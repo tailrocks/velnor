@@ -1,0 +1,1 @@
+error: generated files differ: .github/workflows/ci-runtime-products.yml, .github/ci/.github-actions-generator-state; rerun generate

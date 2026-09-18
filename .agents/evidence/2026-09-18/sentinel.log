@@ -1,0 +1,139 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.42s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID 24a6c378-8dbd-4768-911a-a77eaffc22e6 with nextest profile: docker-e2e
+    Starting 1 test across 4 binaries (22 tests and 27 binaries skipped, including 27 binaries via profile.docker-e2e.default-filter)
+        SLOW [> 60.000s] (───) jackin::dind_e2e jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen
+        SLOW [>120.000s] (───) jackin::dind_e2e jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen
+        SLOW [>180.000s] (───) jackin::dind_e2e jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen
+        SLOW [>240.000s] (───) jackin::dind_e2e jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen
+        SLOW [>300.000s] (───) jackin::dind_e2e jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen
+  TRY 1 FAIL [ 300.649s] (───) jackin::dind_e2e jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen
+  stdout ───
+
+    running 1 test
+    test jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen has been running for over 60 seconds
+    test jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen ... FAILED
+
+    failures:
+
+    failures:
+        jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 300.64s
+
+  stderr ───
+
+    thread 'jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen' (136396570) panicked at crates/jackin/tests/dind_e2e/pty_runner.rs:182:5:
+    timed out waiting for sentinel file /var/folders/8p/h376l_nn3375kyj72czdq2x80000gn/T/.tmpKifS9M/workspace/jackin-sentinel-report.txt
+    diagnostics:
+    captured process output is the diagnostic source; legacy artifact directory exists=false (/var/folders/8p/h376l_nn3375kyj72czdq2x80000gn/T/.tmpKifS9M/home/.jackin/data/diagnostics/runs)
+    stdout tail:
+     jackin❯  · Loading sentinel in /workspace━━━━━━───────────────────────────identityrolecredentialsconstload █████████▆░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   9%                                               Ctrl-C abort   Ctrl-Q quit                                                Resolving role identity…                                                                                               4Pqidentiy  role  credntials  constru Resolving role identity…                                                                                               identiy  role  credntials  construct Resolving role identity…                                                                                               L]*46Pk88<identity role credentials construct  Resolving role identity…                                                                                               Lo]*h4v6v<k6M8z8<cz{identity role credentials construct  Resolving role identity…                                                                                               Loaidentity role credentials construct  Resolving role identity…                                                                                               ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░┌ Choose launch agent ─────────────────┐░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░Filter: ░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░▌ claude░░░░░░░░░░░░░░░░░░░░░░░░░┃░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░  codex░░░░░░░░░░░░░░░░░░░░░░░░░░┃░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░  amp░░░░░░░░░░░░░░░░░░░░░░░░░░░░┃░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░  kimi░░░░░░░░░░░░░░░░░░░░░░░░░░░┃░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░  opencode░░░░░░░░░░░░░░░░░░░░░░░·░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░└──────────────────────────────────────┘░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+    ... transcript truncated; final output follows ...
+    [0m
+    stderr tail:
+
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+   DELAY 2/3 by   1.000s (───) jackin::dind_e2e jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen
+  TRY 2 SLOW [> 60.000s] (───) jackin::dind_e2e jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen
+  TRY 2 SLOW [>120.000s] (───) jackin::dind_e2e jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen
+  TRY 2 SLOW [>180.000s] (───) jackin::dind_e2e jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen
+  TRY 2 SLOW [>240.000s] (───) jackin::dind_e2e jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen
+  TRY 2 SLOW [>300.000s] (───) jackin::dind_e2e jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen
+  TRY 2 FAIL [ 300.828s] (───) jackin::dind_e2e jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen
+  stdout ───
+
+    running 1 test
+    test jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen has been running for over 60 seconds
+    test jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen ... FAILED
+
+    failures:
+
+    failures:
+        jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 300.81s
+
+  stderr ───
+
+    thread 'jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen' (136477584) panicked at crates/jackin/tests/dind_e2e/pty_runner.rs:182:5:
+    timed out waiting for sentinel file /var/folders/8p/h376l_nn3375kyj72czdq2x80000gn/T/.tmpgvw8C4/workspace/jackin-sentinel-report.txt
+    diagnostics:
+    captured process output is the diagnostic source; legacy artifact directory exists=false (/var/folders/8p/h376l_nn3375kyj72czdq2x80000gn/T/.tmpgvw8C4/home/.jackin/data/diagnostics/runs)
+    stdout tail:
+     jackin❯  · Loading sentinel in /workspace━━━━━━───────────────────────────identityrolecredentialsconstload █████████▆░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   9%                                               Ctrl-C abort   Ctrl-Q quit                                                Resolving role identity…                                                                                               4Pqidentiy  role  credntials  constru Resolving role identity…                                                                                               identiy  role  credntials  construct Resolving role identity…                                                                                               L]*46Pk88<identity role credentials construct  Resolving role identity…                                                                                               Lo]*h4v6v<k6M8z8<cz{identity role credentials construct  Resolving role identity…                                                                                               Loaidentity role credentials construct  Resolving role identity…                                                                                               ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░┌ Choose launch agent ─────────────────┐░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░Filter: ░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░▌ claude░░░░░░░░░░░░░░░░░░░░░░░░░┃░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░  codex░░░░░░░░░░░░░░░░░░░░░░░░░░┃░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░  amp░░░░░░░░░░░░░░░░░░░░░░░░░░░░┃░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░  kimi░░░░░░░░░░░░░░░░░░░░░░░░░░░┃░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░  opencode░░░░░░░░░░░░░░░░░░░░░░░·░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░└──────────────────────────────────────┘░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+    ... transcript truncated; final output follows ...
+    [0m
+    stderr tail:
+
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+   DELAY 3/3 by   1.000s (───) jackin::dind_e2e jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen
+  TRY 3 SLOW [> 60.000s] (───) jackin::dind_e2e jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen
+  TRY 3 SLOW [>120.000s] (───) jackin::dind_e2e jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen
+  TRY 3 SLOW [>180.000s] (───) jackin::dind_e2e jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen
+  TRY 3 SLOW [>240.000s] (───) jackin::dind_e2e jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen
+  TRY 3 SLOW [>300.000s] (───) jackin::dind_e2e jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen
+  TRY 3 FAIL [ 300.469s] (1/1) jackin::dind_e2e jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen
+  stdout ───
+
+    running 1 test
+    test jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen has been running for over 60 seconds
+    test jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen ... FAILED
+
+    failures:
+
+    failures:
+        jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 300.46s
+
+  stderr ───
+
+    thread 'jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen' (136727108) panicked at crates/jackin/tests/dind_e2e/pty_runner.rs:182:5:
+    timed out waiting for sentinel file /var/folders/8p/h376l_nn3375kyj72czdq2x80000gn/T/.tmpk45ZiP/workspace/jackin-sentinel-report.txt
+    diagnostics:
+    captured process output is the diagnostic source; legacy artifact directory exists=false (/var/folders/8p/h376l_nn3375kyj72czdq2x80000gn/T/.tmpk45ZiP/home/.jackin/data/diagnostics/runs)
+    stdout tail:
+     jackin❯  · Loading sentinel in /workspace━━━━━━───────────────────────────identityrolecredentialsconstload █████████▆░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   9%                                               Ctrl-C abort   Ctrl-Q quit                                                Resolving role identity…                                                                                               4Pqidentiy  role  credntials  constru Resolving role identity…                                                                                               identiy  role  credntials  construct Resolving role identity…                                                                                               L]*46Pk88<identity role credentials construct  Resolving role identity…                                                                                               Lo]*h4v6v<k6M8z8<cz{identity role credentials construct  Resolving role identity…                                                                                               Loaidentity role credentials construct  Resolving role identity…                                                                                               ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░┌ Choose launch agent ─────────────────┐░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░Filter: ░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░▌ claude░░░░░░░░░░░░░░░░░░░░░░░░░┃░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░  codex░░░░░░░░░░░░░░░░░░░░░░░░░░┃░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░  amp░░░░░░░░░░░░░░░░░░░░░░░░░░░░┃░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░  kimi░░░░░░░░░░░░░░░░░░░░░░░░░░░┃░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░  opencode░░░░░░░░░░░░░░░░░░░░░░░·░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░└──────────────────────────────────────┘░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+    ... transcript truncated; final output follows ...
+    [0m
+    stderr tail:
+
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [ 903.955s] 1 test run: 0 passed, 1 failed, 22 skipped
+  TRY 3 FAIL [ 300.469s] (1/1) jackin::dind_e2e jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen
+  stdout ───
+
+    running 1 test
+    test jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen has been running for over 60 seconds
+    test jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen ... FAILED
+
+    failures:
+
+    failures:
+        jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 300.46s
+
+  stderr ───
+
+    thread 'jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen' (136727108) panicked at crates/jackin/tests/dind_e2e/pty_runner.rs:182:5:
+    timed out waiting for sentinel file /var/folders/8p/h376l_nn3375kyj72czdq2x80000gn/T/.tmpk45ZiP/workspace/jackin-sentinel-report.txt
+    diagnostics:
+    captured process output is the diagnostic source; legacy artifact directory exists=false (/var/folders/8p/h376l_nn3375kyj72czdq2x80000gn/T/.tmpk45ZiP/home/.jackin/data/diagnostics/runs)
+    stdout tail:
+     jackin❯  · Loading sentinel in /workspace━━━━━━───────────────────────────identityrolecredentialsconstload █████████▆░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   9%                                               Ctrl-C abort   Ctrl-Q quit                                                Resolving role identity…                                                                                               4Pqidentiy  role  credntials  constru Resolving role identity…                                                                                               identiy  role  credntials  construct Resolving role identity…                                                                                               L]*46Pk88<identity role credentials construct  Resolving role identity…                                                                                               Lo]*h4v6v<k6M8z8<cz{identity role credentials construct  Resolving role identity…                                                                                               Loaidentity role credentials construct  Resolving role identity…                                                                                               ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░┌ Choose launch agent ─────────────────┐░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░Filter: ░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░▌ claude░░░░░░░░░░░░░░░░░░░░░░░░░┃░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░  codex░░░░░░░░░░░░░░░░░░░░░░░░░░┃░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░  amp░░░░░░░░░░░░░░░░░░░░░░░░░░░░┃░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░  kimi░░░░░░░░░░░░░░░░░░░░░░░░░░░┃░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░  opencode░░░░░░░░░░░░░░░░░░░░░░░·░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░└──────────────────────────────────────┘░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+    ... transcript truncated; final output follows ...
+    [0m
+    stderr tail:
+
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+error: test run failed
+mbx[savings]: 172121 compilations dispensed from stock. inventory immaculate.

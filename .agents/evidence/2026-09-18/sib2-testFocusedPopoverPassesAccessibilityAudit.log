@@ -1,0 +1,152 @@
+Command line invocation:
+    /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -project native/JackinDesktop.xcodeproj -scheme JackinDesktop -destination platform=macOS -parallel-testing-enabled NO "-only-testing:JackinDesktopUITests/JackinDesktopUITests/testFocusedPopoverPassesAccessibilityAudit" -derivedDataPath native/DerivedData -resultBundlePath /tmp/sib2-testFocusedPopoverPassesAccessibilityAudit.xcresult
+
+Writing result bundle at path:
+	/tmp/sib2-testFocusedPopoverPassesAccessibilityAudit.xcresult
+
+ComputePackagePrebuildTargetDependencyGraph
+
+Prepare packages
+
+CreateBuildRequest
+
+SendProjectDescription
+
+CreateBuildOperation
+
+ComputeTargetDependencyGraph
+note: Building targets in dependency order
+note: Target dependency graph (6 targets)
+    Target 'JackinDesktopUITests' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinDesktop' in project 'JackinDesktop'
+    Target 'JackinDesktopTests' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinDesktopUI' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBridge' in project 'JackinDesktop'
+    Target 'JackinDesktop' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinDesktopUI' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBridge' in project 'JackinDesktop'
+    Target 'JackinDesktopUI' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBridge' in project 'JackinDesktop'
+    Target 'JackinUsageBridge' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+    Target 'JackinUsageBindings' in project 'JackinDesktop' (no dependencies)
+
+GatherProvisioningInputs
+
+CreateBuildDescription
+
+ClangStatCache /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang-stat-cache /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKStatCaches.noindex/macosx27.0-26A425-7231f6df4def33e022ae2eb8f782df1a.sdkstatcache
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/JackinDesktop.xcodeproj
+    /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang-stat-cache /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk -o /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKStatCaches.noindex/macosx27.0-26A425-7231f6df4def33e022ae2eb8f782df1a.sdkstatcache
+
+PruneExplicitPrecompiledModules /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKExplicitPrecompiledModules
+
+PruneExplicitPrecompiledModules /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/ExplicitPrecompiledModules
+
+PruneExplicitPrecompiledModules /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/SwiftExplicitPrecompiledModules
+
+2026-09-18 05:19:50.077914+0700 JackinDesktopUITests-Runner[98497:131913915] [Default] Running tests...
+Test Suite 'Selected tests' started at 2026-09-18 05:19:50.111.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 05:19:50.111.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 05:19:50.111.
+Test Case '-[JackinDesktopUITests.JackinDesktopUITests testFocusedPopoverPassesAccessibilityAudit]' started.
+    t =     0.00s Start Test at 2026-09-18 05:19:50.112
+    t =     0.21s Set Up
+    t =     0.21s Open com.jackin-project.desktop
+    t =     0.21s     Launch com.jackin-project.desktop
+2026-09-18 05:19:50.361 xcodebuild[98478:131913707] [MT] IDELaunchParametersSnapshot: debugger version lookup failed for path '<nil>': noURL
+2026-09-18 05:19:50.361 xcodebuild[98478:131913707] [MT] IDELaunchParametersSnapshot: no debugger version
+    t =     0.47s         Wait for accessibility to load
+    t =     0.54s         Setting up automation session
+    t =     0.55s         Wait for com.jackin-project.desktop to idle
+    t =     0.65s Waiting 4.0s for "popover.provider.codex" Any to exist
+    t =     1.69s     Checking `Expect predicate `existsNoRetry == 1` for object "popover.provider.codex" Any`
+    t =     1.69s         Checking existence of `"popover.provider.codex" Any`
+    t =     1.78s Open com.jackin-project.desktop
+    t =     1.78s     Activate com.jackin-project.desktop
+    t =     1.78s         Wait for com.jackin-project.desktop to idle
+    t =     1.78s Open com.jackin-project.desktop
+    t =     1.78s     Activate com.jackin-project.desktop
+    t =     1.79s         Wait for com.jackin-project.desktop to idle
+    t =     1.79s Waiting 3.0s for "popover.provider.codex" Any to exist
+    t =     2.83s     Checking `Expect predicate `existsNoRetry == 1` for object "popover.provider.codex" Any`
+    t =     2.83s         Checking existence of `"popover.provider.codex" Any`
+    t =     2.86s Get all elements bound by index for: Elements matching predicate 'identifier BEGINSWITH "popover.limit."'
+    t =     2.88s Find the Any (Element at index 0)
+    t =     2.91s Find the "popover.limit.bucket:0" StaticText
+    t =     2.93s Find the Any (Element at index 1)
+    t =     3.05s Find the "popover.limit.bucket:1" StaticText
+    t =     3.07s Find the Any (Element at index 2)
+    t =     3.10s Find the "popover.limit.bucket:2" StaticText
+    t =     3.12s Find the Any (Element at index 3)
+    t =     3.14s Find the "popover.limit.bucket:3" StaticText
+    t =     3.16s Checking existence of `"popover.refresh" Any`
+    t =     3.19s Find the "popover.refresh" Any
+    t =     3.22s Find the "popover.refresh" Button
+    t =     3.24s Find the "popover.refresh" Button
+    t =     3.26s Checking existence of `"popover.open-usage" Any`
+    t =     3.29s Find the "popover.open-usage" Any
+    t =     3.32s Find the "popover.open-usage" Button
+    t =     3.34s Find the "popover.open-usage" Button
+    t =     3.36s Checking existence of `"popover.account-picker" Any`
+    t =     3.39s Find the "popover.account-picker" Any
+    t =     3.41s Find the "popover.account-picker" PopUpButton
+    t =     3.43s Find the "popover.account-picker" PopUpButton
+    t =     3.46s Checking existence of `Popover (First Match)`
+    t =     3.46s Checking existence of `"popover.provider-identity" Any`
+    t =     3.48s Find the "popover.provider-identity" Any
+    t =     3.66s Find the Any (Descendant with identity binding to AX element pid: 98498, token: woABAAAAAABvY29jLAAAAAAAAAA=)
+    t =     3.68s Checking existence of `Popover`
+    t =     3.70s Find the Popover
+    t =     3.72s Find the Any (Descendant with identity binding to AX element pid: 98498, token: woABAAAAAABvY29jLAAAAAAAAAA=)
+    t =     3.74s Checking existence of `Popover`
+    t =     3.75s Find the Popover
+    t =     3.77s Find the Popover
+    t =     3.78s Find the Any (Descendant with identity binding to AX element pid: 98498, token: woABAAAAAABvY29jLwAAAAAAAAA=)
+    t =     3.80s Checking existence of `Group`
+    t =     3.81s Find the Group
+    t =     3.83s Find the Any (Descendant with identity binding to AX element pid: 98498, token: woABAAAAAABvY29jRQAAAAAAAAA=)
+    t =     3.85s Checking existence of `"popover.provider-identity" Other`
+    t =     3.87s Find the "popover.provider-identity" Other
+    t =     3.89s Find the "popover.provider-identity" Other
+    t =     3.91s Find the Any (Descendant with identity binding to AX element pid: 98498, token: woABAAAAAABvY29jRwAAAAAAAAA=)
+    t =     3.93s Checking existence of `"popover.limit.bucket:0" StaticText`
+    t =     3.95s Find the "popover.limit.bucket:0" StaticText
+    t =     3.97s Find the "popover.limit.bucket:0" StaticText
+    t =     3.98s Find the Any (Descendant with identity binding to AX element pid: 98498, token: woABAAAAAABvY29jSQAAAAAAAAA=)
+    t =     4.01s Checking existence of `"popover.limit.bucket:2" StaticText`
+    t =     4.03s Find the "popover.limit.bucket:2" StaticText
+    t =     4.05s Find the "popover.limit.bucket:2" StaticText
+    t =     4.06s Find the Any (Descendant with identity binding to AX element pid: 98498, token: woABAAAAAABvY29jSgAAAAAAAAA=)
+    t =     4.09s Checking existence of `"popover.limit.bucket:3" StaticText`
+    t =     4.11s Find the "popover.limit.bucket:3" StaticText
+    t =     4.15s Find the "popover.limit.bucket:3" StaticText
+    t =     4.17s Find the Any (Descendant with identity binding to AX element pid: 98498, token: woABAAAAAABvY29jNQAAAAAAAAA=)
+    t =     4.19s Checking existence of `"popover.account-picker" PopUpButton`
+    t =     4.21s Find the "popover.account-picker" PopUpButton
+    t =     4.23s Find the "popover.account-picker" PopUpButton
+    t =     4.25s Find the Any (Descendant with identity binding to AX element pid: 98498, token: woABAAAAAABvY29jLQAAAAAAAAA=)
+    t =     4.27s Checking existence of `TouchBar`
+    t =     4.29s Find the TouchBar
+    t =     4.31s Terminate com.jackin-project.desktop:98498
+    t =     5.35s Tear Down
+Test Case '-[JackinDesktopUITests.JackinDesktopUITests testFocusedPopoverPassesAccessibilityAudit]' passed (5.420 seconds).
+Test Suite 'JackinDesktopUITests' passed at 2026-09-18 05:19:55.532.
+	 Executed 1 test, with 0 failures (0 unexpected) in 5.420 (5.421) seconds
+Test Suite 'JackinDesktopUITests.xctest' passed at 2026-09-18 05:19:55.533.
+	 Executed 1 test, with 0 failures (0 unexpected) in 5.420 (5.422) seconds
+Test Suite 'Selected tests' passed at 2026-09-18 05:19:55.534.
+	 Executed 1 test, with 0 failures (0 unexpected) in 5.420 (5.423) seconds
+2026-09-18 05:19:55.806 xcodebuild[98478:131913707] [MT] IDETestOperationsObserverDebug: 5.994 elapsed -- Testing started completed.
+2026-09-18 05:19:55.806 xcodebuild[98478:131913707] [MT] IDETestOperationsObserverDebug: 0.000 sec, +0.000 sec -- start
+2026-09-18 05:19:55.806 xcodebuild[98478:131913707] [MT] IDETestOperationsObserverDebug: 5.994 sec, +5.994 sec -- end
+
+Test session results, code coverage, and logs:
+	/tmp/sib2-testFocusedPopoverPassesAccessibilityAudit.xcresult
+
+** TEST SUCCEEDED **
+
+Testing started

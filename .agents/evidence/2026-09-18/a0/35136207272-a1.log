@@ -1,0 +1,1382 @@
+Control / Planning	UNKNOWN STEP	﻿2026-09-16T18:43:52.9616644Z Current runner version: '2.337.0'
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9639529Z ##[group]Runner Image Provisioner
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9640621Z Hosted Compute Agent
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9641502Z Version: 20260828.587
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9642419Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9643419Z Build Date: 2026-08-28T16:44:25Z
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9644307Z Worker ID: {08e5cbc9-7afc-4896-ae8e-2fe6d51848ff}
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9645321Z Azure Region: centralus
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9646078Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9648176Z ##[group]Operating System
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9649015Z Ubuntu
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9649643Z 24.04.5
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9650377Z LTS
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9651201Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9652103Z ##[group]Runner Image
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9652962Z Image: ubuntu-24.04
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9653681Z Version: 20260907.300.1
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9655339Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260907.300/images/ubuntu/Ubuntu2404-Readme.md
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9657346Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260907.300
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9658602Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9660114Z ##[group]GITHUB_TOKEN Permissions
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9663295Z Actions: read
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9664014Z Contents: read
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9664761Z Metadata: read
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9665472Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9668180Z Secret source: Actions
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9669373Z Cache mode: write
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9670628Z Prepare workflow directory
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:52.9989427Z Prepare all required actions
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.0035365Z Getting action download info
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.2732228Z Download action repository 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' (SHA:3d3c42e5aac5ba805825da76410c181273ba90b1)
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.4781124Z Download action repository 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' (SHA:043fb46d1a93c77aae656e7c1c64a875d1fc6a0a)
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.7215433Z Complete job name: Control / Planning
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.7870320Z ##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.7871544Z with:
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.7872019Z   fetch-depth: 0
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.7872507Z   persist-credentials: false
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.7873081Z   repository: tailrocks/velnor
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.7876981Z   token: ***
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.7877486Z   ssh-strict: true
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.7877957Z   ssh-user: git
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.7878397Z   clean: true
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.7878915Z   sparse-checkout-cone-mode: true
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.7879485Z   fetch-tags: false
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.7879961Z   show-progress: true
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.7880447Z   lfs: false
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.7881073Z   submodules: false
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.7881592Z   set-safe-directory: true
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.7882144Z   allow-unsafe-pr-checkout: false
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.7882872Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.8814625Z Syncing repository: tailrocks/velnor
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.8816991Z ##[group]Getting Git version info
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.8818029Z Working directory is '/home/runner/work/velnor/velnor'
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.8819367Z [command]/usr/bin/git version
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.8838450Z git version 2.55.0
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.8854772Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.8864209Z Temporarily overriding HOME='/home/runner/work/_temp/4eca02bc-906f-44ae-a9d4-ac66dc9e7f7c' before making global git config changes
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.8866122Z Adding repository directory to the temporary git global config as a safe directory
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.8869262Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.8917182Z Deleting the contents of '/home/runner/work/velnor/velnor'
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.8920374Z ##[group]Determining repository object format
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.8922271Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.8923892Z ##[group]Initializing the repository
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.8925365Z [command]/usr/bin/git init /home/runner/work/velnor/velnor
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9014480Z hint: Using 'master' as the name for the initial branch. This default branch name
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9016468Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9018216Z hint: to use in all of your new repositories, which will suppress this warning,
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9019123Z hint: call:
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9019825Z hint:
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9020584Z hint: 	git config --global init.defaultBranch <name>
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9021764Z hint:
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9022651Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9023898Z hint: 'development'. The just-created branch can be renamed via this command:
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9024701Z hint:
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9025164Z hint: 	git branch -m <name>
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9025651Z hint:
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9026287Z hint: Disable this message with "git config set advice.defaultBranchName false"
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9027224Z Initialized empty Git repository in /home/runner/work/velnor/velnor/.git/
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9030568Z [command]/usr/bin/git remote add origin https://github.com/tailrocks/velnor
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9071125Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9072169Z ##[group]Disabling automatic garbage collection
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9074568Z [command]/usr/bin/git config --local gc.auto 0
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9101442Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9102265Z ##[group]Setting up auth
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9103267Z Removing SSH command configuration
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9108178Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9136950Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9462653Z Removing HTTP extra header
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9465536Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9496704Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9702595Z Removing includeIf entries pointing to credentials config files
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9703559Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9732284Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9894452Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-33c543d7-2252-4ea9-b8c8-4401809320ac.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9943618Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/.git.path /home/runner/work/_temp/git-credentials-33c543d7-2252-4ea9-b8c8-4401809320ac.config
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9968787Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-33c543d7-2252-4ea9-b8c8-4401809320ac.config
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:53.9996603Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-33c543d7-2252-4ea9-b8c8-4401809320ac.config
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:54.0025375Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-33c543d7-2252-4ea9-b8c8-4401809320ac.config
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:54.0055275Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:54.0056547Z ##[group]Fetching the repository
+Control / Planning	UNKNOWN STEP	2026-09-16T18:43:54.0058994Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules origin +refs/heads/*:refs/remotes/origin/* +refs/tags/*:refs/tags/* +b2e22d834057de0c43c54ae557ab50a307772371:refs/remotes/pull/904/merge
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6657017Z From https://github.com/tailrocks/velnor
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6658404Z  * [new branch]        feat/ci-immutable-runtime-products       -> origin/feat/ci-immutable-runtime-products
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6659407Z  * [new branch]        fix/dogfood-pin-ruleset-403-fallback     -> origin/fix/dogfood-pin-ruleset-403-fallback
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6660408Z  * [new branch]        fix/ruleset-403-fallback-pin             -> origin/fix/ruleset-403-fallback-pin
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6661572Z  * [new branch]        main                                     -> origin/main
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6662534Z  * [new tag]           archive/velnor2-pre-rebuild-20260831-bc593406 -> archive/velnor2-pre-rebuild-20260831-bc593406
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6663529Z  * [new tag]           dima/velnor6-archive-4d81a14             -> dima/velnor6-archive-4d81a14
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6664314Z  * [new tag]           preview                                  -> preview
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6664950Z  * [new tag]           v0.1.10                                  -> v0.1.10
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6665763Z  * [new tag]           v0.1.100                                 -> v0.1.100
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6666465Z  * [new tag]           v0.1.101                                 -> v0.1.101
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6667244Z  * [new tag]           v0.1.102                                 -> v0.1.102
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6667949Z  * [new tag]           v0.1.103                                 -> v0.1.103
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6668668Z  * [new tag]           v0.1.104                                 -> v0.1.104
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6669425Z  * [new tag]           v0.1.105                                 -> v0.1.105
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6670201Z  * [new tag]           v0.1.106                                 -> v0.1.106
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6671097Z  * [new tag]           v0.1.107                                 -> v0.1.107
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6671762Z  * [new tag]           v0.1.108                                 -> v0.1.108
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6672409Z  * [new tag]           v0.1.109                                 -> v0.1.109
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6673395Z  * [new tag]           v0.1.11                                  -> v0.1.11
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6674168Z  * [new tag]           v0.1.110                                 -> v0.1.110
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6675112Z  * [new tag]           v0.1.111                                 -> v0.1.111
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6675794Z  * [new tag]           v0.1.112                                 -> v0.1.112
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6676451Z  * [new tag]           v0.1.113                                 -> v0.1.113
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6677109Z  * [new tag]           v0.1.114                                 -> v0.1.114
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6677782Z  * [new tag]           v0.1.115                                 -> v0.1.115
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6678418Z  * [new tag]           v0.1.116                                 -> v0.1.116
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6679031Z  * [new tag]           v0.1.117                                 -> v0.1.117
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6679668Z  * [new tag]           v0.1.118                                 -> v0.1.118
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6680726Z  * [new tag]           v0.1.119                                 -> v0.1.119
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6681780Z  * [new tag]           v0.1.12                                  -> v0.1.12
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6682474Z  * [new tag]           v0.1.120                                 -> v0.1.120
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6682942Z  * [new tag]           v0.1.121                                 -> v0.1.121
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6683374Z  * [new tag]           v0.1.122                                 -> v0.1.122
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6683818Z  * [new tag]           v0.1.123                                 -> v0.1.123
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6684275Z  * [new tag]           v0.1.124                                 -> v0.1.124
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6684727Z  * [new tag]           v0.1.125                                 -> v0.1.125
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6685160Z  * [new tag]           v0.1.126                                 -> v0.1.126
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6685591Z  * [new tag]           v0.1.127                                 -> v0.1.127
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6686304Z  * [new tag]           v0.1.128                                 -> v0.1.128
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6686733Z  * [new tag]           v0.1.129                                 -> v0.1.129
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6687234Z  * [new tag]           v0.1.13                                  -> v0.1.13
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6687843Z  * [new tag]           v0.1.130                                 -> v0.1.130
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6688426Z  * [new tag]           v0.1.131                                 -> v0.1.131
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6689137Z  * [new tag]           v0.1.132                                 -> v0.1.132
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6689761Z  * [new tag]           v0.1.133                                 -> v0.1.133
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6690246Z  * [new tag]           v0.1.134                                 -> v0.1.134
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6690673Z  * [new tag]           v0.1.135                                 -> v0.1.135
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6691575Z  * [new tag]           v0.1.136                                 -> v0.1.136
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6692067Z  * [new tag]           v0.1.137                                 -> v0.1.137
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6692493Z  * [new tag]           v0.1.138                                 -> v0.1.138
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6692914Z  * [new tag]           v0.1.139                                 -> v0.1.139
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6693353Z  * [new tag]           v0.1.14                                  -> v0.1.14
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6693805Z  * [new tag]           v0.1.140                                 -> v0.1.140
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6694273Z  * [new tag]           v0.1.141                                 -> v0.1.141
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6694681Z  * [new tag]           v0.1.142                                 -> v0.1.142
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6695097Z  * [new tag]           v0.1.143                                 -> v0.1.143
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6695513Z  * [new tag]           v0.1.144                                 -> v0.1.144
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6696053Z  * [new tag]           v0.1.145                                 -> v0.1.145
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6696503Z  * [new tag]           v0.1.146                                 -> v0.1.146
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6696941Z  * [new tag]           v0.1.147                                 -> v0.1.147
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6697368Z  * [new tag]           v0.1.148                                 -> v0.1.148
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6697786Z  * [new tag]           v0.1.149                                 -> v0.1.149
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6698209Z  * [new tag]           v0.1.15                                  -> v0.1.15
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6698670Z  * [new tag]           v0.1.150                                 -> v0.1.150
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6699106Z  * [new tag]           v0.1.151                                 -> v0.1.151
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6699561Z  * [new tag]           v0.1.152                                 -> v0.1.152
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6699994Z  * [new tag]           v0.1.153                                 -> v0.1.153
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6700418Z  * [new tag]           v0.1.154                                 -> v0.1.154
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6701168Z  * [new tag]           v0.1.155                                 -> v0.1.155
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6701631Z  * [new tag]           v0.1.156                                 -> v0.1.156
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6702044Z  * [new tag]           v0.1.157                                 -> v0.1.157
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6702500Z  * [new tag]           v0.1.158                                 -> v0.1.158
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6702954Z  * [new tag]           v0.1.159                                 -> v0.1.159
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6703416Z  * [new tag]           v0.1.16                                  -> v0.1.16
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6703842Z  * [new tag]           v0.1.160                                 -> v0.1.160
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6704249Z  * [new tag]           v0.1.161                                 -> v0.1.161
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6704707Z  * [new tag]           v0.1.162                                 -> v0.1.162
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6705223Z  * [new tag]           v0.1.163                                 -> v0.1.163
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6705650Z  * [new tag]           v0.1.164                                 -> v0.1.164
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6706111Z  * [new tag]           v0.1.165                                 -> v0.1.165
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6706523Z  * [new tag]           v0.1.166                                 -> v0.1.166
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6706972Z  * [new tag]           v0.1.167                                 -> v0.1.167
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6707536Z  * [new tag]           v0.1.168                                 -> v0.1.168
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6707978Z  * [new tag]           v0.1.17                                  -> v0.1.17
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6708412Z  * [new tag]           v0.1.170                                 -> v0.1.170
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6708830Z  * [new tag]           v0.1.171                                 -> v0.1.171
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6709542Z  * [new tag]           v0.1.172                                 -> v0.1.172
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6709996Z  * [new tag]           v0.1.173                                 -> v0.1.173
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6710516Z  * [new tag]           v0.1.174                                 -> v0.1.174
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6711227Z  * [new tag]           v0.1.175                                 -> v0.1.175
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6711887Z  * [new tag]           v0.1.176                                 -> v0.1.176
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6712606Z  * [new tag]           v0.1.177                                 -> v0.1.177
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6713278Z  * [new tag]           v0.1.178                                 -> v0.1.178
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6713941Z  * [new tag]           v0.1.179                                 -> v0.1.179
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6714504Z  * [new tag]           v0.1.18                                  -> v0.1.18
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6715203Z  * [new tag]           v0.1.180                                 -> v0.1.180
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6716241Z  * [new tag]           v0.1.181                                 -> v0.1.181
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6717038Z  * [new tag]           v0.1.182                                 -> v0.1.182
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6717717Z  * [new tag]           v0.1.183                                 -> v0.1.183
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6718473Z  * [new tag]           v0.1.184                                 -> v0.1.184
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6719255Z  * [new tag]           v0.1.185                                 -> v0.1.185
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6720028Z  * [new tag]           v0.1.186                                 -> v0.1.186
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6720835Z  * [new tag]           v0.1.187                                 -> v0.1.187
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6721833Z  * [new tag]           v0.1.188                                 -> v0.1.188
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6723210Z  * [new tag]           v0.1.189                                 -> v0.1.189
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6723877Z  * [new tag]           v0.1.19                                  -> v0.1.19
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6724603Z  * [new tag]           v0.1.190                                 -> v0.1.190
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6725375Z  * [new tag]           v0.1.191                                 -> v0.1.191
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6726034Z  * [new tag]           v0.1.192                                 -> v0.1.192
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6726748Z  * [new tag]           v0.1.193                                 -> v0.1.193
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6727558Z  * [new tag]           v0.1.194                                 -> v0.1.194
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6728448Z  * [new tag]           v0.1.195                                 -> v0.1.195
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6728981Z  * [new tag]           v0.1.196                                 -> v0.1.196
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6729464Z  * [new tag]           v0.1.197                                 -> v0.1.197
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6729989Z  * [new tag]           v0.1.198                                 -> v0.1.198
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6730469Z  * [new tag]           v0.1.199                                 -> v0.1.199
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6731419Z  * [new tag]           v0.1.2                                   -> v0.1.2
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6731934Z  * [new tag]           v0.1.20                                  -> v0.1.20
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6732382Z  * [new tag]           v0.1.200                                 -> v0.1.200
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6732822Z  * [new tag]           v0.1.201                                 -> v0.1.201
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6733293Z  * [new tag]           v0.1.202                                 -> v0.1.202
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6733977Z  * [new tag]           v0.1.203                                 -> v0.1.203
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6734571Z  * [new tag]           v0.1.204                                 -> v0.1.204
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6735239Z  * [new tag]           v0.1.205                                 -> v0.1.205
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6735813Z  * [new tag]           v0.1.206                                 -> v0.1.206
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6736258Z  * [new tag]           v0.1.207                                 -> v0.1.207
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6736696Z  * [new tag]           v0.1.208                                 -> v0.1.208
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6737155Z  * [new tag]           v0.1.209                                 -> v0.1.209
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6737589Z  * [new tag]           v0.1.21                                  -> v0.1.21
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6738053Z  * [new tag]           v0.1.210                                 -> v0.1.210
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6738471Z  * [new tag]           v0.1.211                                 -> v0.1.211
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6738911Z  * [new tag]           v0.1.212                                 -> v0.1.212
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6739369Z  * [new tag]           v0.1.213                                 -> v0.1.213
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6739798Z  * [new tag]           v0.1.214                                 -> v0.1.214
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6740229Z  * [new tag]           v0.1.215                                 -> v0.1.215
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6740780Z  * [new tag]           v0.1.217                                 -> v0.1.217
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6741532Z  * [new tag]           v0.1.218                                 -> v0.1.218
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6742000Z  * [new tag]           v0.1.219                                 -> v0.1.219
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6742558Z  * [new tag]           v0.1.22                                  -> v0.1.22
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6743248Z  * [new tag]           v0.1.220                                 -> v0.1.220
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6744002Z  * [new tag]           v0.1.221                                 -> v0.1.221
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6744635Z  * [new tag]           v0.1.222                                 -> v0.1.222
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6745312Z  * [new tag]           v0.1.223                                 -> v0.1.223
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6746013Z  * [new tag]           v0.1.224                                 -> v0.1.224
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6746759Z  * [new tag]           v0.1.225                                 -> v0.1.225
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6747573Z  * [new tag]           v0.1.226                                 -> v0.1.226
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6748344Z  * [new tag]           v0.1.227                                 -> v0.1.227
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6749090Z  * [new tag]           v0.1.228                                 -> v0.1.228
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6749763Z  * [new tag]           v0.1.229                                 -> v0.1.229
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6750433Z  * [new tag]           v0.1.23                                  -> v0.1.23
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6751442Z  * [new tag]           v0.1.230                                 -> v0.1.230
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6752267Z  * [new tag]           v0.1.231                                 -> v0.1.231
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6753034Z  * [new tag]           v0.1.232                                 -> v0.1.232
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6753658Z  * [new tag]           v0.1.233                                 -> v0.1.233
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6754263Z  * [new tag]           v0.1.234                                 -> v0.1.234
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6755170Z  * [new tag]           v0.1.235                                 -> v0.1.235
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6755788Z  * [new tag]           v0.1.236                                 -> v0.1.236
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6756481Z  * [new tag]           v0.1.237                                 -> v0.1.237
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6757131Z  * [new tag]           v0.1.238                                 -> v0.1.238
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6757947Z  * [new tag]           v0.1.239                                 -> v0.1.239
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6758571Z  * [new tag]           v0.1.24                                  -> v0.1.24
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6759006Z  * [new tag]           v0.1.240                                 -> v0.1.240
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6759438Z  * [new tag]           v0.1.241                                 -> v0.1.241
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6759860Z  * [new tag]           v0.1.242                                 -> v0.1.242
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6760313Z  * [new tag]           v0.1.243                                 -> v0.1.243
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6760783Z  * [new tag]           v0.1.244                                 -> v0.1.244
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6761476Z  * [new tag]           v0.1.245                                 -> v0.1.245
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6761918Z  * [new tag]           v0.1.246                                 -> v0.1.246
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6762359Z  * [new tag]           v0.1.247                                 -> v0.1.247
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6762841Z  * [new tag]           v0.1.248                                 -> v0.1.248
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6763495Z  * [new tag]           v0.1.249                                 -> v0.1.249
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6764154Z  * [new tag]           v0.1.25                                  -> v0.1.25
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6764728Z  * [new tag]           v0.1.250                                 -> v0.1.250
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6765376Z  * [new tag]           v0.1.251                                 -> v0.1.251
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6766059Z  * [new tag]           v0.1.252                                 -> v0.1.252
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6766618Z  * [new tag]           v0.1.253                                 -> v0.1.253
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6767066Z  * [new tag]           v0.1.254                                 -> v0.1.254
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6767479Z  * [new tag]           v0.1.255                                 -> v0.1.255
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6767988Z  * [new tag]           v0.1.256                                 -> v0.1.256
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6768472Z  * [new tag]           v0.1.257                                 -> v0.1.257
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6768913Z  * [new tag]           v0.1.258                                 -> v0.1.258
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6769335Z  * [new tag]           v0.1.259                                 -> v0.1.259
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6769745Z  * [new tag]           v0.1.26                                  -> v0.1.26
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6770198Z  * [new tag]           v0.1.260                                 -> v0.1.260
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6770688Z  * [new tag]           v0.1.261                                 -> v0.1.261
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6771411Z  * [new tag]           v0.1.262                                 -> v0.1.262
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6771916Z  * [new tag]           v0.1.263                                 -> v0.1.263
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6772360Z  * [new tag]           v0.1.264                                 -> v0.1.264
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6772831Z  * [new tag]           v0.1.265                                 -> v0.1.265
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6773302Z  * [new tag]           v0.1.266                                 -> v0.1.266
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6773753Z  * [new tag]           v0.1.267                                 -> v0.1.267
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6774217Z  * [new tag]           v0.1.268                                 -> v0.1.268
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6774759Z  * [new tag]           v0.1.269                                 -> v0.1.269
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6775288Z  * [new tag]           v0.1.27                                  -> v0.1.27
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6775915Z  * [new tag]           v0.1.270                                 -> v0.1.270
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6776376Z  * [new tag]           v0.1.271                                 -> v0.1.271
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6776887Z  * [new tag]           v0.1.272                                 -> v0.1.272
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6777336Z  * [new tag]           v0.1.273                                 -> v0.1.273
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6777851Z  * [new tag]           v0.1.274                                 -> v0.1.274
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6778322Z  * [new tag]           v0.1.28                                  -> v0.1.28
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6778797Z  * [new tag]           v0.1.29                                  -> v0.1.29
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6779285Z  * [new tag]           v0.1.3                                   -> v0.1.3
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6779761Z  * [new tag]           v0.1.30                                  -> v0.1.30
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6780317Z  * [new tag]           v0.1.31                                  -> v0.1.31
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6780786Z  * [new tag]           v0.1.32                                  -> v0.1.32
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6781521Z  * [new tag]           v0.1.33                                  -> v0.1.33
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6782004Z  * [new tag]           v0.1.34                                  -> v0.1.34
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6782471Z  * [new tag]           v0.1.35                                  -> v0.1.35
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6782973Z  * [new tag]           v0.1.36                                  -> v0.1.36
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6783432Z  * [new tag]           v0.1.37                                  -> v0.1.37
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6783927Z  * [new tag]           v0.1.38                                  -> v0.1.38
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6784405Z  * [new tag]           v0.1.39                                  -> v0.1.39
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6784877Z  * [new tag]           v0.1.4                                   -> v0.1.4
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6785450Z  * [new tag]           v0.1.40                                  -> v0.1.40
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6785917Z  * [new tag]           v0.1.41                                  -> v0.1.41
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6786363Z  * [new tag]           v0.1.42                                  -> v0.1.42
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6786851Z  * [new tag]           v0.1.43                                  -> v0.1.43
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6787311Z  * [new tag]           v0.1.44                                  -> v0.1.44
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6787856Z  * [new tag]           v0.1.45                                  -> v0.1.45
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6788317Z  * [new tag]           v0.1.46                                  -> v0.1.46
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6788765Z  * [new tag]           v0.1.47                                  -> v0.1.47
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6789258Z  * [new tag]           v0.1.48                                  -> v0.1.48
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6789712Z  * [new tag]           v0.1.49                                  -> v0.1.49
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6790209Z  * [new tag]           v0.1.5                                   -> v0.1.5
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6790687Z  * [new tag]           v0.1.50                                  -> v0.1.50
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6791321Z  * [new tag]           v0.1.51                                  -> v0.1.51
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6791824Z  * [new tag]           v0.1.52                                  -> v0.1.52
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6792291Z  * [new tag]           v0.1.53                                  -> v0.1.53
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6792783Z  * [new tag]           v0.1.54                                  -> v0.1.54
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6793253Z  * [new tag]           v0.1.55                                  -> v0.1.55
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6793712Z  * [new tag]           v0.1.56                                  -> v0.1.56
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6794177Z  * [new tag]           v0.1.57                                  -> v0.1.57
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6794668Z  * [new tag]           v0.1.58                                  -> v0.1.58
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6795241Z  * [new tag]           v0.1.59                                  -> v0.1.59
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6795713Z  * [new tag]           v0.1.6                                   -> v0.1.6
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6796181Z  * [new tag]           v0.1.60                                  -> v0.1.60
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6796649Z  * [new tag]           v0.1.61                                  -> v0.1.61
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6797138Z  * [new tag]           v0.1.62                                  -> v0.1.62
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6797589Z  * [new tag]           v0.1.63                                  -> v0.1.63
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6798128Z  * [new tag]           v0.1.64                                  -> v0.1.64
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6798586Z  * [new tag]           v0.1.65                                  -> v0.1.65
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6799060Z  * [new tag]           v0.1.66                                  -> v0.1.66
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6799549Z  * [new tag]           v0.1.67                                  -> v0.1.67
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6799999Z  * [new tag]           v0.1.68                                  -> v0.1.68
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6800486Z  * [new tag]           v0.1.69                                  -> v0.1.69
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6801186Z  * [new tag]           v0.1.7                                   -> v0.1.7
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6801742Z  * [new tag]           v0.1.70                                  -> v0.1.70
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6802232Z  * [new tag]           v0.1.71                                  -> v0.1.71
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6802680Z  * [new tag]           v0.1.72                                  -> v0.1.72
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6803176Z  * [new tag]           v0.1.73                                  -> v0.1.73
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6803642Z  * [new tag]           v0.1.74                                  -> v0.1.74
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6804100Z  * [new tag]           v0.1.75                                  -> v0.1.75
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6804665Z  * [new tag]           v0.1.76                                  -> v0.1.76
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6805148Z  * [new tag]           v0.1.77                                  -> v0.1.77
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6805639Z  * [new tag]           v0.1.78                                  -> v0.1.78
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6806099Z  * [new tag]           v0.1.79                                  -> v0.1.79
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6806563Z  * [new tag]           v0.1.8                                   -> v0.1.8
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6807060Z  * [new tag]           v0.1.80                                  -> v0.1.80
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6807517Z  * [new tag]           v0.1.81                                  -> v0.1.81
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6807995Z  * [new tag]           v0.1.82                                  -> v0.1.82
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6808450Z  * [new tag]           v0.1.83                                  -> v0.1.83
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6808950Z  * [new tag]           v0.1.84                                  -> v0.1.84
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6809454Z  * [new tag]           v0.1.85                                  -> v0.1.85
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6809917Z  * [new tag]           v0.1.86                                  -> v0.1.86
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6810387Z  * [new tag]           v0.1.87                                  -> v0.1.87
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6810959Z  * [new tag]           v0.1.88                                  -> v0.1.88
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6811563Z  * [new tag]           v0.1.89                                  -> v0.1.89
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6812088Z  * [new tag]           v0.1.9                                   -> v0.1.9
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6812585Z  * [new tag]           v0.1.90                                  -> v0.1.90
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6813064Z  * [new tag]           v0.1.91                                  -> v0.1.91
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6813522Z  * [new tag]           v0.1.92                                  -> v0.1.92
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6813966Z  * [new tag]           v0.1.93                                  -> v0.1.93
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6814482Z  * [new tag]           v0.1.94                                  -> v0.1.94
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6815009Z  * [new tag]           v0.1.95                                  -> v0.1.95
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6815475Z  * [new tag]           v0.1.96                                  -> v0.1.96
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6815980Z  * [new tag]           v0.1.97                                  -> v0.1.97
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6816454Z  * [new tag]           v0.1.98                                  -> v0.1.98
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6816955Z  * [new tag]           v0.1.99                                  -> v0.1.99
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6817597Z  * [new tag]           velnor-workflow-runtime-v1-203eb9b79141e5a2 -> velnor-workflow-runtime-v1-203eb9b79141e5a2
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6818293Z  * [new ref]           b2e22d834057de0c43c54ae557ab50a307772371 -> pull/904/merge
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6819840Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6820440Z ##[group]Determining the checkout info
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6821338Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6821816Z [command]/usr/bin/git sparse-checkout disable
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6823099Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6824211Z ##[group]Checking out the ref
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.6824750Z [command]/usr/bin/git checkout --progress --force refs/remotes/pull/904/merge
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7492831Z Note: switching to 'refs/remotes/pull/904/merge'.
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7493162Z 
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7493428Z You are in 'detached HEAD' state. You can look around, make experimental
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7494056Z changes and commit them, and you can discard any commits you make in this
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7494572Z state without impacting any branches by switching back to a branch.
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7494875Z 
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7495083Z If you want to create a new branch to retain commits you create, you may
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7495640Z do so (now or later) by using -c with the switch command. Example:
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7495891Z 
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7496072Z   git switch -c <new-branch-name>
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7496444Z 
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7496624Z Or undo this operation with:
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7496825Z 
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7496981Z   git switch -
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7497170Z 
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7497399Z Turn off this advice by setting config variable advice.detachedHead to false
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7497721Z 
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7498312Z HEAD is now at b2e22d83 Merge 62a74bf58993c8c073d47274897f0db88cbd6159 into 3353310c7648fca22698b6c0f4a69ab245127786
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7511461Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7548097Z [command]/usr/bin/git log -1 --format=%H
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7571924Z b2e22d834057de0c43c54ae557ab50a307772371
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7579668Z ##[group]Removing auth
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7580200Z Removing SSH command configuration
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7582904Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7609155Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7781727Z Removing HTTP extra header
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7783972Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7809571Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7983632Z Removing includeIf entries pointing to credentials config files
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.7986379Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.8009510Z includeif.gitdir:/home/runner/work/velnor/velnor/.git.path
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.8010459Z includeif.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.8011288Z includeif.gitdir:/github/workspace/.git.path
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.8012398Z includeif.gitdir:/github/workspace/.git/worktrees/*.path
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.8017468Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/.git.path
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.8036183Z /home/runner/work/_temp/git-credentials-33c543d7-2252-4ea9-b8c8-4401809320ac.config
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.8045327Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/.git.path \/home\/runner\/work\/_temp\/git\-credentials\-33c543d7\-2252\-4ea9\-b8c8\-4401809320ac\.config
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.8072538Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.8090766Z /home/runner/work/_temp/git-credentials-33c543d7-2252-4ea9-b8c8-4401809320ac.config
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.8096603Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path \/home\/runner\/work\/_temp\/git\-credentials\-33c543d7\-2252\-4ea9\-b8c8\-4401809320ac\.config
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.8126891Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git.path
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.8145228Z /github/runner_temp/git-credentials-33c543d7-2252-4ea9-b8c8-4401809320ac.config
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.8152226Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git.path \/github\/runner_temp\/git\-credentials\-33c543d7\-2252\-4ea9\-b8c8\-4401809320ac\.config
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.8182248Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git/worktrees/*.path
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.8201887Z /github/runner_temp/git-credentials-33c543d7-2252-4ea9-b8c8-4401809320ac.config
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.8209255Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git/worktrees/*.path \/github\/runner_temp\/git\-credentials\-33c543d7\-2252\-4ea9\-b8c8\-4401809320ac\.config
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.8238981Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.8402810Z Removing credentials config '/home/runner/work/_temp/git-credentials-33c543d7-2252-4ea9-b8c8-4401809320ac.config'
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.8409665Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.8768851Z Prepare all required actions
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:07.8769683Z Getting action download info
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.0006331Z Download action repository 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9' (SHA:55cc8345863c7cc4c66a329aec7e433d2d1c52a9)
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1752054Z ##[group]Run ./.github/actions/setup-velnor-workflow
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1752557Z with:
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1752974Z   rev: 48a66ad7d56636f8bfa6069fbaf810d0089fef39
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1753421Z   checkout-path: /home/runner/work/velnor/velnor
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1753810Z   cache: true
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1754198Z   cache-key-prefix: velnor-workflow-v3
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1756785Z   github-token: ***
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1757158Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1826328Z ##[start-action display=Resolve source closure;id=runtime.closure]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1871367Z ##[group]Run set -euo pipefail
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1872000Z ^[[36;1mset -euo pipefail^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1872374Z ^[[36;1msha256_digest() {^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1872920Z ^[[36;1m  if command -v sha256sum >/dev/null 2>&1; then^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1873356Z ^[[36;1m    sha256sum | awk '{print $1}'^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1873790Z ^[[36;1m  elif command -v shasum >/dev/null 2>&1; then^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1874197Z ^[[36;1m    shasum -a 256 | awk '{print $1}'^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1874589Z ^[[36;1m  else^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1875018Z ^[[36;1m    echo "::error::no SHA-256 checksum tool available (sha256sum or shasum)" >&2^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1875477Z ^[[36;1m    return 1^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1875803Z ^[[36;1m  fi^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1876093Z ^[[36;1m}^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1876553Z ^[[36;1mtest "$INSTALL_REV" != '' || { echo "::error::runtime revision is empty" >&2; exit 1; }^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1877426Z ^[[36;1m[[ "$INSTALL_REV" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::runtime revision must be a full commit SHA, got $INSTALL_REV" >&2; exit 1; }^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1877981Z ^[[36;1mlisting=""^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1878444Z ^[[36;1mif git -C "$CHECKOUT_PATH" cat-file -e "$INSTALL_REV^{commit}" 2>/dev/null; then^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1879190Z ^[[36;1m  listing="$(git -C "$CHECKOUT_PATH" ls-tree -r "$INSTALL_REV" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1879839Z ^[[36;1melse^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1880528Z ^[[36;1m  tree="$(gh api "repos/$PRODUCT_REPOSITORY/git/trees/$INSTALL_REV?recursive=1")" || { echo "::error::unknown generator revision $INSTALL_REV" >&2; exit 1; }^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1881530Z ^[[36;1m  [[ "$(jq -r '.truncated // false' <<<"$tree")" != "true" ]] || { echo "::error::tree API response is truncated; the closure cannot be proven" >&2; exit 1; }^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1882770Z ^[[36;1m  listing="$(jq -r '[.tree[] | select(.type != "tree") | select(.path == "Cargo.toml" or .path == "Cargo.lock" or .path == "rust-toolchain.toml" or .path == "rust-toolchain" or (.path | startswith("crates/velnor-workflow/")) or (.path | startswith(".cargo/"))) | "\(.mode) \(.type) \(.sha)\t\(.path)"] | sort | join("\n")' <<<"$tree")"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1883769Z ^[[36;1mfi^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1884252Z ^[[36;1mtest "$listing" != '' || { echo "::error::revision $INSTALL_REV has no closure inputs" >&2; exit 1; }^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1884988Z ^[[36;1mclosure="$(printf '%s\nclosure-version:1\nfeatures:\nprofile:release\n' "$(LC_ALL=C sort <<<"$listing")" | sha256_digest)"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1885668Z ^[[36;1m[[ "$closure" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::closure resolution failed" >&2; exit 1; }^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1886170Z ^[[36;1mecho "value=$closure" >> "$GITHUB_OUTPUT"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1912185Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1912684Z env:
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1915465Z   GH_TOKEN: ***
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1915951Z   INSTALL_REV: 48a66ad7d56636f8bfa6069fbaf810d0089fef39
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1916416Z   CHECKOUT_PATH: /home/runner/work/velnor/velnor
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1917034Z   PRODUCT_REPOSITORY: tailrocks/velnor
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.1917434Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.2132909Z ##[end-action id=runtime.closure;outcome=success;conclusion=success;duration_ms=30]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.2137312Z ##[start-action display=Restore runtime cache;id=runtime.cache]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.2205496Z ##[group]Run actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.2206007Z with:
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.2206394Z   path: ~/.cache/velnor/workflow-runtime
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.2207000Z   key: velnor-workflow-v3-Linux-X64-f1f88c200e5b3b82548e1e2392b44b5704c33fa34c71f67f3de1a2225d6236ce
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.2207642Z   enableCrossOsArchive: false
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.2208024Z   fail-on-cache-miss: false
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.2208400Z   lookup-only: false
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.2208760Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4700686Z Cache not found for input keys: velnor-workflow-v3-Linux-X64-f1f88c200e5b3b82548e1e2392b44b5704c33fa34c71f67f3de1a2225d6236ce
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4738516Z ##[end-action id=runtime.cache;outcome=success;conclusion=success;duration_ms=260]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4744382Z ##[start-action display=Download runtime product;id=runtime.__run]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4789358Z ##[group]Run set -euo pipefail
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4789891Z ^[[36;1mset -euo pipefail^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4790269Z ^[[36;1mfor tool in gh jq; do^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4790826Z ^[[36;1m  command -v "$tool" >/dev/null 2>&1 || { echo "::error::required tool missing: $tool" >&2; exit 1; }^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4791833Z ^[[36;1mdone^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4792228Z ^[[36;1mtag="velnor-workflow-runtime-v1-${CLOSURE:0:16}"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4792704Z ^[[36;1masset="velnor-workflow-${RUNNER_OS}-${RUNNER_ARCH}"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4793170Z ^[[36;1mtemporary="$(mktemp -d)"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4793769Z ^[[36;1mtrap 'rm -rf "$temporary"' EXIT^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4794441Z ^[[36;1mif ! gh release download "$tag" --repo "$PRODUCT_REPOSITORY" --pattern "$asset" --pattern manifest.json --dir "$temporary"; then^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4795534Z ^[[36;1m  echo "::error::no runtime product for revision $INSTALL_REV (closure ${CLOSURE:0:16}); the mainline runtime-product publisher builds it after merge" >&2^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4796321Z ^[[36;1m  exit 1^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4796779Z ^[[36;1mfi^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4797270Z ^[[36;1mgh attestation verify "$temporary/$asset" \^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4797734Z ^[[36;1m  --owner tailrocks \^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4798407Z ^[[36;1m  --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4799066Z ^[[36;1mgh attestation verify "$temporary/manifest.json" \^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4799634Z ^[[36;1m  --owner tailrocks \^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4800252Z ^[[36;1m  --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4800842Z ^[[36;1mjq -e \^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4801447Z ^[[36;1m  --arg closure "$CLOSURE" \^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4801872Z ^[[36;1m  --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4802380Z ^[[36;1m  --arg asset "$asset" \^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4803077Z ^[[36;1m  '.closure == $closure and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' \^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4803790Z ^[[36;1m  "$temporary/manifest.json" >/dev/null^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4804247Z ^[[36;1mif command -v sha256sum >/dev/null 2>&1; then^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4804731Z ^[[36;1m  actual="$(sha256sum "$temporary/$asset" | awk '{print $1}')"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4805257Z ^[[36;1melse^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4805654Z ^[[36;1m  actual="$(shasum -a 256 "$temporary/$asset" | awk '{print $1}')"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4806123Z ^[[36;1mfi^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4806681Z ^[[36;1mexpected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "$temporary/manifest.json")"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4807394Z ^[[36;1m[[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4808095Z ^[[36;1mruntime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4808570Z ^[[36;1mmkdir -p "$runtime/bin"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4808991Z ^[[36;1mcp "$temporary/$asset" "$runtime/bin/velnor-workflow"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4809507Z ^[[36;1mchmod 0755 "$runtime/bin/velnor-workflow"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4810017Z ^[[36;1mcp "$temporary/manifest.json" "$runtime/manifest.json"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4810525Z ^[[36;1mchmod 0644 "$runtime/manifest.json"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4834126Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4834580Z env:
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4837179Z   GH_TOKEN: ***
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4837616Z   INSTALL_REV: 48a66ad7d56636f8bfa6069fbaf810d0089fef39
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4838185Z   CLOSURE: f1f88c200e5b3b82548e1e2392b44b5704c33fa34c71f67f3de1a2225d6236ce
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4838684Z   PRODUCT_REPOSITORY: tailrocks/velnor
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.4839068Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.9817460Z release not found
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.9850808Z ##[error]no runtime product for revision 48a66ad7d56636f8bfa6069fbaf810d0089fef39 (closure f1f88c200e5b3b82); the mainline runtime-product publisher builds it after merge
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.9854212Z ##[error]Process completed with exit code 1.
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.9862595Z ##[end-action id=runtime.__run;outcome=failure;conclusion=failure;duration_ms=511]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.9870744Z ##[start-action display=Verify runtime product;id=runtime.__run_2]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.9875256Z ##[end-action id=runtime.__run_2;outcome=skipped;conclusion=skipped;duration_ms=0]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.9878938Z ##[start-action display=Add runtime to PATH;id=runtime.__run_3]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.9882014Z ##[end-action id=runtime.__run_3;outcome=skipped;conclusion=skipped;duration_ms=0]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.9884712Z ##[start-action display=Save runtime cache;id=runtime.__actions_cache]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:08.9896380Z ##[end-action id=runtime.__actions_cache;outcome=skipped;conclusion=skipped;duration_ms=0]
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:09.0098834Z Post job cleanup.
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:09.0857999Z [command]/usr/bin/git version
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:09.0893315Z git version 2.55.0
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:09.0922269Z Temporarily overriding HOME='/home/runner/work/_temp/deee6f06-2734-4282-aa38-af1a5f80d4e7' before making global git config changes
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:09.0923809Z Adding repository directory to the temporary git global config as a safe directory
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:09.0928381Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:09.0955125Z Removing SSH command configuration
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:09.0961016Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:09.0990757Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:09.1171328Z Removing HTTP extra header
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:09.1176757Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:09.1213325Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:09.1395609Z Removing includeIf entries pointing to credentials config files
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:09.1400251Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:09.1425956Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:09.1755556Z Evaluate and set job outputs
+Control / Planning	UNKNOWN STEP	2026-09-16T18:44:09.1766752Z Cleaning up orphan processes
+ci-required	UNKNOWN STEP	﻿2026-09-16T18:44:15.6643530Z Current runner version: '2.337.0'
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6664654Z ##[group]Runner Image Provisioner
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6665415Z Hosted Compute Agent
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6665950Z Version: 20260828.587
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6666509Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6667176Z Build Date: 2026-08-28T16:44:25Z
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6667749Z Worker ID: {0c678e7a-7c93-4a07-a861-c53870cbf273}
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6668386Z Azure Region: westus3
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6668860Z ##[endgroup]
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6669942Z ##[group]Operating System
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6670555Z Ubuntu
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6670990Z 24.04.5
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6671469Z LTS
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6671959Z ##[endgroup]
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6672393Z ##[group]Runner Image
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6672964Z Image: ubuntu-24.04
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6673431Z Version: 20260907.300.1
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6674781Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260907.300/images/ubuntu/Ubuntu2404-Readme.md
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6676029Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260907.300
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6676913Z ##[endgroup]
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6677848Z ##[group]GITHUB_TOKEN Permissions
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6679700Z Actions: read
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6680191Z Contents: read
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6680730Z Metadata: read
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6681200Z ##[endgroup]
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6682833Z Secret source: Actions
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6683811Z Cache mode: write
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6684364Z Prepare workflow directory
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.6977351Z Prepare all required actions
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7091946Z Complete job name: ci-required
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7879502Z ##[group]Run set -euo pipefail
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7881925Z ^[[36;1mset -euo pipefail^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7957509Z ^[[36;1mresult_for_job() {^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7958444Z ^[[36;1m  jq -r --arg job "$1" '.[$job].result // empty' <<<"$NEEDS_JSON"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7959268Z ^[[36;1m}^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7959814Z ^[[36;1mresult="$(result_for_job plan)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7960573Z ^[[36;1mif [[ "$result" != success ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7961501Z ^[[36;1m  echo "required CI prerequisite plan did not pass: $result" >&2^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7962391Z ^[[36;1m  exit 1^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7962919Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7963725Z ^[[36;1mresult="$(result_for_job velnor-lane-admission)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7964546Z ^[[36;1mcase "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7965165Z ^[[36;1m  success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7966256Z ^[[36;1m  *) echo "required CI prerequisite velnor-lane-admission did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7967420Z ^[[36;1mesac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7967972Z ^[[36;1mselected=",$SELECTED_UNITS,"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7968761Z ^[[36;1mif [[ "$selected" == *",bun-velnor,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7969602Z ^[[36;1m  result="$(result_for_job github-bun-velnor)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7970358Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7970980Z ^[[36;1m    success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7971870Z ^[[36;1m    *) echo "selected CI job github-bun-velnor did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7972886Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7973404Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7974178Z ^[[36;1m  result="$(result_for_job github-bun-velnor)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7974969Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7975599Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7976657Z ^[[36;1m    *) echo "unselected CI job github-bun-velnor failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7977748Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7978284Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7978880Z ^[[36;1mif [[ "$selected" == *",bun-velnor,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7979724Z ^[[36;1m  result="$(result_for_job velnor-bun-velnor)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7980520Z ^[[36;1m  if [[ "$FORK_PR" == true ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7981236Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7982214Z ^[[36;1m      success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7983184Z ^[[36;1m      *) echo "selected CI job velnor-bun-velnor did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7988057Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7988589Z ^[[36;1m  else^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7989114Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7989729Z ^[[36;1m      success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7990610Z ^[[36;1m      *) echo "selected CI job velnor-bun-velnor did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7991610Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7992138Z ^[[36;1m  fi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7992655Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7993309Z ^[[36;1m  result="$(result_for_job velnor-bun-velnor)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7994211Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7994829Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7995877Z ^[[36;1m    *) echo "unselected CI job velnor-bun-velnor failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7996989Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7997503Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7998078Z ^[[36;1mif [[ "$selected" == *",docker,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7998884Z ^[[36;1m  result="$(result_for_job github-docker)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.7999644Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8000241Z ^[[36;1m    success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8001084Z ^[[36;1m    *) echo "selected CI job github-docker did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8002048Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8002564Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8003153Z ^[[36;1m  result="$(result_for_job github-docker)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8004339Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8004998Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8006015Z ^[[36;1m    *) echo "unselected CI job github-docker failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8007031Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8007540Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8008115Z ^[[36;1mif [[ "$selected" == *",docker,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8008944Z ^[[36;1m  result="$(result_for_job velnor-docker)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8009717Z ^[[36;1m  if [[ "$FORK_PR" == true ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8010397Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8011035Z ^[[36;1m      success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8012042Z ^[[36;1m      *) echo "selected CI job velnor-docker did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8013020Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8013753Z ^[[36;1m  else^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8014288Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8014943Z ^[[36;1m      success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8015824Z ^[[36;1m      *) echo "selected CI job velnor-docker did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8016790Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8017315Z ^[[36;1m  fi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8017812Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8018424Z ^[[36;1m  result="$(result_for_job velnor-docker)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8019195Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8019818Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8020830Z ^[[36;1m    *) echo "unselected CI job velnor-docker failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8021885Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8022387Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8022953Z ^[[36;1mif [[ "$selected" == *",docs,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8023888Z ^[[36;1m  result="$(result_for_job github-docs)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8024633Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8025249Z ^[[36;1m    success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8026117Z ^[[36;1m    *) echo "selected CI job github-docs did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8027062Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8027576Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8028158Z ^[[36;1m  result="$(result_for_job github-docs)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8028899Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8029521Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8030720Z ^[[36;1m    *) echo "unselected CI job github-docs failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8031747Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8032274Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8032830Z ^[[36;1mif [[ "$selected" == *",docs,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8033930Z ^[[36;1m  result="$(result_for_job velnor-docs)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8034759Z ^[[36;1m  if [[ "$FORK_PR" == true ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8035455Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8036074Z ^[[36;1m      success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8037021Z ^[[36;1m      *) echo "selected CI job velnor-docs did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8037953Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8038467Z ^[[36;1m  else^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8039004Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8039635Z ^[[36;1m      success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8040502Z ^[[36;1m      *) echo "selected CI job velnor-docs did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8041448Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8041968Z ^[[36;1m  fi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8042481Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8043057Z ^[[36;1m  result="$(result_for_job velnor-docs)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8043963Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8044593Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8045558Z ^[[36;1m    *) echo "unselected CI job velnor-docs failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8046606Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8047123Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8047928Z ^[[36;1mif [[ "$selected" == *",opentofu,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8048769Z ^[[36;1m  result="$(result_for_job github-opentofu)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8049541Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8050154Z ^[[36;1m    success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8051025Z ^[[36;1m    *) echo "selected CI job github-opentofu did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8052006Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8052524Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8053134Z ^[[36;1m  result="$(result_for_job github-opentofu)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8054042Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8054682Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8055696Z ^[[36;1m    *) echo "unselected CI job github-opentofu failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8056752Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8057266Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8057841Z ^[[36;1mif [[ "$selected" == *",opentofu,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8058656Z ^[[36;1m  result="$(result_for_job velnor-opentofu)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8059437Z ^[[36;1m  if [[ "$FORK_PR" == true ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8060149Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8060780Z ^[[36;1m      success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8061729Z ^[[36;1m      *) echo "selected CI job velnor-opentofu did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8062713Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8063235Z ^[[36;1m  else^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8063912Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8064538Z ^[[36;1m      success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8065425Z ^[[36;1m      *) echo "selected CI job velnor-opentofu did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8066383Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8066907Z ^[[36;1m  fi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8067423Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8068057Z ^[[36;1m  result="$(result_for_job velnor-opentofu)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8068807Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8069429Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8070462Z ^[[36;1m    *) echo "unselected CI job velnor-opentofu failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8071499Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8072012Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8072618Z ^[[36;1mif [[ "$selected" == *",rust-policy,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8073447Z ^[[36;1m  result="$(result_for_job prepare-cargo)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8074608Z ^[[36;1m  if [[ "$result" != success ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8075618Z ^[[36;1m    echo "selected CI prerequisite prepare-cargo did not pass: $result" >&2^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8076570Z ^[[36;1m    exit 1^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8077111Z ^[[36;1m  fi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8077619Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8078215Z ^[[36;1m  result="$(result_for_job prepare-cargo)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8078955Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8079581Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8080716Z ^[[36;1m    *) echo "unselected CI prerequisite prepare-cargo failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8081825Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8082342Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8082944Z ^[[36;1mif [[ "$selected" == *",rust-policy,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8083949Z ^[[36;1m  result="$(result_for_job github-rust-policy)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8084725Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8085346Z ^[[36;1m    success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8086249Z ^[[36;1m    *) echo "selected CI job github-rust-policy did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8087226Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8087740Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8088357Z ^[[36;1m  result="$(result_for_job github-rust-policy)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8089127Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8089749Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8090811Z ^[[36;1m    *) echo "unselected CI job github-rust-policy failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8092047Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8092565Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8093164Z ^[[36;1mif [[ "$selected" == *",rust-policy,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8094170Z ^[[36;1m  result="$(result_for_job velnor-rust-policy)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8095001Z ^[[36;1m  if [[ "$FORK_PR" == true ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8095720Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8096392Z ^[[36;1m      success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8097369Z ^[[36;1m      *) echo "selected CI job velnor-rust-policy did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8098389Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8098911Z ^[[36;1m  else^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8099433Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8100045Z ^[[36;1m      success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8100992Z ^[[36;1m      *) echo "selected CI job velnor-rust-policy did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8101964Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8102481Z ^[[36;1m  fi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8103004Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8103764Z ^[[36;1m  result="$(result_for_job velnor-rust-policy)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8104528Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8105150Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8106212Z ^[[36;1m    *) echo "unselected CI job velnor-rust-policy failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8107275Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8107829Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8108465Z ^[[36;1mif [[ "$selected" == *",rust-unit-collector,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8109419Z ^[[36;1m  result="$(result_for_job github-rust-unit-collector)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8110247Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8110861Z ^[[36;1m    success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8111822Z ^[[36;1m    *) echo "selected CI job github-rust-unit-collector did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8112927Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8113436Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8114262Z ^[[36;1m  result="$(result_for_job github-rust-unit-collector)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8115089Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8115715Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8116807Z ^[[36;1m    *) echo "unselected CI job github-rust-unit-collector failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8118165Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8118677Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8119299Z ^[[36;1mif [[ "$selected" == *",rust-unit-collector,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8120245Z ^[[36;1m  result="$(result_for_job velnor-rust-unit-collector)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8121095Z ^[[36;1m  if [[ "$FORK_PR" == true ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8121779Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8122408Z ^[[36;1m      success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8123463Z ^[[36;1m      *) echo "selected CI job velnor-rust-unit-collector did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8124724Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8125251Z ^[[36;1m  else^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8125805Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8126419Z ^[[36;1m      success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8127392Z ^[[36;1m      *) echo "selected CI job velnor-rust-unit-collector did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8128462Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8128994Z ^[[36;1m  fi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8129499Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8130166Z ^[[36;1m  result="$(result_for_job velnor-rust-unit-collector)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8131008Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8131633Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8132744Z ^[[36;1m    *) echo "unselected CI job velnor-rust-unit-collector failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8134138Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8134644Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8135271Z ^[[36;1mif [[ "$selected" == *",rust-velnor-bench,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8136398Z ^[[36;1m  result="$(result_for_job github-rust-velnor-bench)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8137206Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8137823Z ^[[36;1m    success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8138817Z ^[[36;1m    *) echo "selected CI job github-rust-velnor-bench did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8139838Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8140356Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8141004Z ^[[36;1m  result="$(result_for_job github-rust-velnor-bench)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8141803Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8142409Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8143512Z ^[[36;1m    *) echo "unselected CI job github-rust-velnor-bench failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8144786Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8145304Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8145931Z ^[[36;1mif [[ "$selected" == *",rust-velnor-bench,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8146846Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-bench)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8147702Z ^[[36;1m  if [[ "$FORK_PR" == true ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8148402Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8149029Z ^[[36;1m      success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8150041Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-bench did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8151137Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8151666Z ^[[36;1m  else^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8152191Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8152803Z ^[[36;1m      success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8153930Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-bench did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8154951Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8155459Z ^[[36;1m  fi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8155963Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8156609Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-bench)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8157401Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8158056Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8159156Z ^[[36;1m    *) echo "unselected CI job velnor-rust-velnor-bench failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8160239Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8160753Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8161381Z ^[[36;1mif [[ "$selected" == *",rust-velnor-client,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8162506Z ^[[36;1m  result="$(result_for_job github-rust-velnor-client)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8163320Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8164112Z ^[[36;1m    success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8165364Z ^[[36;1m    *) echo "selected CI job github-rust-velnor-client did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8166441Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8166957Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8167598Z ^[[36;1m  result="$(result_for_job github-rust-velnor-client)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8168407Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8169029Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8170112Z ^[[36;1m    *) echo "unselected CI job github-rust-velnor-client failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8171249Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8171749Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8172364Z ^[[36;1mif [[ "$selected" == *",rust-velnor-client,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8173299Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-client)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8174315Z ^[[36;1m  if [[ "$FORK_PR" == true ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8175002Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8175622Z ^[[36;1m      success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8176666Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-client did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8177697Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8178232Z ^[[36;1m  else^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8178755Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8179370Z ^[[36;1m      success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8180508Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-client did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8181585Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8182090Z ^[[36;1m  fi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8182578Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8183236Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-client)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8184227Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8184846Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8185949Z ^[[36;1m    *) echo "unselected CI job velnor-rust-velnor-client failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8187070Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8187571Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8188206Z ^[[36;1mif [[ "$selected" == *",rust-velnor-control,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8189155Z ^[[36;1m  result="$(result_for_job github-rust-velnor-control)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8189957Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8190556Z ^[[36;1m    success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8191527Z ^[[36;1m    *) echo "selected CI job github-rust-velnor-control did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8192620Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8193133Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8193938Z ^[[36;1m  result="$(result_for_job github-rust-velnor-control)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8194759Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8195370Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8196480Z ^[[36;1m    *) echo "unselected CI job github-rust-velnor-control failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8197609Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8198109Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8198730Z ^[[36;1mif [[ "$selected" == *",rust-velnor-control,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8199647Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-control)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8200510Z ^[[36;1m  if [[ "$FORK_PR" == true ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8201205Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8201818Z ^[[36;1m      success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8202870Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-control did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8204073Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8204569Z ^[[36;1m  else^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8205080Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8205696Z ^[[36;1m      success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8206912Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-control did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8207961Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8208520Z ^[[36;1m  fi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8209017Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8209679Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-control)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8210507Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8211131Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8212216Z ^[[36;1m    *) echo "unselected CI job velnor-rust-velnor-control failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8213368Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8214045Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8214659Z ^[[36;1mif [[ "$selected" == *",rust-velnor-model,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8215579Z ^[[36;1m  result="$(result_for_job github-rust-velnor-model)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8216389Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8216979Z ^[[36;1m    success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8217939Z ^[[36;1m    *) echo "selected CI job github-rust-velnor-model did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8218970Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8219471Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8220119Z ^[[36;1m  result="$(result_for_job github-rust-velnor-model)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8220934Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8221547Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8222656Z ^[[36;1m    *) echo "unselected CI job github-rust-velnor-model failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8223929Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8224436Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8225219Z ^[[36;1mif [[ "$selected" == *",rust-velnor-model,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8226146Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-model)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8226977Z ^[[36;1m  if [[ "$FORK_PR" == true ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8227658Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8228283Z ^[[36;1m      success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8229317Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-model did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8230341Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8230853Z ^[[36;1m  else^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8231383Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8232026Z ^[[36;1m      success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8232959Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-model did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8234212Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8234719Z ^[[36;1m  fi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8235207Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8235858Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-model)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8236678Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8237291Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8238360Z ^[[36;1m    *) echo "unselected CI job velnor-rust-velnor-model failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8239491Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8239997Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8240614Z ^[[36;1mif [[ "$selected" == *",rust-velnor-render,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8241556Z ^[[36;1m  result="$(result_for_job github-rust-velnor-render)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8242370Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8242949Z ^[[36;1m    success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8244074Z ^[[36;1m    *) echo "selected CI job github-rust-velnor-render did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8245107Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8245607Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8246272Z ^[[36;1m  result="$(result_for_job github-rust-velnor-render)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8247080Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8247677Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8248771Z ^[[36;1m    *) echo "unselected CI job github-rust-velnor-render failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8249896Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8250641Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8251274Z ^[[36;1mif [[ "$selected" == *",rust-velnor-render,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8252206Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-render)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8253036Z ^[[36;1m  if [[ "$FORK_PR" == true ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8253909Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8254540Z ^[[36;1m      success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8255555Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-render did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8256629Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8257145Z ^[[36;1m  else^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8257698Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8258299Z ^[[36;1m      success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8259303Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-render did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8260384Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8260905Z ^[[36;1m  fi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8261411Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8262081Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-render)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8262892Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8263520Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8264773Z ^[[36;1m    *) echo "unselected CI job velnor-rust-velnor-render failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8265888Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8266394Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8267019Z ^[[36;1mif [[ "$selected" == *",rust-velnor-runner,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8267963Z ^[[36;1m  result="$(result_for_job github-rust-velnor-runner)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8269013Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8269617Z ^[[36;1m    success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8270572Z ^[[36;1m    *) echo "selected CI job github-rust-velnor-runner did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8271631Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8272149Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8272809Z ^[[36;1m  result="$(result_for_job github-rust-velnor-runner)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8273768Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8274390Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8275455Z ^[[36;1m    *) echo "unselected CI job github-rust-velnor-runner failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8276581Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8277136Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8277799Z ^[[36;1mif [[ "$selected" == *",rust-velnor-runner,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8278724Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-runner)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8279589Z ^[[36;1m  if [[ "$FORK_PR" == true ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8280268Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8280912Z ^[[36;1m      success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8281964Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-runner did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8283033Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8283705Z ^[[36;1m  else^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8284238Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8284851Z ^[[36;1m      success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8285834Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-runner did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8286891Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8287397Z ^[[36;1m  fi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8287897Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8288544Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-runner)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8289363Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8290011Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8291099Z ^[[36;1m    *) echo "unselected CI job velnor-rust-velnor-runner failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8292236Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8292741Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8293361Z ^[[36;1mif [[ "$selected" == *",rust-velnor-tools,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8294446Z ^[[36;1m  result="$(result_for_job github-rust-velnor-tools)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8295472Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8296054Z ^[[36;1m    success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8296997Z ^[[36;1m    *) echo "selected CI job github-rust-velnor-tools did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8298024Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8298520Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8299157Z ^[[36;1m  result="$(result_for_job github-rust-velnor-tools)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8299964Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8300568Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8301663Z ^[[36;1m    *) echo "unselected CI job github-rust-velnor-tools failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8302768Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8303264Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8304037Z ^[[36;1mif [[ "$selected" == *",rust-velnor-tools,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8304959Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-tools)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8305801Z ^[[36;1m  if [[ "$FORK_PR" == true ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8306491Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8307177Z ^[[36;1m      success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8308179Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-tools did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8309221Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8309771Z ^[[36;1m  else^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8310291Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8310888Z ^[[36;1m      success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8312042Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-tools did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8313068Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8313825Z ^[[36;1m  fi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8314347Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8315003Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-tools)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8315799Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8316434Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8317544Z ^[[36;1m    *) echo "unselected CI job velnor-rust-velnor-tools failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8318645Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8319145Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8319783Z ^[[36;1mif [[ "$selected" == *",rust-velnor-workflow,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8320742Z ^[[36;1m  result="$(result_for_job github-rust-velnor-workflow)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8321561Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8322153Z ^[[36;1m    success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8323139Z ^[[36;1m    *) echo "selected CI job github-rust-velnor-workflow did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8324345Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8324856Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8325522Z ^[[36;1m  result="$(result_for_job github-rust-velnor-workflow)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8326335Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8326945Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8328076Z ^[[36;1m    *) echo "unselected CI job github-rust-velnor-workflow failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8329207Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8329712Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8330343Z ^[[36;1mif [[ "$selected" == *",rust-velnor-workflow,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8331289Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-workflow)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8332158Z ^[[36;1m  if [[ "$FORK_PR" == true ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8332863Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8333487Z ^[[36;1m      success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8334763Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-workflow did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8335845Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8336357Z ^[[36;1m  else^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8336876Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8337492Z ^[[36;1m      success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8338478Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-workflow did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8339813Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8340319Z ^[[36;1m  fi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8340815Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8341487Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-workflow)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8342352Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8342999Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8344283Z ^[[36;1m    *) echo "unselected CI job velnor-rust-velnor-workflow failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8345486Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8346011Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8346706Z ^[[36;1mif [[ "$selected" == *",rust-velnor-workflow-contract,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8347820Z ^[[36;1m  result="$(result_for_job github-rust-velnor-workflow-contract)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8348721Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8349327Z ^[[36;1m    success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8350421Z ^[[36;1m    *) echo "selected CI job github-rust-velnor-workflow-contract did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8351556Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8352061Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8352808Z ^[[36;1m  result="$(result_for_job github-rust-velnor-workflow-contract)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8353844Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8354458Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8355665Z ^[[36;1m    *) echo "unselected CI job github-rust-velnor-workflow-contract failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8356898Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8357598Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8358288Z ^[[36;1mif [[ "$selected" == *",rust-velnor-workflow-contract,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8359390Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-workflow-contract)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8360327Z ^[[36;1m  if [[ "$FORK_PR" == true ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8361029Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8361680Z ^[[36;1m      success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8362826Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-workflow-contract did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8364161Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8364687Z ^[[36;1m  else^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8365211Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8365819Z ^[[36;1m      success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8366906Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-workflow-contract did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8368094Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8368610Z ^[[36;1m  fi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8369117Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8369856Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-workflow-contract)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8370785Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8371398Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8372614Z ^[[36;1m    *) echo "unselected CI job velnor-rust-velnor-workflow-contract failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8374008Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8374525Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8375136Z ^[[36;1mif [[ "$selected" == *",rust-velnorctl,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8376023Z ^[[36;1m  result="$(result_for_job github-rust-velnorctl)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8376803Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8377408Z ^[[36;1m    success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8378327Z ^[[36;1m    *) echo "selected CI job github-rust-velnorctl did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8379351Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8379880Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8380504Z ^[[36;1m  result="$(result_for_job github-rust-velnorctl)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8381278Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8381891Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8382963Z ^[[36;1m    *) echo "unselected CI job github-rust-velnorctl failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8384423Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8384940Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8385547Z ^[[36;1mif [[ "$selected" == *",rust-velnorctl,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8386416Z ^[[36;1m  result="$(result_for_job velnor-rust-velnorctl)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8387226Z ^[[36;1m  if [[ "$FORK_PR" == true ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8387918Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8388532Z ^[[36;1m      success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8389532Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnorctl did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8390573Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8391080Z ^[[36;1m  else^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8391599Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8392232Z ^[[36;1m      success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8393183Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnorctl did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8394361Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8394884Z ^[[36;1m  fi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8395379Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8395993Z ^[[36;1m  result="$(result_for_job velnor-rust-velnorctl)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8396775Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8397389Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8398446Z ^[[36;1m    *) echo "unselected CI job velnor-rust-velnorctl failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8399560Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8400074Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8400740Z ^[[36;1mif [[ "$selected" == *",rust-production-topology,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8401951Z ^[[36;1m  result="$(result_for_job github-rust-production-topology)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8402808Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8403409Z ^[[36;1m    success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8404621Z ^[[36;1m    *) echo "selected CI job github-rust-production-topology did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8405728Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8406248Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8407010Z ^[[36;1m  result="$(result_for_job github-rust-production-topology)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8407883Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8408497Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8409653Z ^[[36;1m    *) echo "unselected CI job github-rust-production-topology failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8410874Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8411375Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8412042Z ^[[36;1mif [[ "$selected" == *",rust-production-topology,"* ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8413077Z ^[[36;1m  result="$(result_for_job velnor-rust-production-topology)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8414113Z ^[[36;1m  if [[ "$FORK_PR" == true ]]; then^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8414820Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8415439Z ^[[36;1m      success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8416548Z ^[[36;1m      *) echo "selected CI job velnor-rust-production-topology did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8417674Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8418184Z ^[[36;1m  else^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8418735Z ^[[36;1m    case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8419348Z ^[[36;1m      success) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8420385Z ^[[36;1m      *) echo "selected CI job velnor-rust-production-topology did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8421497Z ^[[36;1m    esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8422020Z ^[[36;1m  fi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8422518Z ^[[36;1melse^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8423210Z ^[[36;1m  result="$(result_for_job velnor-rust-production-topology)"^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8424217Z ^[[36;1m  case "$result" in^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8424833Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8425999Z ^[[36;1m    *) echo "unselected CI job velnor-rust-production-topology failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8427211Z ^[[36;1m  esac^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8427712Z ^[[36;1mfi^[[0m
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8991525Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.8992318Z env:
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.9002316Z   NEEDS_JSON: {
+ci-required	UNKNOWN STEP	  "plan": {
+ci-required	UNKNOWN STEP	    "result": "failure",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "velnor-lane-admission": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "github-bun-velnor": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "velnor-bun-velnor": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "github-docker": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "velnor-docker": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "github-docs": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "velnor-docs": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "github-opentofu": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "velnor-opentofu": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "prepare-cargo": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "github-rust-policy": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "velnor-rust-policy": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "github-rust-unit-collector": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "velnor-rust-unit-collector": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "github-rust-velnor-bench": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "velnor-rust-velnor-bench": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "github-rust-velnor-client": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "velnor-rust-velnor-client": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "github-rust-velnor-control": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "velnor-rust-velnor-control": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "github-rust-velnor-model": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "velnor-rust-velnor-model": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "github-rust-velnor-render": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "velnor-rust-velnor-render": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "github-rust-velnor-runner": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "velnor-rust-velnor-runner": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "github-rust-velnor-tools": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "velnor-rust-velnor-tools": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "github-rust-velnor-workflow": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "velnor-rust-velnor-workflow": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "github-rust-velnor-workflow-contract": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "velnor-rust-velnor-workflow-contract": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "github-rust-velnorctl": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "velnor-rust-velnorctl": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "github-rust-production-topology": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  },
+ci-required	UNKNOWN STEP	  "velnor-rust-production-topology": {
+ci-required	UNKNOWN STEP	    "result": "skipped",
+ci-required	UNKNOWN STEP	    "outputs": {}
+ci-required	UNKNOWN STEP	  }
+ci-required	UNKNOWN STEP	}
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.9012392Z   SELECTED_UNITS: 
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.9012742Z   FORK_PR: false
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.9013088Z ##[endgroup]
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.9236048Z required CI prerequisite plan did not pass: failure
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.9249223Z ##[error]Process completed with exit code 1.
+ci-required	UNKNOWN STEP	2026-09-16T18:44:15.9376557Z Cleaning up orphan processes
+Control / Required	UNKNOWN STEP	﻿2026-09-16T18:44:23.4587819Z Current runner version: '2.337.0'
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.4616079Z ##[group]Runner Image Provisioner
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.4617145Z Hosted Compute Agent
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.4617815Z Version: 20260828.587
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.4618511Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.4619472Z Build Date: 2026-08-28T16:44:25Z
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.4620247Z Worker ID: {518da4cc-83dc-4a5e-aac7-d1306d66c5a7}
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.4621096Z Azure Region: westus
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.4621751Z ##[endgroup]
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.4623879Z ##[group]Operating System
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.4624743Z Ubuntu
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.4625322Z 24.04.5
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.4625970Z LTS
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.4626537Z ##[endgroup]
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.4627133Z ##[group]Runner Image
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.4627848Z Image: ubuntu-24.04
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.4628461Z Version: 20260907.300.1
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.4629934Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260907.300/images/ubuntu/Ubuntu2404-Readme.md
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.4631655Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260907.300
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.4633169Z ##[endgroup]
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.4634631Z ##[group]GITHUB_TOKEN Permissions
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.4636828Z Actions: read
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.4637480Z Contents: read
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.4638053Z Metadata: read
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.4638819Z ##[endgroup]
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.4641075Z Secret source: Actions
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.4642161Z Cache mode: write
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.4643391Z Prepare workflow directory
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.5027228Z Prepare all required actions
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.5154646Z Complete job name: Control / Required
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.6103680Z ##[group]Run exit 1
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.6105008Z ^[[36;1mexit 1^[[0m
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.6668761Z shell: /usr/bin/bash -e {0}
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.6670382Z ##[endgroup]
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.7118129Z ##[error]Process completed with exit code 1.
+Control / Required	UNKNOWN STEP	2026-09-16T18:44:23.7296218Z Cleaning up orphan processes

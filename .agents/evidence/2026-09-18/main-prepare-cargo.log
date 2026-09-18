@@ -1,0 +1,7 @@
+##[group]Velnor rejected job (operational_store)
+##[error]Velnor rejected this job before workflow execution.
+phase: operational_store
+reason: operational store rejected the sanitized admission row; job failed closed before execution
+effect: no declared workflow command was executed
+remediation: correct the rejected workflow field/action/ref or add the exact reviewed capability to Velnor, publish and deploy that Velnor release, then rerun
+##[endgroup]

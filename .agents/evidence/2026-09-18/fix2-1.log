@@ -1,0 +1,419 @@
+Command line invocation:
+    /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -project native/JackinDesktop.xcodeproj -scheme JackinDesktop -destination platform=macOS -parallel-testing-enabled NO "-only-testing:JackinDesktopUITests/JackinDesktopUITests/testOverviewPassesAccessibilityAudit" -derivedDataPath native/DerivedData -resultBundlePath /tmp/fix2-1.xcresult
+
+Writing result bundle at path:
+	/tmp/fix2-1.xcresult
+
+ComputePackagePrebuildTargetDependencyGraph
+
+Prepare packages
+
+CreateBuildRequest
+
+SendProjectDescription
+
+CreateBuildOperation
+
+ComputeTargetDependencyGraph
+note: Building targets in dependency order
+note: Target dependency graph (6 targets)
+    Target 'JackinDesktopUITests' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinDesktop' in project 'JackinDesktop'
+    Target 'JackinDesktopTests' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinDesktopUI' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBridge' in project 'JackinDesktop'
+    Target 'JackinDesktop' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinDesktopUI' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBridge' in project 'JackinDesktop'
+    Target 'JackinDesktopUI' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBridge' in project 'JackinDesktop'
+    Target 'JackinUsageBridge' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+    Target 'JackinUsageBindings' in project 'JackinDesktop' (no dependencies)
+
+GatherProvisioningInputs
+
+CreateBuildDescription
+
+ExecuteExternalTool /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc --version
+
+ExecuteExternalTool /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang -v -E -dM -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk -x c -c /dev/null
+
+ExecuteExternalTool /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/libtool -V
+
+ExecuteExternalTool /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld -version_details
+
+Build description signature: 29d23ea3edce8ddf06db7bd5c7727af0
+Build description path: /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/XCBuildData/29d23ea3edce8ddf06db7bd5c7727af0.xcbuilddata
+ClangStatCache /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang-stat-cache /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKStatCaches.noindex/macosx27.0-26A425-7231f6df4def33e022ae2eb8f782df1a.sdkstatcache
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/JackinDesktop.xcodeproj
+    /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang-stat-cache /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk -o /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKStatCaches.noindex/macosx27.0-26A425-7231f6df4def33e022ae2eb8f782df1a.sdkstatcache
+
+ProcessInfoPlistFile /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktop.app/Contents/Info.plist /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/Support/JackinDesktop-Info.plist (in target 'JackinDesktop' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    builtin-infoPlistUtility /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/Support/JackinDesktop-Info.plist -producttype com.apple.product-type.application -genpkginfo /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktop.app/Contents/PkgInfo -expandbuildsettings -platform macosx -o /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktop.app/Contents/Info.plist
+
+SwiftDriver JackinDesktopUITests normal arm64 com.apple.xcode.tools.swift.compiler (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    builtin-SwiftDriver -- /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc -module-name JackinDesktopUITests -Onone @/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.SwiftFileList -DDEBUG -module-alias Testing\=_Testing_Unavailable -plugin-path /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing -enable-experimental-feature DebugDescriptionMacro -sdk /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk -target arm64-apple-macos26.0 -g -module-cache-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/ModuleCache.noindex -Xfrontend -serialize-debugging-options -profile-coverage-mapping -profile-generate -enable-testing -warnings-as-errors -index-store-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Index.noindex/DataStore -Xcc -D_LIBCPP_HARDENING_MODE\=_LIBCPP_HARDENING_MODE_DEBUG -swift-version 6 -I /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug -Isystem /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib -F /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug -F /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks -parse-as-library -c -j18 -enable-batch-mode -incremental -Xcc -ivfsstatcache -Xcc /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKStatCaches.noindex/macosx27.0-26A425-7231f6df4def33e022ae2eb8f782df1a.sdkstatcache -output-file-map /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests-OutputFileMap.json -save-temps -no-color-diagnostics -explicit-module-build -module-cache-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/SwiftExplicitPrecompiledModules -clang-scanner-module-cache-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/ModuleCache.noindex -sdk-module-cache-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKExplicitPrecompiledModules -emit-dependencies -emit-module -emit-module-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.swiftmodule -serialize-diagnostics -dependency-scan-serialize-diagnostics-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests-dependency-scan.dia -validate-clang-modules-once -clang-build-session-file /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/ModuleCache.noindex/Session.modulevalidation -Xcc -fmodules-prune-interval\=86400 -Xcc -fmodules-prune-after\=345600 -emit-const-values -const-gather-protocols-list /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests_const_extract_protocols.json -Xcc -iquote -Xcc /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests-generated-files.hmap -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests-own-target-headers.hmap -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests-all-non-framework-target-headers.hmap -Xcc -ivfsoverlay -Xcc /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktop-9195fc9352869b57ac7a60bcaac88bf1-VFS/all-product-headers.yaml -Xcc -iquote -Xcc /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests-project-headers.hmap -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/include -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/DerivedSources-normal/arm64 -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/DerivedSources/arm64 -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/DerivedSources -Xcc -DDEBUG\=1 -emit-objc-header -emit-objc-header-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests-Swift.h -working-directory /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native -experimental-emit-module-separately -disable-cmo
+
+SwiftEmitModule normal arm64 Emitting\ module\ for\ JackinDesktopUITests (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+
+SwiftCompile normal arm64 (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    
+
+SwiftCompile normal arm64 Compiling\ JackinDesktopUITests.swift /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+
+SwiftCompile normal arm64 /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    builtin-SwiftPerFileCompile JackinDesktopUITests.swift
+
+SwiftDriverJobDiscovery normal arm64 Compiling JackinDesktopUITests.swift (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+
+SwiftDriver\ Compilation JackinDesktopUITests normal arm64 com.apple.xcode.tools.swift.compiler (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    builtin-Swift-Compilation -- /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc -module-name JackinDesktopUITests -Onone @/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.SwiftFileList -DDEBUG -module-alias Testing\=_Testing_Unavailable -plugin-path /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing -enable-experimental-feature DebugDescriptionMacro -sdk /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk -target arm64-apple-macos26.0 -g -module-cache-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/ModuleCache.noindex -Xfrontend -serialize-debugging-options -profile-coverage-mapping -profile-generate -enable-testing -warnings-as-errors -index-store-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Index.noindex/DataStore -Xcc -D_LIBCPP_HARDENING_MODE\=_LIBCPP_HARDENING_MODE_DEBUG -swift-version 6 -I /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug -Isystem /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib -F /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug -F /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks -parse-as-library -c -j18 -enable-batch-mode -incremental -Xcc -ivfsstatcache -Xcc /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKStatCaches.noindex/macosx27.0-26A425-7231f6df4def33e022ae2eb8f782df1a.sdkstatcache -output-file-map /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests-OutputFileMap.json -save-temps -no-color-diagnostics -explicit-module-build -module-cache-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/SwiftExplicitPrecompiledModules -clang-scanner-module-cache-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/ModuleCache.noindex -sdk-module-cache-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKExplicitPrecompiledModules -emit-dependencies -emit-module -emit-module-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.swiftmodule -serialize-diagnostics -dependency-scan-serialize-diagnostics-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests-dependency-scan.dia -validate-clang-modules-once -clang-build-session-file /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/ModuleCache.noindex/Session.modulevalidation -Xcc -fmodules-prune-interval\=86400 -Xcc -fmodules-prune-after\=345600 -emit-const-values -const-gather-protocols-list /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests_const_extract_protocols.json -Xcc -iquote -Xcc /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests-generated-files.hmap -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests-own-target-headers.hmap -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests-all-non-framework-target-headers.hmap -Xcc -ivfsoverlay -Xcc /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktop-9195fc9352869b57ac7a60bcaac88bf1-VFS/all-product-headers.yaml -Xcc -iquote -Xcc /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests-project-headers.hmap -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/include -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/DerivedSources-normal/arm64 -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/DerivedSources/arm64 -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/DerivedSources -Xcc -DDEBUG\=1 -emit-objc-header -emit-objc-header-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests-Swift.h -working-directory /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native -experimental-emit-module-separately -disable-cmo
+
+SwiftDriverJobDiscovery normal arm64 Emitting module for JackinDesktopUITests (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+
+SwiftDriver\ Compilation\ Requirements JackinDesktopUITests normal arm64 com.apple.xcode.tools.swift.compiler (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    builtin-Swift-Compilation-Requirements -- /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc -module-name JackinDesktopUITests -Onone @/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.SwiftFileList -DDEBUG -module-alias Testing\=_Testing_Unavailable -plugin-path /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing -enable-experimental-feature DebugDescriptionMacro -sdk /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk -target arm64-apple-macos26.0 -g -module-cache-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/ModuleCache.noindex -Xfrontend -serialize-debugging-options -profile-coverage-mapping -profile-generate -enable-testing -warnings-as-errors -index-store-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Index.noindex/DataStore -Xcc -D_LIBCPP_HARDENING_MODE\=_LIBCPP_HARDENING_MODE_DEBUG -swift-version 6 -I /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug -Isystem /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib -F /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug -F /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks -parse-as-library -c -j18 -enable-batch-mode -incremental -Xcc -ivfsstatcache -Xcc /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKStatCaches.noindex/macosx27.0-26A425-7231f6df4def33e022ae2eb8f782df1a.sdkstatcache -output-file-map /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests-OutputFileMap.json -save-temps -no-color-diagnostics -explicit-module-build -module-cache-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/SwiftExplicitPrecompiledModules -clang-scanner-module-cache-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/ModuleCache.noindex -sdk-module-cache-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKExplicitPrecompiledModules -emit-dependencies -emit-module -emit-module-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.swiftmodule -serialize-diagnostics -dependency-scan-serialize-diagnostics-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests-dependency-scan.dia -validate-clang-modules-once -clang-build-session-file /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/ModuleCache.noindex/Session.modulevalidation -Xcc -fmodules-prune-interval\=86400 -Xcc -fmodules-prune-after\=345600 -emit-const-values -const-gather-protocols-list /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests_const_extract_protocols.json -Xcc -iquote -Xcc /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests-generated-files.hmap -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests-own-target-headers.hmap -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests-all-non-framework-target-headers.hmap -Xcc -ivfsoverlay -Xcc /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktop-9195fc9352869b57ac7a60bcaac88bf1-VFS/all-product-headers.yaml -Xcc -iquote -Xcc /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests-project-headers.hmap -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/include -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/DerivedSources-normal/arm64 -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/DerivedSources/arm64 -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/DerivedSources -Xcc -DDEBUG\=1 -emit-objc-header -emit-objc-header-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests-Swift.h -working-directory /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native -experimental-emit-module-separately -disable-cmo
+
+Copy /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests.swiftmodule/arm64-apple-macos.swiftmodule /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.swiftmodule (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    builtin-copy -exclude .DS_Store -exclude CVS -exclude .svn -exclude .git -exclude .hg -resolve-src-symlinks -rename /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.swiftmodule /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests.swiftmodule/arm64-apple-macos.swiftmodule
+
+Copy /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests.swiftmodule/Project/arm64-apple-macos.swiftsourceinfo /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.swiftsourceinfo (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    builtin-copy -exclude .DS_Store -exclude CVS -exclude .svn -exclude .git -exclude .hg -resolve-src-symlinks -rename /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.swiftsourceinfo /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests.swiftmodule/Project/arm64-apple-macos.swiftsourceinfo
+
+Copy /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests.swiftmodule/arm64-apple-macos.abi.json /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.abi.json (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    builtin-copy -exclude .DS_Store -exclude CVS -exclude .svn -exclude .git -exclude .hg -resolve-src-symlinks -rename /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.abi.json /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests.swiftmodule/arm64-apple-macos.abi.json
+
+Ld /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest/Contents/MacOS/JackinDesktopUITests normal (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang -Xlinker -reproducible -target arm64-apple-macos26.0 -bundle -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk -O0 -Xlinker -no_warn_duplicate_libraries -L/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/EagerLinkingTBDs/Debug -L/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug -L/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib -F/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/EagerLinkingTBDs/Debug -F/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug -iframework /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks -filelist /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.LinkFileList -Xlinker -rpath -Xlinker @loader_path/../Frameworks -Xlinker -rpath -Xlinker @executable_path/Frameworks -Xlinker -rpath -Xlinker @loader_path/Frameworks -Xlinker -dead_strip -Xlinker -object_path_lto -Xlinker /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests_lto.o -rdynamic -Xlinker -no_deduplicate -Xlinker -debug_variant -Xlinker -dependency_info -Xlinker /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests_dependency_info.dat -fobjc-link-runtime -fprofile-instr-generate -L/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx -L/usr/lib/swift -Xlinker -add_ast_path -Xlinker /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.swiftmodule -Xlinker -needed_framework -Xlinker XCTest -framework XCTest -Xlinker -needed-lXCTestSwiftSupport -lXCTestSwiftSupport -Xlinker -no_adhoc_codesign -o /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest/Contents/MacOS/JackinDesktopUITests
+
+ExtractAppIntentsMetadata (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/appintentsmetadataprocessor --toolchain-dir /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain --module-name JackinDesktopUITests --sdk-root /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk --xcode-version 27A266a --platform-family macOS --deployment-target 26.0 --output /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest/Contents/Resources --target-triple arm64-apple-macos26.0 --binary-file /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest/Contents/MacOS/JackinDesktopUITests --dependency-file /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests_dependency_info.dat --stringsdata-file /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/ExtractedAppShortcutsMetadata.stringsdata --source-file-list /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.SwiftFileList --metadata-file-list /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests.DependencyMetadataFileList --static-metadata-file-list /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests.DependencyStaticMetadataFileList --swift-const-vals-list /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.SwiftConstValuesFileList --force --quiet-warnings --compile-time-extraction --deployment-aware-processing --no-app-shortcuts-localization
+2026-09-18 05:03:05.792 appintentsmetadataprocessor[58275:131741021] Starting appintentsmetadataprocessor export
+2026-09-18 05:03:05.825 appintentsmetadataprocessor[58275:131741021] Extracted no relevant App Intents symbols, skipping writing output
+
+ProcessInfoPlistFile /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest/Contents/Info.plist /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/empty-JackinDesktopUITests.plist (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    builtin-infoPlistUtility /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/empty-JackinDesktopUITests.plist -producttype com.apple.product-type.bundle.ui-testing -expandbuildsettings -platform macosx -additionalcontentfile /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/ProductTypeInfoPlistAdditions.plist -o /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest/Contents/Info.plist
+
+ProcessInfoPlistFile /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopTests.xctest/Contents/Info.plist /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopTests.build/empty-JackinDesktopTests.plist (in target 'JackinDesktopTests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    builtin-infoPlistUtility /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopTests.build/empty-JackinDesktopTests.plist -producttype com.apple.product-type.bundle.unit-test -expandbuildsettings -platform macosx -o /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopTests.xctest/Contents/Info.plist
+
+CopySwiftLibs /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopTests.xctest (in target 'JackinDesktopTests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    builtin-swiftStdLibTool --copy --verbose --sign - --scan-executable /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopTests.xctest/Contents/MacOS/JackinDesktopTests --scan-folder /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopTests.xctest/Contents/Frameworks --scan-folder /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopTests.xctest/Contents/PlugIns --scan-folder /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopTests.xctest/Contents/Library/SystemExtensions --scan-folder /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopTests.xctest/Contents/Extensions --platform macosx --toolchain /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain --destination /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopTests.xctest/Contents/Frameworks --strip-bitcode --scan-executable /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib/libXCTestSwiftSupport.dylib --strip-bitcode-tool /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/bitcode_strip --emit-dependency-info /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopTests.build/SwiftStdLibToolInputDependencies.dep --filter-for-swift-os
+
+CopySwiftLibs /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    builtin-swiftStdLibTool --copy --verbose --sign - --scan-executable /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest/Contents/MacOS/JackinDesktopUITests --scan-folder /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest/Contents/Frameworks --scan-folder /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest/Contents/PlugIns --scan-folder /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest/Contents/Library/SystemExtensions --scan-folder /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest/Contents/Extensions --platform macosx --toolchain /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain --destination /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest/Contents/Frameworks --strip-bitcode --scan-executable /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib/libXCTestSwiftSupport.dylib --strip-bitcode-tool /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/bitcode_strip --emit-dependency-info /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/SwiftStdLibToolInputDependencies.dep --filter-for-swift-os
+
+CodeSign /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    
+    Signing Identity:     "Sign to Run Locally"
+    
+    /usr/bin/codesign --force --sign - --entitlements /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests.xctest.xcent --timestamp\=none --generate-entitlement-der /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest
+
+CodeSign /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    
+    Signing Identity:     "Sign to Run Locally"
+    
+    /usr/bin/codesign --force --sign - --entitlements /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests.xctest.xcent --timestamp\=none --generate-entitlement-der /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app: replacing existing signature
+
+PruneExplicitPrecompiledModules /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKExplicitPrecompiledModules
+
+PruneExplicitPrecompiledModules /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/SwiftExplicitPrecompiledModules
+
+PruneExplicitPrecompiledModules /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/ExplicitPrecompiledModules
+
+2026-09-18 05:03:06.180221+0700 JackinDesktopUITests-Runner[58278:131741084] [Default] Running tests...
+Test Suite 'Selected tests' started at 2026-09-18 05:03:06.227.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 05:03:06.228.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 05:03:06.228.
+Test Case '-[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit]' started.
+    t =     0.00s Start Test at 2026-09-18 05:03:06.228
+    t =     0.18s Set Up
+    t =     0.18s Open com.jackin-project.desktop
+    t =     0.18s     Launch com.jackin-project.desktop
+2026-09-18 05:03:06.445 xcodebuild[58249:131740702] [MT] IDELaunchParametersSnapshot: debugger version lookup failed for path '<nil>': noURL
+2026-09-18 05:03:06.445 xcodebuild[58249:131740702] [MT] IDELaunchParametersSnapshot: no debugger version
+    t =     0.43s         Wait for accessibility to load
+    t =     0.66s         Setting up automation session
+    t =     0.66s         Wait for com.jackin-project.desktop to idle
+    t =     0.75s Open com.jackin-project.desktop
+    t =     0.75s     Activate com.jackin-project.desktop
+    t =     0.75s         Wait for com.jackin-project.desktop to idle
+    t =     0.76s Waiting 8.0s for "usage-window" Window to exist
+    t =     1.80s     Checking `Expect predicate `existsNoRetry == 1` for object "usage-window" Window`
+    t =     1.80s         Checking existence of `"usage-window" Window`
+    t =     1.94s Open com.jackin-project.desktop
+    t =     1.94s     Activate com.jackin-project.desktop
+    t =     1.95s         Wait for com.jackin-project.desktop to idle
+    t =     1.95s Waiting 5.0s for "usage.overview.table" Any to exist
+    t =     3.04s     Checking `Expect predicate `existsNoRetry == 1` for object "usage.overview.table" Any`
+    t =     3.04s         Checking existence of `"usage.overview.table" Any`
+    t =     3.09s         Capturing element debug description
+    t =     4.02s     Checking `Expect predicate `existsNoRetry == 1` for object "usage.overview.table" Any`
+    t =     4.02s         Checking existence of `"usage.overview.table" Any`
+    t =     4.06s         Capturing element debug description
+    t =     4.99s     Checking `Expect predicate `existsNoRetry == 1` for object "usage.overview.table" Any`
+    t =     4.99s         Checking existence of `"usage.overview.table" Any`
+    t =     5.03s         Capturing element debug description
+    t =     5.96s     Checking `Expect predicate `existsNoRetry == 1` for object "usage.overview.table" Any`
+    t =     5.96s         Checking existence of `"usage.overview.table" Any`
+    t =     6.00s         Capturing element debug description
+    t =     6.95s     Checking `Expect predicate `existsNoRetry == 1` for object "usage.overview.table" Any`
+    t =     6.95s         Checking existence of `"usage.overview.table" Any`
+    t =     6.99s         Capturing element debug description
+    t =     6.99s     Checking existence of `"usage.overview.table" Any`
+    t =     7.01s Collecting debug information to assist test failure triage
+    t =     7.01s     Requesting snapshot of accessibility hierarchy for app with pid 58329
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:472: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : XCTAssertTrue failed
+    t =     7.10s Find the "usage.overview.table" Any
+    t =     8.12s     Find the "usage.overview.table" Any (retry 1)
+    t =     9.17s     Find the "usage.overview.table" Any (retry 2)
+    t =     9.21s     Collecting debug information to assist test failure triage
+    t =     9.21s         Requesting snapshot of accessibility hierarchy for app with pid 58329
+    t =     9.25s     Requesting snapshot of accessibility hierarchy for app with pid 58329
+    t =     9.25s Using snapshot previously cached by application
+    t =     9.25s     Find: Descendants matching type Any
+    t =     9.26s     Find: Elements matching predicate '"usage.overview.table" IN identifiers'
+    t =     9.26s     Requesting snapshot of accessibility hierarchy for app with pid 58329
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:473: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Failed to get matching snapshot: No matches found for Elements matching predicate '"usage.overview.table" IN identifiers' from input {(
+    MenuBar,
+    TouchBar,
+    MenuBar,
+    MenuBarItem, title: 'Apple',
+    MenuBarItem, title: 'jackin❯ desktop',
+    MenuBarItem, title: 'File',
+    MenuBarItem, title: 'Edit',
+    MenuBarItem, title: 'View',
+    MenuBarItem, title: 'Window',
+    MenuBarItem, title: 'Help',
+    StatusItem, title: ' Fixture', label: 'Anthropic, Personal, Updated now',
+    StatusItem, title: ' Fixture', label: 'OpenAI, personal@example.test, Updated now',
+    StatusItem, title: ' Fixture', label: 'MiniMax, Default, Updated now',
+    Menu,
+    Menu,
+    Menu,
+    Menu,
+    Menu,
+    Menu,
+    Menu,
+    MenuItem, identifier: '_aboutThisMacRequested:', title: 'About This Mac',
+    MenuItem, identifier: '_systemInformationRequested:', title: 'System Information',
+    MenuItem,
+    MenuItem, identifier: '_systemSettingsRequested:', title: 'System Settings…',
+    MenuItem, identifier: '_appStoreRequested:', title: 'App Store',
+    MenuItem,
+    MenuItem, identifier: '_recentsRequested:', title: 'Recent Items',
+    MenuItem,
+    MenuItem, identifier: '_forceQuitPanelRequested:', title: 'Force Quit…',
+    MenuItem, identifier: '_forceQuitRequested:', title: 'Force Quit jackin❯ desktop',
+    MenuItem,
+    MenuItem, identifier: '_sleepRequested:', title: 'Sleep',
+    MenuItem, identifier: '_restartRequested:', title: 'Restart…',
+    MenuItem, identifier: '_restartNowRequested:', title: 'Restart',
+    MenuItem, identifier: '_shutDownRequested:', title: 'Shut Down…',
+    MenuItem, identifier: '_shutDownNowRequested:', title: 'Shut Down',
+    MenuItem,
+    MenuItem, identifier: '_lockScreenRequested:', title: 'Lock Screen',
+    MenuItem, identifier: '_logOutRequested:', title: 'Log Out Alexey Zhokhov…',
+    MenuItem, identifier: '_logOutNowRequested:', title: 'Log Out Alexey Zhokhov',
+    MenuItem,
+    MenuItem, identifier: 'orderFrontAbout:', title: 'About jackin❯ desktop',
+    MenuItem,
+    MenuItem, identifier: 'openSettings:', title: 'Settings…',
+    MenuItem,
+    MenuItem, title: 'Services',
+    MenuItem,
+    MenuItem, identifier: 'hide:', title: 'Hide jackin❯ desktop',
+    MenuItem, identifier: 'hideOtherApplications:', title: 'Hide Others',
+    MenuItem, identifier: 'unhideAllApplications:', title: 'Show All',
+    MenuItem,
+    MenuItem, identifier: 'terminate:', title: 'Quit jackin❯ desktop',
+    MenuItem, identifier: 'performClose:', title: 'Close Window',
+    MenuItem, identifier: 'closeAll:', title: 'Close All',
+    MenuItem, identifier: 'undo:', title: 'Undo',
+    MenuItem, identifier: 'redo:', title: 'Redo',
+    MenuItem,
+    MenuItem, identifier: 'cut:', title: 'Cut',
+    MenuItem, identifier: 'copy:', title: 'Copy',
+    MenuItem, identifier: 'paste:', title: 'Paste',
+    MenuItem, identifier: 'selectAll:', title: 'Select All',
+    MenuItem,
+    MenuItem, identifier: '__NSTextViewContextSubmenuIdentifierWritingTools', title: 'Writing Tools',
+    MenuItem, identifier: '_NSMenuItemAutoFillIdentifier', title: 'AutoFill',
+    MenuItem, identifier: 'startDictation:', title: 'Start Dictation',
+    MenuItem, identifier: 'orderFrontCharacterPalette:', title: 'Emoji & Symbols',
+    MenuItem, identifier: 'toggleSidebar:', title: 'Hide Sidebar',
+    MenuItem,
+    MenuItem, identifier: 'refreshAll:', title: 'Refresh',
+    MenuItem, identifier: 'toggleFullScreen:', title: 'Enter Full Screen',
+    MenuItem, identifier: 'performMiniaturize:', title: 'Minimize',
+    MenuItem, identifier: 'miniaturizeAll:', title: 'Minimize All',
+    MenuItem, identifier: 'performZoom:', title: 'Zoom',
+    MenuItem, identifier: 'zoomAll:', title: 'Zoom All',
+    MenuItem, identifier: '_zoomFill:', title: 'Fill',
+    MenuItem, identifier: '_zoomCenter:', title: 'Center',
+    MenuItem,
+    MenuItem, title: 'Move & Resize',
+    MenuItem, title: 'Full Screen Tile',
+    MenuItem,
+    MenuItem, identifier: '_removeWindowFromStageManagerSet:', title: 'Remove Window from Set',
+    MenuItem,
+    MenuItem, identifier: 'menu.show-usage', title: 'Usage',
+    MenuItem,
+    MenuItem, identifier: 'arrangeInFront:', title: 'Bring All to Front',
+    MenuItem, identifier: 'alternateArrangeInFront:', title: 'Arrange in Front',
+    MenuItem,
+    MenuItem, identifier: 'makeKeyAndOrderFront:', title: 'jackin❯ desktop',
+    MenuItem, identifier: 'showHelp:', title: 'jackin❯ desktop Help',
+    Menu,
+    Menu,
+    Menu,
+    Menu,
+    Menu,
+    MenuItem, title: 'Applications',
+    MenuItem, identifier: '_recentItemRequested:', title: '1Password',
+    MenuItem, identifier: '_recentItemRequested:', title: 'Show “1Password” in Finder',
+    MenuItem, identifier: '_recentItemRequested:', title: 'Activity Monitor',
+    MenuItem, identifier: '_recentItemRequested:', title: 'Show “Activity Monitor” in Finder',
+    MenuItem, identifier: '_recentItemRequested:', title: 'Claude',
+    MenuItem, identifier: '_recentItemRequested:', title: 'Show “Claude” in Finder',
+    MenuItem, identifier: '_recentItemRequested:', title: 'Finder',
+    MenuItem, identifier: '_recentItemRequested:', title: 'Show “Finder” in Finder',
+    MenuItem, identifier: '_recentItemRequested:', title: 'OrbStack',
+    MenuItem, identifier: '_recentItemRequested:', title: 'Show “OrbStack” in Finder',
+    MenuItem, identifier: '_recentItemRequested:', title: 'Safari',
+    MenuItem, identifier: '_recentItemRequested:', title: 'Show “Safari” in Finder',
+    MenuItem, identifier: '_recentItemRequested:', title: 'Sublime Text',
+    MenuItem, identifier: '_recentItemRequested:', title: 'Show “Sublime Text” in Finder',
+    MenuItem, identifier: '_recentItemRequested:', title: 'TablePlus',
+    MenuItem, identifier: '_recentItemRequested:', title: 'Show “TablePlus” in Finder',
+    MenuItem, identifier: '_recentItemRequested:', title: 'TablePro',
+    MenuItem, identifier: '_recentItemRequested:', title: 'Show “TablePro” in Finder',
+    MenuItem, identifier: '_recentItemRequested:', title: 'Telegram',
+    MenuItem, identifier: '_recentItemRequested:', title: 'Show “Telegram” in Finder',
+    MenuItem,
+    MenuItem, title: 'Documents',
+    MenuItem, identifier: '_recentItemRequested:', title: 'ChainArgos_Platform_Comprehensive_Research_GOAL.md',
+    MenuItem, identifier: '_recentItemRequested:', title: 'Show “ChainArgos_Platform_Comprehensive_Research_GOAL.md” in Finder',
+    MenuItem, identifier: '_recentItemRequested:', title: 'ChainArgos_Platform_Real_Case_Specification_Goal.md',
+    MenuItem, identifier: '_recentItemRequested:', title: 'Show “ChainArgos_Platform_Real_Case_Specification_Goal.md” in Finder',
+    MenuItem, identifier: '_recentItemRequested:', title: 'chainargos-atlas-autonomous-docs-research.md',
+    MenuItem, identifier: '_recentItemRequested:', title: 'Show “chainargos-atlas-autonomous-docs-research.md” in Finder',
+    MenuItem, identifier: '_recentItemRequested:', title: 'chainargos-atlas-autonomous-docs-research.md',
+    MenuItem, identifier: '_recentItemRequested:', title: 'Show “chainargos-atlas-autonomous-docs-research.md” in Finder',
+    MenuItem, identifier: '_recentItemRequested:', title: 'chainargos-atlas-docs-only-research-codex.md',
+    MenuItem, identifier: '_recentItemRequested:', title: 'Show “chainargos-atlas-docs-only-research-codex.md” in Finder',
+    MenuItem, identifier: '_recentItemRequested:', title: 'chainargos-atlas-docs-research-goal.txt',
+    MenuItem, identifier: '_recentItemRequested:', title: 'Show “chainargos-atlas-docs-research-goal.txt” in Finder',
+    MenuItem, identifier: '_recentItemRequested:', title: 'chainargos-atlas-research-completion-codex.md',
+    MenuItem, identifier: '_recentItemRequested:', title: 'Show “chainargos-atlas-research-completion-codex.md” in Finder',
+    MenuItem, identifier: '_recentItemRequested:', title: 'execution-readiness-report.md',
+    MenuItem, identifier: '_recentItemRequested:', title: 'Show “execution-readiness-report.md” in Finder',
+    MenuItem, identifier: '_recentItemRequested:', title: 'jackin-goal-prompt.md',
+    MenuItem, identifier: '_recentItemRequested:', title: 'Show “jackin-goal-prompt.md” in Finder',
+    MenuItem, identifier: '_recentItemRequested:', title: 'velnor-jackin-pr994-goal.md',
+    MenuItem, identifier: '_recentItemRequested:', title: 'Show “velnor-jackin-pr994-goal.md” in Finder',
+    MenuItem,
+    MenuItem, title: 'Servers',
+    MenuItem, identifier: '_recentItemRequested:', title: 'Macintosh HD',
+    MenuItem, identifier: '_recentItemRequested:', title: 'OrbStack',
+    MenuItem,
+    MenuItem, identifier: '_clearRecentItemsRequested:', title: 'Clear Menu',
+    MenuItem, identifier: '_processRequest:', title: 'Activity Monitor',
+    MenuItem, identifier: '_processRequest:', title: 'Allocations & Leaks',
+    MenuItem, identifier: '_processRequest:', title: 'File Activity',
+    MenuItem, identifier: '_processRequest:', title: 'System Trace',
+    MenuItem, identifier: '_processRequest:', title: 'Time Profile Active Application',
+    MenuItem, identifier: '_processRequest:', title: 'Time Profile App Under Mouse',
+    MenuItem, identifier: '_processRequest:', title: 'Time Profile Entire System',
+    MenuItem, identifier: '_processRequest:', title: 'Toggle Instruments Recording',
+    MenuItem, identifier: '_processRequest:', title: 'Ask Claude',
+    MenuItem, identifier: '_processRequest:', title: 'New Claude Code Session Here',
+    MenuItem, identifier: '_processRequest:', title: 'Send to Claude',
+    MenuItem, identifier: '_configureServicesMenu:', title: 'Services Settings…',
+    MenuItem, identifier: 'showWritingTools:', title: 'Show Writing Tools',
+    MenuItem,
+    MenuItem, identifier: 'showWritingTools:', title: 'Proofread',
+    MenuItem, identifier: 'showWritingTools:', title: 'Rewrite',
+    MenuItem,
+    MenuItem, identifier: 'showWritingTools:', title: 'Make Friendly',
+    MenuItem, identifier: 'showWritingTools:', title: 'Make Professional',
+    MenuItem, identifier: 'showWritingTools:', title: 'Make Concise',
+    MenuItem,
+    MenuItem, identifier: 'showWritingTools:', title: 'Summarize',
+    MenuItem, identifier: 'showWritingTools:', title: 'Create Key Points',
+    MenuItem, identifier: 'showWritingTools:', title: 'Make List',
+    MenuItem, identifier: 'showWritingTools:', title: 'Make Table',
+    MenuItem,
+    MenuItem, identifier: 'showWritingTools:', title: 'Compose…',
+    MenuItem, identifier: '_handleInsertFromContactsCommand:', title: 'Contact…',
+    MenuItem, identifier: '_handleInsertFromPasswordsCommand:', title: 'Passwords…',
+    MenuItem, identifier: '_handleInsertFromCreditCardsCommand:', title: 'Credit Card…',
+    MenuItem, title: 'Halves',
+    MenuItem, identifier: '_zoomLeft:', title: 'Left',
+    MenuItem, identifier: '_zoomRight:', title: 'Right',
+    MenuItem, identifier: '_zoomTop:', title: 'Top',
+    MenuItem, identifier: '_zoomBottom:', title: 'Bottom',
+    MenuItem,
+    MenuItem, title: 'Quarters',
+    MenuItem, identifier: '_zoomTopLeft:', title: 'Top Left',
+    MenuItem, identifier: '_zoomTopRight:', title: 'Top Right',
+    MenuItem, identifier: '_zoomBottomLeft:', title: 'Bottom Left',
+    MenuItem, identifier: '_zoomBottomRight:', title: 'Bottom Right',
+    MenuItem,
+    MenuItem, title: 'Arrange',
+    MenuItem, identifier: '_zoomLeftAndRight:', title: 'Left & Right',
+    MenuItem, identifier: '_zoomLeftThreeUp:', title: 'Left & Quarters',
+    MenuItem, identifier: '_zoomRightAndLeft:', title: 'Right & Left',
+    MenuItem, identifier: '_zoomRightThreeUp:', title: 'Right & Quarters',
+    MenuItem, identifier: '_zoomTopAndBottom:', title: 'Top & Bottom',
+    MenuItem, identifier: '_zoomTopThreeUp:', title: 'Top & Quarters',
+    MenuItem, identifier: '_zoomBottomAndTop:', title: 'Bottom & Top',
+    MenuItem, identifier: '_zoomBottomThreeUp:', title: 'Bottom & Quarters',
+    MenuItem, identifier: '_zoomQuarters:', title: 'Quarters',
+    MenuItem,
+    MenuItem, identifier: '_zoomUntile:', title: 'Return to Previous Size'
+)}
+    t =     9.30s Tear Down
+Test Case '-[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit]' failed (9.581 seconds).
+Test Suite 'JackinDesktopUITests' failed at 2026-09-18 05:03:15.810.
+	 Executed 1 test, with 2 failures (0 unexpected) in 9.581 (9.582) seconds
+Test Suite 'JackinDesktopUITests.xctest' failed at 2026-09-18 05:03:15.810.
+	 Executed 1 test, with 2 failures (0 unexpected) in 9.581 (9.583) seconds
+Test Suite 'Selected tests' failed at 2026-09-18 05:03:15.811.
+	 Executed 1 test, with 2 failures (0 unexpected) in 9.581 (9.583) seconds
+2026-09-18 05:03:20.026 xcodebuild[58249:131740702] [MT] IDETestOperationsObserverDebug: 14.156 elapsed -- Testing started completed.
+2026-09-18 05:03:20.026 xcodebuild[58249:131740702] [MT] IDETestOperationsObserverDebug: 0.000 sec, +0.000 sec -- start
+2026-09-18 05:03:20.026 xcodebuild[58249:131740702] [MT] IDETestOperationsObserverDebug: 14.156 sec, +14.156 sec -- end
+
+Test session results, code coverage, and logs:
+	/tmp/fix2-1.xcresult
+
+Failing tests:
+	JackinDesktopUITests.testOverviewPassesAccessibilityAudit()
+	JackinDesktopUITests.testOverviewPassesAccessibilityAudit()
+
+** TEST FAILED **
+
+Testing started

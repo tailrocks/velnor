@@ -1,0 +1,48 @@
+Repository probe/sprocket
+  source: static-filesystem-and-manifest-inspection
+  profile: generic
+  runners: both
+
+Detected
+
+  ✓ rust package
+
+Execution units
+
+  Rust: 1 job
+  - rust-sprocket [Rust] · root=. · runners=github: ubuntu-24.04; velnor: [self-hosted, probe-lane]
+    PR: mbx fmt --manifest-path 'Cargo.toml' -- --check ; mbx test  --all-features --package 'sprocket' ; mbx clippy  --profile test --all-targets --all-features --package 'sprocket' -- -D warnings
+  total: 1 unit · 0 dependency edges
+
+Generated files
+
+  + create    .github/actionlint.yaml                    actionlint runner-label contract
+  + create    .github/ci/project.toml                    detected CI graph + binary runtime contract
+  + create    .github/workflows/ci-main.yml              trusted main verification
+  + create    .github/workflows/ci-policy.yml            base-owned pull-request policy gate
+  + create    .github/workflows/ci-pr.yml                parallel PR verification
+  + create    .github/workflows/ci-unit-rust.yml         generated CI support file
+  + create    .github/workflows/maintenance.yml          closed-PR cache cleanup
+  + create    .github/workflows/nightly.yml              scheduled full verification
+  + create    .github/workflows/release.yml              release publisher workflow
+  + create    config/fleet/velnor-host.env               generated CI support file
+  + create    .github/ci/.github-actions-generator-state ownership and overwrite safety state
+
+Why
+
+  → Rust manifests become independently schedulable jobs per crate; Cargo resolves prerequisites inside each job while ci-required aggregates every selected result.
+  → Only checked-in, statically detected evidence controls generated commands; project code and task runners are never executed.
+  → Generated jobs invoke `velnor-workflow run` directly; the checked-in TOML remains the runtime contract for planning, execution, policy, and release commands.
+
+Boundaries
+
+  ! Project code, build scripts, task runners, and commands are never executed during analysis.
+  ! Release, signing, registry, deployment, branch-protection, and runner-capability contracts remain explicit manual inputs.
+
+Template memory (ceiling 5.00 MiB, GitHub limit 10 MiB)
+
+  → .github/workflows/ci-main.yml: 176.6 KiB expanded (own 44.5 KiB; 2×ci-unit-rust.yml @ 66.0 KiB)
+  → .github/workflows/ci-pr.yml: 162.6 KiB expanded (own 30.6 KiB; 2×ci-unit-rust.yml @ 66.0 KiB)
+
+Result Generated 11 files in /private/tmp/vb1-gen/a
+

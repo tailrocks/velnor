@@ -1,0 +1,641 @@
+Control / Planning	UNKNOWN STEP	﻿2026-09-16T22:50:54.8753105Z Current runner version: '2.337.0'
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.8773737Z ##[group]Runner Image Provisioner
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.8774518Z Hosted Compute Agent
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.8774997Z Version: 20260828.587
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.8775492Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.8776146Z Build Date: 2026-08-28T16:44:25Z
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.8776734Z Worker ID: {8e019b08-296f-4801-9656-7e04266d011e}
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.8777381Z Azure Region: westus3
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.8777851Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.8778905Z ##[group]Operating System
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.8779463Z Ubuntu
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.8779920Z 24.04.5
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.8780361Z LTS
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.8780798Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.8781251Z ##[group]Runner Image
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.8781789Z Image: ubuntu-24.04
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.8782279Z Version: 20260907.300.1
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.8783448Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260907.300/images/ubuntu/Ubuntu2404-Readme.md
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.8784712Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260907.300
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.8785567Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.8786567Z ##[group]GITHUB_TOKEN Permissions
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.8788110Z Actions: read
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.8788632Z Contents: read
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.8789144Z Metadata: read
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.8789630Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.8791206Z Secret source: Actions
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.8791998Z Cache mode: write
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.8792571Z Prepare workflow directory
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.9048284Z Prepare all required actions
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:54.9087433Z Getting action download info
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.2534191Z Download action repository 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' (SHA:3d3c42e5aac5ba805825da76410c181273ba90b1)
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.3762769Z Download action repository 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' (SHA:043fb46d1a93c77aae656e7c1c64a875d1fc6a0a)
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.5581260Z Complete job name: Control / Planning
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.6170234Z ##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.6171029Z with:
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.6171359Z   fetch-depth: 0
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.6171725Z   persist-credentials: false
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.6172133Z   repository: tailrocks/velnor
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.6175613Z   token: ***
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.6175955Z   ssh-strict: true
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.6176300Z   ssh-user: git
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.6176633Z   clean: true
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.6176982Z   sparse-checkout-cone-mode: true
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.6177392Z   fetch-tags: false
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.6177739Z   show-progress: true
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.6178086Z   lfs: false
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.6178423Z   submodules: false
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.6178773Z   set-safe-directory: true
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.6179166Z   allow-unsafe-pr-checkout: false
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.6179718Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.6948978Z Syncing repository: tailrocks/velnor
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.6951345Z ##[group]Getting Git version info
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.6952317Z Working directory is '/home/runner/work/velnor/velnor'
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.6953860Z [command]/usr/bin/git version
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.7001830Z git version 2.55.0
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.7017073Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.7025370Z Temporarily overriding HOME='/home/runner/work/_temp/61cb3bed-ed79-478c-b057-4be99daee3c6' before making global git config changes
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.7027130Z Adding repository directory to the temporary git global config as a safe directory
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.7035243Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.7072657Z Deleting the contents of '/home/runner/work/velnor/velnor'
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.7075632Z ##[group]Determining repository object format
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.7076866Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.7077800Z ##[group]Initializing the repository
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.7080160Z [command]/usr/bin/git init /home/runner/work/velnor/velnor
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.8466620Z hint: Using 'master' as the name for the initial branch. This default branch name
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.8474560Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.8476488Z hint: to use in all of your new repositories, which will suppress this warning,
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.8477928Z hint: call:
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.8478492Z hint:
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.8479188Z hint: 	git config --global init.defaultBranch <name>
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.8479921Z hint:
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.8480764Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.8482034Z hint: 'development'. The just-created branch can be renamed via this command:
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.8482862Z hint:
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.8483573Z hint: 	git branch -m <name>
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.8484215Z hint:
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.8485049Z hint: Disable this message with "git config set advice.defaultBranchName false"
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.8486145Z Initialized empty Git repository in /home/runner/work/velnor/velnor/.git/
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.8488198Z [command]/usr/bin/git remote add origin https://github.com/tailrocks/velnor
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.8531784Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.8532470Z ##[group]Disabling automatic garbage collection
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.8534263Z [command]/usr/bin/git config --local gc.auto 0
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.8562908Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.8563837Z ##[group]Setting up auth
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.8564392Z Removing SSH command configuration
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.8568241Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.8598376Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.8852027Z Removing HTTP extra header
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.8857190Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.8888738Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.9068885Z Removing includeIf entries pointing to credentials config files
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.9078369Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.9106792Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.9304807Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-f485dc29-e93d-478c-aa4b-1e0f29d0f7b3.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.9342206Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/.git.path /home/runner/work/_temp/git-credentials-f485dc29-e93d-478c-aa4b-1e0f29d0f7b3.config
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.9376648Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-f485dc29-e93d-478c-aa4b-1e0f29d0f7b3.config
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.9410041Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-f485dc29-e93d-478c-aa4b-1e0f29d0f7b3.config
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.9442854Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-f485dc29-e93d-478c-aa4b-1e0f29d0f7b3.config
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.9471181Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.9471841Z ##[group]Fetching the repository
+Control / Planning	UNKNOWN STEP	2026-09-16T22:50:55.9479120Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules origin +refs/heads/*:refs/remotes/origin/* +refs/tags/*:refs/tags/* +4d8cf2eea827c668cbfa54e102bdafb1d9529791:refs/remotes/pull/915/merge
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7229309Z From https://github.com/tailrocks/velnor
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7231386Z  * [new branch]        docs/bastion-final-plan                  -> origin/docs/bastion-final-plan
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7232129Z  * [new branch]        main                                     -> origin/main
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7232863Z  * [new branch]        tmp/proof-products-final                 -> origin/tmp/proof-products-final
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7233987Z  * [new tag]           archive/velnor2-pre-rebuild-20260831-bc593406 -> archive/velnor2-pre-rebuild-20260831-bc593406
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7234921Z  * [new tag]           dima/velnor6-archive-4d81a14             -> dima/velnor6-archive-4d81a14
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7235574Z  * [new tag]           preview                                  -> preview
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7235965Z  * [new tag]           v0.1.10                                  -> v0.1.10
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7236332Z  * [new tag]           v0.1.100                                 -> v0.1.100
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7236730Z  * [new tag]           v0.1.101                                 -> v0.1.101
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7237108Z  * [new tag]           v0.1.102                                 -> v0.1.102
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7237476Z  * [new tag]           v0.1.103                                 -> v0.1.103
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7237829Z  * [new tag]           v0.1.104                                 -> v0.1.104
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7238308Z  * [new tag]           v0.1.105                                 -> v0.1.105
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7238919Z  * [new tag]           v0.1.106                                 -> v0.1.106
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7239457Z  * [new tag]           v0.1.107                                 -> v0.1.107
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7239805Z  * [new tag]           v0.1.108                                 -> v0.1.108
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7240310Z  * [new tag]           v0.1.109                                 -> v0.1.109
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7240840Z  * [new tag]           v0.1.11                                  -> v0.1.11
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7241596Z  * [new tag]           v0.1.110                                 -> v0.1.110
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7242072Z  * [new tag]           v0.1.111                                 -> v0.1.111
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7242408Z  * [new tag]           v0.1.112                                 -> v0.1.112
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7242744Z  * [new tag]           v0.1.113                                 -> v0.1.113
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7243077Z  * [new tag]           v0.1.114                                 -> v0.1.114
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7243572Z  * [new tag]           v0.1.115                                 -> v0.1.115
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7243921Z  * [new tag]           v0.1.116                                 -> v0.1.116
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7244259Z  * [new tag]           v0.1.117                                 -> v0.1.117
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7244593Z  * [new tag]           v0.1.118                                 -> v0.1.118
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7245017Z  * [new tag]           v0.1.119                                 -> v0.1.119
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7245740Z  * [new tag]           v0.1.12                                  -> v0.1.12
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7246716Z  * [new tag]           v0.1.120                                 -> v0.1.120
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7247269Z  * [new tag]           v0.1.121                                 -> v0.1.121
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7247826Z  * [new tag]           v0.1.122                                 -> v0.1.122
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7248352Z  * [new tag]           v0.1.123                                 -> v0.1.123
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7248866Z  * [new tag]           v0.1.124                                 -> v0.1.124
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7249445Z  * [new tag]           v0.1.125                                 -> v0.1.125
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7249974Z  * [new tag]           v0.1.126                                 -> v0.1.126
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7250500Z  * [new tag]           v0.1.127                                 -> v0.1.127
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7251044Z  * [new tag]           v0.1.128                                 -> v0.1.128
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7251820Z  * [new tag]           v0.1.129                                 -> v0.1.129
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7252393Z  * [new tag]           v0.1.13                                  -> v0.1.13
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7252953Z  * [new tag]           v0.1.130                                 -> v0.1.130
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7253764Z  * [new tag]           v0.1.131                                 -> v0.1.131
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7254288Z  * [new tag]           v0.1.132                                 -> v0.1.132
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7254841Z  * [new tag]           v0.1.133                                 -> v0.1.133
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7255567Z  * [new tag]           v0.1.134                                 -> v0.1.134
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7255968Z  * [new tag]           v0.1.135                                 -> v0.1.135
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7256307Z  * [new tag]           v0.1.136                                 -> v0.1.136
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7256676Z  * [new tag]           v0.1.137                                 -> v0.1.137
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7257035Z  * [new tag]           v0.1.138                                 -> v0.1.138
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7257378Z  * [new tag]           v0.1.139                                 -> v0.1.139
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7257720Z  * [new tag]           v0.1.14                                  -> v0.1.14
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7258065Z  * [new tag]           v0.1.140                                 -> v0.1.140
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7258398Z  * [new tag]           v0.1.141                                 -> v0.1.141
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7258739Z  * [new tag]           v0.1.142                                 -> v0.1.142
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7259127Z  * [new tag]           v0.1.143                                 -> v0.1.143
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7259528Z  * [new tag]           v0.1.144                                 -> v0.1.144
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7259919Z  * [new tag]           v0.1.145                                 -> v0.1.145
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7260448Z  * [new tag]           v0.1.146                                 -> v0.1.146
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7260846Z  * [new tag]           v0.1.147                                 -> v0.1.147
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7261231Z  * [new tag]           v0.1.148                                 -> v0.1.148
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7261619Z  * [new tag]           v0.1.149                                 -> v0.1.149
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7262006Z  * [new tag]           v0.1.15                                  -> v0.1.15
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7262405Z  * [new tag]           v0.1.150                                 -> v0.1.150
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7262811Z  * [new tag]           v0.1.151                                 -> v0.1.151
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7263444Z  * [new tag]           v0.1.152                                 -> v0.1.152
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7264081Z  * [new tag]           v0.1.153                                 -> v0.1.153
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7264648Z  * [new tag]           v0.1.154                                 -> v0.1.154
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7265318Z  * [new tag]           v0.1.155                                 -> v0.1.155
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7265729Z  * [new tag]           v0.1.156                                 -> v0.1.156
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7266126Z  * [new tag]           v0.1.157                                 -> v0.1.157
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7266519Z  * [new tag]           v0.1.158                                 -> v0.1.158
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7266935Z  * [new tag]           v0.1.159                                 -> v0.1.159
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7267323Z  * [new tag]           v0.1.16                                  -> v0.1.16
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7267730Z  * [new tag]           v0.1.160                                 -> v0.1.160
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7268124Z  * [new tag]           v0.1.161                                 -> v0.1.161
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7268517Z  * [new tag]           v0.1.162                                 -> v0.1.162
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7268911Z  * [new tag]           v0.1.163                                 -> v0.1.163
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7269474Z  * [new tag]           v0.1.164                                 -> v0.1.164
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7269863Z  * [new tag]           v0.1.165                                 -> v0.1.165
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7270262Z  * [new tag]           v0.1.166                                 -> v0.1.166
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7270648Z  * [new tag]           v0.1.167                                 -> v0.1.167
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7271034Z  * [new tag]           v0.1.168                                 -> v0.1.168
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7271419Z  * [new tag]           v0.1.17                                  -> v0.1.17
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7271805Z  * [new tag]           v0.1.170                                 -> v0.1.170
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7272203Z  * [new tag]           v0.1.171                                 -> v0.1.171
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7272616Z  * [new tag]           v0.1.172                                 -> v0.1.172
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7273031Z  * [new tag]           v0.1.173                                 -> v0.1.173
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7273610Z  * [new tag]           v0.1.174                                 -> v0.1.174
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7274006Z  * [new tag]           v0.1.175                                 -> v0.1.175
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7274402Z  * [new tag]           v0.1.176                                 -> v0.1.176
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7274795Z  * [new tag]           v0.1.177                                 -> v0.1.177
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7275188Z  * [new tag]           v0.1.178                                 -> v0.1.178
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7275591Z  * [new tag]           v0.1.179                                 -> v0.1.179
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7275992Z  * [new tag]           v0.1.18                                  -> v0.1.18
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7276392Z  * [new tag]           v0.1.180                                 -> v0.1.180
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7276781Z  * [new tag]           v0.1.181                                 -> v0.1.181
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7277289Z  * [new tag]           v0.1.182                                 -> v0.1.182
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7277694Z  * [new tag]           v0.1.183                                 -> v0.1.183
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7278086Z  * [new tag]           v0.1.184                                 -> v0.1.184
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7278498Z  * [new tag]           v0.1.185                                 -> v0.1.185
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7278914Z  * [new tag]           v0.1.186                                 -> v0.1.186
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7279315Z  * [new tag]           v0.1.187                                 -> v0.1.187
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7279720Z  * [new tag]           v0.1.188                                 -> v0.1.188
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7280119Z  * [new tag]           v0.1.189                                 -> v0.1.189
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7280522Z  * [new tag]           v0.1.19                                  -> v0.1.19
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7280937Z  * [new tag]           v0.1.190                                 -> v0.1.190
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7281418Z  * [new tag]           v0.1.191                                 -> v0.1.191
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7281910Z  * [new tag]           v0.1.192                                 -> v0.1.192
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7351383Z  * [new tag]           v0.1.193                                 -> v0.1.193
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7352146Z  * [new tag]           v0.1.194                                 -> v0.1.194
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7352855Z  * [new tag]           v0.1.195                                 -> v0.1.195
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7353595Z  * [new tag]           v0.1.196                                 -> v0.1.196
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7354139Z  * [new tag]           v0.1.197                                 -> v0.1.197
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7354700Z  * [new tag]           v0.1.198                                 -> v0.1.198
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7355254Z  * [new tag]           v0.1.199                                 -> v0.1.199
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7355799Z  * [new tag]           v0.1.2                                   -> v0.1.2
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7356687Z  * [new tag]           v0.1.20                                  -> v0.1.20
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7357266Z  * [new tag]           v0.1.200                                 -> v0.1.200
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7357864Z  * [new tag]           v0.1.201                                 -> v0.1.201
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7358489Z  * [new tag]           v0.1.202                                 -> v0.1.202
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7359067Z  * [new tag]           v0.1.203                                 -> v0.1.203
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7359679Z  * [new tag]           v0.1.204                                 -> v0.1.204
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7360297Z  * [new tag]           v0.1.205                                 -> v0.1.205
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7360900Z  * [new tag]           v0.1.206                                 -> v0.1.206
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7361522Z  * [new tag]           v0.1.207                                 -> v0.1.207
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7362152Z  * [new tag]           v0.1.208                                 -> v0.1.208
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7362787Z  * [new tag]           v0.1.209                                 -> v0.1.209
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7363565Z  * [new tag]           v0.1.21                                  -> v0.1.21
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7364165Z  * [new tag]           v0.1.210                                 -> v0.1.210
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7364757Z  * [new tag]           v0.1.211                                 -> v0.1.211
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7365389Z  * [new tag]           v0.1.212                                 -> v0.1.212
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7365992Z  * [new tag]           v0.1.213                                 -> v0.1.213
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7366560Z  * [new tag]           v0.1.214                                 -> v0.1.214
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7367082Z  * [new tag]           v0.1.215                                 -> v0.1.215
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7367486Z  * [new tag]           v0.1.217                                 -> v0.1.217
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7368142Z  * [new tag]           v0.1.218                                 -> v0.1.218
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7368570Z  * [new tag]           v0.1.219                                 -> v0.1.219
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7368983Z  * [new tag]           v0.1.22                                  -> v0.1.22
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7369405Z  * [new tag]           v0.1.220                                 -> v0.1.220
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7369825Z  * [new tag]           v0.1.221                                 -> v0.1.221
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7370241Z  * [new tag]           v0.1.222                                 -> v0.1.222
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7370667Z  * [new tag]           v0.1.223                                 -> v0.1.223
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7371080Z  * [new tag]           v0.1.224                                 -> v0.1.224
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7371484Z  * [new tag]           v0.1.225                                 -> v0.1.225
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7371887Z  * [new tag]           v0.1.226                                 -> v0.1.226
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7372309Z  * [new tag]           v0.1.227                                 -> v0.1.227
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7372717Z  * [new tag]           v0.1.228                                 -> v0.1.228
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7373140Z  * [new tag]           v0.1.229                                 -> v0.1.229
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7373709Z  * [new tag]           v0.1.23                                  -> v0.1.23
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7374139Z  * [new tag]           v0.1.230                                 -> v0.1.230
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7374546Z  * [new tag]           v0.1.231                                 -> v0.1.231
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7374953Z  * [new tag]           v0.1.232                                 -> v0.1.232
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7375351Z  * [new tag]           v0.1.233                                 -> v0.1.233
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7375752Z  * [new tag]           v0.1.234                                 -> v0.1.234
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7376156Z  * [new tag]           v0.1.235                                 -> v0.1.235
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7376689Z  * [new tag]           v0.1.236                                 -> v0.1.236
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7377094Z  * [new tag]           v0.1.237                                 -> v0.1.237
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7377500Z  * [new tag]           v0.1.238                                 -> v0.1.238
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7377903Z  * [new tag]           v0.1.239                                 -> v0.1.239
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7378313Z  * [new tag]           v0.1.24                                  -> v0.1.24
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7378731Z  * [new tag]           v0.1.240                                 -> v0.1.240
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7379130Z  * [new tag]           v0.1.241                                 -> v0.1.241
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7379530Z  * [new tag]           v0.1.242                                 -> v0.1.242
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7379946Z  * [new tag]           v0.1.243                                 -> v0.1.243
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7380355Z  * [new tag]           v0.1.244                                 -> v0.1.244
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7380776Z  * [new tag]           v0.1.245                                 -> v0.1.245
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7381178Z  * [new tag]           v0.1.246                                 -> v0.1.246
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7381579Z  * [new tag]           v0.1.247                                 -> v0.1.247
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7381981Z  * [new tag]           v0.1.248                                 -> v0.1.248
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7382389Z  * [new tag]           v0.1.249                                 -> v0.1.249
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7382761Z  * [new tag]           v0.1.25                                  -> v0.1.25
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7383136Z  * [new tag]           v0.1.250                                 -> v0.1.250
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7383801Z  * [new tag]           v0.1.251                                 -> v0.1.251
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7384217Z  * [new tag]           v0.1.252                                 -> v0.1.252
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7384744Z  * [new tag]           v0.1.253                                 -> v0.1.253
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7385158Z  * [new tag]           v0.1.254                                 -> v0.1.254
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7385562Z  * [new tag]           v0.1.255                                 -> v0.1.255
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7385965Z  * [new tag]           v0.1.256                                 -> v0.1.256
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7386368Z  * [new tag]           v0.1.257                                 -> v0.1.257
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7386766Z  * [new tag]           v0.1.258                                 -> v0.1.258
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7387172Z  * [new tag]           v0.1.259                                 -> v0.1.259
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7387570Z  * [new tag]           v0.1.26                                  -> v0.1.26
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7387974Z  * [new tag]           v0.1.260                                 -> v0.1.260
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7388377Z  * [new tag]           v0.1.261                                 -> v0.1.261
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7388793Z  * [new tag]           v0.1.262                                 -> v0.1.262
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7389194Z  * [new tag]           v0.1.263                                 -> v0.1.263
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7389590Z  * [new tag]           v0.1.264                                 -> v0.1.264
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7389986Z  * [new tag]           v0.1.265                                 -> v0.1.265
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7390389Z  * [new tag]           v0.1.266                                 -> v0.1.266
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7390784Z  * [new tag]           v0.1.267                                 -> v0.1.267
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7391177Z  * [new tag]           v0.1.268                                 -> v0.1.268
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7391583Z  * [new tag]           v0.1.269                                 -> v0.1.269
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7392037Z  * [new tag]           v0.1.27                                  -> v0.1.27
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7392441Z  * [new tag]           v0.1.270                                 -> v0.1.270
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7392985Z  * [new tag]           v0.1.271                                 -> v0.1.271
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7393512Z  * [new tag]           v0.1.272                                 -> v0.1.272
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7393928Z  * [new tag]           v0.1.273                                 -> v0.1.273
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7394346Z  * [new tag]           v0.1.274                                 -> v0.1.274
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7394741Z  * [new tag]           v0.1.28                                  -> v0.1.28
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7395142Z  * [new tag]           v0.1.29                                  -> v0.1.29
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7395543Z  * [new tag]           v0.1.3                                   -> v0.1.3
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7395935Z  * [new tag]           v0.1.30                                  -> v0.1.30
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7396334Z  * [new tag]           v0.1.31                                  -> v0.1.31
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7396726Z  * [new tag]           v0.1.32                                  -> v0.1.32
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7397144Z  * [new tag]           v0.1.33                                  -> v0.1.33
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7397535Z  * [new tag]           v0.1.34                                  -> v0.1.34
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7397923Z  * [new tag]           v0.1.35                                  -> v0.1.35
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7398312Z  * [new tag]           v0.1.36                                  -> v0.1.36
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7398704Z  * [new tag]           v0.1.37                                  -> v0.1.37
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7399087Z  * [new tag]           v0.1.38                                  -> v0.1.38
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7399477Z  * [new tag]           v0.1.39                                  -> v0.1.39
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7399874Z  * [new tag]           v0.1.4                                   -> v0.1.4
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7400275Z  * [new tag]           v0.1.40                                  -> v0.1.40
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7400668Z  * [new tag]           v0.1.41                                  -> v0.1.41
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7401178Z  * [new tag]           v0.1.42                                  -> v0.1.42
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7401575Z  * [new tag]           v0.1.43                                  -> v0.1.43
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7401965Z  * [new tag]           v0.1.44                                  -> v0.1.44
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7402353Z  * [new tag]           v0.1.45                                  -> v0.1.45
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7402734Z  * [new tag]           v0.1.46                                  -> v0.1.46
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7403117Z  * [new tag]           v0.1.47                                  -> v0.1.47
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7403643Z  * [new tag]           v0.1.48                                  -> v0.1.48
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7404029Z  * [new tag]           v0.1.49                                  -> v0.1.49
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7404426Z  * [new tag]           v0.1.5                                   -> v0.1.5
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7404824Z  * [new tag]           v0.1.50                                  -> v0.1.50
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7405212Z  * [new tag]           v0.1.51                                  -> v0.1.51
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7405595Z  * [new tag]           v0.1.52                                  -> v0.1.52
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7405982Z  * [new tag]           v0.1.53                                  -> v0.1.53
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7406366Z  * [new tag]           v0.1.54                                  -> v0.1.54
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7406749Z  * [new tag]           v0.1.55                                  -> v0.1.55
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7407134Z  * [new tag]           v0.1.56                                  -> v0.1.56
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7407520Z  * [new tag]           v0.1.57                                  -> v0.1.57
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7407902Z  * [new tag]           v0.1.58                                  -> v0.1.58
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7408281Z  * [new tag]           v0.1.59                                  -> v0.1.59
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7408673Z  * [new tag]           v0.1.6                                   -> v0.1.6
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7409169Z  * [new tag]           v0.1.60                                  -> v0.1.60
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7409563Z  * [new tag]           v0.1.61                                  -> v0.1.61
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7409951Z  * [new tag]           v0.1.62                                  -> v0.1.62
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7410343Z  * [new tag]           v0.1.63                                  -> v0.1.63
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7410728Z  * [new tag]           v0.1.64                                  -> v0.1.64
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7411111Z  * [new tag]           v0.1.65                                  -> v0.1.65
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7411497Z  * [new tag]           v0.1.66                                  -> v0.1.66
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7411881Z  * [new tag]           v0.1.67                                  -> v0.1.67
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7412267Z  * [new tag]           v0.1.68                                  -> v0.1.68
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7412677Z  * [new tag]           v0.1.69                                  -> v0.1.69
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7413064Z  * [new tag]           v0.1.7                                   -> v0.1.7
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7413571Z  * [new tag]           v0.1.70                                  -> v0.1.70
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7413961Z  * [new tag]           v0.1.71                                  -> v0.1.71
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7414344Z  * [new tag]           v0.1.72                                  -> v0.1.72
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7414727Z  * [new tag]           v0.1.73                                  -> v0.1.73
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7415113Z  * [new tag]           v0.1.74                                  -> v0.1.74
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7415501Z  * [new tag]           v0.1.75                                  -> v0.1.75
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7415898Z  * [new tag]           v0.1.76                                  -> v0.1.76
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7416282Z  * [new tag]           v0.1.77                                  -> v0.1.77
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7416784Z  * [new tag]           v0.1.78                                  -> v0.1.78
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7417170Z  * [new tag]           v0.1.79                                  -> v0.1.79
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7417555Z  * [new tag]           v0.1.8                                   -> v0.1.8
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7417947Z  * [new tag]           v0.1.80                                  -> v0.1.80
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7418329Z  * [new tag]           v0.1.81                                  -> v0.1.81
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7418715Z  * [new tag]           v0.1.82                                  -> v0.1.82
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7419110Z  * [new tag]           v0.1.83                                  -> v0.1.83
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7419491Z  * [new tag]           v0.1.84                                  -> v0.1.84
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7419872Z  * [new tag]           v0.1.85                                  -> v0.1.85
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7420259Z  * [new tag]           v0.1.86                                  -> v0.1.86
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7420661Z  * [new tag]           v0.1.87                                  -> v0.1.87
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7421049Z  * [new tag]           v0.1.88                                  -> v0.1.88
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7421434Z  * [new tag]           v0.1.89                                  -> v0.1.89
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7421818Z  * [new tag]           v0.1.9                                   -> v0.1.9
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7422208Z  * [new tag]           v0.1.90                                  -> v0.1.90
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7422593Z  * [new tag]           v0.1.91                                  -> v0.1.91
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7422980Z  * [new tag]           v0.1.92                                  -> v0.1.92
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7423501Z  * [new tag]           v0.1.93                                  -> v0.1.93
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7423895Z  * [new tag]           v0.1.94                                  -> v0.1.94
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7424291Z  * [new tag]           v0.1.95                                  -> v0.1.95
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7424807Z  * [new tag]           v0.1.96                                  -> v0.1.96
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7425208Z  * [new tag]           v0.1.97                                  -> v0.1.97
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7425597Z  * [new tag]           v0.1.98                                  -> v0.1.98
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7425987Z  * [new tag]           v0.1.99                                  -> v0.1.99
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7426576Z  * [new tag]           velnor-workflow-runtime-v1-1ff514a2852c82d3 -> velnor-workflow-runtime-v1-1ff514a2852c82d3
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7427333Z  * [new tag]           velnor-workflow-runtime-v1-203eb9b79141e5a2 -> velnor-workflow-runtime-v1-203eb9b79141e5a2
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7428043Z  * [new tag]           velnor-workflow-runtime-v1-2bd48976b59bf084 -> velnor-workflow-runtime-v1-2bd48976b59bf084
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7428748Z  * [new tag]           velnor-workflow-runtime-v1-6ae4ca31ef453567 -> velnor-workflow-runtime-v1-6ae4ca31ef453567
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7429483Z  * [new tag]           velnor-workflow-runtime-v1-78673ee16c42581e -> velnor-workflow-runtime-v1-78673ee16c42581e
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7430187Z  * [new tag]           velnor-workflow-runtime-v1-93c8a35808d1210b -> velnor-workflow-runtime-v1-93c8a35808d1210b
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7430882Z  * [new tag]           velnor-workflow-runtime-v1-9f236b40635970a4 -> velnor-workflow-runtime-v1-9f236b40635970a4
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7431579Z  * [new tag]           velnor-workflow-runtime-v1-ad493401f003a130 -> velnor-workflow-runtime-v1-ad493401f003a130
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7432286Z  * [new tag]           velnor-workflow-runtime-v1-c0ce56f09b27859c -> velnor-workflow-runtime-v1-c0ce56f09b27859c
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7432994Z  * [new tag]           velnor-workflow-runtime-v1-d39cbf21e351b410 -> velnor-workflow-runtime-v1-d39cbf21e351b410
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7433822Z  * [new tag]           velnor-workflow-runtime-v1-e5ad6f4f923cd154 -> velnor-workflow-runtime-v1-e5ad6f4f923cd154
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7434646Z  * [new tag]           velnor-workflow-runtime-v1-f1f88c200e5b3b82 -> velnor-workflow-runtime-v1-f1f88c200e5b3b82
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7435369Z  * [new tag]           velnor-workflow-runtime-v1-fd45efac853b6570 -> velnor-workflow-runtime-v1-fd45efac853b6570
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7436089Z  * [new tag]           velnor-workflow-runtime-v1-ff27a1c010cb4faf -> velnor-workflow-runtime-v1-ff27a1c010cb4faf
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7436707Z  * [new ref]           4d8cf2eea827c668cbfa54e102bdafb1d9529791 -> pull/915/merge
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7438137Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7438639Z ##[group]Determining the checkout info
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7439150Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7439437Z [command]/usr/bin/git sparse-checkout disable
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7440319Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7441314Z ##[group]Checking out the ref
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.7441739Z [command]/usr/bin/git checkout --progress --force refs/remotes/pull/915/merge
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8025697Z Note: switching to 'refs/remotes/pull/915/merge'.
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8026083Z 
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8026347Z You are in 'detached HEAD' state. You can look around, make experimental
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8026863Z changes and commit them, and you can discard any commits you make in this
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8027363Z state without impacting any branches by switching back to a branch.
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8027619Z 
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8027862Z If you want to create a new branch to retain commits you create, you may
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8028340Z do so (now or later) by using -c with the switch command. Example:
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8028576Z 
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8028718Z   git switch -c <new-branch-name>
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8028892Z 
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8029033Z Or undo this operation with:
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8029191Z 
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8029304Z   git switch -
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8029432Z 
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8029705Z Turn off this advice by setting config variable advice.detachedHead to false
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8030236Z 
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8030646Z HEAD is now at 4d8cf2ee Merge d8eda2344ab1c6055dbe72ecdc42df45883ea178 into 33688938297eee3933997dbbf368ee20fb1779d4
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8042824Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8085080Z [command]/usr/bin/git log -1 --format=%H
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8109827Z 4d8cf2eea827c668cbfa54e102bdafb1d9529791
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8118525Z ##[group]Removing auth
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8119006Z Removing SSH command configuration
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8122192Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8151631Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8338929Z Removing HTTP extra header
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8342328Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8373204Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8562428Z Removing includeIf entries pointing to credentials config files
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8565132Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8591358Z includeif.gitdir:/home/runner/work/velnor/velnor/.git.path
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8591955Z includeif.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8592397Z includeif.gitdir:/github/workspace/.git.path
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8592798Z includeif.gitdir:/github/workspace/.git/worktrees/*.path
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8598056Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/.git.path
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8619980Z /home/runner/work/_temp/git-credentials-f485dc29-e93d-478c-aa4b-1e0f29d0f7b3.config
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8627745Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/.git.path \/home\/runner\/work\/_temp\/git\-credentials\-f485dc29\-e93d\-478c\-aa4b\-1e0f29d0f7b3\.config
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8656420Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8678697Z /home/runner/work/_temp/git-credentials-f485dc29-e93d-478c-aa4b-1e0f29d0f7b3.config
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8684984Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path \/home\/runner\/work\/_temp\/git\-credentials\-f485dc29\-e93d\-478c\-aa4b\-1e0f29d0f7b3\.config
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8712622Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git.path
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8733605Z /github/runner_temp/git-credentials-f485dc29-e93d-478c-aa4b-1e0f29d0f7b3.config
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8743017Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git.path \/github\/runner_temp\/git\-credentials\-f485dc29\-e93d\-478c\-aa4b\-1e0f29d0f7b3\.config
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8775323Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git/worktrees/*.path
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8798311Z /github/runner_temp/git-credentials-f485dc29-e93d-478c-aa4b-1e0f29d0f7b3.config
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8805199Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git/worktrees/*.path \/github\/runner_temp\/git\-credentials\-f485dc29\-e93d\-478c\-aa4b\-1e0f29d0f7b3\.config
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.8834414Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.9011665Z Removing credentials config '/home/runner/work/_temp/git-credentials-f485dc29-e93d-478c-aa4b-1e0f29d0f7b3.config'
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.9018090Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.9350921Z Prepare all required actions
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:00.9351491Z Getting action download info
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.0747944Z Download action repository 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9' (SHA:55cc8345863c7cc4c66a329aec7e433d2d1c52a9)
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2636610Z ##[group]Run ./.github/actions/setup-velnor-workflow
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2636885Z with:
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2637082Z   rev: 7341ef4bdf750c1fbe419e94fb3848c5b8dde718
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2637351Z   checkout-path: /home/runner/work/velnor/velnor
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2637590Z   cache: true
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2637774Z   cache-key-prefix: velnor-workflow-v3
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2639910Z   github-token: ***
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2640092Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2692963Z ##[start-action display=Resolve source closure;id=runtime.closure]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2725334Z ##[group]Run set -euo pipefail
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2725640Z ^[[36;1mset -euo pipefail^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2725851Z ^[[36;1msha256_digest() {^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2726140Z ^[[36;1m  if command -v sha256sum >/dev/null 2>&1; then^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2726439Z ^[[36;1m    sha256sum | awk '{print $1}'^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2726702Z ^[[36;1m  elif command -v shasum >/dev/null 2>&1; then^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2726958Z ^[[36;1m    shasum -a 256 | awk '{print $1}'^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2727172Z ^[[36;1m  else^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2727439Z ^[[36;1m    echo "::error::no SHA-256 checksum tool available (sha256sum or shasum)" >&2^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2727745Z ^[[36;1m    return 1^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2727925Z ^[[36;1m  fi^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2728077Z ^[[36;1m}^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2728340Z ^[[36;1mtest "$INSTALL_REV" != '' || { echo "::error::runtime revision is empty" >&2; exit 1; }^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2728868Z ^[[36;1m[[ "$INSTALL_REV" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::runtime revision must be a full commit SHA, got $INSTALL_REV" >&2; exit 1; }^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2729289Z ^[[36;1mlisting=""^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2729589Z ^[[36;1mif git -C "$CHECKOUT_PATH" cat-file -e "$INSTALL_REV^{commit}" 2>/dev/null; then^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2730201Z ^[[36;1m  listing="$(git -C "$CHECKOUT_PATH" ls-tree -r "$INSTALL_REV" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2730684Z ^[[36;1melse^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2731128Z ^[[36;1m  tree="$(gh api "repos/$PRODUCT_REPOSITORY/git/trees/$INSTALL_REV?recursive=1")" || { echo "::error::unknown generator revision $INSTALL_REV" >&2; exit 1; }^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2731854Z ^[[36;1m  [[ "$(jq -r '.truncated // false' <<<"$tree")" != "true" ]] || { echo "::error::tree API response is truncated; the closure cannot be proven" >&2; exit 1; }^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2732927Z ^[[36;1m  listing="$(jq -r '[.tree[] | select(.type != "tree") | select(.path == "Cargo.toml" or .path == "Cargo.lock" or .path == "rust-toolchain.toml" or .path == "rust-toolchain" or (.path | startswith("crates/velnor-workflow/")) or (.path | startswith(".cargo/"))) | "\(.mode) \(.type) \(.sha)\t\(.path)"] | sort | join("\n")' <<<"$tree")"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2733902Z ^[[36;1mfi^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2734214Z ^[[36;1mtest "$listing" != '' || { echo "::error::revision $INSTALL_REV has no closure inputs" >&2; exit 1; }^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2734766Z ^[[36;1mclosure="$(printf '%s\nclosure-version:1\nfeatures:\nprofile:release\n' "$(LC_ALL=C sort <<<"$listing")" | sha256_digest)"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2735284Z ^[[36;1m[[ "$closure" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::closure resolution failed" >&2; exit 1; }^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2735635Z ^[[36;1mecho "value=$closure" >> "$GITHUB_OUTPUT"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2771699Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2771985Z env:
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2774214Z   GH_TOKEN: ***
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2774444Z   INSTALL_REV: 7341ef4bdf750c1fbe419e94fb3848c5b8dde718
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2774725Z   CHECKOUT_PATH: /home/runner/work/velnor/velnor
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2775188Z   PRODUCT_REPOSITORY: tailrocks/velnor
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2775406Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2940649Z ##[end-action id=runtime.closure;outcome=success;conclusion=success;duration_ms=24]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.2944966Z ##[start-action display=Restore runtime cache;id=runtime.cache]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.3026808Z ##[group]Run actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.3027114Z with:
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.3027296Z   path: ~/.cache/velnor/workflow-runtime
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.3027698Z   key: velnor-workflow-v3-Linux-X64-9f236b40635970a422bf41a55f1529510e42f7113883c53683d24d088f79dad3
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.3028101Z   enableCrossOsArchive: false
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.3028309Z   fail-on-cache-miss: false
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.3028505Z   lookup-only: false
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.3028681Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:01.6075784Z Cache hit for: velnor-workflow-v3-Linux-X64-9f236b40635970a422bf41a55f1529510e42f7113883c53683d24d088f79dad3
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.6767866Z Received 2243310 of 2243310 (100.0%), 2.5 MBs/sec
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.6768318Z Cache Size: ~2 MB (2243310 B)
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.6787290Z [command]/usr/bin/tar -xf /home/runner/work/_temp/34071cf3-71a8-43af-819f-7a63db0d525d/cache.tzst -P -C /home/runner/work/velnor/velnor --use-compress-program unzstd
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.6925042Z Cache restored successfully
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.6984637Z Cache restored from key: velnor-workflow-v3-Linux-X64-9f236b40635970a422bf41a55f1529510e42f7113883c53683d24d088f79dad3
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7041611Z ##[end-action id=runtime.cache;outcome=success;conclusion=success;duration_ms=1409]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7047338Z ##[start-action display=Download runtime product;id=runtime.__run]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7056062Z ##[end-action id=runtime.__run;outcome=skipped;conclusion=skipped;duration_ms=0]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7058506Z ##[start-action display=Verify runtime product;id=runtime.__run_2]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7077018Z ##[group]Run set -euo pipefail
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7077273Z ^[[36;1mset -euo pipefail^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7077550Z ^[[36;1mruntime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7077828Z ^[[36;1mjq -e \^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7078027Z ^[[36;1m  --arg closure "$CLOSURE" \^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7078292Z ^[[36;1m  --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7078761Z ^[[36;1m  '.closure == $closure and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$"))' \^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7079200Z ^[[36;1m  "$runtime/manifest.json" >/dev/null^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7079484Z ^[[36;1mif command -v sha256sum >/dev/null 2>&1; then^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7079838Z ^[[36;1m  actual="$(sha256sum "$runtime/bin/velnor-workflow" | awk '{print $1}')"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7080153Z ^[[36;1melse^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7080430Z ^[[36;1m  actual="$(shasum -a 256 "$runtime/bin/velnor-workflow" | awk '{print $1}')"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7080731Z ^[[36;1mfi^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7081107Z ^[[36;1mexpected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "$runtime/manifest.json")"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7081645Z ^[[36;1m[[ "$actual" == "$expected" ]] || { echo "::error::cached runtime digest mismatch" >&2; exit 1; }^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7115242Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7115524Z env:
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7115781Z   CLOSURE: 9f236b40635970a422bf41a55f1529510e42f7113883c53683d24d088f79dad3
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7116080Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7273005Z ##[end-action id=runtime.__run_2;outcome=success;conclusion=success;duration_ms=21]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7275855Z ##[start-action display=Add runtime to PATH;id=runtime.__run_3]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7292075Z ##[group]Run set -euo pipefail
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7292334Z ^[[36;1mset -euo pipefail^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7292598Z ^[[36;1mruntime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7293024Z ^[[36;1mtest -x "$runtime/bin/velnor-workflow"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7293674Z ^[[36;1mtest -s "$runtime/manifest.json"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7293974Z ^[[36;1mreported="$("$runtime/bin/velnor-workflow" --closure)"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7294567Z ^[[36;1m[[ "$reported" == "$CLOSURE" ]] || { echo "::error::runtime at $runtime reports closure $reported, expected $CLOSURE" >&2; exit 1; }^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7295030Z ^[[36;1mecho "$runtime/bin" >> "$GITHUB_PATH"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7325251Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7325529Z env:
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7325795Z   CLOSURE: 9f236b40635970a422bf41a55f1529510e42f7113883c53683d24d088f79dad3
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7326103Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7389847Z ##[end-action id=runtime.__run_3;outcome=success;conclusion=success;duration_ms=11]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7391560Z ##[start-action display=Save runtime cache;id=runtime.__actions_cache]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7402958Z ##[end-action id=runtime.__actions_cache;outcome=skipped;conclusion=skipped;duration_ms=0]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7449183Z ##[group]Run echo "VELNOR_WORKFLOW_POLICY_REVISION=7341ef4bdf750c1fbe419e94fb3848c5b8dde718" >> "$GITHUB_ENV"
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7449775Z ^[[36;1mecho "VELNOR_WORKFLOW_POLICY_REVISION=7341ef4bdf750c1fbe419e94fb3848c5b8dde718" >> "$GITHUB_ENV"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7481167Z shell: /usr/bin/bash -e {0}
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7481393Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7562164Z ##[group]Run set -euo pipefail
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7562406Z ^[[36;1mset -euo pipefail^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7562693Z ^[[36;1mif [[ -z "${CI_SCOPE_OVERRIDE:-}" ]]; then unset CI_SCOPE_OVERRIDE; fi^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7563063Z ^[[36;1mvelnor-workflow plan --config .github/ci/project.toml^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7593494Z shell: /usr/bin/bash -e {0}
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7593717Z env:
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7593987Z   VELNOR_WORKFLOW_POLICY_REVISION: 7341ef4bdf750c1fbe419e94fb3848c5b8dde718
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7594318Z   EVENT_NAME: pull_request
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7594517Z   CI_SCOPE_OVERRIDE: 
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7594731Z   BASE_SHA: 33688938297eee3933997dbbf368ee20fb1779d4
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7595000Z   HEAD_SHA: 4d8cf2eea827c668cbfa54e102bdafb1d9529791
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7595249Z   VELNOR_LANES: both
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7595429Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7670444Z scope=affected
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7670718Z units=
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7670950Z full_units=
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7700459Z ##[group]Run set -euo pipefail
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7700710Z ^[[36;1mset -euo pipefail^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7700954Z ^[[36;1mstage="$RUNNER_TEMP/velnor-workflow-runtime"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7701218Z ^[[36;1mrm -rf "$stage"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7701414Z ^[[36;1mmkdir -p "$stage"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7701633Z ^[[36;1msrc="$(command -v velnor-workflow)"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7701901Z ^[[36;1minstall -m 0755 "$src" "$stage/velnor-workflow"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7702223Z ^[[36;1mdigest="$(sha256sum "$stage/velnor-workflow" | awk '{print $1}')"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7702572Z ^[[36;1mpolicy_src="${VELNOR_WORKFLOW_PINNED_BINARY:-$src}"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7702912Z ^[[36;1minstall -m 0755 "$policy_src" "$stage/velnor-workflow-policy"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7703484Z ^[[36;1mpolicy_revision="$("$stage/velnor-workflow-policy" --revision)"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7703901Z ^[[36;1mpolicy_closure="$("$stage/velnor-workflow-policy" --closure)"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7704733Z ^[[36;1m[[ "$policy_closure" == "9f236b40635970a422bf41a55f1529510e42f7113883c53683d24d088f79dad3" ]] || { echo "::error::policy runtime reports closure $policy_closure, expected 9f236b40635970a422bf41a55f1529510e42f7113883c53683d24d088f79dad3" >&2; exit 1; }^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7705601Z ^[[36;1mpolicy_digest="$(sha256sum "$stage/velnor-workflow-policy" | awk '{print $1}')"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7707959Z ^[[36;1mjq -n --arg repository "$GITHUB_REPOSITORY" --arg revision "$EXPECTED_REVISION" --arg closure "9f236b40635970a422bf41a55f1529510e42f7113883c53683d24d088f79dad3" --arg head_branch "915/merge" --arg platform "Linux-X64" --arg run_id "$GITHUB_RUN_ID" --arg job_id "plan" --arg binary_sha256 "$digest" --arg policy_revision "$policy_revision" --arg policy_closure "$policy_closure" --arg policy_binary_sha256 "$policy_digest" '{repository: $repository, revision: $revision, closure: $closure, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256, policy_revision: $policy_revision, policy_closure: $policy_closure, policy_binary_sha256: $policy_binary_sha256}' > "$stage/manifest.json"^[[0m
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7741970Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7742249Z env:
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7742515Z   VELNOR_WORKFLOW_POLICY_REVISION: 7341ef4bdf750c1fbe419e94fb3848c5b8dde718
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7742890Z   EXPECTED_REVISION: 7341ef4bdf750c1fbe419e94fb3848c5b8dde718
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.7743160Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.8121790Z ##[group]Run actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.8122110Z with:
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.8122417Z   name: velnor-workflow-runtime-7341ef4bdf750c1fbe419e94fb3848c5b8dde718-Linux-X64
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.8122814Z   path: /home/runner/work/_temp/velnor-workflow-runtime
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.8123089Z   if-no-files-found: error
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.8123505Z   retention-days: 7
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.8123732Z   compression-level: 6
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.8123918Z   overwrite: false
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.8124103Z   include-hidden-files: false
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.8124305Z   archive: true
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.8124478Z env:
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.8124734Z   VELNOR_WORKFLOW_POLICY_REVISION: 7341ef4bdf750c1fbe419e94fb3848c5b8dde718
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.8125035Z ##[endgroup]
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.9205616Z With the provided path, there will be 3 files uploaded
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.9209756Z Artifact name is valid!
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:02.9210499Z Root directory input is valid!
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:03.2407751Z Uploading artifact: velnor-workflow-runtime-7341ef4bdf750c1fbe419e94fb3848c5b8dde718-Linux-X64.zip
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:03.2438239Z Beginning upload of artifact content to blob storage
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.3749091Z Uploaded bytes 4719658
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.4379101Z Finished uploading artifact content to blob storage!
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.4379736Z SHA256 digest of uploaded artifact is c1d36457bc5889ab5b0d376db96c1af4f20513f6f15af0c3a6ecb68e80ec7255
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.4380201Z Finalizing artifact upload
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.8077419Z Artifact velnor-workflow-runtime-7341ef4bdf750c1fbe419e94fb3848c5b8dde718-Linux-X64 successfully finalized. Artifact ID 10472855093
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.8078486Z Artifact velnor-workflow-runtime-7341ef4bdf750c1fbe419e94fb3848c5b8dde718-Linux-X64 has been successfully uploaded! Final size is 4719658 bytes. Artifact ID is 10472855093
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.8080417Z Artifact download URL: https://github.com/tailrocks/velnor/actions/runs/35159617549/artifacts/10472855093
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.8227303Z Post job cleanup.
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.8879144Z [command]/usr/bin/git version
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.8920780Z git version 2.55.0
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.8951073Z Temporarily overriding HOME='/home/runner/work/_temp/b9e0ac04-7e04-439b-9159-4a2b83e7141e' before making global git config changes
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.8952024Z Adding repository directory to the temporary git global config as a safe directory
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.8955765Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.8981437Z Removing SSH command configuration
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.8987130Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.9016292Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.9224785Z Removing HTTP extra header
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.9230108Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.9259161Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.9455783Z Removing includeIf entries pointing to credentials config files
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.9465120Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.9495393Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.9810973Z Evaluate and set job outputs
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.9816471Z Set output 'scope'
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.9817939Z Set output 'base_sha'
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.9818572Z Set output 'head_sha'
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.9818844Z Set output 'bun_matrix'
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.9819112Z Set output 'docker_matrix'
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.9819388Z Set output 'docs_matrix'
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.9819657Z Set output 'opentofu_matrix'
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.9819929Z Set output 'rust_matrix'
+Control / Planning	UNKNOWN STEP	2026-09-16T22:51:04.9820435Z Cleaning up orphan processes

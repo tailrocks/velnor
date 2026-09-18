@@ -1,0 +1,13 @@
+   Compiling jackin-runtime v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-runtime)
+   Compiling jackin v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 20.62s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID 77956a53-a45a-45bc-a17a-ca68d4bccfe9 with nextest profile: docker-e2e
+    Starting 1 test across 4 binaries (22 tests and 27 binaries skipped, including 27 binaries via profile.docker-e2e.default-filter)
+        PASS [  13.574s] (1/1) jackin::dind_e2e jackin_load_sentinel_role_runs_hooks_and_keeps_build_output_off_screen
+────────────
+     Summary [  13.574s] 1 test run: 1 passed, 22 skipped
+mbx[savings]: 311.1 GiB of outputs, one copy, several very confident checkouts.
+VERIFY_EXIT=0

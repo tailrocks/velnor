@@ -1,0 +1,70 @@
+schema = 1
+
+[generator]
+repository = "jackin-project/jackin"
+revision = "b9c3156cdb88e63c11b9e595a3e694b02238c09a"
+
+[scan]
+exclude = ["native/Package.swift", "native/.swiftpm/**"]
+
+# Runner placement: keep both backends for manual dispatch; automatic events
+# (main push/schedule, same-repo PR) must stay GitHub-only so ci-required is
+# not blocked by queued self-hosted jobs when the Velnor fleet is unavailable.
+[workflow]
+runners = "github"
+automatic = "github"
+default_dispatch_runner = "github"
+automatic_lanes = "github"
+github_runner = "ubuntu-26.04"
+macos_runner = "macos-26"
+velnor_labels = ["self-hosted", "velnor-target-mvp"]
+velnor_trusted_label = "velnor-trusted"
+velnor_trusted_runner_available = true
+
+[policy]
+ruleset_required_status_checks = ["ci-required"]
+ruleset_external_status_checks = ["DCO", "construct-required", "docs-link-check", "docs-required", "validate"]
+
+# Unit contracts the scan cannot derive. Command arrays are rejected by
+# velnor-workflow 721c2fed; typed capabilities only (`ci_tasks`, `mise_tools`).
+# Construct Dockerfile ARG defaults match versions.env so the scan-derived
+# `docker build` is self-contained.
+[[units]]
+id = "rust-jackin-xtask"
+mise_tools = ["github:open-telemetry/weaver"]
+
+# XCFramework must exist before `swift build` resolves the binary target.
+# Run desktop-xcframework in the same macOS job as swift-package-native so
+# the binary target path is populated on one runner (separate jobs do not
+# share target/xcframework).
+[[units]]
+id = "swift-package-native"
+kind = "swift"
+depends_on = ["rust-jackin-usage-ffi"]
+root = "native"
+watch = ["native/**/*.swift", "native/Package.swift", "native/Package.resolved", "native/.swiftpm/Package.resolved", "crates/jackin-xtask/**"]
+ci_tasks = ["swift-package-native-ci"]
+mise_tools = ["cargo-binstall", "rust", "cargo:sccache", "cargo:boltffi_cli"]
+
+# jackin-lints pins nightly via crates/jackin-lints/rust-toolchain.
+# dylint-link must be on PATH (rust + cargo-binstall).
+[[units]]
+id = "rust-jackin-lints"
+mise_tools = ["rust", "cargo-binstall"]
+
+[[declare]]
+primitive = "renovate"
+file = "renovate.yml"
+
+[[declare]]
+primitive = "renovate-validate"
+file = "renovate-validate.yml"
+
+[renovate]
+enabled = true
+reason = "selection experiment only"
+lanes = "both"
+schedule = "0 6 * * *"
+token = "GH_RENOVATE_TOKEN"
+config = "renovate.json"
+validate = true

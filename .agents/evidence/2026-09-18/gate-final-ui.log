@@ -1,0 +1,308 @@
+[desktop-test-ui] $ native/Scripts/run-ui-tests.sh
+
+----- xcbeautify -----
+Version: 3.2.1
+----------------------
+
+Test Suite 'Selected tests' started at 2026-09-18 05:27:00.394.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 05:27:00.395.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 05:27:00.395.
+    [32m✔[0m testEmptyUsageStateIsDistinct ([31m3.997[0m seconds)
+Executed 1 test, with 0 failures (0 unexpected) in 3.997 (3.998) seconds
+Test Suite 'JackinDesktopUITests.xctest' passed at 2026-09-18 05:27:04.393.
+Executed 1 test, with 0 failures (0 unexpected) in 3.997 (3.998) seconds
+Executed 1 test, with 0 failures (0 unexpected) in 3.997 (3.999) seconds
+[1mTest session results:[0m /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/UITests-20260917T222658Z-55120/testEmptyUsageStateIsDistinct.xcresult
+[32;1mTest Succeeded[0m
+[36;1mTesting started[0m
+
+----- xcbeautify -----
+Version: 3.2.1
+----------------------
+
+Test Suite 'Selected tests' started at 2026-09-18 05:27:06.160.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 05:27:06.160.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 05:27:06.160.
+    [32m✔[0m testFocusedPopoverPassesAccessibilityAudit ([31m13.568[0m seconds)
+Executed 1 test, with 0 failures (0 unexpected) in 13.568 (13.568) seconds
+Test Suite 'JackinDesktopUITests.xctest' passed at 2026-09-18 05:27:19.729.
+Executed 1 test, with 0 failures (0 unexpected) in 13.568 (13.569) seconds
+Executed 1 test, with 0 failures (0 unexpected) in 13.568 (13.570) seconds
+[1mTest session results:[0m /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/UITests-20260917T222658Z-55120/testFocusedPopoverPassesAccessibilityAudit.xcresult
+[32;1mTest Succeeded[0m
+[36;1mTesting started[0m
+
+----- xcbeautify -----
+Version: 3.2.1
+----------------------
+
+Test Suite 'Selected tests' started at 2026-09-18 05:27:21.748.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 05:27:21.748.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 05:27:21.748.
+    [32m✔[0m testFocusedPopoverUsesRealHost ([31m3.242[0m seconds)
+Executed 1 test, with 0 failures (0 unexpected) in 3.242 (3.243) seconds
+Test Suite 'JackinDesktopUITests.xctest' passed at 2026-09-18 05:27:24.992.
+Executed 1 test, with 0 failures (0 unexpected) in 3.242 (3.243) seconds
+Executed 1 test, with 0 failures (0 unexpected) in 3.242 (3.244) seconds
+[1mTest session results:[0m /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/UITests-20260917T222658Z-55120/testFocusedPopoverUsesRealHost.xcresult
+[32;1mTest Succeeded[0m
+[36;1mTesting started[0m
+
+----- xcbeautify -----
+Version: 3.2.1
+----------------------
+
+Test Suite 'Selected tests' started at 2026-09-18 05:27:30.081.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 05:27:30.082.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 05:27:30.082.
+    [32m✔[0m testGlobalErrorUsageStateIsDistinct ([31m10.236[0m seconds)
+Executed 1 test, with 0 failures (0 unexpected) in 10.236 (10.236) seconds
+Test Suite 'JackinDesktopUITests.xctest' passed at 2026-09-18 05:27:40.318.
+Executed 1 test, with 0 failures (0 unexpected) in 10.236 (10.237) seconds
+Executed 1 test, with 0 failures (0 unexpected) in 10.236 (10.237) seconds
+[1mTest session results:[0m /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/UITests-20260917T222658Z-55120/testGlobalErrorUsageStateIsDistinct.xcresult
+[32;1mTest Succeeded[0m
+[36;1mTesting started[0m
+
+----- xcbeautify -----
+Version: 3.2.1
+----------------------
+
+Test Suite 'Selected tests' started at 2026-09-18 05:27:46.710.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 05:27:46.711.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 05:27:46.711.
+    [32m✔[0m testLoadingUsageStateIsDistinct ([31m7.009[0m seconds)
+Executed 1 test, with 0 failures (0 unexpected) in 7.009 (7.009) seconds
+Test Suite 'JackinDesktopUITests.xctest' passed at 2026-09-18 05:27:53.720.
+Executed 1 test, with 0 failures (0 unexpected) in 7.009 (7.010) seconds
+Executed 1 test, with 0 failures (0 unexpected) in 7.009 (7.010) seconds
+[1mTest session results:[0m /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/UITests-20260917T222658Z-55120/testLoadingUsageStateIsDistinct.xcresult
+[32;1mTest Succeeded[0m
+[36;1mTesting started[0m
+
+----- xcbeautify -----
+Version: 3.2.1
+----------------------
+
+Test Suite 'Selected tests' started at 2026-09-18 05:27:58.306.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 05:27:58.306.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 05:27:58.306.
+    [32m✔[0m testMaximumContentRemainsScrollableAtMinimumSize ([31m10.485[0m seconds)
+Executed 1 test, with 0 failures (0 unexpected) in 10.485 (10.486) seconds
+Test Suite 'JackinDesktopUITests.xctest' passed at 2026-09-18 05:28:08.792.
+Executed 1 test, with 0 failures (0 unexpected) in 10.485 (10.486) seconds
+Executed 1 test, with 0 failures (0 unexpected) in 10.485 (10.487) seconds
+[1mTest session results:[0m /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/UITests-20260917T222658Z-55120/testMaximumContentRemainsScrollableAtMinimumSize.xcresult
+[32;1mTest Succeeded[0m
+[36;1mTesting started[0m
+
+----- xcbeautify -----
+Version: 3.2.1
+----------------------
+
+Test Suite 'Selected tests' started at 2026-09-18 05:28:11.367.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 05:28:11.368.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 05:28:11.368.
+    [32m✔[0m testMaximumPopoverContentRemainsScrollable ([31m23.860[0m seconds)
+Executed 1 test, with 0 failures (0 unexpected) in 23.860 (23.860) seconds
+Test Suite 'JackinDesktopUITests.xctest' passed at 2026-09-18 05:28:35.229.
+Executed 1 test, with 0 failures (0 unexpected) in 23.860 (23.861) seconds
+Executed 1 test, with 0 failures (0 unexpected) in 23.860 (23.861) seconds
+[1mTest session results:[0m /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/UITests-20260917T222658Z-55120/testMaximumPopoverContentRemainsScrollable.xcresult
+[32;1mTest Succeeded[0m
+[36;1mTesting started[0m
+
+----- xcbeautify -----
+Version: 3.2.1
+----------------------
+
+Test Suite 'Selected tests' started at 2026-09-18 05:28:38.130.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 05:28:38.131.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 05:28:38.131.
+    [32m✔[0m testMultiAccountProviderUsesNativePicker ([31m11.430[0m seconds)
+Executed 1 test, with 0 failures (0 unexpected) in 11.430 (11.430) seconds
+Test Suite 'JackinDesktopUITests.xctest' passed at 2026-09-18 05:28:49.561.
+Executed 1 test, with 0 failures (0 unexpected) in 11.430 (11.431) seconds
+Executed 1 test, with 0 failures (0 unexpected) in 11.430 (11.431) seconds
+[1mTest session results:[0m /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/UITests-20260917T222658Z-55120/testMultiAccountProviderUsesNativePicker.xcresult
+[32;1mTest Succeeded[0m
+[36;1mTesting started[0m
+
+----- xcbeautify -----
+Version: 3.2.1
+----------------------
+
+Test Suite 'Selected tests' started at 2026-09-18 05:28:52.972.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 05:28:52.973.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 05:28:52.973.
+    [32m✔[0m testNativeSidebarOwnsLeadingRegionAndToggleKeepsItsCoordinate ([31m10.455[0m seconds)
+Executed 1 test, with 0 failures (0 unexpected) in 10.455 (10.456) seconds
+Test Suite 'JackinDesktopUITests.xctest' passed at 2026-09-18 05:29:03.429.
+Executed 1 test, with 0 failures (0 unexpected) in 10.455 (10.457) seconds
+Executed 1 test, with 0 failures (0 unexpected) in 10.455 (10.458) seconds
+[1mTest session results:[0m /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/UITests-20260917T222658Z-55120/testNativeSidebarOwnsLeadingRegionAndToggleKeepsItsCoordinate.xcresult
+[32;1mTest Succeeded[0m
+[36;1mTesting started[0m
+
+----- xcbeautify -----
+Version: 3.2.1
+----------------------
+
+Test Suite 'Selected tests' started at 2026-09-18 05:29:05.256.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 05:29:05.256.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 05:29:05.257.
+    [32m✔[0m testOverviewAndProviderNavigationAtMinimumSize ([31m14.017[0m seconds)
+Executed 1 test, with 0 failures (0 unexpected) in 14.017 (14.017) seconds
+Test Suite 'JackinDesktopUITests.xctest' passed at 2026-09-18 05:29:19.274.
+Executed 1 test, with 0 failures (0 unexpected) in 14.017 (14.017) seconds
+Executed 1 test, with 0 failures (0 unexpected) in 14.017 (14.018) seconds
+[1mTest session results:[0m /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/UITests-20260917T222658Z-55120/testOverviewAndProviderNavigationAtMinimumSize.xcresult
+[32;1mTest Succeeded[0m
+[36;1mTesting started[0m
+
+----- xcbeautify -----
+Version: 3.2.1
+----------------------
+
+Test Suite 'Selected tests' started at 2026-09-18 05:29:23.299.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 05:29:23.299.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 05:29:23.299.
+    [32m✔[0m testOverviewPassesAccessibilityAudit ([31m36.387[0m seconds)
+Executed 1 test, with 0 failures (0 unexpected) in 36.387 (36.388) seconds
+Test Suite 'JackinDesktopUITests.xctest' passed at 2026-09-18 05:29:59.688.
+Executed 1 test, with 0 failures (0 unexpected) in 36.387 (36.389) seconds
+Executed 1 test, with 0 failures (0 unexpected) in 36.387 (36.390) seconds
+[1mTest session results:[0m /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/UITests-20260917T222658Z-55120/testOverviewPassesAccessibilityAudit.xcresult
+[32;1mTest Succeeded[0m
+[36;1mTesting started[0m
+
+----- xcbeautify -----
+Version: 3.2.1
+----------------------
+
+Test Suite 'Selected tests' started at 2026-09-18 05:30:01.936.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 05:30:01.937.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 05:30:01.937.
+    [32m✔[0m testPartialFailureOverviewRemainsCoherentWhenRepresented ([31m5.542[0m seconds)
+Executed 1 test, with 0 failures (0 unexpected) in 5.542 (5.543) seconds
+Test Suite 'JackinDesktopUITests.xctest' passed at 2026-09-18 05:30:07.480.
+Executed 1 test, with 0 failures (0 unexpected) in 5.542 (5.543) seconds
+Executed 1 test, with 0 failures (0 unexpected) in 5.542 (5.544) seconds
+[1mTest session results:[0m /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/UITests-20260917T222658Z-55120/testPartialFailureOverviewRemainsCoherentWhenRepresented.xcresult
+[32;1mTest Succeeded[0m
+[36;1mTesting started[0m
+
+----- xcbeautify -----
+Version: 3.2.1
+----------------------
+
+Test Suite 'Selected tests' started at 2026-09-18 05:30:09.252.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 05:30:09.252.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 05:30:09.252.
+    [32m✔[0m testPopoverRoutesProviderContextIntoUsage ([31m6.759[0m seconds)
+Executed 1 test, with 0 failures (0 unexpected) in 6.759 (6.760) seconds
+Test Suite 'JackinDesktopUITests.xctest' passed at 2026-09-18 05:30:16.013.
+Executed 1 test, with 0 failures (0 unexpected) in 6.759 (6.760) seconds
+Executed 1 test, with 0 failures (0 unexpected) in 6.759 (6.761) seconds
+[1mTest session results:[0m /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/UITests-20260917T222658Z-55120/testPopoverRoutesProviderContextIntoUsage.xcresult
+[32;1mTest Succeeded[0m
+[36;1mTesting started[0m
+
+----- xcbeautify -----
+Version: 3.2.1
+----------------------
+
+Test Suite 'Selected tests' started at 2026-09-18 05:30:17.996.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 05:30:17.997.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 05:30:17.997.
+    [32m✔[0m testProviderDetailPassesAccessibilityAudit ([31m20.799[0m seconds)
+Executed 1 test, with 0 failures (0 unexpected) in 20.799 (20.799) seconds
+Test Suite 'JackinDesktopUITests.xctest' passed at 2026-09-18 05:30:38.796.
+Executed 1 test, with 0 failures (0 unexpected) in 20.799 (20.800) seconds
+Executed 1 test, with 0 failures (0 unexpected) in 20.799 (20.800) seconds
+[1mTest session results:[0m /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/UITests-20260917T222658Z-55120/testProviderDetailPassesAccessibilityAudit.xcresult
+[32;1mTest Succeeded[0m
+[36;1mTesting started[0m
+
+----- xcbeautify -----
+Version: 3.2.1
+----------------------
+
+Test Suite 'Selected tests' started at 2026-09-18 05:30:44.217.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 05:30:44.218.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 05:30:44.218.
+    [32m✔[0m testRefreshActivityTransitionReachesNativeChrome ([31m9.828[0m seconds)
+Executed 1 test, with 0 failures (0 unexpected) in 9.828 (9.829) seconds
+Test Suite 'JackinDesktopUITests.xctest' passed at 2026-09-18 05:30:54.047.
+Executed 1 test, with 0 failures (0 unexpected) in 9.828 (9.829) seconds
+Executed 1 test, with 0 failures (0 unexpected) in 9.828 (9.830) seconds
+[1mTest session results:[0m /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/UITests-20260917T222658Z-55120/testRefreshActivityTransitionReachesNativeChrome.xcresult
+[32;1mTest Succeeded[0m
+[36;1mTesting started[0m
+
+----- xcbeautify -----
+Version: 3.2.1
+----------------------
+
+Test Suite 'Selected tests' started at 2026-09-18 05:30:59.543.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 05:30:59.543.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 05:30:59.543.
+    [32m✔[0m testRefreshingUsageExposesNativeBusyState ([31m6.944[0m seconds)
+Executed 1 test, with 0 failures (0 unexpected) in 6.944 (6.944) seconds
+Test Suite 'JackinDesktopUITests.xctest' passed at 2026-09-18 05:31:06.488.
+Executed 1 test, with 0 failures (0 unexpected) in 6.944 (6.945) seconds
+Executed 1 test, with 0 failures (0 unexpected) in 6.944 (6.946) seconds
+[1mTest session results:[0m /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/UITests-20260917T222658Z-55120/testRefreshingUsageExposesNativeBusyState.xcresult
+[32;1mTest Succeeded[0m
+[36;1mTesting started[0m
+
+----- xcbeautify -----
+Version: 3.2.1
+----------------------
+
+Test Suite 'Selected tests' started at 2026-09-18 05:31:12.246.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 05:31:12.247.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 05:31:12.247.
+    [32m✔[0m testRetainedUsageWindowPreservesContextAcrossCloseAndReopen ([31m13.584[0m seconds)
+Executed 1 test, with 0 failures (0 unexpected) in 13.584 (13.585) seconds
+Test Suite 'JackinDesktopUITests.xctest' passed at 2026-09-18 05:31:25.832.
+Executed 1 test, with 0 failures (0 unexpected) in 13.584 (13.585) seconds
+Executed 1 test, with 0 failures (0 unexpected) in 13.584 (13.586) seconds
+[1mTest session results:[0m /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/UITests-20260917T222658Z-55120/testRetainedUsageWindowPreservesContextAcrossCloseAndReopen.xcresult
+[32;1mTest Succeeded[0m
+[36;1mTesting started[0m
+
+----- xcbeautify -----
+Version: 3.2.1
+----------------------
+
+Test Suite 'Selected tests' started at 2026-09-18 05:31:34.025.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 05:31:34.026.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 05:31:34.026.
+    [32m✔[0m testSidebarShortcutPreservesDetailKeyboardFocus ([31m17.444[0m seconds)
+Executed 1 test, with 0 failures (0 unexpected) in 17.444 (17.445) seconds
+Test Suite 'JackinDesktopUITests.xctest' passed at 2026-09-18 05:31:51.471.
+Executed 1 test, with 0 failures (0 unexpected) in 17.444 (17.445) seconds
+Executed 1 test, with 0 failures (0 unexpected) in 17.444 (17.446) seconds
+[1mTest session results:[0m /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/UITests-20260917T222658Z-55120/testSidebarShortcutPreservesDetailKeyboardFocus.xcresult
+[32;1mTest Succeeded[0m
+[36;1mTesting started[0m
+
+----- xcbeautify -----
+Version: 3.2.1
+----------------------
+
+Test Suite 'Selected tests' started at 2026-09-18 05:32:00.467.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 05:32:00.468.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 05:32:00.468.
+    [32m✔[0m testStandardCommandsAndMenusShareNativeState ([31m29.907[0m seconds)
+Executed 1 test, with 0 failures (0 unexpected) in 29.907 (29.908) seconds
+Test Suite 'JackinDesktopUITests.xctest' passed at 2026-09-18 05:32:30.377.
+Executed 1 test, with 0 failures (0 unexpected) in 29.907 (29.909) seconds
+Executed 1 test, with 0 failures (0 unexpected) in 29.907 (29.910) seconds
+[1mTest session results:[0m /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/UITests-20260917T222658Z-55120/testStandardCommandsAndMenusShareNativeState.xcresult
+[32;1mTest Succeeded[0m
+[36;1mTesting started[0m
+UI tests: 19/19 passed
+Results: /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/UITests-20260917T222658Z-55120
+JUnit: /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/.build/test-results/ui-20260917T222658Z-55120

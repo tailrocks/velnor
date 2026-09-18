@@ -1,0 +1,511 @@
+Command line invocation:
+    /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -project native/JackinDesktop.xcodeproj -scheme JackinDesktop -destination platform=macOS -parallel-testing-enabled NO "-only-testing:JackinDesktopUITests/JackinDesktopUITests/testOverviewPassesAccessibilityAudit" -derivedDataPath native/DerivedData -resultBundlePath /tmp/fix3-6.xcresult
+
+Writing result bundle at path:
+	/tmp/fix3-6.xcresult
+
+ComputePackagePrebuildTargetDependencyGraph
+
+Prepare packages
+
+CreateBuildRequest
+
+SendProjectDescription
+
+CreateBuildOperation
+
+ComputeTargetDependencyGraph
+note: Building targets in dependency order
+note: Target dependency graph (6 targets)
+    Target 'JackinDesktopUITests' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinDesktop' in project 'JackinDesktop'
+    Target 'JackinDesktopTests' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinDesktopUI' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBridge' in project 'JackinDesktop'
+    Target 'JackinDesktop' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinDesktopUI' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBridge' in project 'JackinDesktop'
+    Target 'JackinDesktopUI' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBridge' in project 'JackinDesktop'
+    Target 'JackinUsageBridge' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+    Target 'JackinUsageBindings' in project 'JackinDesktop' (no dependencies)
+
+GatherProvisioningInputs
+
+CreateBuildDescription
+
+ClangStatCache /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang-stat-cache /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKStatCaches.noindex/macosx27.0-26A425-7231f6df4def33e022ae2eb8f782df1a.sdkstatcache
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/JackinDesktop.xcodeproj
+    /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang-stat-cache /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk -o /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKStatCaches.noindex/macosx27.0-26A425-7231f6df4def33e022ae2eb8f782df1a.sdkstatcache
+
+PruneExplicitPrecompiledModules /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/SwiftExplicitPrecompiledModules
+
+PruneExplicitPrecompiledModules /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKExplicitPrecompiledModules
+
+PruneExplicitPrecompiledModules /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/ExplicitPrecompiledModules
+
+2026-09-18 05:13:48.652430+0700 JackinDesktopUITests-Runner[91798:131878432] [Default] Running tests...
+Test Suite 'Selected tests' started at 2026-09-18 05:13:48.705.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 05:13:48.705.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 05:13:48.705.
+Test Case '-[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit]' started.
+    t =     0.00s Start Test at 2026-09-18 05:13:48.705
+    t =     0.20s Set Up
+2026-09-18 05:13:48.977 xcodebuild[91725:131877907] [MT] IDELaunchParametersSnapshot: debugger version lookup failed for path '<nil>': noURL
+2026-09-18 05:13:48.977 xcodebuild[91725:131877907] [MT] IDELaunchParametersSnapshot: no debugger version
+    t =     0.20s Open com.jackin-project.desktop
+    t =     0.20s     Launch com.jackin-project.desktop
+    t =     0.48s         Wait for accessibility to load
+    t =     0.60s         Setting up automation session
+    t =     0.61s         Wait for com.jackin-project.desktop to idle
+    t =     0.85s Open com.jackin-project.desktop
+    t =     0.86s     Activate com.jackin-project.desktop
+    t =     0.86s         Wait for com.jackin-project.desktop to idle
+    t =     0.87s Waiting 8.0s for "usage-window" Window to exist
+    t =     1.91s     Checking `Expect predicate `existsNoRetry == 1` for object "usage-window" Window`
+    t =     1.91s         Checking existence of `"usage-window" Window`
+    t =     2.06s Open com.jackin-project.desktop
+    t =     2.07s     Activate com.jackin-project.desktop
+    t =     2.07s         Wait for com.jackin-project.desktop to idle
+    t =     2.07s Waiting 5.0s for "usage.overview.table" Any to exist
+    t =     3.11s     Checking `Expect predicate `existsNoRetry == 1` for object "usage.overview.table" Any`
+    t =     3.11s         Checking existence of `"usage.overview.table" Any`
+    t =     3.19s Find the "usage.overview.table" Any
+    t =     3.27s Find the "usage.sidebar" Any
+    t =     3.34s Checking existence of `"usage-window" Window`
+    t =     3.41s Open com.jackin-project.desktop
+    t =     3.41s     Activate com.jackin-project.desktop
+    t =     3.41s         Wait for com.jackin-project.desktop to idle
+    t =     3.41s Waiting 1.0s for "usage.overview.table" Any to exist
+    t =     4.42s     Checking `Expect predicate `existsNoRetry == 1` for object "usage.overview.table" Any`
+    t =     4.42s         Checking existence of `"usage.overview.table" Any`
+    t =     4.51s     Checking existence of `"usage.overview.table" Any`
+    t =     4.61s Checking existence of `"usage.overview.table" Outline`
+    t =     4.69s Get number of matches for: Descendants matching type OutlineRow
+    t =     4.79s Get number of matches for: Elements matching predicate 'identifier BEGINSWITH "usage.overview.account."'
+    t =     5.17s Checking existence of `"usage.overview.table" Outline`
+    t =     5.24s Get number of matches for: Descendants matching type OutlineRow
+    t =     5.32s Get number of matches for: Elements matching predicate 'identifier BEGINSWITH "usage.overview.account."'
+    t =     5.69s Checking existence of `"usage.overview.table" Outline`
+    t =     5.77s Get number of matches for: Descendants matching type OutlineRow
+    t =     5.84s Get number of matches for: Elements matching predicate 'identifier BEGINSWITH "usage.overview.account."'
+    t =     6.21s Checking existence of `"usage.overview.table" Outline`
+    t =     6.29s Get number of matches for: Descendants matching type OutlineRow
+    t =     6.38s Get number of matches for: Elements matching predicate 'identifier BEGINSWITH "usage.overview.account."'
+    t =     6.45s Checking existence of `"usage.overview.table" Outline`
+    t =     6.55s Find the "usage.overview.table" Outline
+    t =     6.64s Checking existence of `Any (First Match)`
+    t =     6.70s Get all elements bound by index for: Elements matching predicate 'identifier BEGINSWITH "usage.overview.provider."'
+    t =     6.78s Checking existence of `Any (Element at index 0)`
+    t =     6.85s Find the Any (Element at index 0)
+    t =     6.93s Find the "usage.overview.provider.codex" StaticText
+    t =     7.00s Checking existence of `Any (Element at index 1)`
+    t =     7.06s Find the Any (Element at index 1)
+    t =     7.13s Find the "usage.overview.provider.claude" StaticText
+    t =     7.20s Checking existence of `Any (Element at index 2)`
+    t =     7.27s Find the Any (Element at index 2)
+    t =     7.34s Find the "usage.overview.provider.amp" StaticText
+    t =     7.42s Checking existence of `Any (Element at index 3)`
+    t =     7.49s Find the Any (Element at index 3)
+    t =     7.56s Find the "usage.overview.provider.grok" StaticText
+    t =     7.64s Checking existence of `Any (Element at index 4)`
+    t =     7.70s Find the Any (Element at index 4)
+    t =     7.77s Find the "usage.overview.provider.zai" StaticText
+    t =     7.84s Checking existence of `Any (Element at index 5)`
+    t =     7.91s Find the Any (Element at index 5)
+    t =     7.99s Find the "usage.overview.provider.kimi" StaticText
+    t =     8.06s Checking existence of `Any (Element at index 6)`
+    t =     8.13s Find the Any (Element at index 6)
+    t =     8.21s Find the "usage.overview.provider.minimax" StaticText
+    t =     8.28s Checking existence of `Any (First Match)`
+    t =     8.33s Get all elements bound by index for: Elements matching predicate 'identifier BEGINSWITH "usage.overview.account."'
+    t =     8.39s Checking existence of `Any (Element at index 0)`
+    t =     8.46s Find the Any (Element at index 0)
+    t =     8.53s Find the "usage.overview.account.codex.codex-personal" StaticText
+    t =     8.60s Checking existence of `Any (Element at index 1)`
+    t =     8.67s Find the Any (Element at index 1)
+    t =     8.73s Find the "usage.overview.account.codex.codex-plus" StaticText
+    t =     8.80s Checking existence of `Any (Element at index 2)`
+    t =     8.87s Find the Any (Element at index 2)
+    t =     8.93s Find the "usage.overview.account.claude.claude-personal" StaticText
+    t =     9.00s Checking existence of `Any (Element at index 3)`
+    t =     9.06s Find the Any (Element at index 3)
+    t =     9.13s Find the "usage.overview.account.claude.claude-work" StaticText
+    t =     9.20s Checking existence of `Any (Element at index 4)`
+    t =     9.27s Find the Any (Element at index 4)
+    t =     9.33s Find the "usage.overview.account.grok.grok-default" StaticText
+    t =     9.40s Checking existence of `Any (Element at index 5)`
+    t =     9.47s Find the Any (Element at index 5)
+    t =     9.54s Find the "usage.overview.account.zai.zai-default" StaticText
+    t =     9.61s Checking existence of `Any (Element at index 6)`
+    t =     9.68s Find the Any (Element at index 6)
+    t =     9.75s Find the "usage.overview.account.kimi.kimi-default" StaticText
+    t =     9.82s Checking existence of `Any (Element at index 7)`
+    t =     9.90s Find the Any (Element at index 7)
+    t =     9.97s Find the "usage.overview.account.minimax.minimax-default" StaticText
+    t =    10.04s Checking existence of `Any (First Match)`
+    t =    10.08s Get all elements bound by index for: Elements matching predicate 'identifier BEGINSWITH "usage.sidebar.provider."'
+    t =    10.15s Checking existence of `Any (Element at index 0)`
+    t =    10.21s Find the Any (Element at index 0)
+    t =    10.29s Find the "usage.sidebar.provider.codex" StaticText
+    t =    10.36s Checking existence of `Any (Element at index 1)`
+    t =    10.43s Find the Any (Element at index 1)
+    t =    10.51s Find the "usage.sidebar.provider.claude" StaticText
+    t =    10.58s Checking existence of `Any (Element at index 2)`
+    t =    10.65s Find the Any (Element at index 2)
+    t =    10.73s Find the "usage.sidebar.provider.amp" StaticText
+    t =    10.81s Checking existence of `Any (Element at index 3)`
+    t =    10.88s Find the Any (Element at index 3)
+    t =    10.95s Find the "usage.sidebar.provider.grok" StaticText
+    t =    11.03s Checking existence of `Any (Element at index 4)`
+    t =    11.10s Find the Any (Element at index 4)
+    t =    11.18s Find the "usage.sidebar.provider.zai" StaticText
+    t =    11.25s Checking existence of `Any (Element at index 5)`
+    t =    11.32s Find the Any (Element at index 5)
+    t =    11.40s Find the "usage.sidebar.provider.kimi" StaticText
+    t =    11.48s Checking existence of `Any (Element at index 6)`
+    t =    11.55s Find the Any (Element at index 6)
+    t =    11.62s Find the "usage.sidebar.provider.minimax" StaticText
+    t =    11.70s Checking existence of `"usage.fixture-badge" Any`
+    t =    11.79s Find the "usage.fixture-badge" Any
+    t =    11.89s Checking existence of `"usage-window" Window`
+    t =    11.97s Checking existence of `"usage.sidebar" Any`
+    t =    12.07s Checking existence of `"usage.refresh" Any`
+    t =    12.16s Find the "usage.refresh" Any
+    t =    15.98s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jcQAAAAAAAAA=)
+    t =    17.05s     Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jcQAAAAAAAAA=) (retry 1)
+    t =    18.13s     Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jcQAAAAAAAAA=) (retry 2)
+    t =    18.20s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jTQAAAAAAAAD+/////////1gAAAAAAAAAAAAAAAAAAAA=)
+    t =    18.28s Checking existence of `Group`
+    t =    18.34s Find the Group
+    t =    18.41s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jXgAAAAAAAAA=)
+    t =    18.47s Checking existence of `"usage.sidebar.provider.amp" StaticText`
+    t =    18.54s Find the "usage.sidebar.provider.amp" StaticText
+    t =    18.60s Find the "usage.sidebar.provider.amp" StaticText
+    t =    18.66s Find the "usage.sidebar.provider.amp" StaticText
+    t =    18.73s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jWwAAAAAAAAA=)
+    t =    18.80s Checking existence of `"usage.sidebar.provider.zai" StaticText`
+    t =    18.86s Find the "usage.sidebar.provider.zai" StaticText
+    t =    18.92s Find the "usage.sidebar.provider.zai" StaticText
+    t =    18.99s Find the "usage.sidebar.provider.zai" StaticText
+    t =    19.05s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jWQAAAAAAAAA=)
+    t =    19.12s Checking existence of `"usage.sidebar.provider.kimi" StaticText`
+    t =    19.18s Find the "usage.sidebar.provider.kimi" StaticText
+    t =    19.24s Find the "usage.sidebar.provider.kimi" StaticText
+    t =    19.30s Find the "usage.sidebar.provider.kimi" StaticText
+    t =    19.36s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jQwAAAAAAAAA=)
+    t =    19.43s Checking existence of `Group`
+    t =    19.49s Find the Group
+    t =    19.55s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD//////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    19.61s Checking existence of `Group`
+    t =    19.68s Find the Group
+    t =    19.73s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD//////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    19.79s Checking existence of `Group`
+    t =    19.85s Find the Group
+    t =    19.91s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD//////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    19.97s Checking existence of `Group`
+    t =    20.03s Find the Group
+    t =    20.09s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD//////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    20.16s Checking existence of `Group`
+    t =    20.22s Find the Group
+    t =    20.28s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD//////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    20.34s Checking existence of `Group`
+    t =    20.40s Find the Group
+    t =    20.46s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD+/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    20.52s Checking existence of `Group`
+    t =    20.59s Find the Group
+    t =    20.64s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jZAAAAAAAAAA=)
+    t =    20.70s Checking existence of `"usage.overview.account.codex.codex-personal" StaticText`
+    t =    20.77s Find the "usage.overview.account.codex.codex-personal" StaticText
+    t =    20.83s Find the "usage.overview.account.codex.codex-personal" StaticText
+    t =    20.89s Find the "usage.overview.account.codex.codex-personal" StaticText
+    t =    20.95s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD+/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    21.01s Checking existence of `Group`
+    t =    21.06s Find the Group
+    t =    21.12s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD+/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    21.18s Checking existence of `Group`
+    t =    21.24s Find the Group
+    t =    21.30s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD+/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    21.36s Checking existence of `Group`
+    t =    21.41s Find the Group
+    t =    21.46s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD+/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    21.52s Checking existence of `Group`
+    t =    21.58s Find the Group
+    t =    21.63s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD9/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    21.69s Checking existence of `Group`
+    t =    21.74s Find the Group
+    t =    21.80s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jcAAAAAAAAAA=)
+    t =    21.86s Checking existence of `"usage.overview.account.codex.codex-plus" StaticText`
+    t =    21.91s Find the "usage.overview.account.codex.codex-plus" StaticText
+    t =    21.97s Find the "usage.overview.account.codex.codex-plus" StaticText
+    t =    22.03s Find the "usage.overview.account.codex.codex-plus" StaticText
+    t =    22.09s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD9/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    22.15s Checking existence of `Group`
+    t =    22.20s Find the Group
+    t =    22.26s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD9/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    22.33s Checking existence of `Group`
+    t =    22.39s Find the Group
+    t =    22.45s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD9/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    22.51s Checking existence of `Group`
+    t =    22.57s Find the Group
+    t =    22.62s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD9/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    22.69s Checking existence of `Group`
+    t =    22.75s Find the Group
+    t =    22.80s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD8/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    22.87s Checking existence of `Group`
+    t =    22.94s Find the Group
+    t =    23.00s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD8/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    23.08s Checking existence of `Group`
+    t =    23.15s Find the Group
+    t =    23.21s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD8/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    23.29s Checking existence of `Group`
+    t =    23.36s Find the Group
+    t =    23.43s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD8/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    23.50s Checking existence of `Group`
+    t =    23.57s Find the Group
+    t =    23.64s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD8/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    23.70s Checking existence of `Group`
+    t =    23.77s Find the Group
+    t =    23.84s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD7/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    23.90s Checking existence of `Group`
+    t =    23.97s Find the Group
+    t =    24.02s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jYgAAAAAAAAA=)
+    t =    24.09s Checking existence of `"usage.overview.account.claude.claude-personal" StaticText`
+    t =    24.15s Find the "usage.overview.account.claude.claude-personal" StaticText
+    t =    24.21s Find the "usage.overview.account.claude.claude-personal" StaticText
+    t =    24.28s Find the "usage.overview.account.claude.claude-personal" StaticText
+    t =    24.34s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD7/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    24.41s Checking existence of `Group`
+    t =    24.46s Find the Group
+    t =    24.53s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD7/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    24.60s Checking existence of `Group`
+    t =    24.66s Find the Group
+    t =    24.74s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD7/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    24.81s Checking existence of `Group`
+    t =    24.87s Find the Group
+    t =    24.94s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD7/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    25.01s Checking existence of `Group`
+    t =    25.08s Find the Group
+    t =    25.16s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD6/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    25.23s Checking existence of `Group`
+    t =    25.30s Find the Group
+    t =    25.37s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jagAAAAAAAAA=)
+    t =    25.45s Checking existence of `"usage.overview.account.claude.claude-work" StaticText`
+    t =    25.53s Find the "usage.overview.account.claude.claude-work" StaticText
+    t =    25.60s Find the "usage.overview.account.claude.claude-work" StaticText
+    t =    25.67s Find the "usage.overview.account.claude.claude-work" StaticText
+    t =    25.74s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD6/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    25.82s Checking existence of `Group`
+    t =    25.90s Find the Group
+    t =    25.97s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD6/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    26.05s Checking existence of `Group`
+    t =    26.13s Find the Group
+    t =    26.21s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD6/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    26.29s Checking existence of `Group`
+    t =    26.37s Find the Group
+    t =    26.45s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD6/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    26.53s Checking existence of `Group`
+    t =    26.61s Find the Group
+    t =    26.68s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD5/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    26.76s Checking existence of `Group`
+    t =    26.84s Find the Group
+    t =    26.92s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD5/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    27.00s Checking existence of `Group`
+    t =    27.08s Find the Group
+    t =    27.15s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD5/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    27.23s Checking existence of `Group`
+    t =    27.31s Find the Group
+    t =    27.39s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD5/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    27.48s Checking existence of `Group`
+    t =    27.56s Find the Group
+    t =    27.64s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD5/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    27.72s Checking existence of `Group`
+    t =    27.81s Find the Group
+    t =    27.89s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD4/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    27.98s Checking existence of `Group`
+    t =    28.05s Find the Group
+    t =    28.13s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD4/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    28.21s Checking existence of `Group`
+    t =    28.30s Find the Group
+    t =    28.38s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD4/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    28.46s Checking existence of `Group`
+    t =    28.55s Find the Group
+    t =    28.63s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD4/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    28.71s Checking existence of `Group`
+    t =    28.79s Find the Group
+    t =    28.87s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD4/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    28.95s Checking existence of `Group`
+    t =    29.03s Find the Group
+    t =    29.11s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD3/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    29.19s Checking existence of `Group`
+    t =    29.27s Find the Group
+    t =    29.36s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jaQAAAAAAAAA=)
+    t =    29.44s Checking existence of `"usage.overview.account.grok.grok-default" StaticText`
+    t =    29.52s Find the "usage.overview.account.grok.grok-default" StaticText
+    t =    29.60s Find the "usage.overview.account.grok.grok-default" StaticText
+    t =    29.69s Find the "usage.overview.account.grok.grok-default" StaticText
+    t =    29.77s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD3/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    29.85s Checking existence of `Group`
+    t =    29.93s Find the Group
+    t =    30.01s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD3/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    30.10s Checking existence of `Group`
+    t =    30.17s Find the Group
+    t =    30.25s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD3/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    30.33s Checking existence of `Group`
+    t =    30.41s Find the Group
+    t =    30.49s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD3/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    30.57s Checking existence of `Group`
+    t =    30.65s Find the Group
+    t =    30.73s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD2/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    30.82s Checking existence of `Group`
+    t =    30.90s Find the Group
+    t =    30.97s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD2/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    31.05s Checking existence of `Group`
+    t =    31.14s Find the Group
+    t =    31.21s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD2/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    31.30s Checking existence of `Group`
+    t =    31.38s Find the Group
+    t =    31.46s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD2/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    31.54s Checking existence of `Group`
+    t =    31.62s Find the Group
+    t =    31.70s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD2/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    31.80s Checking existence of `Group`
+    t =    31.89s Find the Group
+    t =    31.97s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD1/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    32.06s Checking existence of `Group`
+    t =    32.13s Find the Group
+    t =    32.21s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jawAAAAAAAAA=)
+    t =    32.30s Checking existence of `"usage.overview.account.zai.zai-default" StaticText`
+    t =    32.38s Find the "usage.overview.account.zai.zai-default" StaticText
+    t =    32.47s Find the "usage.overview.account.zai.zai-default" StaticText
+    t =    32.55s Find the "usage.overview.account.zai.zai-default" StaticText
+    t =    32.63s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD1/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    32.72s Checking existence of `Group`
+    t =    32.80s Find the Group
+    t =    32.89s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD1/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    32.98s Checking existence of `Group`
+    t =    33.07s Find the Group
+    t =    33.15s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD1/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    33.23s Checking existence of `Group`
+    t =    33.32s Find the Group
+    t =    33.40s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD1/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    33.49s Checking existence of `Group`
+    t =    33.57s Find the Group
+    t =    33.65s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD0/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    33.75s Checking existence of `Group`
+    t =    33.83s Find the Group
+    t =    33.91s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD0/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    34.00s Checking existence of `Group`
+    t =    34.12s Find the Group
+    t =    34.20s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD0/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    34.29s Checking existence of `Group`
+    t =    34.38s Find the Group
+    t =    34.46s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD0/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    34.55s Checking existence of `Group`
+    t =    34.63s Find the Group
+    t =    34.72s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAAD0/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    34.81s Checking existence of `Group`
+    t =    34.89s Find the Group
+    t =    34.97s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAADz/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    35.06s Checking existence of `Group`
+    t =    35.15s Find the Group
+    t =    35.22s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jbgAAAAAAAAA=)
+    t =    35.31s Checking existence of `"usage.overview.account.kimi.kimi-default" StaticText`
+    t =    35.39s Find the "usage.overview.account.kimi.kimi-default" StaticText
+    t =    35.48s Find the "usage.overview.account.kimi.kimi-default" StaticText
+    t =    35.57s Find the "usage.overview.account.kimi.kimi-default" StaticText
+    t =    35.65s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAADz/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    35.74s Checking existence of `Group`
+    t =    35.83s Find the Group
+    t =    35.92s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAADz/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    36.00s Checking existence of `Group`
+    t =    36.12s Find the Group
+    t =    36.20s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAADz/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    36.28s Checking existence of `Group`
+    t =    36.37s Find the Group
+    t =    36.45s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAADz/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    36.54s Checking existence of `Group`
+    t =    36.62s Find the Group
+    t =    36.70s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAADy/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    36.79s Checking existence of `Group`
+    t =    36.88s Find the Group
+    t =    36.96s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAADy/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    37.05s Checking existence of `Group`
+    t =    37.12s Find the Group
+    t =    37.20s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAADy/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    37.29s Checking existence of `Group`
+    t =    37.37s Find the Group
+    t =    37.45s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAADy/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    37.54s Checking existence of `Group`
+    t =    37.61s Find the Group
+    t =    37.70s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAADy/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    37.79s Checking existence of `Group`
+    t =    37.88s Find the Group
+    t =    37.96s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAADx/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    38.04s Checking existence of `Group`
+    t =    38.12s Find the Group
+    t =    38.21s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jYwAAAAAAAAA=)
+    t =    38.33s Checking existence of `"usage.overview.account.minimax.minimax-default" StaticText`
+    t =    38.42s Find the "usage.overview.account.minimax.minimax-default" StaticText
+    t =    38.50s Find the "usage.overview.account.minimax.minimax-default" StaticText
+    t =    38.59s Find the "usage.overview.account.minimax.minimax-default" StaticText
+    t =    38.67s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAADx/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    38.75s Checking existence of `Group`
+    t =    38.84s Find the Group
+    t =    38.93s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAADx/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    39.01s Checking existence of `Group`
+    t =    39.10s Find the Group
+    t =    39.18s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAADx/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    39.27s Checking existence of `Group`
+    t =    39.35s Find the Group
+    t =    39.43s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jUAAAAAAAAADx/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    39.52s Checking existence of `Group`
+    t =    39.60s Find the Group
+    t =    39.68s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jRgAAAAAAAAA=)
+    t =    39.77s Checking existence of `Group`
+    t =    39.85s Find the Group
+    t =    39.95s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jTgAAAAAAAAA=)
+    t =    40.04s Checking existence of `"usage.fixture-badge" StaticText`
+    t =    40.12s Find the "usage.fixture-badge" StaticText
+    t =    40.20s Find the "usage.fixture-badge" StaticText
+    t =    40.29s Find the "usage.fixture-badge" StaticText
+    t =    40.38s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jOgAAAAAAAAA=)
+    t =    40.46s Checking existence of `Group`
+    t =    40.55s Find the Group
+    t =    40.63s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jPgAAAAAAAAA=)
+    t =    40.72s Checking existence of `Group`
+    t =    40.80s Find the Group
+    t =    40.87s Find the Group
+    t =    40.95s Get all elements bound by index for: Descendants matching type Button
+    t =    41.04s Find the Button (Element at index 0)
+    t =    41.12s Find the "_XCUI:CloseWindow" Button
+    t =    41.20s Find the Group
+    t =    41.29s Find the Button (Element at index 1)
+    t =    41.37s Find the "_XCUI:ZoomWindow" Button
+    t =    41.46s Find the Group at {{469.0, 284.0}, {14.0, 14.0}}
+    t =    41.55s Find the Any (Descendant with identity binding to AX element pid: 91803, token: m2YBAAAAAABvY29jLwAAAAAAAAA=)
+    t =    41.63s Checking existence of `TouchBar`
+    t =    41.71s Find the TouchBar
+    t =    41.79s Terminate com.jackin-project.desktop:91803
+    t =    42.84s Tear Down
+Test Case '-[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit]' passed (44.875 seconds).
+Test Suite 'JackinDesktopUITests' passed at 2026-09-18 05:14:33.580.
+	 Executed 1 test, with 0 failures (0 unexpected) in 44.875 (44.875) seconds
+Test Suite 'JackinDesktopUITests.xctest' passed at 2026-09-18 05:14:33.581.
+	 Executed 1 test, with 0 failures (0 unexpected) in 44.875 (44.876) seconds
+Test Suite 'Selected tests' passed at 2026-09-18 05:14:33.581.
+	 Executed 1 test, with 0 failures (0 unexpected) in 44.875 (44.876) seconds
+2026-09-18 05:14:33.853 xcodebuild[91725:131877907] [MT] IDETestOperationsObserverDebug: 46.121 elapsed -- Testing started completed.
+2026-09-18 05:14:33.853 xcodebuild[91725:131877907] [MT] IDETestOperationsObserverDebug: 0.000 sec, +0.000 sec -- start
+2026-09-18 05:14:33.853 xcodebuild[91725:131877907] [MT] IDETestOperationsObserverDebug: 46.121 sec, +46.121 sec -- end
+
+Test session results, code coverage, and logs:
+	/tmp/fix3-6.xcresult
+
+** TEST SUCCEEDED **
+
+Testing started

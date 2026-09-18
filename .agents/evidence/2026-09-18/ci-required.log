@@ -1,0 +1,1030 @@
+﻿2026-09-17T13:37:41.1006666Z Current runner version: '2.337.0'
+2026-09-17T13:37:41.1031000Z ##[group]Runner Image Provisioner
+2026-09-17T13:37:41.1032267Z Hosted Compute Agent
+2026-09-17T13:37:41.1032978Z Version: 20260828.587
+2026-09-17T13:37:41.1033603Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+2026-09-17T13:37:41.1034311Z Build Date: 2026-08-28T16:44:25Z
+2026-09-17T13:37:41.1034968Z Worker ID: {e47330e9-5306-43c2-8d07-e699b15dc341}
+2026-09-17T13:37:41.1035696Z Azure Region: westus3
+2026-09-17T13:37:41.1036272Z ##[endgroup]
+2026-09-17T13:37:41.1037846Z ##[group]Operating System
+2026-09-17T13:37:41.1038471Z Ubuntu
+2026-09-17T13:37:41.1038986Z 24.04.5
+2026-09-17T13:37:41.1039510Z LTS
+2026-09-17T13:37:41.1040041Z ##[endgroup]
+2026-09-17T13:37:41.1040564Z ##[group]Runner Image
+2026-09-17T13:37:41.1041128Z Image: ubuntu-24.04
+2026-09-17T13:37:41.1041947Z Version: 20260907.300.1
+2026-09-17T13:37:41.1043168Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260907.300/images/ubuntu/Ubuntu2404-Readme.md
+2026-09-17T13:37:41.1044680Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260907.300
+2026-09-17T13:37:41.1045578Z ##[endgroup]
+2026-09-17T13:37:41.1046837Z ##[group]GITHUB_TOKEN Permissions
+2026-09-17T13:37:41.1049102Z Actions: read
+2026-09-17T13:37:41.1049675Z Contents: read
+2026-09-17T13:37:41.1050216Z Metadata: read
+2026-09-17T13:37:41.1050760Z ##[endgroup]
+2026-09-17T13:37:41.1053005Z Secret source: Actions
+2026-09-17T13:37:41.1053936Z Cache mode: write
+2026-09-17T13:37:41.1054585Z Prepare workflow directory
+2026-09-17T13:37:41.1316443Z Prepare all required actions
+2026-09-17T13:37:41.1397435Z Complete job name: ci-required
+2026-09-17T13:37:41.2058773Z ##[group]Run set -euo pipefail
+2026-09-17T13:37:41.2061694Z [36;1mset -euo pipefail[0m
+2026-09-17T13:37:41.2062477Z [36;1mif [[ -z "$PLAN_DIGEST" ]]; then[0m
+2026-09-17T13:37:41.2063326Z [36;1m  echo "plan did not freeze a plan digest: the expected set has no identity" >&2[0m
+2026-09-17T13:37:41.2064150Z [36;1m  exit 1[0m
+2026-09-17T13:37:41.2064614Z [36;1mfi[0m
+2026-09-17T13:37:41.2065136Z [36;1mecho "verdict binds plan digest $PLAN_DIGEST"[0m
+2026-09-17T13:37:41.2065764Z [36;1mresult_for_job() {[0m
+2026-09-17T13:37:41.2066374Z [36;1m  jq -r --arg job "$1" '.[$job].result // empty' <<<"$NEEDS_JSON"[0m
+2026-09-17T13:37:41.2067021Z [36;1m}[0m
+2026-09-17T13:37:41.2067449Z [36;1mplan_expects() {[0m
+2026-09-17T13:37:41.2068363Z [36;1m  [[ "$(jq -r --arg unit "$1" --arg provider "$2" '[.[] | select(.unit_id == $unit) | .providers[] | select(. == $provider)] | length' <<<"$SELECTED_UNITS")" -gt 0 ]][0m
+2026-09-17T13:37:41.2069372Z [36;1m}[0m
+2026-09-17T13:37:41.2069898Z [36;1mplan_expects_local() {[0m
+2026-09-17T13:37:41.2070834Z [36;1m  [[ "$(jq -r --arg unit "$1" '[.[] | select(.unit_id == $unit) | .providers[] | select(. == "velnor")] | length' <<<"$SELECTED_UNITS")" -gt 0 ]][0m
+2026-09-17T13:37:41.2071807Z [36;1m}[0m
+2026-09-17T13:37:41.2072276Z [36;1mresult="$(result_for_job plan)"[0m
+2026-09-17T13:37:41.2072858Z [36;1mif [[ "$result" != success ]]; then[0m
+2026-09-17T13:37:41.2073540Z [36;1m  echo "required CI prerequisite plan did not pass: $result" >&2[0m
+2026-09-17T13:37:41.2074248Z [36;1m  exit 1[0m
+2026-09-17T13:37:41.2074677Z [36;1mfi[0m
+2026-09-17T13:37:41.2075208Z [36;1mif plan_expects "bun-velnor" "github-hosted"; then[0m
+2026-09-17T13:37:41.2075962Z [36;1m  result="$(result_for_job github-hosted-bun-velnor)"[0m
+2026-09-17T13:37:41.2076668Z [36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2077359Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2077862Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2079309Z [36;1m      skipped) echo "expected CI job github-hosted-bun-velnor was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2081130Z [36;1m      cancelled) echo "expected CI job github-hosted-bun-velnor was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2083397Z [36;1m      *) echo "expected CI job github-hosted-bun-velnor did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2084675Z [36;1m    esac[0m
+2026-09-17T13:37:41.2085367Z [36;1m  else[0m
+2026-09-17T13:37:41.2086057Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2086827Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2088635Z [36;1m      *) echo "selected CI job github-hosted-bun-velnor ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2090177Z [36;1m    esac[0m
+2026-09-17T13:37:41.2090776Z [36;1m  fi[0m
+2026-09-17T13:37:41.2091569Z [36;1melse[0m
+2026-09-17T13:37:41.2092295Z [36;1m  result="$(result_for_job github-hosted-bun-velnor)"[0m
+2026-09-17T13:37:41.2093140Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2093827Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2094865Z [36;1m    success) echo "unexpected CI job github-hosted-bun-velnor succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2096178Z [36;1m    *) echo "unexpected CI job github-hosted-bun-velnor ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2097040Z [36;1m  esac[0m
+2026-09-17T13:37:41.2097505Z [36;1mfi[0m
+2026-09-17T13:37:41.2098046Z [36;1mif plan_expects "bun-velnor" "velnor"; then[0m
+2026-09-17T13:37:41.2098690Z [36;1m  result="$(result_for_job velnor-bun-velnor)"[0m
+2026-09-17T13:37:41.2099340Z [36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2100000Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2100742Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2101856Z [36;1m      skipped) echo "expected CI job velnor-bun-velnor was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2103179Z [36;1m      cancelled) echo "expected CI job velnor-bun-velnor was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2104325Z [36;1m      *) echo "expected CI job velnor-bun-velnor did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2105056Z [36;1m    esac[0m
+2026-09-17T13:37:41.2105498Z [36;1m  else[0m
+2026-09-17T13:37:41.2105921Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2106412Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2107488Z [36;1m      *) echo "selected CI job velnor-bun-velnor ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2108659Z [36;1m    esac[0m
+2026-09-17T13:37:41.2109076Z [36;1m  fi[0m
+2026-09-17T13:37:41.2109486Z [36;1melse[0m
+2026-09-17T13:37:41.2109977Z [36;1m  result="$(result_for_job velnor-bun-velnor)"[0m
+2026-09-17T13:37:41.2110547Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2111023Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2112068Z [36;1m    success) echo "unexpected CI job velnor-bun-velnor succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2113337Z [36;1m    *) echo "unexpected CI job velnor-bun-velnor ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2114122Z [36;1m  esac[0m
+2026-09-17T13:37:41.2114536Z [36;1mfi[0m
+2026-09-17T13:37:41.2115107Z [36;1mif plan_expects "docker" "github-hosted"; then[0m
+2026-09-17T13:37:41.2115759Z [36;1m  result="$(result_for_job github-hosted-docker)"[0m
+2026-09-17T13:37:41.2116457Z [36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED_TRUSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2117156Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2117644Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2118521Z [36;1m      skipped) echo "expected CI job github-hosted-docker was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2119807Z [36;1m      cancelled) echo "expected CI job github-hosted-docker was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2121053Z [36;1m      *) echo "expected CI job github-hosted-docker did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2122058Z [36;1m    esac[0m
+2026-09-17T13:37:41.2122518Z [36;1m  else[0m
+2026-09-17T13:37:41.2122987Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2123517Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2124677Z [36;1m      *) echo "selected CI job github-hosted-docker ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED_TRUSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED_TRUSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2125909Z [36;1m    esac[0m
+2026-09-17T13:37:41.2126332Z [36;1m  fi[0m
+2026-09-17T13:37:41.2126766Z [36;1melse[0m
+2026-09-17T13:37:41.2127259Z [36;1m  result="$(result_for_job github-hosted-docker)"[0m
+2026-09-17T13:37:41.2128013Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2128528Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2129430Z [36;1m    success) echo "unexpected CI job github-hosted-docker succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2130767Z [36;1m    *) echo "unexpected CI job github-hosted-docker ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2131802Z [36;1m  esac[0m
+2026-09-17T13:37:41.2132219Z [36;1mfi[0m
+2026-09-17T13:37:41.2132684Z [36;1mif plan_expects "docker" "velnor"; then[0m
+2026-09-17T13:37:41.2133313Z [36;1m  result="$(result_for_job velnor-docker)"[0m
+2026-09-17T13:37:41.2134019Z [36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2134661Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2135258Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2136084Z [36;1m      skipped) echo "expected CI job velnor-docker was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2137307Z [36;1m      cancelled) echo "expected CI job velnor-docker was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2138354Z [36;1m      *) echo "expected CI job velnor-docker did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2139090Z [36;1m    esac[0m
+2026-09-17T13:37:41.2139512Z [36;1m  else[0m
+2026-09-17T13:37:41.2139950Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2140452Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2141737Z [36;1m      *) echo "selected CI job velnor-docker ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2142885Z [36;1m    esac[0m
+2026-09-17T13:37:41.2143299Z [36;1m  fi[0m
+2026-09-17T13:37:41.2144122Z [36;1melse[0m
+2026-09-17T13:37:41.2144810Z [36;1m  result="$(result_for_job velnor-docker)"[0m
+2026-09-17T13:37:41.2145484Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2146177Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2147453Z [36;1m    success) echo "unexpected CI job velnor-docker succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2149194Z [36;1m    *) echo "unexpected CI job velnor-docker ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2150312Z [36;1m  esac[0m
+2026-09-17T13:37:41.2150890Z [36;1mfi[0m
+2026-09-17T13:37:41.2151761Z [36;1mif plan_expects "docs" "github-hosted"; then[0m
+2026-09-17T13:37:41.2152727Z [36;1m  result="$(result_for_job github-hosted-docs)"[0m
+2026-09-17T13:37:41.2153762Z [36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2154645Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2155274Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2156561Z [36;1m      skipped) echo "expected CI job github-hosted-docs was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2158328Z [36;1m      cancelled) echo "expected CI job github-hosted-docs was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2160049Z [36;1m      *) echo "expected CI job github-hosted-docs did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2161505Z [36;1m    esac[0m
+2026-09-17T13:37:41.2162114Z [36;1m  else[0m
+2026-09-17T13:37:41.2162744Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2163470Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2165014Z [36;1m      *) echo "selected CI job github-hosted-docs ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2166763Z [36;1m    esac[0m
+2026-09-17T13:37:41.2167411Z [36;1m  fi[0m
+2026-09-17T13:37:41.2168041Z [36;1melse[0m
+2026-09-17T13:37:41.2168761Z [36;1m  result="$(result_for_job github-hosted-docs)"[0m
+2026-09-17T13:37:41.2169597Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2170344Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2171819Z [36;1m    success) echo "unexpected CI job github-hosted-docs succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2173731Z [36;1m    *) echo "unexpected CI job github-hosted-docs ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2174894Z [36;1m  esac[0m
+2026-09-17T13:37:41.2175502Z [36;1mfi[0m
+2026-09-17T13:37:41.2176167Z [36;1mif plan_expects "docs" "velnor"; then[0m
+2026-09-17T13:37:41.2177003Z [36;1m  result="$(result_for_job velnor-docs)"[0m
+2026-09-17T13:37:41.2177951Z [36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2178925Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2179638Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2181193Z [36;1m      skipped) echo "expected CI job velnor-docs was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2183278Z [36;1m      cancelled) echo "expected CI job velnor-docs was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2184917Z [36;1m      *) echo "expected CI job velnor-docs did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2185871Z [36;1m    esac[0m
+2026-09-17T13:37:41.2186479Z [36;1m  else[0m
+2026-09-17T13:37:41.2187155Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2187873Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2189473Z [36;1m      *) echo "selected CI job velnor-docs ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2191191Z [36;1m    esac[0m
+2026-09-17T13:37:41.2192011Z [36;1m  fi[0m
+2026-09-17T13:37:41.2192668Z [36;1melse[0m
+2026-09-17T13:37:41.2193429Z [36;1m  result="$(result_for_job velnor-docs)"[0m
+2026-09-17T13:37:41.2194287Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2194994Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2196331Z [36;1m    success) echo "unexpected CI job velnor-docs succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2198171Z [36;1m    *) echo "unexpected CI job velnor-docs ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2199362Z [36;1m  esac[0m
+2026-09-17T13:37:41.2200001Z [36;1mfi[0m
+2026-09-17T13:37:41.2200713Z [36;1mif plan_expects "opentofu" "github-hosted"; then[0m
+2026-09-17T13:37:41.2202542Z [36;1m  result="$(result_for_job github-hosted-opentofu)"[0m
+2026-09-17T13:37:41.2203620Z [36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2204532Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2205689Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2207237Z [36;1m      skipped) echo "expected CI job github-hosted-opentofu was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2209371Z [36;1m      cancelled) echo "expected CI job github-hosted-opentofu was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2211240Z [36;1m      *) echo "expected CI job github-hosted-opentofu did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2212776Z [36;1m    esac[0m
+2026-09-17T13:37:41.2213357Z [36;1m  else[0m
+2026-09-17T13:37:41.2214076Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2214779Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2216384Z [36;1m      *) echo "selected CI job github-hosted-opentofu ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2218044Z [36;1m    esac[0m
+2026-09-17T13:37:41.2218613Z [36;1m  fi[0m
+2026-09-17T13:37:41.2219248Z [36;1melse[0m
+2026-09-17T13:37:41.2219979Z [36;1m  result="$(result_for_job github-hosted-opentofu)"[0m
+2026-09-17T13:37:41.2220918Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2221778Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2223184Z [36;1m    success) echo "unexpected CI job github-hosted-opentofu succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2225233Z [36;1m    *) echo "unexpected CI job github-hosted-opentofu ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2226464Z [36;1m  esac[0m
+2026-09-17T13:37:41.2227045Z [36;1mfi[0m
+2026-09-17T13:37:41.2227728Z [36;1mif plan_expects "opentofu" "velnor"; then[0m
+2026-09-17T13:37:41.2228653Z [36;1m  result="$(result_for_job velnor-opentofu)"[0m
+2026-09-17T13:37:41.2229707Z [36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2230672Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2231626Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2233146Z [36;1m      skipped) echo "expected CI job velnor-opentofu was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2235076Z [36;1m      cancelled) echo "expected CI job velnor-opentofu was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2236867Z [36;1m      *) echo "expected CI job velnor-opentofu did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2237936Z [36;1m    esac[0m
+2026-09-17T13:37:41.2238507Z [36;1m  else[0m
+2026-09-17T13:37:41.2239211Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2239911Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2241737Z [36;1m      *) echo "selected CI job velnor-opentofu ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2243426Z [36;1m    esac[0m
+2026-09-17T13:37:41.2244060Z [36;1m  fi[0m
+2026-09-17T13:37:41.2244633Z [36;1melse[0m
+2026-09-17T13:37:41.2245290Z [36;1m  result="$(result_for_job velnor-opentofu)"[0m
+2026-09-17T13:37:41.2246145Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2246801Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2248106Z [36;1m    success) echo "unexpected CI job velnor-opentofu succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2249860Z [36;1m    *) echo "unexpected CI job velnor-opentofu ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2251138Z [36;1m  esac[0m
+2026-09-17T13:37:41.2252172Z [36;1mfi[0m
+2026-09-17T13:37:41.2256157Z [36;1mif plan_expects_local "rust-unit-collector" || plan_expects_local "rust-velnor-bench" || plan_expects_local "rust-velnor-client" || plan_expects_local "rust-velnor-control" || plan_expects_local "rust-velnor-model" || plan_expects_local "rust-velnor-render" || plan_expects_local "rust-velnor-runner" || plan_expects_local "rust-velnor-tools" || plan_expects_local "rust-velnor-workflow" || plan_expects_local "rust-velnor-workflow-contract" || plan_expects_local "rust-velnorctl" || plan_expects_local "rust-production-topology"; then[0m
+2026-09-17T13:37:41.2260260Z [36;1m  result="$(result_for_job prepare-cargo)"[0m
+2026-09-17T13:37:41.2261423Z [36;1m  if [[ "$PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2262478Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2263382Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2264665Z [36;1m      skipped) echo "expected CI prerequisite prepare-cargo was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2266728Z [36;1m      cancelled) echo "expected CI prerequisite prepare-cargo was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2268469Z [36;1m      *) echo "expected CI prerequisite prepare-cargo did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2269680Z [36;1m    esac[0m
+2026-09-17T13:37:41.2270253Z [36;1m  else[0m
+2026-09-17T13:37:41.2270898Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2271752Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2273503Z [36;1m      *) echo "selected CI prerequisite prepare-cargo ran outside its provider admission (PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED=$PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2275324Z [36;1m    esac[0m
+2026-09-17T13:37:41.2275946Z [36;1m  fi[0m
+2026-09-17T13:37:41.2276521Z [36;1melse[0m
+2026-09-17T13:37:41.2277223Z [36;1m  result="$(result_for_job prepare-cargo)"[0m
+2026-09-17T13:37:41.2278074Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2278812Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2280248Z [36;1m    success) echo "unexpected CI prerequisite prepare-cargo succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2282320Z [36;1m    *) echo "unexpected CI prerequisite prepare-cargo ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2283533Z [36;1m  esac[0m
+2026-09-17T13:37:41.2284206Z [36;1mfi[0m
+2026-09-17T13:37:41.2285092Z [36;1mif plan_expects "rust-policy" "github-hosted"; then[0m
+2026-09-17T13:37:41.2286080Z [36;1m  result="$(result_for_job github-hosted-rust-policy)"[0m
+2026-09-17T13:37:41.2287171Z [36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2288029Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2288740Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2290064Z [36;1m      skipped) echo "expected CI job github-hosted-rust-policy was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2292240Z [36;1m      cancelled) echo "expected CI job github-hosted-rust-policy was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2294120Z [36;1m      *) echo "expected CI job github-hosted-rust-policy did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2295184Z [36;1m    esac[0m
+2026-09-17T13:37:41.2295876Z [36;1m  else[0m
+2026-09-17T13:37:41.2296502Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2297148Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2298906Z [36;1m      *) echo "selected CI job github-hosted-rust-policy ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2300650Z [36;1m    esac[0m
+2026-09-17T13:37:41.2301441Z [36;1m  fi[0m
+2026-09-17T13:37:41.2302022Z [36;1melse[0m
+2026-09-17T13:37:41.2302773Z [36;1m  result="$(result_for_job github-hosted-rust-policy)"[0m
+2026-09-17T13:37:41.2303696Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2304338Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2305827Z [36;1m    success) echo "unexpected CI job github-hosted-rust-policy succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2307858Z [36;1m    *) echo "unexpected CI job github-hosted-rust-policy ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2309125Z [36;1m  esac[0m
+2026-09-17T13:37:41.2309722Z [36;1mfi[0m
+2026-09-17T13:37:41.2310396Z [36;1mif plan_expects "rust-policy" "velnor"; then[0m
+2026-09-17T13:37:41.2311478Z [36;1m  result="$(result_for_job velnor-rust-policy)"[0m
+2026-09-17T13:37:41.2312526Z [36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2313575Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2314253Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2315578Z [36;1m      skipped) echo "expected CI job velnor-rust-policy was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2317562Z [36;1m      cancelled) echo "expected CI job velnor-rust-policy was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2319188Z [36;1m      *) echo "expected CI job velnor-rust-policy did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2320278Z [36;1m    esac[0m
+2026-09-17T13:37:41.2320851Z [36;1m  else[0m
+2026-09-17T13:37:41.2321576Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2322343Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2324054Z [36;1m      *) echo "selected CI job velnor-rust-policy ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2325738Z [36;1m    esac[0m
+2026-09-17T13:37:41.2326345Z [36;1m  fi[0m
+2026-09-17T13:37:41.2326969Z [36;1melse[0m
+2026-09-17T13:37:41.2327637Z [36;1m  result="$(result_for_job velnor-rust-policy)"[0m
+2026-09-17T13:37:41.2328498Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2329210Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2330571Z [36;1m    success) echo "unexpected CI job velnor-rust-policy succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2332688Z [36;1m    *) echo "unexpected CI job velnor-rust-policy ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2334004Z [36;1m  esac[0m
+2026-09-17T13:37:41.2334623Z [36;1mfi[0m
+2026-09-17T13:37:41.2335477Z [36;1mif plan_expects "rust-unit-collector" "github-hosted"; then[0m
+2026-09-17T13:37:41.2336716Z [36;1m  result="$(result_for_job github-hosted-rust-unit-collector)"[0m
+2026-09-17T13:37:41.2337947Z [36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2338905Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2339699Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2341191Z [36;1m      skipped) echo "expected CI job github-hosted-rust-unit-collector was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2343630Z [36;1m      cancelled) echo "expected CI job github-hosted-rust-unit-collector was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2345731Z [36;1m      *) echo "expected CI job github-hosted-rust-unit-collector did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2346944Z [36;1m    esac[0m
+2026-09-17T13:37:41.2347594Z [36;1m  else[0m
+2026-09-17T13:37:41.2348262Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2349003Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2350821Z [36;1m      *) echo "selected CI job github-hosted-rust-unit-collector ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2352886Z [36;1m    esac[0m
+2026-09-17T13:37:41.2353526Z [36;1m  fi[0m
+2026-09-17T13:37:41.2354074Z [36;1melse[0m
+2026-09-17T13:37:41.2354899Z [36;1m  result="$(result_for_job github-hosted-rust-unit-collector)"[0m
+2026-09-17T13:37:41.2356052Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2356710Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2358229Z [36;1m    success) echo "unexpected CI job github-hosted-rust-unit-collector succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2360393Z [36;1m    *) echo "unexpected CI job github-hosted-rust-unit-collector ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2361860Z [36;1m  esac[0m
+2026-09-17T13:37:41.2362534Z [36;1mfi[0m
+2026-09-17T13:37:41.2363233Z [36;1mif plan_expects "rust-unit-collector" "velnor"; then[0m
+2026-09-17T13:37:41.2364369Z [36;1m  result="$(result_for_job velnor-rust-unit-collector)"[0m
+2026-09-17T13:37:41.2365572Z [36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2366552Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2367252Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2368560Z [36;1m      skipped) echo "expected CI job velnor-rust-unit-collector was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2370710Z [36;1m      cancelled) echo "expected CI job velnor-rust-unit-collector was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2372956Z [36;1m      *) echo "expected CI job velnor-rust-unit-collector did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2374202Z [36;1m    esac[0m
+2026-09-17T13:37:41.2374786Z [36;1m  else[0m
+2026-09-17T13:37:41.2375407Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2376097Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2377813Z [36;1m      *) echo "selected CI job velnor-rust-unit-collector ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2379556Z [36;1m    esac[0m
+2026-09-17T13:37:41.2380187Z [36;1m  fi[0m
+2026-09-17T13:37:41.2380826Z [36;1melse[0m
+2026-09-17T13:37:41.2381656Z [36;1m  result="$(result_for_job velnor-rust-unit-collector)"[0m
+2026-09-17T13:37:41.2382593Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2383312Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2384782Z [36;1m    success) echo "unexpected CI job velnor-rust-unit-collector succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2386816Z [36;1m    *) echo "unexpected CI job velnor-rust-unit-collector ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2388106Z [36;1m  esac[0m
+2026-09-17T13:37:41.2389090Z [36;1mfi[0m
+2026-09-17T13:37:41.2389942Z [36;1mif plan_expects "rust-velnor-bench" "github-hosted"; then[0m
+2026-09-17T13:37:41.2391083Z [36;1m  result="$(result_for_job github-hosted-rust-velnor-bench)"[0m
+2026-09-17T13:37:41.2392298Z [36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2393212Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2393897Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2395330Z [36;1m      skipped) echo "expected CI job github-hosted-rust-velnor-bench was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2397559Z [36;1m      cancelled) echo "expected CI job github-hosted-rust-velnor-bench was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2399456Z [36;1m      *) echo "expected CI job github-hosted-rust-velnor-bench did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2400553Z [36;1m    esac[0m
+2026-09-17T13:37:41.2401190Z [36;1m  else[0m
+2026-09-17T13:37:41.2401947Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2402664Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2404465Z [36;1m      *) echo "selected CI job github-hosted-rust-velnor-bench ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2406226Z [36;1m    esac[0m
+2026-09-17T13:37:41.2406836Z [36;1m  fi[0m
+2026-09-17T13:37:41.2407407Z [36;1melse[0m
+2026-09-17T13:37:41.2408202Z [36;1m  result="$(result_for_job github-hosted-rust-velnor-bench)"[0m
+2026-09-17T13:37:41.2409169Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2409831Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2411435Z [36;1m    success) echo "unexpected CI job github-hosted-rust-velnor-bench succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2413591Z [36;1m    *) echo "unexpected CI job github-hosted-rust-velnor-bench ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2414838Z [36;1m  esac[0m
+2026-09-17T13:37:41.2415632Z [36;1mfi[0m
+2026-09-17T13:37:41.2416411Z [36;1mif plan_expects "rust-velnor-bench" "velnor"; then[0m
+2026-09-17T13:37:41.2417417Z [36;1m  result="$(result_for_job velnor-rust-velnor-bench)"[0m
+2026-09-17T13:37:41.2418494Z [36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2419376Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2420071Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2421524Z [36;1m      skipped) echo "expected CI job velnor-rust-velnor-bench was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2423654Z [36;1m      cancelled) echo "expected CI job velnor-rust-velnor-bench was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2425482Z [36;1m      *) echo "expected CI job velnor-rust-velnor-bench did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2426538Z [36;1m    esac[0m
+2026-09-17T13:37:41.2427130Z [36;1m  else[0m
+2026-09-17T13:37:41.2427776Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2428506Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2430227Z [36;1m      *) echo "selected CI job velnor-rust-velnor-bench ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2432272Z [36;1m    esac[0m
+2026-09-17T13:37:41.2432890Z [36;1m  fi[0m
+2026-09-17T13:37:41.2433455Z [36;1melse[0m
+2026-09-17T13:37:41.2434222Z [36;1m  result="$(result_for_job velnor-rust-velnor-bench)"[0m
+2026-09-17T13:37:41.2435158Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2435970Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2437526Z [36;1m    success) echo "unexpected CI job velnor-rust-velnor-bench succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2439519Z [36;1m    *) echo "unexpected CI job velnor-rust-velnor-bench ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2440690Z [36;1m  esac[0m
+2026-09-17T13:37:41.2441409Z [36;1mfi[0m
+2026-09-17T13:37:41.2442201Z [36;1mif plan_expects "rust-velnor-client" "github-hosted"; then[0m
+2026-09-17T13:37:41.2443357Z [36;1m  result="$(result_for_job github-hosted-rust-velnor-client)"[0m
+2026-09-17T13:37:41.2444516Z [36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2445390Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2446136Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2447475Z [36;1m      skipped) echo "expected CI job github-hosted-rust-velnor-client was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2449708Z [36;1m      cancelled) echo "expected CI job github-hosted-rust-velnor-client was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2451774Z [36;1m      *) echo "expected CI job github-hosted-rust-velnor-client did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2453056Z [36;1m    esac[0m
+2026-09-17T13:37:41.2453659Z [36;1m  else[0m
+2026-09-17T13:37:41.2454238Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2454953Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2456757Z [36;1m      *) echo "selected CI job github-hosted-rust-velnor-client ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2458619Z [36;1m    esac[0m
+2026-09-17T13:37:41.2459176Z [36;1m  fi[0m
+2026-09-17T13:37:41.2459784Z [36;1melse[0m
+2026-09-17T13:37:41.2460628Z [36;1m  result="$(result_for_job github-hosted-rust-velnor-client)"[0m
+2026-09-17T13:37:41.2461660Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2462371Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2463805Z [36;1m    success) echo "unexpected CI job github-hosted-rust-velnor-client succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2466013Z [36;1m    *) echo "unexpected CI job github-hosted-rust-velnor-client ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2467460Z [36;1m  esac[0m
+2026-09-17T13:37:41.2468060Z [36;1mfi[0m
+2026-09-17T13:37:41.2468830Z [36;1mif plan_expects "rust-velnor-client" "velnor"; then[0m
+2026-09-17T13:37:41.2469863Z [36;1m  result="$(result_for_job velnor-rust-velnor-client)"[0m
+2026-09-17T13:37:41.2470896Z [36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2471994Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2472691Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2474060Z [36;1m      skipped) echo "expected CI job velnor-rust-velnor-client was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2476121Z [36;1m      cancelled) echo "expected CI job velnor-rust-velnor-client was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2477985Z [36;1m      *) echo "expected CI job velnor-rust-velnor-client did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2479122Z [36;1m    esac[0m
+2026-09-17T13:37:41.2479720Z [36;1m  else[0m
+2026-09-17T13:37:41.2480371Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2481067Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2482910Z [36;1m      *) echo "selected CI job velnor-rust-velnor-client ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2484704Z [36;1m    esac[0m
+2026-09-17T13:37:41.2485334Z [36;1m  fi[0m
+2026-09-17T13:37:41.2485916Z [36;1melse[0m
+2026-09-17T13:37:41.2486757Z [36;1m  result="$(result_for_job velnor-rust-velnor-client)"[0m
+2026-09-17T13:37:41.2487693Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2488373Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2489856Z [36;1m    success) echo "unexpected CI job velnor-rust-velnor-client succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2491995Z [36;1m    *) echo "unexpected CI job velnor-rust-velnor-client ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2493292Z [36;1m  esac[0m
+2026-09-17T13:37:41.2493922Z [36;1mfi[0m
+2026-09-17T13:37:41.2494787Z [36;1mif plan_expects "rust-velnor-control" "github-hosted"; then[0m
+2026-09-17T13:37:41.2495890Z [36;1m  result="$(result_for_job github-hosted-rust-velnor-control)"[0m
+2026-09-17T13:37:41.2497009Z [36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2497932Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2498602Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2500115Z [36;1m      skipped) echo "expected CI job github-hosted-rust-velnor-control was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2502451Z [36;1m      cancelled) echo "expected CI job github-hosted-rust-velnor-control was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2504497Z [36;1m      *) echo "expected CI job github-hosted-rust-velnor-control did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2505679Z [36;1m    esac[0m
+2026-09-17T13:37:41.2506270Z [36;1m  else[0m
+2026-09-17T13:37:41.2506996Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2507668Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2509476Z [36;1m      *) echo "selected CI job github-hosted-rust-velnor-control ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2511461Z [36;1m    esac[0m
+2026-09-17T13:37:41.2512074Z [36;1m  fi[0m
+2026-09-17T13:37:41.2512698Z [36;1melse[0m
+2026-09-17T13:37:41.2513505Z [36;1m  result="$(result_for_job github-hosted-rust-velnor-control)"[0m
+2026-09-17T13:37:41.2514443Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2515145Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2516649Z [36;1m    success) echo "unexpected CI job github-hosted-rust-velnor-control succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2518939Z [36;1m    *) echo "unexpected CI job github-hosted-rust-velnor-control ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2520262Z [36;1m  esac[0m
+2026-09-17T13:37:41.2520853Z [36;1mfi[0m
+2026-09-17T13:37:41.2521780Z [36;1mif plan_expects "rust-velnor-control" "velnor"; then[0m
+2026-09-17T13:37:41.2522886Z [36;1m  result="$(result_for_job velnor-rust-velnor-control)"[0m
+2026-09-17T13:37:41.2523943Z [36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2524899Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2525606Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2527066Z [36;1m      skipped) echo "expected CI job velnor-rust-velnor-control was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2529368Z [36;1m      cancelled) echo "expected CI job velnor-rust-velnor-control was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2531435Z [36;1m      *) echo "expected CI job velnor-rust-velnor-control did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2532612Z [36;1m    esac[0m
+2026-09-17T13:37:41.2533343Z [36;1m  else[0m
+2026-09-17T13:37:41.2533972Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2534760Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2536713Z [36;1m      *) echo "selected CI job velnor-rust-velnor-control ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2538595Z [36;1m    esac[0m
+2026-09-17T13:37:41.2539154Z [36;1m  fi[0m
+2026-09-17T13:37:41.2539670Z [36;1melse[0m
+2026-09-17T13:37:41.2540668Z [36;1m  result="$(result_for_job velnor-rust-velnor-control)"[0m
+2026-09-17T13:37:41.2541746Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2542516Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2543962Z [36;1m    success) echo "unexpected CI job velnor-rust-velnor-control succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2546150Z [36;1m    *) echo "unexpected CI job velnor-rust-velnor-control ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2547497Z [36;1m  esac[0m
+2026-09-17T13:37:41.2548133Z [36;1mfi[0m
+2026-09-17T13:37:41.2548948Z [36;1mif plan_expects "rust-velnor-model" "github-hosted"; then[0m
+2026-09-17T13:37:41.2550102Z [36;1m  result="$(result_for_job github-hosted-rust-velnor-model)"[0m
+2026-09-17T13:37:41.2551599Z [36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2552577Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2553245Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2554652Z [36;1m      skipped) echo "expected CI job github-hosted-rust-velnor-model was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2556894Z [36;1m      cancelled) echo "expected CI job github-hosted-rust-velnor-model was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2558872Z [36;1m      *) echo "expected CI job github-hosted-rust-velnor-model did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2560021Z [36;1m    esac[0m
+2026-09-17T13:37:41.2560611Z [36;1m  else[0m
+2026-09-17T13:37:41.2561429Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2562132Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2563973Z [36;1m      *) echo "selected CI job github-hosted-rust-velnor-model ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2565805Z [36;1m    esac[0m
+2026-09-17T13:37:41.2566814Z [36;1m  fi[0m
+2026-09-17T13:37:41.2567507Z [36;1melse[0m
+2026-09-17T13:37:41.2568322Z [36;1m  result="$(result_for_job github-hosted-rust-velnor-model)"[0m
+2026-09-17T13:37:41.2569554Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2570255Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2571805Z [36;1m    success) echo "unexpected CI job github-hosted-rust-velnor-model succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2573904Z [36;1m    *) echo "unexpected CI job github-hosted-rust-velnor-model ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2575258Z [36;1m  esac[0m
+2026-09-17T13:37:41.2575869Z [36;1mfi[0m
+2026-09-17T13:37:41.2576545Z [36;1mif plan_expects "rust-velnor-model" "velnor"; then[0m
+2026-09-17T13:37:41.2577655Z [36;1m  result="$(result_for_job velnor-rust-velnor-model)"[0m
+2026-09-17T13:37:41.2578675Z [36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2579578Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2580314Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2581820Z [36;1m      skipped) echo "expected CI job velnor-rust-velnor-model was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2584000Z [36;1m      cancelled) echo "expected CI job velnor-rust-velnor-model was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2585783Z [36;1m      *) echo "expected CI job velnor-rust-velnor-model did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2587038Z [36;1m    esac[0m
+2026-09-17T13:37:41.2587684Z [36;1m  else[0m
+2026-09-17T13:37:41.2588384Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2589233Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2591233Z [36;1m      *) echo "selected CI job velnor-rust-velnor-model ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2593436Z [36;1m    esac[0m
+2026-09-17T13:37:41.2594070Z [36;1m  fi[0m
+2026-09-17T13:37:41.2594668Z [36;1melse[0m
+2026-09-17T13:37:41.2595491Z [36;1m  result="$(result_for_job velnor-rust-velnor-model)"[0m
+2026-09-17T13:37:41.2596447Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2597249Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2598713Z [36;1m    success) echo "unexpected CI job velnor-rust-velnor-model succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2600904Z [36;1m    *) echo "unexpected CI job velnor-rust-velnor-model ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2602354Z [36;1m  esac[0m
+2026-09-17T13:37:41.2602974Z [36;1mfi[0m
+2026-09-17T13:37:41.2603903Z [36;1mif plan_expects "rust-velnor-render" "github-hosted"; then[0m
+2026-09-17T13:37:41.2605129Z [36;1m  result="$(result_for_job github-hosted-rust-velnor-render)"[0m
+2026-09-17T13:37:41.2606275Z [36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2607227Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2607996Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2609503Z [36;1m      skipped) echo "expected CI job github-hosted-rust-velnor-render was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2611871Z [36;1m      cancelled) echo "expected CI job github-hosted-rust-velnor-render was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2613848Z [36;1m      *) echo "expected CI job github-hosted-rust-velnor-render did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2615046Z [36;1m    esac[0m
+2026-09-17T13:37:41.2615655Z [36;1m  else[0m
+2026-09-17T13:37:41.2616306Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2617007Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2618834Z [36;1m      *) echo "selected CI job github-hosted-rust-velnor-render ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2620589Z [36;1m    esac[0m
+2026-09-17T13:37:41.2621233Z [36;1m  fi[0m
+2026-09-17T13:37:41.2622089Z [36;1melse[0m
+2026-09-17T13:37:41.2622862Z [36;1m  result="$(result_for_job github-hosted-rust-velnor-render)"[0m
+2026-09-17T13:37:41.2623890Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2624678Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2626183Z [36;1m    success) echo "unexpected CI job github-hosted-rust-velnor-render succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2628357Z [36;1m    *) echo "unexpected CI job github-hosted-rust-velnor-render ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2629679Z [36;1m  esac[0m
+2026-09-17T13:37:41.2630245Z [36;1mfi[0m
+2026-09-17T13:37:41.2630958Z [36;1mif plan_expects "rust-velnor-render" "velnor"; then[0m
+2026-09-17T13:37:41.2632276Z [36;1m  result="$(result_for_job velnor-rust-velnor-render)"[0m
+2026-09-17T13:37:41.2633311Z [36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2634239Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2634951Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2636232Z [36;1m      skipped) echo "expected CI job velnor-rust-velnor-render was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2638331Z [36;1m      cancelled) echo "expected CI job velnor-rust-velnor-render was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2640181Z [36;1m      *) echo "expected CI job velnor-rust-velnor-render did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2641471Z [36;1m    esac[0m
+2026-09-17T13:37:41.2642123Z [36;1m  else[0m
+2026-09-17T13:37:41.2642927Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2643696Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2645546Z [36;1m      *) echo "selected CI job velnor-rust-velnor-render ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2647435Z [36;1m    esac[0m
+2026-09-17T13:37:41.2648097Z [36;1m  fi[0m
+2026-09-17T13:37:41.2648723Z [36;1melse[0m
+2026-09-17T13:37:41.2649591Z [36;1m  result="$(result_for_job velnor-rust-velnor-render)"[0m
+2026-09-17T13:37:41.2650540Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2651259Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2653360Z [36;1m    success) echo "unexpected CI job velnor-rust-velnor-render succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2655651Z [36;1m    *) echo "unexpected CI job velnor-rust-velnor-render ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2656979Z [36;1m  esac[0m
+2026-09-17T13:37:41.2657559Z [36;1mfi[0m
+2026-09-17T13:37:41.2658431Z [36;1mif plan_expects "rust-velnor-runner" "github-hosted"; then[0m
+2026-09-17T13:37:41.2659557Z [36;1m  result="$(result_for_job github-hosted-rust-velnor-runner)"[0m
+2026-09-17T13:37:41.2660705Z [36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2661757Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2662467Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2663867Z [36;1m      skipped) echo "expected CI job github-hosted-rust-velnor-runner was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2666163Z [36;1m      cancelled) echo "expected CI job github-hosted-rust-velnor-runner was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2668210Z [36;1m      *) echo "expected CI job github-hosted-rust-velnor-runner did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2669436Z [36;1m    esac[0m
+2026-09-17T13:37:41.2670075Z [36;1m  else[0m
+2026-09-17T13:37:41.2670662Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2671557Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2673404Z [36;1m      *) echo "selected CI job github-hosted-rust-velnor-runner ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2675685Z [36;1m    esac[0m
+2026-09-17T13:37:41.2676280Z [36;1m  fi[0m
+2026-09-17T13:37:41.2676877Z [36;1melse[0m
+2026-09-17T13:37:41.2677749Z [36;1m  result="$(result_for_job github-hosted-rust-velnor-runner)"[0m
+2026-09-17T13:37:41.2678727Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2679394Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2680953Z [36;1m    success) echo "unexpected CI job github-hosted-rust-velnor-runner succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2683306Z [36;1m    *) echo "unexpected CI job github-hosted-rust-velnor-runner ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2684615Z [36;1m  esac[0m
+2026-09-17T13:37:41.2685237Z [36;1mfi[0m
+2026-09-17T13:37:41.2685987Z [36;1mif plan_expects "rust-velnor-runner" "velnor"; then[0m
+2026-09-17T13:37:41.2687006Z [36;1m  result="$(result_for_job velnor-rust-velnor-runner)"[0m
+2026-09-17T13:37:41.2688096Z [36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2689044Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2689737Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2691168Z [36;1m      skipped) echo "expected CI job velnor-rust-velnor-runner was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2693343Z [36;1m      cancelled) echo "expected CI job velnor-rust-velnor-runner was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2695403Z [36;1m      *) echo "expected CI job velnor-rust-velnor-runner did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2696567Z [36;1m    esac[0m
+2026-09-17T13:37:41.2697145Z [36;1m  else[0m
+2026-09-17T13:37:41.2697762Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2698519Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2700203Z [36;1m      *) echo "selected CI job velnor-rust-velnor-runner ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2702220Z [36;1m    esac[0m
+2026-09-17T13:37:41.2702801Z [36;1m  fi[0m
+2026-09-17T13:37:41.2703417Z [36;1melse[0m
+2026-09-17T13:37:41.2704188Z [36;1m  result="$(result_for_job velnor-rust-velnor-runner)"[0m
+2026-09-17T13:37:41.2705067Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2705787Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2707288Z [36;1m    success) echo "unexpected CI job velnor-rust-velnor-runner succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2709376Z [36;1m    *) echo "unexpected CI job velnor-rust-velnor-runner ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2710593Z [36;1m  esac[0m
+2026-09-17T13:37:41.2711243Z [36;1mfi[0m
+2026-09-17T13:37:41.2712310Z [36;1mif plan_expects "rust-velnor-tools" "github-hosted"; then[0m
+2026-09-17T13:37:41.2713406Z [36;1m  result="$(result_for_job github-hosted-rust-velnor-tools)"[0m
+2026-09-17T13:37:41.2714559Z [36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2715450Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2716166Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2717629Z [36;1m      skipped) echo "expected CI job github-hosted-rust-velnor-tools was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2719897Z [36;1m      cancelled) echo "expected CI job github-hosted-rust-velnor-tools was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2721995Z [36;1m      *) echo "expected CI job github-hosted-rust-velnor-tools did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2723272Z [36;1m    esac[0m
+2026-09-17T13:37:41.2723855Z [36;1m  else[0m
+2026-09-17T13:37:41.2724509Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2725269Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2727204Z [36;1m      *) echo "selected CI job github-hosted-rust-velnor-tools ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2729020Z [36;1m    esac[0m
+2026-09-17T13:37:41.2729657Z [36;1m  fi[0m
+2026-09-17T13:37:41.2730289Z [36;1melse[0m
+2026-09-17T13:37:41.2731110Z [36;1m  result="$(result_for_job github-hosted-rust-velnor-tools)"[0m
+2026-09-17T13:37:41.2732181Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2732930Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2734429Z [36;1m    success) echo "unexpected CI job github-hosted-rust-velnor-tools succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2736570Z [36;1m    *) echo "unexpected CI job github-hosted-rust-velnor-tools ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2737943Z [36;1m  esac[0m
+2026-09-17T13:37:41.2738525Z [36;1mfi[0m
+2026-09-17T13:37:41.2739270Z [36;1mif plan_expects "rust-velnor-tools" "velnor"; then[0m
+2026-09-17T13:37:41.2740390Z [36;1m  result="$(result_for_job velnor-rust-velnor-tools)"[0m
+2026-09-17T13:37:41.2741563Z [36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2742509Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2743190Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2744461Z [36;1m      skipped) echo "expected CI job velnor-rust-velnor-tools was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2746749Z [36;1m      cancelled) echo "expected CI job velnor-rust-velnor-tools was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2748729Z [36;1m      *) echo "expected CI job velnor-rust-velnor-tools did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2749810Z [36;1m    esac[0m
+2026-09-17T13:37:41.2750401Z [36;1m  else[0m
+2026-09-17T13:37:41.2751035Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2751864Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2753620Z [36;1m      *) echo "selected CI job velnor-rust-velnor-tools ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2755380Z [36;1m    esac[0m
+2026-09-17T13:37:41.2756059Z [36;1m  fi[0m
+2026-09-17T13:37:41.2756611Z [36;1melse[0m
+2026-09-17T13:37:41.2757355Z [36;1m  result="$(result_for_job velnor-rust-velnor-tools)"[0m
+2026-09-17T13:37:41.2758276Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2758928Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2760383Z [36;1m    success) echo "unexpected CI job velnor-rust-velnor-tools succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2762623Z [36;1m    *) echo "unexpected CI job velnor-rust-velnor-tools ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2764006Z [36;1m  esac[0m
+2026-09-17T13:37:41.2764664Z [36;1mfi[0m
+2026-09-17T13:37:41.2765824Z [36;1mif plan_expects "rust-velnor-workflow" "github-hosted"; then[0m
+2026-09-17T13:37:41.2767089Z [36;1m  result="$(result_for_job github-hosted-rust-velnor-workflow)"[0m
+2026-09-17T13:37:41.2768249Z [36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2769193Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2770032Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2771683Z [36;1m      skipped) echo "expected CI job github-hosted-rust-velnor-workflow was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2774116Z [36;1m      cancelled) echo "expected CI job github-hosted-rust-velnor-workflow was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2776211Z [36;1m      *) echo "expected CI job github-hosted-rust-velnor-workflow did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2777690Z [36;1m    esac[0m
+2026-09-17T13:37:41.2778282Z [36;1m  else[0m
+2026-09-17T13:37:41.2778868Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2779661Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2781623Z [36;1m      *) echo "selected CI job github-hosted-rust-velnor-workflow ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2783636Z [36;1m    esac[0m
+2026-09-17T13:37:41.2784295Z [36;1m  fi[0m
+2026-09-17T13:37:41.2784903Z [36;1melse[0m
+2026-09-17T13:37:41.2785760Z [36;1m  result="$(result_for_job github-hosted-rust-velnor-workflow)"[0m
+2026-09-17T13:37:41.2786728Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2787431Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2788993Z [36;1m    success) echo "unexpected CI job github-hosted-rust-velnor-workflow succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2791233Z [36;1m    *) echo "unexpected CI job github-hosted-rust-velnor-workflow ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2792663Z [36;1m  esac[0m
+2026-09-17T13:37:41.2793271Z [36;1mfi[0m
+2026-09-17T13:37:41.2794070Z [36;1mif plan_expects "rust-velnor-workflow" "velnor"; then[0m
+2026-09-17T13:37:41.2795109Z [36;1m  result="$(result_for_job velnor-rust-velnor-workflow)"[0m
+2026-09-17T13:37:41.2796201Z [36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2797218Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2797895Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2799519Z [36;1m      skipped) echo "expected CI job velnor-rust-velnor-workflow was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2801873Z [36;1m      cancelled) echo "expected CI job velnor-rust-velnor-workflow was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2803848Z [36;1m      *) echo "expected CI job velnor-rust-velnor-workflow did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2805077Z [36;1m    esac[0m
+2026-09-17T13:37:41.2805710Z [36;1m  else[0m
+2026-09-17T13:37:41.2806342Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2807069Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2808822Z [36;1m      *) echo "selected CI job velnor-rust-velnor-workflow ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2810737Z [36;1m    esac[0m
+2026-09-17T13:37:41.2811503Z [36;1m  fi[0m
+2026-09-17T13:37:41.2812131Z [36;1melse[0m
+2026-09-17T13:37:41.2812939Z [36;1m  result="$(result_for_job velnor-rust-velnor-workflow)"[0m
+2026-09-17T13:37:41.2813948Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2814714Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2816349Z [36;1m    success) echo "unexpected CI job velnor-rust-velnor-workflow succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2818558Z [36;1m    *) echo "unexpected CI job velnor-rust-velnor-workflow ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2819855Z [36;1m  esac[0m
+2026-09-17T13:37:41.2820495Z [36;1mfi[0m
+2026-09-17T13:37:41.2821508Z [36;1mif plan_expects "rust-velnor-workflow-contract" "github-hosted"; then[0m
+2026-09-17T13:37:41.2822951Z [36;1m  result="$(result_for_job github-hosted-rust-velnor-workflow-contract)"[0m
+2026-09-17T13:37:41.2824260Z [36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2825205Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2825935Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2827478Z [36;1m      skipped) echo "expected CI job github-hosted-rust-velnor-workflow-contract was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2830048Z [36;1m      cancelled) echo "expected CI job github-hosted-rust-velnor-workflow-contract was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2832660Z [36;1m      *) echo "expected CI job github-hosted-rust-velnor-workflow-contract did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2834081Z [36;1m    esac[0m
+2026-09-17T13:37:41.2834714Z [36;1m  else[0m
+2026-09-17T13:37:41.2835388Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2836088Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2838073Z [36;1m      *) echo "selected CI job github-hosted-rust-velnor-workflow-contract ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2840209Z [36;1m    esac[0m
+2026-09-17T13:37:41.2840832Z [36;1m  fi[0m
+2026-09-17T13:37:41.2841551Z [36;1melse[0m
+2026-09-17T13:37:41.2842482Z [36;1m  result="$(result_for_job github-hosted-rust-velnor-workflow-contract)"[0m
+2026-09-17T13:37:41.2843578Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2844278Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2845991Z [36;1m    success) echo "unexpected CI job github-hosted-rust-velnor-workflow-contract succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2848535Z [36;1m    *) echo "unexpected CI job github-hosted-rust-velnor-workflow-contract ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2849960Z [36;1m  esac[0m
+2026-09-17T13:37:41.2850609Z [36;1mfi[0m
+2026-09-17T13:37:41.2851592Z [36;1mif plan_expects "rust-velnor-workflow-contract" "velnor"; then[0m
+2026-09-17T13:37:41.2852962Z [36;1m  result="$(result_for_job velnor-rust-velnor-workflow-contract)"[0m
+2026-09-17T13:37:41.2854152Z [36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2855032Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2855848Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2857314Z [36;1m      skipped) echo "expected CI job velnor-rust-velnor-workflow-contract was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2859734Z [36;1m      cancelled) echo "expected CI job velnor-rust-velnor-workflow-contract was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2861893Z [36;1m      *) echo "expected CI job velnor-rust-velnor-workflow-contract did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2863097Z [36;1m    esac[0m
+2026-09-17T13:37:41.2863760Z [36;1m  else[0m
+2026-09-17T13:37:41.2864372Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2865251Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2867015Z [36;1m      *) echo "selected CI job velnor-rust-velnor-workflow-contract ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2868861Z [36;1m    esac[0m
+2026-09-17T13:37:41.2869472Z [36;1m  fi[0m
+2026-09-17T13:37:41.2870032Z [36;1melse[0m
+2026-09-17T13:37:41.2870858Z [36;1m  result="$(result_for_job velnor-rust-velnor-workflow-contract)"[0m
+2026-09-17T13:37:41.2871956Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2872711Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2874226Z [36;1m    success) echo "unexpected CI job velnor-rust-velnor-workflow-contract succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2876422Z [36;1m    *) echo "unexpected CI job velnor-rust-velnor-workflow-contract ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2877820Z [36;1m  esac[0m
+2026-09-17T13:37:41.2878366Z [36;1mfi[0m
+2026-09-17T13:37:41.2879205Z [36;1mif plan_expects "rust-velnorctl" "github-hosted"; then[0m
+2026-09-17T13:37:41.2880275Z [36;1m  result="$(result_for_job github-hosted-rust-velnorctl)"[0m
+2026-09-17T13:37:41.2881434Z [36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2882408Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2883227Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2884588Z [36;1m      skipped) echo "expected CI job github-hosted-rust-velnorctl was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2886750Z [36;1m      cancelled) echo "expected CI job github-hosted-rust-velnorctl was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2888603Z [36;1m      *) echo "expected CI job github-hosted-rust-velnorctl did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2889830Z [36;1m    esac[0m
+2026-09-17T13:37:41.2890437Z [36;1m  else[0m
+2026-09-17T13:37:41.2891046Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2891825Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2893593Z [36;1m      *) echo "selected CI job github-hosted-rust-velnorctl ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2895386Z [36;1m    esac[0m
+2026-09-17T13:37:41.2895980Z [36;1m  fi[0m
+2026-09-17T13:37:41.2896533Z [36;1melse[0m
+2026-09-17T13:37:41.2897316Z [36;1m  result="$(result_for_job github-hosted-rust-velnorctl)"[0m
+2026-09-17T13:37:41.2898285Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2898964Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2900461Z [36;1m    success) echo "unexpected CI job github-hosted-rust-velnorctl succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2902848Z [36;1m    *) echo "unexpected CI job github-hosted-rust-velnorctl ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2904233Z [36;1m  esac[0m
+2026-09-17T13:37:41.2904900Z [36;1mfi[0m
+2026-09-17T13:37:41.2905639Z [36;1mif plan_expects "rust-velnorctl" "velnor"; then[0m
+2026-09-17T13:37:41.2906649Z [36;1m  result="$(result_for_job velnor-rust-velnorctl)"[0m
+2026-09-17T13:37:41.2907687Z [36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2908606Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2909303Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2910593Z [36;1m      skipped) echo "expected CI job velnor-rust-velnorctl was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2912886Z [36;1m      cancelled) echo "expected CI job velnor-rust-velnorctl was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2914610Z [36;1m      *) echo "expected CI job velnor-rust-velnorctl did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2915716Z [36;1m    esac[0m
+2026-09-17T13:37:41.2916345Z [36;1m  else[0m
+2026-09-17T13:37:41.2916899Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2917597Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2919286Z [36;1m      *) echo "selected CI job velnor-rust-velnorctl ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2921060Z [36;1m    esac[0m
+2026-09-17T13:37:41.2921759Z [36;1m  fi[0m
+2026-09-17T13:37:41.2922320Z [36;1melse[0m
+2026-09-17T13:37:41.2923044Z [36;1m  result="$(result_for_job velnor-rust-velnorctl)"[0m
+2026-09-17T13:37:41.2923976Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2924655Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2926028Z [36;1m    success) echo "unexpected CI job velnor-rust-velnorctl succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2927952Z [36;1m    *) echo "unexpected CI job velnor-rust-velnorctl ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2929217Z [36;1m  esac[0m
+2026-09-17T13:37:41.2929718Z [36;1mfi[0m
+2026-09-17T13:37:41.2930697Z [36;1mif plan_expects "rust-production-topology" "github-hosted"; then[0m
+2026-09-17T13:37:41.2932042Z [36;1m  result="$(result_for_job github-hosted-rust-production-topology)"[0m
+2026-09-17T13:37:41.2933236Z [36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2934244Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2934902Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2936455Z [36;1m      skipped) echo "expected CI job github-hosted-rust-production-topology was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2938770Z [36;1m      cancelled) echo "expected CI job github-hosted-rust-production-topology was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2940898Z [36;1m      *) echo "expected CI job github-hosted-rust-production-topology did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2942227Z [36;1m    esac[0m
+2026-09-17T13:37:41.2942843Z [36;1m  else[0m
+2026-09-17T13:37:41.2943442Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2944195Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2945991Z [36;1m      *) echo "selected CI job github-hosted-rust-production-topology ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2947838Z [36;1m    esac[0m
+2026-09-17T13:37:41.2948478Z [36;1m  fi[0m
+2026-09-17T13:37:41.2949090Z [36;1melse[0m
+2026-09-17T13:37:41.2949919Z [36;1m  result="$(result_for_job github-hosted-rust-production-topology)"[0m
+2026-09-17T13:37:41.2950918Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2951902Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2953612Z [36;1m    success) echo "unexpected CI job github-hosted-rust-production-topology succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2955947Z [36;1m    *) echo "unexpected CI job github-hosted-rust-production-topology ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2957332Z [36;1m  esac[0m
+2026-09-17T13:37:41.2957871Z [36;1mfi[0m
+2026-09-17T13:37:41.2958641Z [36;1mif plan_expects "rust-production-topology" "velnor"; then[0m
+2026-09-17T13:37:41.2959822Z [36;1m  result="$(result_for_job velnor-rust-production-topology)"[0m
+2026-09-17T13:37:41.2960957Z [36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then[0m
+2026-09-17T13:37:41.2962047Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2962709Z [36;1m      success) ;;[0m
+2026-09-17T13:37:41.2964082Z [36;1m      skipped) echo "expected CI job velnor-rust-production-topology was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2966276Z [36;1m      cancelled) echo "expected CI job velnor-rust-production-topology was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2968242Z [36;1m      *) echo "expected CI job velnor-rust-production-topology did not pass: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2969487Z [36;1m    esac[0m
+2026-09-17T13:37:41.2970058Z [36;1m  else[0m
+2026-09-17T13:37:41.2970666Z [36;1m    case "$result" in[0m
+2026-09-17T13:37:41.2971470Z [36;1m      skipped) ;;[0m
+2026-09-17T13:37:41.2973223Z [36;1m      *) echo "selected CI job velnor-rust-production-topology ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2975064Z [36;1m    esac[0m
+2026-09-17T13:37:41.2975650Z [36;1m  fi[0m
+2026-09-17T13:37:41.2976261Z [36;1melse[0m
+2026-09-17T13:37:41.2977118Z [36;1m  result="$(result_for_job velnor-rust-production-topology)"[0m
+2026-09-17T13:37:41.2978014Z [36;1m  case "$result" in[0m
+2026-09-17T13:37:41.2978732Z [36;1m    skipped) ;;[0m
+2026-09-17T13:37:41.2980239Z [36;1m    success) echo "unexpected CI job velnor-rust-production-topology succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2982482Z [36;1m    *) echo "unexpected CI job velnor-rust-production-topology ran outside the expected set: $result" >&2; exit 1 ;;[0m
+2026-09-17T13:37:41.2983758Z [36;1m  esac[0m
+2026-09-17T13:37:41.2984339Z [36;1mfi[0m
+2026-09-17T13:37:41.3762510Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-09-17T13:37:41.3763494Z env:
+2026-09-17T13:37:41.3789923Z   NEEDS_JSON: {
+  "plan": {
+    "result": "success",
+    "outputs": {
+      "rust_matrix": "[{\"label\":\"Rust dependency policy\",\"unit\":\"rust-policy\"},{\"label\":\"Rust crate (unit-collector)\",\"unit\":\"rust-unit-collector\"},{\"label\":\"Rust crate (velnor-bench)\",\"unit\":\"rust-velnor-bench\"},{\"label\":\"Rust crate (velnor-client)\",\"unit\":\"rust-velnor-client\"},{\"label\":\"Rust crate (velnor-control)\",\"unit\":\"rust-velnor-control\"},{\"label\":\"Rust crate (velnor-model)\",\"unit\":\"rust-velnor-model\"},{\"label\":\"Rust crate (velnor-render)\",\"unit\":\"rust-velnor-render\"},{\"label\":\"Rust crate (velnor-runner)\",\"unit\":\"rust-velnor-runner\"},{\"label\":\"Rust crate (velnor-tools)\",\"unit\":\"rust-velnor-tools\"},{\"label\":\"Rust crate (velnor-workflow)\",\"unit\":\"rust-velnor-workflow\"},{\"label\":\"Rust crate (velnor-workflow-contract)\",\"unit\":\"rust-velnor-workflow-contract\"},{\"label\":\"Rust crate (velnorctl)\",\"unit\":\"rust-velnorctl\"},{\"label\":\"Rust production topology\",\"unit\":\"rust-production-topology\"}]",
+      "scope": "affected",
+      "head_sha": "9303b711c32d5d2887511db1b15525a98ff54576",
+      "units": "[{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"bun-velnor\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"docker\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"docs\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"opentofu\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"rust-policy\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"rust-production-topology\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"rust-unit-collector\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"rust-velnor-bench\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"rust-velnor-client\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"rust-velnor-control\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"rust-velnor-model\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"rust-velnor-render\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"rust-velnor-runner\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"rust-velnor-tools\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"rust-velnor-workflow\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"rust-velnor-workflow-contract\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"rust-velnorctl\"}]",
+      "plan_digest": "8563e4d2f58b08d6",
+      "excluded": "[]",
+      "bun_matrix": "[{\"label\":\"Bun package (velnor)\",\"unit\":\"bun-velnor\"}]",
+      "docker_matrix": "[{\"label\":\"Docker\",\"unit\":\"docker\"}]",
+      "docs_matrix": "[{\"label\":\"Documentation\",\"unit\":\"docs\"}]",
+      "base_sha": "40206d9fe60a8e0693046d1695762c62883a0578",
+      "unit_ids": "bun-velnor,docker,docs,opentofu,rust-policy,rust-production-topology,rust-unit-collector,rust-velnor-bench,rust-velnor-client,rust-velnor-control,rust-velnor-model,rust-velnor-render,rust-velnor-runner,rust-velnor-tools,rust-velnor-workflow,rust-velnor-workflow-contract,rust-velnorctl",
+      "full_units": "bun-velnor,docker,docs,opentofu,rust-policy,rust-production-topology,rust-unit-collector,rust-velnor-bench,rust-velnor-client,rust-velnor-control,rust-velnor-model,rust-velnor-render,rust-velnor-runner,rust-velnor-tools,rust-velnor-workflow,rust-velnor-workflow-contract,rust-velnorctl",
+      "opentofu_matrix": "[{\"label\":\"OpenTofu\",\"unit\":\"opentofu\"}]"
+    }
+  },
+  "github-hosted-bun-velnor": {
+    "result": "success",
+    "outputs": {}
+  },
+  "velnor-bun-velnor": {
+    "result": "failure",
+    "outputs": {}
+  },
+  "github-hosted-docker": {
+    "result": "success",
+    "outputs": {}
+  },
+  "velnor-docker": {
+    "result": "failure",
+    "outputs": {}
+  },
+  "github-hosted-docs": {
+    "result": "success",
+    "outputs": {}
+  },
+  "velnor-docs": {
+    "result": "failure",
+    "outputs": {}
+  },
+  "github-hosted-opentofu": {
+    "result": "success",
+    "outputs": {}
+  },
+  "velnor-opentofu": {
+    "result": "failure",
+    "outputs": {}
+  },
+  "prepare-cargo": {
+    "result": "failure",
+    "outputs": {}
+  },
+  "github-hosted-rust-policy": {
+    "result": "success",
+    "outputs": {}
+  },
+  "velnor-rust-policy": {
+    "result": "skipped",
+    "outputs": {}
+  },
+  "github-hosted-rust-unit-collector": {
+    "result": "success",
+    "outputs": {}
+  },
+  "velnor-rust-unit-collector": {
+    "result": "skipped",
+    "outputs": {}
+  },
+  "github-hosted-rust-velnor-bench": {
+    "result": "success",
+    "outputs": {}
+  },
+  "velnor-rust-velnor-bench": {
+    "result": "skipped",
+    "outputs": {}
+  },
+  "github-hosted-rust-velnor-client": {
+    "result": "success",
+    "outputs": {}
+  },
+  "velnor-rust-velnor-client": {
+    "result": "skipped",
+    "outputs": {}
+  },
+  "github-hosted-rust-velnor-control": {
+    "result": "success",
+    "outputs": {}
+  },
+  "velnor-rust-velnor-control": {
+    "result": "skipped",
+    "outputs": {}
+  },
+  "github-hosted-rust-velnor-model": {
+    "result": "success",
+    "outputs": {}
+  },
+  "velnor-rust-velnor-model": {
+    "result": "skipped",
+    "outputs": {}
+  },
+  "github-hosted-rust-velnor-render": {
+    "result": "success",
+    "outputs": {}
+  },
+  "velnor-rust-velnor-render": {
+    "result": "skipped",
+    "outputs": {}
+  },
+  "github-hosted-rust-velnor-runner": {
+    "result": "success",
+    "outputs": {}
+  },
+  "velnor-rust-velnor-runner": {
+    "result": "skipped",
+    "outputs": {}
+  },
+  "github-hosted-rust-velnor-tools": {
+    "result": "success",
+    "outputs": {}
+  },
+  "velnor-rust-velnor-tools": {
+    "result": "skipped",
+    "outputs": {}
+  },
+  "github-hosted-rust-velnor-workflow": {
+    "result": "success",
+    "outputs": {}
+  },
+  "velnor-rust-velnor-workflow": {
+    "result": "skipped",
+    "outputs": {}
+  },
+  "github-hosted-rust-velnor-workflow-contract": {
+    "result": "success",
+    "outputs": {}
+  },
+  "velnor-rust-velnor-workflow-contract": {
+    "result": "skipped",
+    "outputs": {}
+  },
+  "github-hosted-rust-velnorctl": {
+    "result": "success",
+    "outputs": {}
+  },
+  "velnor-rust-velnorctl": {
+    "result": "skipped",
+    "outputs": {}
+  },
+  "github-hosted-rust-production-topology": {
+    "result": "success",
+    "outputs": {}
+  },
+  "velnor-rust-production-topology": {
+    "result": "skipped",
+    "outputs": {}
+  }
+}
+2026-09-17T13:37:41.3832036Z   SELECTED_UNITS: [{"providers":["github-hosted","velnor"],"unit_id":"bun-velnor"},{"providers":["github-hosted","velnor"],"unit_id":"docker"},{"providers":["github-hosted","velnor"],"unit_id":"docs"},{"providers":["github-hosted","velnor"],"unit_id":"opentofu"},{"providers":["github-hosted","velnor"],"unit_id":"rust-policy"},{"providers":["github-hosted","velnor"],"unit_id":"rust-production-topology"},{"providers":["github-hosted","velnor"],"unit_id":"rust-unit-collector"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-bench"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-client"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-control"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-model"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-render"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-runner"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-tools"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-workflow"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-workflow-contract"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnorctl"}]
+2026-09-17T13:37:41.3837750Z   PLAN_DIGEST: 8563e4d2f58b08d6
+2026-09-17T13:37:41.3838260Z   EXCLUDED: []
+2026-09-17T13:37:41.3838753Z   PROVIDER_ADMITTED_GITHUB_HOSTED: true
+2026-09-17T13:37:41.3839317Z   PROVIDER_ADMITTED_GITHUB_HOSTED_TRUSTED: true
+2026-09-17T13:37:41.3839909Z   PROVIDER_ADMITTED_VELNOR_TRUSTED: true
+2026-09-17T13:37:41.3840669Z   PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED: true
+2026-09-17T13:37:41.3841224Z ##[endgroup]
+2026-09-17T13:37:41.3993507Z verdict binds plan digest 8563e4d2f58b08d6
+2026-09-17T13:37:41.4103731Z expected CI job velnor-bun-velnor did not pass: failure
+2026-09-17T13:37:41.4123720Z ##[error]Process completed with exit code 1.
+2026-09-17T13:37:41.4260167Z Cleaning up orphan processes

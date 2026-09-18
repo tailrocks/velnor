@@ -1,0 +1,50 @@
+   Compiling rustls-webpki v0.103.15
+   Compiling jackin v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin)
+   Compiling rustls v0.23.45
+   Compiling tokio-rustls v0.26.4
+   Compiling rustls-platform-verifier v0.7.0
+   Compiling tonic v0.14.6
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.13.4
+   Compiling bollard v0.21.0
+   Compiling tonic-prost v0.14.6
+   Compiling tonic-types v0.14.6
+   Compiling opentelemetry-proto v0.32.0
+   Compiling fast-down v5.0.2
+   Compiling oci-client v0.17.0
+   Compiling opentelemetry-otlp v0.32.0
+   Compiling jackin-otlp-testbed v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-otlp-testbed)
+   Compiling sigstore v0.14.0
+   Compiling jackin-diagnostics v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-diagnostics)
+   Compiling jackin-docker v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-docker)
+   Compiling jackin-env v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-env)
+   Compiling jackin-launch v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-launch)
+   Compiling jackin-instance v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-instance)
+   Compiling jackin-usage v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-usage)
+   Compiling jackin-console v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-console)
+   Compiling jackin-image v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-image)
+   Compiling jackin-isolation v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-isolation)
+   Compiling jackin-host v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-host)
+   Compiling jackin-runtime v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-runtime)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 16.29s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID 956100df-a307-4d0c-abff-81e0c8612697 with nextest profile: docker-e2e
+    Starting 12 tests across 1 binary (30 binaries skipped)
+        PASS [   6.637s] ( 1/12) jackin::usage_broker_e2e docker::usage_broker_capsule_refresh_is_same_updating_generation_in_desktop
+        PASS [   9.044s] ( 2/12) jackin::usage_broker_e2e docker::usage_broker_desktop_and_twenty_docker_capsules_make_one_provider_call
+        PASS [   1.136s] ( 3/12) jackin::usage_broker_e2e docker::usage_broker_desktop_and_two_docker_capsules_make_one_provider_call
+        PASS [   0.187s] ( 4/12) jackin::usage_broker_e2e docker::usage_broker_distinct_accounts_run_concurrently_within_bound
+        PASS [   0.459s] ( 5/12) jackin::usage_broker_e2e docker::usage_broker_docker_capsule_cannot_access_another_account_or_global_tree
+        PASS [   0.183s] ( 6/12) jackin::usage_broker_e2e docker::usage_broker_failure_and_rate_deadline_are_identical_for_all_waiters
+        PASS [   0.285s] ( 7/12) jackin::usage_broker_e2e docker::usage_broker_timeout_holds_ownership_until_provider_returns
+        PASS [   0.008s] ( 8/12) jackin::usage_broker_e2e docker::usage_broker_unavailable_state_makes_zero_provider_calls
+        PASS [  31.721s] ( 9/12) jackin::usage_broker_e2e recovery::usage_broker_killed_owner_recovers_once_without_a_herd
+        PASS [   0.008s] (10/12) jackin::usage_broker_e2e usage_broker_child
+        PASS [   0.174s] (11/12) jackin::usage_broker_e2e usage_broker_twenty_host_processes_make_one_provider_call
+        PASS [   0.175s] (12/12) jackin::usage_broker_e2e usage_broker_two_host_processes_make_one_provider_call
+────────────
+     Summary [  50.022s] 12 tests run: 12 passed, 0 skipped
+mbx[cache]: 18 hits, 0 misses, 35 not looked up; 0 B downloaded, 0 B uploaded, 1022.3 MiB stored locally
+mbx[savings]: lent the same 271.7 GiB to every checkout at once. none of them has checked.

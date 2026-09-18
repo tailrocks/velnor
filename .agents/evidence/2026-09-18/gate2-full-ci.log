@@ -1,0 +1,586 @@
+==> actionlint .github/workflows/ci-main.yml .github/workflows/ci-policy.yml .github/workflows/ci-pr.yml .github/workflows/ci-unit-bun.yml .github/workflows/ci-unit-docker.yml .github/workflows/ci-unit-rust.yml .github/workflows/ci-unit-swift.yml .github/workflows/desktop-merge.yml .github/workflows/desktop-scheduled.yml .github/workflows/maintenance.yml .github/workflows/nightly.yml .github/workflows/release.yml .github/workflows/renovate-upstream-sources.yml .github/workflows/renovate-validate.yml .github/workflows/renovate.yml
+==> cargo fmt --check
+==> cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+==> cargo xtask lint --strict
+==> cargo check --workspace --all-targets --locked
+==> cargo nextest run --workspace --all-features --locked
+==> cargo test --doc --workspace --locked
+==> cargo audit
+==> cargo deny check advisories bans licenses sources
+==> cargo xtask schema-check --base origin/main
+==> cargo shear --deny-warnings
+==> cargo hack check --workspace --feature-powerset --all-targets --locked
+mbx[warning]: cc cache bypassed: compiler invocation names no output file
+==> cargo xtask roadmap audit
+==> cargo xtask docs repo-links
+==> cargo xtask research check
+==> cargo nextest run -p jackin-capsule -p jackin-console --locked
+error: 5 ci step(s) failed:
+  cargo clippy [lint]: step cargo clippy: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings failed with code Some(101)
+Checking jackin v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin)
+    Checking jackin-runtime v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-runtime)
+error[E0063]: missing field `account_id` in initializer of `jackin_protocol::control::PaneSnapshot`
+  --> crates/jackin-runtime/src/reactive_daemon/tests.rs:22:25
+   |
+22 |             panes: vec![PaneSnapshot {
+   |                         ^^^^^^^^^^^^ missing `account_id`
+
+error[E0063]: missing fields `account_id` and `instance` in initializer of `jackin_protocol::control::TabSnapshot`
+  --> crates/jackin-runtime/src/reactive_daemon/tests.rs:19:20
+   |
+19 |         tabs: vec![TabSnapshot {
+   |                    ^^^^^^^^^^^ missing `account_id` and `instance`
+
+For more information about this error, try `rustc --explain E0063`.
+error: could not compile `jackin-runtime` (lib test) due to 2 previous errors
+  cargo lint [lint]: step cargo lint: cargo xtask lint --strict failed with code Some(1)
+Weaver Registry Check
+Checking registry `crates/jackin-telemetry/registry`
+ℹ Found registry manifest: crates/jackin-telemetry/registry/manifest.yaml
+ℹ Found registry manifest: crates/jackin-telemetry/vendor/semconv-1.43.0/manifest.yaml
+✔ No `after_resolution` policy violation
+
+Total execution time: 0.029534125s
+error: lint gates failed:
+  container-paths: 1 container-path violation(s):
+  crates/jackin-runtime/src/runtime/launch/capsule_setup.rs: 1 unallowlisted `/jackin` production literal(s) at [crates/jackin-runtime/src/runtime/launch/capsule_setup.rs:133] — route through jackin_core::container_paths; if residual is required (e.g. Dockerfile template), add a shrink-only row via: cargo xtask lint container-paths --print-allowlist
+
+fix: route new container paths through jackin_core::container_paths; regenerate: cargo xtask lint container-paths --print-allowlist
+re-run: cargo xtask lint container-paths
+  telemetry-registry: telemetry error-ownership census drift; run `cargo xtask telemetry-registry --generate`
+  ratchet: 1 ratchet violation(s):
+  test-layout/crates/jackin-runtime/src/runtime/launch/launch_runtime.rs: test suite module must be exactly `#[cfg(test)]` followed by `mod tests;` — move tests to the canonical sibling file and remove visibility, aliases, `#[path]`, and feature-qualified suite attributes — fix or allowlist via `cargo xtask lint ratchet --print test-layout`
+
+Fix the listed rows, then re-run `cargo xtask lint ratchet`.
+  cargo nextest [tests]: step cargo nextest: cargo nextest run --workspace --all-features --locked failed with code Some(101)
+Compiling ring v0.17.14
+   Compiling rustls v0.23.45
+   Compiling rustls-webpki v0.103.15
+   Compiling rcgen v0.14.8
+   Compiling tokio-rustls v0.26.4
+   Compiling rustls-platform-verifier v0.7.0
+   Compiling tonic v0.14.6
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.13.4
+   Compiling bollard v0.21.0
+   Compiling tonic-prost v0.14.6
+   Compiling tonic-types v0.14.6
+   Compiling opentelemetry-proto v0.32.0
+   Compiling fast-down v5.0.2
+   Compiling oci-client v0.17.0
+   Compiling opentelemetry-otlp v0.32.0
+   Compiling jackin-otlp-testbed v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-otlp-testbed)
+   Compiling sigstore v0.14.0
+   Compiling jackin-diagnostics v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-diagnostics)
+   Compiling jackin-usage v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-usage)
+   Compiling jackin-docker v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-docker)
+   Compiling jackin-env v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-env)
+   Compiling jackin-launch v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-launch)
+   Compiling jackin-instance v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-instance)
+   Compiling jackin-isolation v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-isolation)
+   Compiling jackin-host v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-host)
+   Compiling jackin-image v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-image)
+   Compiling jackin-console v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-console)
+   Compiling jackin-capsule v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-capsule)
+   Compiling jackin-usage-ffi v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-usage-ffi)
+   Compiling jackin-config v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-config)
+   Compiling jackin-runtime v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-runtime)
+   Compiling jackin v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin)
+error[E0063]: missing field `account_id` in initializer of `PaneSnapshot`
+  --> crates/jackin-runtime/src/reactive_daemon/tests.rs:22:25
+   |
+22 |             panes: vec![PaneSnapshot {
+   |                         ^^^^^^^^^^^^ missing `account_id`
+
+error[E0063]: missing fields `account_id` and `instance` in initializer of `TabSnapshot`
+  --> crates/jackin-runtime/src/reactive_daemon/tests.rs:19:20
+   |
+19 |         tabs: vec![TabSnapshot {
+   |                    ^^^^^^^^^^^ missing `account_id` and `instance`
+
+For more information about this error, try `rustc --explain E0063`.
+error: could not compile `jackin-runtime` (lib test) due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: command `/Users/donbeave/.rustup/toolchains/1.97.1-aarch64-apple-darwin/bin/cargo test --no-run --message-format json-render-diagnostics --workspace --all-features --locked` exited with code 101
+  cargo feature-powerset [powerset]: step cargo feature-powerset: cargo hack check --workspace --feature-powerset --all-targets --locked failed with code Some(1)
+info: running `cargo check --all-targets --locked --no-default-features` on jackin (1/52)
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Checking rustls-webpki v0.103.15
+    Checking jackin-core v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-core)
+   Compiling jackin v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin)
+    Checking rustls v0.23.45
+    Checking tokio-rustls v0.26.4
+    Checking rustls-platform-verifier v0.7.0
+    Checking tonic v0.14.6
+    Checking hyper-rustls v0.27.9
+    Checking reqwest v0.13.4
+    Checking bollard v0.21.0
+    Checking tonic-prost v0.14.6
+    Checking tonic-types v0.14.6
+    Checking opentelemetry-proto v0.32.0
+    Checking fast-down v5.0.2
+    Checking oci-client v0.17.0
+    Checking opentelemetry-otlp v0.32.0
+    Checking jackin-otlp-testbed v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-otlp-testbed)
+    Checking sigstore v0.14.0
+    Checking jackin-diagnostics v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-diagnostics)
+    Checking jackin-config v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-config)
+    Checking jackin-protocol v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-protocol)
+    Checking jackin-oppicker v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-oppicker)
+    Checking jackin-manifest v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-manifest)
+    Checking jackin-test-support v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-test-support)
+    Checking jackin-docker v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-docker)
+    Checking jackin-env v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-env)
+    Checking jackin-usage v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-usage)
+    Checking jackin-launch v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-launch)
+    Checking jackin-instance v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-instance)
+    Checking jackin-console v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-console)
+    Checking jackin-isolation v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-isolation)
+    Checking jackin-image v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-image)
+    Checking jackin-host v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-host)
+    Checking jackin-runtime v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-runtime)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 23.39s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+
+info: running `cargo check --all-targets --locked --no-default-features --features default,e2e` on jackin (2/52)
+   Compiling jackin v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.73s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+
+info: running `cargo check --all-targets --locked --no-default-features --features default` on jackin (3/52)
+    Checking jackin v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.24s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+
+info: running `cargo check --all-targets --locked --no-default-features --features e2e` on jackin (4/52)
+   Compiling jackin v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9.15s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+
+info: running `cargo check --all-targets --locked` on jackin-brand (5/52)
+    Checking is-terminal v0.4.17
+    Checking supports-color v2.1.0
+    Checking owo-colors v4.3.0
+    Checking jackin-brand v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-brand)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.11s
+
+info: running `cargo check --all-targets --locked --no-default-features` on jackin-config (6/52)
+   Compiling ring v0.17.14
+    Checking jackin-telemetry v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-telemetry)
+    Checking jackin-core v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-core)
+   Compiling rustls v0.23.45
+    Checking jackin-config v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-config)
+    Checking rustls-webpki v0.103.15
+    Checking tokio-rustls v0.26.4
+    Checking tonic v0.14.6
+    Checking tonic-prost v0.14.6
+    Checking tonic-types v0.14.6
+    Checking opentelemetry-proto v0.32.0
+    Checking opentelemetry-otlp v0.32.0
+    Checking jackin-otlp-testbed v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-otlp-testbed)
+    Checking jackin-diagnostics v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-diagnostics)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.29s
+
+info: running `cargo check --all-targets --locked --no-default-features --features test-support` on jackin-config (7/52)
+    Checking jackin-config v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-config)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.31s
+
+info: running `cargo check --all-targets --locked` on jackin-core (8/52)
+    Checking jackin-core v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-core)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.22s
+
+info: running `cargo check --all-targets --locked` on jackin-telemetry (9/52)
+    Checking regex-syntax v0.8.11
+    Checking slab v0.4.12
+    Checking miniz_oxide v0.8.9
+    Checking zerocopy v0.8.54
+    Checking thiserror v2.0.18
+    Checking serde v1.0.229
+    Checking tracing-subscriber v0.3.23
+    Checking tokio v1.53.1
+    Checking parking_lot_core v0.9.12
+    Checking object v0.37.3
+    Checking futures-util v0.3.32
+    Checking parking_lot v0.12.5
+    Checking tinytemplate v1.2.1
+    Checking regex-automata v0.4.16
+    Checking opentelemetry v0.32.0
+    Checking backtrace v0.3.76
+    Checking regex v1.13.1
+    Checking dhat v0.3.3
+    Checking tracing-opentelemetry v0.33.0
+    Checking futures-executor v0.3.32
+    Checking half v2.7.1
+    Checking ppv-lite86 v0.2.21
+    Checking jackin-telemetry v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-telemetry)
+    Checking rand_chacha v0.9.0
+    Checking ciborium-ll v0.2.2
+    Checking rand v0.9.5
+    Checking ciborium v0.2.2
+    Checking criterion v0.8.2
+    Checking opentelemetry_sdk v0.32.1
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.02s
+
+info: running `cargo check --all-targets --locked --no-default-features` on jackin-diagnostics (10/52)
+   Compiling serde_core v1.0.229
+    Checking opentelemetry_sdk v0.32.1
+   Compiling jackin-diagnostics v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-diagnostics)
+    Checking time v0.3.53
+    Checking pem v3.0.6
+    Checking axum v0.8.9
+    Checking serde v1.0.229
+    Checking serde_json v1.0.151
+    Checking jackin-core v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-core)
+    Checking yasna v0.6.0
+    Checking rcgen v0.14.8
+    Checking tonic v0.14.6
+    Checking tonic-prost v0.14.6
+    Checking tonic-types v0.14.6
+    Checking opentelemetry-proto v0.32.0
+    Checking opentelemetry-otlp v0.32.0
+    Checking jackin-otlp-testbed v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-otlp-testbed)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.17s
+
+info: running `cargo check --all-targets --locked --no-default-features --features default,test-support` on jackin-diagnostics (11/52)
+    Checking jackin-diagnostics v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-diagnostics)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.83s
+
+info: running `cargo check --all-targets --locked --no-default-features --features default` on jackin-diagnostics (12/52)
+    Checking jackin-diagnostics v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-diagnostics)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.86s
+
+info: running `cargo check --all-targets --locked --no-default-features --features test-support` on jackin-diagnostics (13/52)
+   Compiling jackin-diagnostics v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-diagnostics)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.85s
+
+info: running `cargo check --all-targets --locked` on jackin-otlp-testbed (14/52)
+   Compiling anyhow v1.0.104
+   Compiling pin-project-internal v1.1.13
+   Compiling async-trait v0.1.89
+    Checking tokio v1.53.1
+    Checking futures-util v0.3.32
+    Checking opentelemetry v0.32.0
+    Checking tracing-opentelemetry v0.33.0
+    Checking pin-project v1.1.13
+   Compiling prost-derive v0.14.4
+    Checking futures-executor v0.3.32
+    Checking opentelemetry_sdk v0.32.1
+    Checking prost v0.14.4
+    Checking tokio-util v0.7.18
+    Checking tokio-stream v0.1.18
+    Checking jackin-telemetry v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-telemetry)
+    Checking h2 v0.4.16
+    Checking tower v0.5.3
+    Checking axum v0.8.9
+    Checking hyper v1.10.1
+    Checking hyper-util v0.1.20
+    Checking hyper-timeout v0.5.2
+    Checking tonic v0.14.6
+    Checking tonic-prost v0.14.6
+    Checking opentelemetry-proto v0.32.0
+    Checking jackin-otlp-testbed v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-otlp-testbed)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.74s
+
+info: running `cargo check --all-targets --locked --no-default-features` on jackin-console (15/52)
+    Checking ring v0.17.14
+    Checking jackin-telemetry v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-telemetry)
+    Checking jackin-core v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-core)
+    Checking jackin-protocol v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-protocol)
+    Checking jackin-config v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-config)
+    Checking jackin-oppicker v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-oppicker)
+    Checking rustls-webpki v0.103.15
+    Checking rustls v0.23.45
+    Checking tokio-rustls v0.26.4
+    Checking tonic v0.14.6
+    Checking tonic-prost v0.14.6
+    Checking tonic-types v0.14.6
+    Checking opentelemetry-proto v0.32.0
+    Checking opentelemetry-otlp v0.32.0
+    Checking jackin-otlp-testbed v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-otlp-testbed)
+    Checking jackin-diagnostics v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-diagnostics)
+    Checking jackin-env v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-env)
+    Checking jackin-console v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-console)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.86s
+
+info: running `cargo check --all-targets --locked --no-default-features --features test-support` on jackin-console (16/52)
+    Checking jackin-console v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-console)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.84s
+
+info: running `cargo check --all-targets --locked` on jackin-env (17/52)
+    Checking tokio-rustls v0.26.4
+    Checking jackin-core v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-core)
+    Checking num-traits v0.2.19
+    Checking tonic v0.14.6
+    Checking proptest v1.11.0
+    Checking tonic-prost v0.14.6
+    Checking tonic-types v0.14.6
+    Checking opentelemetry-proto v0.32.0
+    Checking opentelemetry-otlp v0.32.0
+    Checking jackin-protocol v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-protocol)
+    Checking jackin-config v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-config)
+    Checking jackin-diagnostics v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-diagnostics)
+    Checking jackin-env v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-env)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.35s
+
+info: running `cargo check --all-targets --locked` on jackin-process (18/52)
+   Compiling syn v2.0.119
+   Compiling tokio-macros v2.7.1
+    Checking tokio v1.53.1
+    Checking jackin-process v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-process)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.48s
+
+info: running `cargo check --all-targets --locked` on jackin-protocol (19/52)
+    Checking jackin-core v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-core)
+    Checking jackin-telemetry v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-telemetry)
+    Checking jackin-protocol v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-protocol)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.08s
+
+info: running `cargo check --all-targets --locked` on jackin-oppicker (20/52)
+    Checking either v1.16.0
+   Compiling rustix v1.1.4
+    Checking mio v1.2.2
+   Compiling darling_core v0.23.0
+   Compiling strum_macros v0.28.0
+    Checking compact_str v0.9.1
+   Compiling derive_more-impl v2.1.1
+    Checking kasuari v0.4.12
+    Checking time v0.3.53
+    Checking tokio v1.53.1
+    Checking jackin-core v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-core)
+    Checking itertools v0.14.0
+    Checking signal-hook-mio v0.2.5
+    Checking derive_more v2.1.1
+    Checking strum v0.28.0
+    Checking unicode-truncate v2.0.1
+    Checking jackin-telemetry v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-telemetry)
+   Compiling darling_macro v0.23.0
+   Compiling darling v0.23.0
+    Checking crossterm v0.29.0
+    Checking ratatui-core v0.1.2
+    Checking tui-scrollbar v0.2.7
+   Compiling instability v0.3.12
+    Checking ratatui-widgets v0.3.2
+    Checking ratatui-crossterm v0.1.2
+    Checking termrock v0.11.0 (https://github.com/tailrocks/termrock.git?rev=1ac0d0793b8cfd9edc61ced241e2b2ecb89162b4#1ac0d079)
+    Checking jackin-oppicker v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-oppicker)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 14.01s
+
+info: running `cargo check --all-targets --locked` on jackin-tui (21/52)
+   Compiling thiserror v2.0.18
+   Compiling syn v2.0.119
+    Checking num_threads v0.1.7
+   Compiling serde_core v1.0.229
+   Compiling serde v1.0.229
+    Checking time v0.3.53
+   Compiling darling_core v0.23.0
+   Compiling thiserror-impl v2.0.18
+   Compiling strum_macros v0.28.0
+   Compiling derive_more-impl v2.1.1
+    Checking derive_more v2.1.1
+    Checking strum v0.28.0
+   Compiling darling_macro v0.23.0
+   Compiling darling v0.23.0
+    Checking crossterm v0.29.0
+    Checking kasuari v0.4.12
+    Checking ratatui-core v0.1.2
+    Checking tui-scrollbar v0.2.7
+   Compiling instability v0.3.12
+    Checking ratatui-widgets v0.3.2
+    Checking ratatui-crossterm v0.1.2
+    Checking ratatui-macros v0.7.2
+    Checking termrock v0.11.0 (https://github.com/tailrocks/termrock.git?rev=1ac0d0793b8cfd9edc61ced241e2b2ecb89162b4#1ac0d079)
+    Checking ratatui v0.30.2
+    Checking jackin-tui v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-tui)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 18.96s
+
+info: running `cargo check --all-targets --locked` on jackin-docker (22/52)
+   Compiling libc v0.2.186
+    Checking security-framework-sys v2.17.0
+    Checking tokio v1.53.1
+   Compiling jobserver v0.1.35
+   Compiling errno v0.3.14
+   Compiling mio v1.2.2
+    Checking security-framework v3.7.0
+    Checking fast-steal v6.5.4
+    Checking crossfire v3.1.19
+    Checking memmap2 v0.9.11
+    Checking bollard-stubs v1.53.1-rc.29.3.1
+    Checking serde_urlencoded v0.7.1
+    Checking url v2.5.8
+   Compiling cc v1.2.67
+   Compiling signal-hook-registry v1.4.8
+    Checking rustls-native-certs v0.8.4
+    Checking tokio-util v0.7.18
+    Checking tokio-stream v0.1.18
+    Checking jackin-telemetry v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-telemetry)
+    Checking jackin-process v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-process)
+   Compiling cmake v0.1.58
+   Compiling ring v0.17.14
+    Checking fast-pull v5.0.2
+   Compiling aws-lc-sys v0.45.0
+    Checking opentelemetry_sdk v0.32.1
+    Checking h2 v0.4.16
+    Checking tower v0.5.3
+    Checking hyper v1.10.1
+    Checking axum v0.8.9
+    Checking tower-http v0.6.11
+    Checking hyper-util v0.1.20
+    Checking hyper-timeout v0.5.2
+    Checking hyperlocal v0.9.1
+   Compiling jackin-build-meta v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-build-meta)
+   Compiling jackin-docker v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-docker)
+   Compiling aws-lc-rs v1.18.1
+   Compiling rustls v0.23.45
+    Checking rustls-webpki v0.103.15
+    Checking tokio-rustls v0.26.4
+    Checking rustls-platform-verifier v0.7.0
+    Checking tonic v0.14.6
+    Checking hyper-rustls v0.27.9
+    Checking reqwest v0.13.4
+    Checking bollard v0.21.0
+    Checking tonic-prost v0.14.6
+    Checking tonic-types v0.14.6
+    Checking fast-down v5.0.2
+    Checking opentelemetry-proto v0.32.0
+    Checking opentelemetry-otlp v0.32.0
+    Checking jackin-otlp-testbed v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-otlp-testbed)
+    Checking jackin-diagnostics v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-diagnostics)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 15.27s
+
+info: running `cargo check --all-targets --locked` on jackin-build-meta (23/52)
+    Checking tokio v1.53.1
+    Checking jackin-process v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-process)
+    Checking jackin-build-meta v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-build-meta)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.55s
+
+info: running `cargo check --all-targets --locked` on jackin-image (24/52)
+   Compiling ring v0.17.14
+   Compiling jackin-process v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-process)
+    Checking jackin-telemetry v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-telemetry)
+    Checking jackin-core v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-core)
+   Compiling jackin-build-meta v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-build-meta)
+   Compiling jackin-docker v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-docker)
+   Compiling jackin-image v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-image)
+   Compiling rustls v0.23.45
+    Checking rustls-webpki v0.103.15
+    Checking tokio-rustls v0.26.4
+    Checking rustls-platform-verifier v0.7.0
+    Checking tonic v0.14.6
+    Checking hyper-rustls v0.27.9
+    Checking reqwest v0.13.4
+    Checking bollard v0.21.0
+    Checking tonic-prost v0.14.6
+    Checking tonic-types v0.14.6
+    Checking oci-client v0.17.0
+    Checking fast-down v5.0.2
+    Checking opentelemetry-proto v0.32.0
+    Checking opentelemetry-otlp v0.32.0
+    Checking sigstore v0.14.0
+    Checking jackin-config v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-config)
+    Checking jackin-diagnostics v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-diagnostics)
+    Checking jackin-otlp-testbed v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-otlp-testbed)
+    Checking jackin-manifest v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-manifest)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.42s
+
+info: running `cargo check --all-targets --locked` on jackin-manifest (25/52)
+    Checking serde v1.0.229
+    Checking ppv-lite86 v0.2.21
+    Checking tempfile v3.27.0
+    Checking jackin-telemetry v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-telemetry)
+    Checking rand v0.9.5
+    Checking rand_chacha v0.9.0
+    Checking rusty-fork v0.3.1
+    Checking jackin-core v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-core)
+    Checking ciborium v0.2.2
+    Checking dockerfile-parser-rs v3.3.0
+    Checking tinytemplate v1.2.1
+    Checking proptest v1.11.0
+    Checking criterion v0.8.2
+    Checking jackin-config v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-config)
+    Checking jackin-manifest v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-manifest)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.44s
+
+info: running `cargo check --all-targets --locked` on jackin-launch (26/52)
+    Checking h2 v0.4.16
+    Checking tower v0.5.3
+    Checking ratatui-widgets v0.3.2
+    Checking ratatui-crossterm v0.1.2
+    Checking opentelemetry_sdk v0.32.1
+   Compiling jackin-launch v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-launch)
+    Checking jackin-telemetry v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-telemetry)
+    Checking axum v0.8.9
+    Checking ratatui-macros v0.7.2
+    Checking termrock v0.11.0 (https://github.com/tailrocks/termrock.git?rev=1ac0d0793b8cfd9edc61ced241e2b2ecb89162b4#1ac0d079)
+    Checking ratatui v0.30.2
+    Checking hyper v1.10.1
+    Checking hyper-util v0.1.20
+    Checking hyper-timeout v0.5.2
+    Checking tonic v0.14.6
+    Checking tonic-prost v0.14.6
+    Checking tonic-types v0.14.6
+    Checking opentelemetry-proto v0.32.0
+    Checking opentelemetry-otlp v0.32.0
+    Checking jackin-diagnostics v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-diagnostics)
+    Checking jackin-tui v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-tui)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9.03s
+
+info: running `cargo check --all-targets --locked --no-default-features` on jackin-runtime (27/52)
+    Checking jackin-diagnostics v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-diagnostics)
+    Checking jackin-config v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-config)
+    Checking jackin-docker v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-docker)
+    Checking jackin-launch v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-launch)
+    Checking jackin-manifest v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-manifest)
+    Checking jackin-usage v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-usage)
+    Checking jackin-env v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-env)
+    Checking jackin-instance v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-instance)
+    Checking jackin-test-support v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-test-support)
+    Checking jackin-host v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-host)
+    Checking jackin-image v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-image)
+    Checking jackin-isolation v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-isolation)
+    Checking jackin-runtime v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-runtime)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.91s
+
+info: running `cargo check --all-targets --locked --no-default-features --features daemon-spike` on jackin-runtime (28/52)
+   Compiling jackin-runtime v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-runtime)
+error[E0063]: missing field `account_id` in initializer of `PaneSnapshot`
+  --> crates/jackin-runtime/src/reactive_daemon/tests.rs:22:25
+   |
+22 |             panes: vec![PaneSnapshot {
+   |                         ^^^^^^^^^^^^ missing `account_id`
+
+error[E0063]: missing fields `account_id` and `instance` in initializer of `TabSnapshot`
+  --> crates/jackin-runtime/src/reactive_daemon/tests.rs:19:20
+   |
+19 |         tabs: vec![TabSnapshot {
+   |                    ^^^^^^^^^^^ missing `account_id` and `instance`
+
+For more information about this error, try `rustc --explain E0063`.
+error: could not compile `jackin-runtime` (lib test) due to 2 previous errors
+error: process didn't exit successfully: `/Users/donbeave/.rustup/toolchains/1.97.1-aarch64-apple-darwin/bin/cargo check --all-targets --locked --manifest-path crates/jackin-runtime/Cargo.toml --no-default-features --features daemon-spike` (exit status: 101)
+  cargo docs repo-links [docs]: step cargo docs repo-links: cargo xtask docs repo-links failed with code Some(1)
+error: repository file references must be verifiable links (17 problem(s)):
+  docs/content/(public)/(role-authoring)/developing/construct-image.mdx:136: RepoFile path does not exist in the repository: .github/workflows/construct.yml
+  docs/content/research/engineering/ci/performance/ci-speed-roadmap.mdx:172: RepoFile path does not exist in the repository: .github/workflows/docs.yml
+  docs/content/research/engineering/ci/performance/ci-speed-roadmap.mdx:173: RepoFile path does not exist in the repository: .github/workflows/construct.yml
+  docs/content/research/engineering/ci/performance/ci-speed-roadmap.mdx:174: RepoFile path does not exist in the repository: .github/workflows/preview.yml
+  docs/content/research/engineering/ci/performance/ci-speed-roadmap.mdx:176: RepoFile path does not exist in the repository: .github/workflows/jackin-dev.yml
+  docs/content/research/engineering/ci/performance/ci-speed-roadmap.mdx:61: RepoFile path does not exist in the repository: .github/workflows/construct.yml
+  docs/content/research/engineering/ci/performance/ci-speed-roadmap.mdx:61: RepoFile path does not exist in the repository: .github/workflows/docs.yml
+  docs/content/research/engineering/ci/performance/ci-speed-roadmap.mdx:61: RepoFile path does not exist in the repository: .github/workflows/preview.yml
+  docs/content/research/engineering/ci/rust-tooling/index.mdx:132: RepoFile path does not exist in the repository: .github/workflows/docs.yml
+  docs/content/research/engineering/ci/rust-tooling/index.mdx:197: RepoFile path does not exist in the repository: .github/workflows/docs.yml
+  docs/content/research/engineering/desktop-verification/commands.mdx:29: RepoFile path does not exist in the repository: .github/workflows/desktop-cadence.yml
+  docs/content/roadmap/(documentation-tooling)/docs-markdown-linting.mdx:11: RepoFile path does not exist in the repository: .github/workflows/docs.yml
+  docs/content/roadmap/(documentation-tooling)/docs-markdown-linting.mdx:17: RepoFile path does not exist in the repository: .github/workflows/docs.yml
+  docs/content/roadmap/(documentation-tooling)/docs-markdown-linting.mdx:26: RepoFile path does not exist in the repository: .github/workflows/docs.yml
+  docs/content/roadmap/(isolation-security)/security-threat-model-and-signed-releases.mdx:22: RepoFile path does not exist in the repository: .github/workflows/preview.yml
+  docs/content/roadmap/(isolation-security)/security-threat-model-and-signed-releases.mdx:64: RepoFile path does not exist in the repository: .github/workflows/preview.yml
+  docs/content/roadmap/(operator-surface)/pr-verification.mdx:13: RepoFile path does not exist in the repository: .github/workflows/jackin-dev.yml
+mbx[cache]: 441 hits, 157 misses, 399 not looked up, 48 bypassed; 0 B downloaded, 0 B uploaded, 841.6 MiB stored locally
+mbx[savings]: 162248 compilations retrieved with a straight face.

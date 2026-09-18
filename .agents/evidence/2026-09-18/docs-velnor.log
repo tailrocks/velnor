@@ -1,0 +1,7 @@
+Documentation · Documentation · velnor — docs / velnor	UNKNOWN STEP	2026-09-17T12:25:09.5303253Z ##[group]Velnor rejected job (operational_store)
+Documentation · Documentation · velnor — docs / velnor	UNKNOWN STEP	2026-09-17T12:25:09.5303253Z ##[error]Velnor rejected this job before workflow execution.
+Documentation · Documentation · velnor — docs / velnor	UNKNOWN STEP	2026-09-17T12:25:09.5303253Z phase: operational_store
+Documentation · Documentation · velnor — docs / velnor	UNKNOWN STEP	2026-09-17T12:25:09.5303253Z reason: operational store rejected the sanitized admission row; job failed closed before execution
+Documentation · Documentation · velnor — docs / velnor	UNKNOWN STEP	2026-09-17T12:25:09.5303253Z effect: no declared workflow command was executed
+Documentation · Documentation · velnor — docs / velnor	UNKNOWN STEP	2026-09-17T12:25:09.5303253Z remediation: correct the rejected workflow field/action/ref or add the exact reviewed capability to Velnor, publish and deploy that Velnor release, then rerun
+Documentation · Documentation · velnor — docs / velnor	UNKNOWN STEP	2026-09-17T12:25:09.5303253Z ##[endgroup]

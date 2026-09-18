@@ -1,0 +1,170 @@
+Diff in /private/tmp/s4b-verify/crates/jackin-console/src/services/launch/tests.rs:296:
+     let config = admission_config(temp.path());
+ 
+     let admitted =
+[31m-        admitted_account_choices(&config, Some(&wn("demo")), "smith", Agent::Claude)
+(B[m[31m-            .unwrap();
+(B[m[32m+        admitted_account_choices(&config, Some(&wn("demo")), "smith", Agent::Claude).unwrap();
+(B[m     assert!(
+         admitted.is_none(),
+         "no default anywhere must defer to the legacy bindings path"
+Diff in /private/tmp/s4b-verify/crates/jackin-console/src/services/launch/tests.rs:317:
+         .or_default()
+         .default_launch = Some(vec!["claude-z".into()]);
+ 
+[31m-    let admitted =
+(B[m[31m-        admitted_account_choices(&config, Some(&wn("demo")), "smith", Agent::Claude)
+(B[m[31m-            .unwrap()
+(B[m[31m-            .expect("a configured default must admit");
+(B[m[32m+    let admitted = admitted_account_choices(&config, Some(&wn("demo")), "smith", Agent::Claude)
+(B[m[32m+        .unwrap()
+(B[m[32m+        .expect("a configured default must admit");
+(B[m     assert_eq!(
+[31m-        admitted.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+(B[m[32m+        admitted
+(B[m[32m+            .iter()
+(B[m[32m+            .map(|row| row.id.as_str())
+(B[m[32m+            .collect::<Vec<_>>(),
+(B[m         vec!["z-claude"]
+     );
+     assert_eq!(admitted.first().expect("one admitted row").name, "Z");
+Diff in /private/tmp/s4b-verify/crates/jackin-console/src/services/launch/tests.rs:329:
+ 
+     // The same default admits nothing for an agent with no instance in it.
+[31m-    let admitted =
+(B[m[31m-        admitted_account_choices(&config, Some(&wn("demo")), "smith", Agent::Codex)
+(B[m[31m-            .unwrap()
+(B[m[31m-            .expect("resolution succeeds; the admitted set is just empty for Codex");
+(B[m[32m+    let admitted = admitted_account_choices(&config, Some(&wn("demo")), "smith", Agent::Codex)
+(B[m[32m+        .unwrap()
+(B[m[32m+        .expect("resolution succeeds; the admitted set is just empty for Codex");
+(B[m     assert!(admitted.is_empty());
+ }
+ 
+Diff in /private/tmp/s4b-verify/crates/jackin-console/src/services/launch.rs:216:
+         LoadWorkspaceInput::Saved(name) => Some(WorkspaceName::parse(name)?),
+         LoadWorkspaceInput::CurrentDir | LoadWorkspaceInput::Path { .. } => None,
+     };
+[31m-    let accounts = match admitted_account_choices(
+(B[m[31m-        config,
+(B[m[31m-        workspace_name.as_ref(),
+(B[m[31m-        &role.key(),
+(B[m[31m-        agent,
+(B[m[31m-    )? {
+(B[m[31m-        Some(admitted) => admitted,
+(B[m[31m-        None => accounts_for_launch(config, workspace_name.as_ref(), agent),
+(B[m[31m-    };
+(B[m[32m+    let accounts =
+(B[m[32m+        match admitted_account_choices(config, workspace_name.as_ref(), &role.key(), agent)? {
+(B[m[32m+            Some(admitted) => admitted,
+(B[m[32m+            None => accounts_for_launch(config, workspace_name.as_ref(), agent),
+(B[m[32m+        };
+(B[m     Ok(Some(CommittedAgentLaunch {
+         input,
+         role,
+Diff in /private/tmp/s4b-verify/crates/jackin-console/src/services/launch.rs:352:
+     role: &str,
+     agent: Agent,
+ ) -> anyhow::Result<Option<Vec<AccountChoice>>> {
+[31m-    if config
+(B[m[31m-        .effective_default_launch(workspace, role)
+(B[m[31m-        .is_none()
+(B[m[31m-    {
+(B[m[32m+    if config.effective_default_launch(workspace, role).is_none() {
+(B[m         return Ok(None);
+     }
+     let instances = resolve_launch(config, workspace, role, None)?;
+Diff in /private/tmp/s4b-verify/crates/jackin-console/src/tui/prompts/tests.rs:619:
+ 
+     let error =
+         select_launch_account(&config, Some(&ws), ROLE, Agent::Claude, eligible).unwrap_err();
+[31m-    assert!(error.to_string().contains("not authorized"), "got {error:?}");
+(B[m[32m+    assert!(
+(B[m[32m+        error.to_string().contains("not authorized"),
+(B[m[32m+        "got {error:?}"
+(B[m[32m+    );
+(B[m }
+ 
+ #[test]
+Diff in /private/tmp/s4b-verify/crates/jackin-console/src/tui/prompts/tests.rs:643:
+         configuration.model = Some(model.into());
+         config.agent_configurations.insert(id.into(), configuration);
+     }
+[31m-    set_workspace_default(&mut config, ws.as_str(), &["claude-a-fast", "claude-a-deep"]);
+(B[m[32m+    set_workspace_default(
+(B[m[32m+        &mut config,
+(B[m[32m+        ws.as_str(),
+(B[m[32m+        &["claude-a-fast", "claude-a-deep"],
+(B[m[32m+    );
+(B[m     let eligible = accounts_for_launch(&config, Some(&ws), Agent::Claude);
+ 
+     assert_eq!(
+Diff in /private/tmp/s4b-verify/crates/jackin-console/src/tui/prompts.rs:368:
+                 };
+                 Err(anyhow::anyhow!(no_admitted_instance_message(agent, scope)))
+             }
+[31m-            1 => Ok(LaunchAccountSelection::Launch(
+(B[m[31m-                admitted.swap_remove(0).id,
+(B[m[31m-            )),
+(B[m[32m+            1 => Ok(LaunchAccountSelection::Launch(admitted.swap_remove(0).id)),
+(B[m             _ => Ok(LaunchAccountSelection::Pick(admitted)),
+         };
+     }
+Diff in /private/tmp/s4b-verify/crates/jackin-runtime/src/runtime/launch/launch_pipeline/launch_core/orchestrate/tests.rs:1:
+ // SPDX-FileCopyrightText: 2026 Alexey Zhokhov
+ // SPDX-License-Identifier: Apache-2.0
+ 
+[31m-use super::{FinishLaunch, RuntimeDispatch, finish_launch};
+(B[m use super::helpers::provision_agents_for_instances;
+[32m+use super::{FinishLaunch, RuntimeDispatch, finish_launch};
+(B[m use jackin_config::AppConfig;
+ use jackin_core::JackinPaths;
+ use jackin_test_support::{FakeDockerClient, FakeRunner};
+Diff in /private/tmp/s4b-verify/crates/jackin-runtime/src/runtime/launch/launch_pipeline/launch_core/orchestrate.rs:16:
+ use super::super::{emit_auth_provision_launch_plan, purge_or_mark_clean_exited};
+ use super::LaunchCore;
+ use helpers::{
+[31m-    emit_auth_breadcrumbs, provision_agents_for_instances, resolve_provision_inputs, reuse_sentinel,
+(B[m[31m-    sidecar_replenish, workspace_launch_config,
+(B[m[32m+    emit_auth_breadcrumbs, provision_agents_for_instances, resolve_provision_inputs,
+(B[m[32m+    reuse_sentinel, sidecar_replenish, workspace_launch_config,
+(B[m };
+ use jackin_core::{CommandRunner, ContainerId, WorkspaceName};
+ use jackin_docker::docker_client::DockerApi;
+Diff in /private/tmp/s4b-verify/crates/jackin-runtime/src/runtime/launch/programmatic/tests.rs:270:
+         Some(vec!["codex-main".into(), "codex-alt".into()]);
+ 
+     let selected =
+[31m-        with_account_selection(&config, Agent::Codex, Some(&workspace), "codex", "shared")
+(B[m[31m-            .unwrap();
+(B[m[32m+        with_account_selection(&config, Agent::Codex, Some(&workspace), "codex", "shared").unwrap();
+(B[m     // The pick is admitted: no ephemeral override is synthesized and the
+     // sibling instance survives.
+     assert_eq!(
+Diff in /private/tmp/s4b-verify/crates/jackin-runtime/src/runtime/launch/programmatic/tests.rs:307:
+     let (mut config, workspace) = two_account_config();
+     config.workspaces.get_mut("work").unwrap().default_launch = Some(vec!["ghost".into()]);
+ 
+[31m-    let error =
+(B[m[31m-        with_account_selection(&config, Agent::Codex, Some(&workspace), "codex", "private")
+(B[m[31m-            .unwrap_err();
+(B[m[32m+    let error = with_account_selection(&config, Agent::Codex, Some(&workspace), "codex", "private")
+(B[m[32m+        .unwrap_err();
+(B[m     assert!(
+         error.to_string().contains("unknown agent configuration"),
+         "got {error:?}"
+Diff in /private/tmp/s4b-verify/crates/jackin-runtime/src/runtime/launch/programmatic.rs:325:
+ /// only covers hand-built configs that skipped validation.
+ fn free_ephemeral_config_id(selected: &AppConfig, agent: Agent, id: &str) -> String {
+     let base = format!("{id}@{}", agent.slug());
+[31m-    if selected.agent_configurations.get(&base).is_none_or(|existing| {
+(B[m[31m-        existing.agent == agent && existing.account == id
+(B[m[31m-    }) {
+(B[m[32m+    if selected
+(B[m[32m+        .agent_configurations
+(B[m[32m+        .get(&base)
+(B[m[32m+        .is_none_or(|existing| existing.agent == agent && existing.account == id)
+(B[m[32m+    {
+(B[m         return base;
+     }
+     let mut counter = 2_u32;

@@ -1,0 +1,31 @@
+      ┌─────────┐  mr boxington
+     ╱ ═══════ ╱│
+    ╱─────────╱ │
+    │ •    (◉)│≡│
+    │  ◟▄▄▄◞  │ ╱
+    │   ◀◆▶   │╱
+    └─────────┘
+   Compiling velnor-runner v0.1.275 (/Users/donbeave/Projects/tailrocks/velnor-project/velnor3/.muse/worktrees/subagent-v2-01a0ac95-7322-7412-8f86-f69a41ff2453-01a0ad3f-53c8-7f11-ada6-83bf377afed7/crates/velnor-runner)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.47s
+     Running tests/scaleset_daemon.rs (/Users/donbeave/Projects/tailrocks/velnor-project/velnor3/.muse/worktrees/subagent-v2-01a0ac95-7322-7412-8f86-f69a41ff2453-01a0ad3f-53c8-7f11-ada6-83bf377afed7/target/debug/deps/scaleset_daemon-d16f79797a62fbac)
+
+running 1 test
+TEST-HB e2e-inline iter=1
+LANE-HB fetch_jit enter runner=velnor-7-4244
+LANE-HB fetch_jit thread enter
+mbx[progress]: 15s elapsed; 0 hits, 0 misses, 0 bypassed, 0 not looked up; ~0.0s compiler work saved
+mbx[progress]: 30s elapsed; 0 hits, 0 misses, 0 bypassed, 0 not looked up; ~0.0s compiler work saved
+mbx[progress]: 45s elapsed; 0 hits, 0 misses, 0 bypassed, 0 not looked up; ~0.0s compiler work saved
+mbx[progress]: 60s elapsed; 0 hits, 0 misses, 0 bypassed, 0 not looked up; ~0.0s compiler work saved
+test daemon_serves_one_job_end_to_end has been running for over 60 seconds
+mbx[progress]: 75s elapsed; 0 hits, 0 misses, 0 bypassed, 0 not looked up; ~0.0s compiler work saved
+mbx[progress]: 90s elapsed; 0 hits, 0 misses, 0 bypassed, 0 not looked up; ~0.0s compiler work saved
+mbx[progress]: 105s elapsed; 0 hits, 0 misses, 0 bypassed, 0 not looked up; ~0.0s compiler work saved
+mbx[progress]: 120s elapsed; 0 hits, 0 misses, 0 bypassed, 0 not looked up; ~0.0s compiler work saved
+mbx[progress]: 135s elapsed; 0 hits, 0 misses, 0 bypassed, 0 not looked up; ~0.0s compiler work saved
+mbx[progress]: 150s elapsed; 0 hits, 0 misses, 0 bypassed, 0 not looked up; ~0.0s compiler work saved
+error: test failed, to rerun pass `-p velnor-runner --test scaleset_daemon`
+
+Caused by:
+  process didn't exit successfully: `/Users/donbeave/Projects/tailrocks/velnor-project/velnor3/.muse/worktrees/subagent-v2-01a0ac95-7322-7412-8f86-f69a41ff2453-01a0ad3f-53c8-7f11-ada6-83bf377afed7/target/debug/deps/scaleset_daemon-d16f79797a62fbac daemon_serves_one_job_end_to_end --nocapture` (signal: 9, SIGKILL: kill)
+mbx[savings]: 148.8 GiB of outputs exist once and appear everywhere. do not tell the checkouts.

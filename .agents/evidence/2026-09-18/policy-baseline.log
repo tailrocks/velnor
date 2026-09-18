@@ -1,0 +1,16 @@
+PASS pin-declared           .github-gen/velnor-workflow.toml [generator] revision = b9c3156cdb88e63c11b9e595a3e694b02238c09a
+PASS pin-reachable          not applicable: tailrocks/velnor-apt consumes the generator from tailrocks/velnor; the pin is a commit of that repository, proven when the pinned generator is obtained
+PASS pin-monotonic          not applicable: tailrocks/velnor-apt consumes the generator from tailrocks/velnor; the pin is a commit of that repository, proven when the pinned generator is obtained
+FAIL entrypoint-pin         .github/workflows/ci-policy.yml: No such file or directory (os error 2)
+FAIL generated-tree         could not regenerate the tree with velnor-workflow at b9c3156cdb88e63c11b9e595a3e694b02238c09a
+       - VELNOR_WORKFLOW_PINNED_BINARY=/tmp/b2-product/velnor-workflow-macOS-ARM64 is not the declared pin: reports revision 048a7bdaed8240cf652127c94434e60528633dec, but the declared pin is b9c3156cdb88e63c11b9e595a3e694b02238c09a
+FAIL pull-request-target    1 finding
+       - .github/workflows/ci-policy.yml: the base-owned policy entrypoint is missing
+PASS entrypoint-privileges  .github/workflows/ci-policy.yml holds contents: read only, references no secrets, and persists no credentials
+PASS trusted-runners        every self-hosted job is gated on a trusted event and an approved runner
+PASS action-pins            every action reference is a full-SHA pin or a reviewed local path
+PASS workflow-structure     every workflow parses as GitHub would run it
+FAIL required-checks        1 finding
+       - .github/workflows/ci-pr.yml is absent but the ruleset requires [ci-required]
+policy: 11 rules, 4 failed
+error: workflow policy failed: entrypoint-pin, generated-tree, pull-request-target, required-checks

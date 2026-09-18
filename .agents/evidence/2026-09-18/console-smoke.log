@@ -1,0 +1,33 @@
+^Dq
+  [1m[48;2;0;255;65m[38;2;0;0;0m jackin[38;2;255;255;255m❯[38;2;0;0;0m [0m
+Operator's CLI for orchestrating AI coding roles in isolated containers
+
+[1m[92mUsage:[0m [1m[32mjackin[0m [37m[OPTIONS][0m [37m[COMMAND][0m
+
+[1m[92mCommands:[0m
+  [1m[32mload[0m         Jack a role into an isolated container
+  [1m[32mhardline[0m     Reattach to a running role's session
+  [1m[32meject[0m        Stop a role and clean up its container
+  [1m[32mexile[0m        Pull every running role out at once
+  [1m[32mpurge[0m        Delete persisted state for a role class
+  [1m[32mprewarm[0m      Prewarm jackin-owned runtime caches before launch
+  [1m[32mprune[0m        Delete cached or stale jackin data
+  [1m[32mconsole[0m      Open the operator console to manage workspaces, launch roles, and more
+  [1m[32mrole[0m         Validate, migrate, and scaffold role repositories
+  [1m[32mworkspace[0m    Manage saved workspaces
+  [1m[32maccount[0m      Manage coding-agent and AI-provider accounts
+  [1m[32mconfig[0m       View and modify operator configuration
+  [1m[32mdaemon[0m       Manage the per-user jackin❯ host daemon
+  [1m[32mdoctor[0m       Run pre-flight health checks for your jackin❯ setup
+  [1m[32mdiagnostics[0m  Validate direct OTLP telemetry delivery
+  [1m[32mstatus[0m       Show fleet status — workspaces, instances, and agents [alias: ps]
+  [1m[32musage[0m        Read cached usage and quota data from a running Capsule daemon
+  [1m[32mhelp[0m         Print help documentation for a jackin command
+
+[1m[92mOptions:[0m
+      [1m[32m--debug[0m    Print raw container output for troubleshooting [env: JACKIN_DEBUG=]
+  [1m[32m-h[0m, [1m[32m--help[0m     Print help (see more with '--help')
+  [1m[32m-V[0m, [1m[32m--version[0m  Print version
+
+Run 'jackin help <command>' for more detailed information.
+

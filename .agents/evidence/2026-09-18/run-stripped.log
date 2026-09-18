@@ -1,0 +1,1502 @@
+Policy	Set up job	﻿2026-09-16T21:41:44.5474134Z Current runner version: '2.337.0'
+Policy	Set up job	2026-09-16T21:41:44.5513665Z ##[group]Runner Image Provisioner
+Policy	Set up job	2026-09-16T21:41:44.5514981Z Hosted Compute Agent
+Policy	Set up job	2026-09-16T21:41:44.5515976Z Version: 20260828.587
+Policy	Set up job	2026-09-16T21:41:44.5517069Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+Policy	Set up job	2026-09-16T21:41:44.5518293Z Build Date: 2026-08-28T16:44:25Z
+Policy	Set up job	2026-09-16T21:41:44.5519480Z Worker ID: {fc11a9fb-7aa0-4058-8b64-2ad0fa0ef2d9}
+Policy	Set up job	2026-09-16T21:41:44.5520735Z Azure Region: eastus
+Policy	Set up job	2026-09-16T21:41:44.5522059Z ##[endgroup]
+Policy	Set up job	2026-09-16T21:41:44.5524435Z ##[group]Operating System
+Policy	Set up job	2026-09-16T21:41:44.5525525Z Ubuntu
+Policy	Set up job	2026-09-16T21:41:44.5526346Z 24.04.5
+Policy	Set up job	2026-09-16T21:41:44.5527143Z LTS
+Policy	Set up job	2026-09-16T21:41:44.5528101Z ##[endgroup]
+Policy	Set up job	2026-09-16T21:41:44.5529037Z ##[group]Runner Image
+Policy	Set up job	2026-09-16T21:41:44.5529952Z Image: ubuntu-24.04
+Policy	Set up job	2026-09-16T21:41:44.5530993Z Version: 20260907.300.1
+Policy	Set up job	2026-09-16T21:41:44.5533079Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260907.300/images/ubuntu/Ubuntu2404-Readme.md
+Policy	Set up job	2026-09-16T21:41:44.5536124Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260907.300
+Policy	Set up job	2026-09-16T21:41:44.5537891Z ##[endgroup]
+Policy	Set up job	2026-09-16T21:41:44.5539739Z ##[group]GITHUB_TOKEN Permissions
+Policy	Set up job	2026-09-16T21:41:44.5542815Z Contents: read
+Policy	Set up job	2026-09-16T21:41:44.5543746Z Metadata: read
+Policy	Set up job	2026-09-16T21:41:44.5544786Z ##[endgroup]
+Policy	Set up job	2026-09-16T21:41:44.5547833Z Secret source: Actions
+Policy	Set up job	2026-09-16T21:41:44.5549285Z Cache mode: read
+Policy	Set up job	2026-09-16T21:41:44.5551001Z Prepare workflow directory
+Policy	Set up job	2026-09-16T21:41:44.6028488Z Prepare all required actions
+Policy	Set up job	2026-09-16T21:41:44.6099854Z Getting action download info
+Policy	Set up job	2026-09-16T21:41:44.8120517Z Download action repository 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' (SHA:3d3c42e5aac5ba805825da76410c181273ba90b1)
+Policy	Set up job	2026-09-16T21:41:44.9072722Z Download action repository 'jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c' (SHA:c2a87611a18de5b3828c5652fe268e992400cb5c)
+Policy	Set up job	2026-09-16T21:41:45.2598322Z Complete job name: Policy
+Policy	Checkout repository history	﻿2026-09-16T21:41:45.3392726Z ##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+Policy	Checkout repository history	2026-09-16T21:41:45.3393837Z with:
+Policy	Checkout repository history	2026-09-16T21:41:45.3394275Z   path: policy-checkout
+Policy	Checkout repository history	2026-09-16T21:41:45.3394742Z   fetch-depth: 0
+Policy	Checkout repository history	2026-09-16T21:41:45.3395192Z   persist-credentials: false
+Policy	Checkout repository history	2026-09-16T21:41:45.3395800Z   repository: tailrocks/velnor
+Policy	Checkout repository history	2026-09-16T21:41:45.3400103Z   token: ***
+Policy	Checkout repository history	2026-09-16T21:41:45.3400630Z   ssh-strict: true
+Policy	Checkout repository history	2026-09-16T21:41:45.3401241Z   ssh-user: git
+Policy	Checkout repository history	2026-09-16T21:41:45.3401984Z   clean: true
+Policy	Checkout repository history	2026-09-16T21:41:45.3402506Z   sparse-checkout-cone-mode: true
+Policy	Checkout repository history	2026-09-16T21:41:45.3403201Z   fetch-tags: false
+Policy	Checkout repository history	2026-09-16T21:41:45.3403737Z   show-progress: true
+Policy	Checkout repository history	2026-09-16T21:41:45.3404330Z   lfs: false
+Policy	Checkout repository history	2026-09-16T21:41:45.3404882Z   submodules: false
+Policy	Checkout repository history	2026-09-16T21:41:45.3405423Z   set-safe-directory: true
+Policy	Checkout repository history	2026-09-16T21:41:45.3406106Z   allow-unsafe-pr-checkout: false
+Policy	Checkout repository history	2026-09-16T21:41:45.3407041Z ##[endgroup]
+Policy	Checkout repository history	2026-09-16T21:41:45.4455761Z Syncing repository: tailrocks/velnor
+Policy	Checkout repository history	2026-09-16T21:41:45.4458884Z ##[group]Getting Git version info
+Policy	Checkout repository history	2026-09-16T21:41:45.4460520Z Working directory is '/home/runner/work/velnor/velnor/policy-checkout'
+Policy	Checkout repository history	2026-09-16T21:41:45.4462868Z [command]/usr/bin/git version
+Policy	Checkout repository history	2026-09-16T21:41:45.4499266Z git version 2.55.0
+Policy	Checkout repository history	2026-09-16T21:41:45.4522176Z ##[endgroup]
+Policy	Checkout repository history	2026-09-16T21:41:45.4532689Z Temporarily overriding HOME='/home/runner/work/_temp/175ff488-bace-43d7-ba99-b04af148de4f' before making global git config changes
+Policy	Checkout repository history	2026-09-16T21:41:45.4535198Z Adding repository directory to the temporary git global config as a safe directory
+Policy	Checkout repository history	2026-09-16T21:41:45.4539786Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor/policy-checkout
+Policy	Checkout repository history	2026-09-16T21:41:45.4594303Z ##[group]Determining repository object format
+Policy	Checkout repository history	2026-09-16T21:41:45.4596194Z ##[endgroup]
+Policy	Checkout repository history	2026-09-16T21:41:45.4597349Z ##[group]Initializing the repository
+Policy	Checkout repository history	2026-09-16T21:41:45.4604359Z [command]/usr/bin/git init /home/runner/work/velnor/velnor/policy-checkout
+Policy	Checkout repository history	2026-09-16T21:41:45.4699391Z hint: Using 'master' as the name for the initial branch. This default branch name
+Policy	Checkout repository history	2026-09-16T21:41:45.4702385Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+Policy	Checkout repository history	2026-09-16T21:41:45.4704655Z hint: to use in all of your new repositories, which will suppress this warning,
+Policy	Checkout repository history	2026-09-16T21:41:45.4706031Z hint: call:
+Policy	Checkout repository history	2026-09-16T21:41:45.4706830Z hint:
+Policy	Checkout repository history	2026-09-16T21:41:45.4707818Z hint: 	git config --global init.defaultBranch <name>
+Policy	Checkout repository history	2026-09-16T21:41:45.4709021Z hint:
+Policy	Checkout repository history	2026-09-16T21:41:45.4710230Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+Policy	Checkout repository history	2026-09-16T21:41:45.4712198Z hint: 'development'. The just-created branch can be renamed via this command:
+Policy	Checkout repository history	2026-09-16T21:41:45.4713634Z hint:
+Policy	Checkout repository history	2026-09-16T21:41:45.4714467Z hint: 	git branch -m <name>
+Policy	Checkout repository history	2026-09-16T21:41:45.4715371Z hint:
+Policy	Checkout repository history	2026-09-16T21:41:45.4716636Z hint: Disable this message with "git config set advice.defaultBranchName false"
+Policy	Checkout repository history	2026-09-16T21:41:45.4718062Z Initialized empty Git repository in /home/runner/work/velnor/velnor/policy-checkout/.git/
+Policy	Checkout repository history	2026-09-16T21:41:45.4720801Z [command]/usr/bin/git remote add origin https://github.com/tailrocks/velnor
+Policy	Checkout repository history	2026-09-16T21:41:45.4765672Z ##[endgroup]
+Policy	Checkout repository history	2026-09-16T21:41:45.4767168Z ##[group]Disabling automatic garbage collection
+Policy	Checkout repository history	2026-09-16T21:41:45.4768705Z [command]/usr/bin/git config --local gc.auto 0
+Policy	Checkout repository history	2026-09-16T21:41:45.4802123Z ##[endgroup]
+Policy	Checkout repository history	2026-09-16T21:41:45.4803574Z ##[group]Setting up auth
+Policy	Checkout repository history	2026-09-16T21:41:45.4804538Z Removing SSH command configuration
+Policy	Checkout repository history	2026-09-16T21:41:45.4808235Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Policy	Checkout repository history	2026-09-16T21:41:45.4846413Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Policy	Checkout repository history	2026-09-16T21:41:45.5202200Z Removing HTTP extra header
+Policy	Checkout repository history	2026-09-16T21:41:45.5208631Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Policy	Checkout repository history	2026-09-16T21:41:45.5248964Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Policy	Checkout repository history	2026-09-16T21:41:45.5590632Z Removing includeIf entries pointing to credentials config files
+Policy	Checkout repository history	2026-09-16T21:41:45.5598092Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Policy	Checkout repository history	2026-09-16T21:41:45.5652576Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Policy	Checkout repository history	2026-09-16T21:41:45.5910502Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-0375ed44-7541-4d82-9b27-204f0f6f0dde.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+Policy	Checkout repository history	2026-09-16T21:41:45.5962138Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git.path /home/runner/work/_temp/git-credentials-0375ed44-7541-4d82-9b27-204f0f6f0dde.config
+Policy	Checkout repository history	2026-09-16T21:41:45.6008097Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-0375ed44-7541-4d82-9b27-204f0f6f0dde.config
+Policy	Checkout repository history	2026-09-16T21:41:45.6047252Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/policy-checkout/.git.path /github/runner_temp/git-credentials-0375ed44-7541-4d82-9b27-204f0f6f0dde.config
+Policy	Checkout repository history	2026-09-16T21:41:45.6085308Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/policy-checkout/.git/worktrees/*.path /github/runner_temp/git-credentials-0375ed44-7541-4d82-9b27-204f0f6f0dde.config
+Policy	Checkout repository history	2026-09-16T21:41:45.6120524Z ##[endgroup]
+Policy	Checkout repository history	2026-09-16T21:41:45.6121961Z ##[group]Fetching the repository
+Policy	Checkout repository history	2026-09-16T21:41:45.6128789Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules origin +refs/heads/*:refs/remotes/origin/* +refs/tags/*:refs/tags/*
+Policy	Checkout repository history	2026-09-16T21:41:49.5598102Z From https://github.com/tailrocks/velnor
+Policy	Checkout repository history	2026-09-16T21:41:49.5602871Z  * [new branch]        chore/proof-candidate-path -> origin/chore/proof-candidate-path
+Policy	Checkout repository history	2026-09-16T21:41:49.5605047Z  * [new branch]        fix/dogfood-pin-ruleset-403-fallback -> origin/fix/dogfood-pin-ruleset-403-fallback
+Policy	Checkout repository history	2026-09-16T21:41:49.5606870Z  * [new branch]        fix/ruleset-403-fallback-pin -> origin/fix/ruleset-403-fallback-pin
+Policy	Checkout repository history	2026-09-16T21:41:49.5608216Z  * [new branch]        main       -> origin/main
+Policy	Checkout repository history	2026-09-16T21:41:49.5609552Z  * [new branch]        tmp/proof-runtime-products-2 -> origin/tmp/proof-runtime-products-2
+Policy	Checkout repository history	2026-09-16T21:41:49.5611212Z  * [new tag]           archive/velnor2-pre-rebuild-20260831-bc593406 -> archive/velnor2-pre-rebuild-20260831-bc593406
+Policy	Checkout repository history	2026-09-16T21:41:49.5613192Z  * [new tag]           dima/velnor6-archive-4d81a14 -> dima/velnor6-archive-4d81a14
+Policy	Checkout repository history	2026-09-16T21:41:49.5614367Z  * [new tag]           preview    -> preview
+Policy	Checkout repository history	2026-09-16T21:41:49.5615525Z  * [new tag]           v0.1.10    -> v0.1.10
+Policy	Checkout repository history	2026-09-16T21:41:49.5616617Z  * [new tag]           v0.1.100   -> v0.1.100
+Policy	Checkout repository history	2026-09-16T21:41:49.5617646Z  * [new tag]           v0.1.101   -> v0.1.101
+Policy	Checkout repository history	2026-09-16T21:41:49.5618619Z  * [new tag]           v0.1.102   -> v0.1.102
+Policy	Checkout repository history	2026-09-16T21:41:49.5619685Z  * [new tag]           v0.1.103   -> v0.1.103
+Policy	Checkout repository history	2026-09-16T21:41:49.5620482Z  * [new tag]           v0.1.104   -> v0.1.104
+Policy	Checkout repository history	2026-09-16T21:41:49.5621181Z  * [new tag]           v0.1.105   -> v0.1.105
+Policy	Checkout repository history	2026-09-16T21:41:49.5622204Z  * [new tag]           v0.1.106   -> v0.1.106
+Policy	Checkout repository history	2026-09-16T21:41:49.5622802Z  * [new tag]           v0.1.107   -> v0.1.107
+Policy	Checkout repository history	2026-09-16T21:41:49.5623385Z  * [new tag]           v0.1.108   -> v0.1.108
+Policy	Checkout repository history	2026-09-16T21:41:49.5623995Z  * [new tag]           v0.1.109   -> v0.1.109
+Policy	Checkout repository history	2026-09-16T21:41:49.5624597Z  * [new tag]           v0.1.11    -> v0.1.11
+Policy	Checkout repository history	2026-09-16T21:41:49.5625169Z  * [new tag]           v0.1.110   -> v0.1.110
+Policy	Checkout repository history	2026-09-16T21:41:49.5625742Z  * [new tag]           v0.1.111   -> v0.1.111
+Policy	Checkout repository history	2026-09-16T21:41:49.5626311Z  * [new tag]           v0.1.112   -> v0.1.112
+Policy	Checkout repository history	2026-09-16T21:41:49.5626878Z  * [new tag]           v0.1.113   -> v0.1.113
+Policy	Checkout repository history	2026-09-16T21:41:49.5627724Z  * [new tag]           v0.1.114   -> v0.1.114
+Policy	Checkout repository history	2026-09-16T21:41:49.5628305Z  * [new tag]           v0.1.115   -> v0.1.115
+Policy	Checkout repository history	2026-09-16T21:41:49.5628865Z  * [new tag]           v0.1.116   -> v0.1.116
+Policy	Checkout repository history	2026-09-16T21:41:49.5629434Z  * [new tag]           v0.1.117   -> v0.1.117
+Policy	Checkout repository history	2026-09-16T21:41:49.5630099Z  * [new tag]           v0.1.118   -> v0.1.118
+Policy	Checkout repository history	2026-09-16T21:41:49.5630823Z  * [new tag]           v0.1.119   -> v0.1.119
+Policy	Checkout repository history	2026-09-16T21:41:49.5632263Z  * [new tag]           v0.1.12    -> v0.1.12
+Policy	Checkout repository history	2026-09-16T21:41:49.5633267Z  * [new tag]           v0.1.120   -> v0.1.120
+Policy	Checkout repository history	2026-09-16T21:41:49.5634263Z  * [new tag]           v0.1.121   -> v0.1.121
+Policy	Checkout repository history	2026-09-16T21:41:49.5635088Z  * [new tag]           v0.1.122   -> v0.1.122
+Policy	Checkout repository history	2026-09-16T21:41:49.5636034Z  * [new tag]           v0.1.123   -> v0.1.123
+Policy	Checkout repository history	2026-09-16T21:41:49.5637010Z  * [new tag]           v0.1.124   -> v0.1.124
+Policy	Checkout repository history	2026-09-16T21:41:49.5642042Z  * [new tag]           v0.1.125   -> v0.1.125
+Policy	Checkout repository history	2026-09-16T21:41:49.5643079Z  * [new tag]           v0.1.126   -> v0.1.126
+Policy	Checkout repository history	2026-09-16T21:41:49.5644079Z  * [new tag]           v0.1.127   -> v0.1.127
+Policy	Checkout repository history	2026-09-16T21:41:49.5645213Z  * [new tag]           v0.1.128   -> v0.1.128
+Policy	Checkout repository history	2026-09-16T21:41:49.5646215Z  * [new tag]           v0.1.129   -> v0.1.129
+Policy	Checkout repository history	2026-09-16T21:41:49.5647300Z  * [new tag]           v0.1.13    -> v0.1.13
+Policy	Checkout repository history	2026-09-16T21:41:49.5648299Z  * [new tag]           v0.1.130   -> v0.1.130
+Policy	Checkout repository history	2026-09-16T21:41:49.5649287Z  * [new tag]           v0.1.131   -> v0.1.131
+Policy	Checkout repository history	2026-09-16T21:41:49.5650265Z  * [new tag]           v0.1.132   -> v0.1.132
+Policy	Checkout repository history	2026-09-16T21:41:49.5651267Z  * [new tag]           v0.1.133   -> v0.1.133
+Policy	Checkout repository history	2026-09-16T21:41:49.5652512Z  * [new tag]           v0.1.134   -> v0.1.134
+Policy	Checkout repository history	2026-09-16T21:41:49.5653581Z  * [new tag]           v0.1.135   -> v0.1.135
+Policy	Checkout repository history	2026-09-16T21:41:49.5654612Z  * [new tag]           v0.1.136   -> v0.1.136
+Policy	Checkout repository history	2026-09-16T21:41:49.5655625Z  * [new tag]           v0.1.137   -> v0.1.137
+Policy	Checkout repository history	2026-09-16T21:41:49.5656820Z  * [new tag]           v0.1.138   -> v0.1.138
+Policy	Checkout repository history	2026-09-16T21:41:49.5658139Z  * [new tag]           v0.1.139   -> v0.1.139
+Policy	Checkout repository history	2026-09-16T21:41:49.5659196Z  * [new tag]           v0.1.14    -> v0.1.14
+Policy	Checkout repository history	2026-09-16T21:41:49.5660178Z  * [new tag]           v0.1.140   -> v0.1.140
+Policy	Checkout repository history	2026-09-16T21:41:49.5661157Z  * [new tag]           v0.1.141   -> v0.1.141
+Policy	Checkout repository history	2026-09-16T21:41:49.5662440Z  * [new tag]           v0.1.142   -> v0.1.142
+Policy	Checkout repository history	2026-09-16T21:41:49.5663452Z  * [new tag]           v0.1.143   -> v0.1.143
+Policy	Checkout repository history	2026-09-16T21:41:49.5664490Z  * [new tag]           v0.1.144   -> v0.1.144
+Policy	Checkout repository history	2026-09-16T21:41:49.5665496Z  * [new tag]           v0.1.145   -> v0.1.145
+Policy	Checkout repository history	2026-09-16T21:41:49.5666496Z  * [new tag]           v0.1.146   -> v0.1.146
+Policy	Checkout repository history	2026-09-16T21:41:49.5667497Z  * [new tag]           v0.1.147   -> v0.1.147
+Policy	Checkout repository history	2026-09-16T21:41:49.5668497Z  * [new tag]           v0.1.148   -> v0.1.148
+Policy	Checkout repository history	2026-09-16T21:41:49.5669497Z  * [new tag]           v0.1.149   -> v0.1.149
+Policy	Checkout repository history	2026-09-16T21:41:49.5670488Z  * [new tag]           v0.1.15    -> v0.1.15
+Policy	Checkout repository history	2026-09-16T21:41:49.5671687Z  * [new tag]           v0.1.150   -> v0.1.150
+Policy	Checkout repository history	2026-09-16T21:41:49.5672899Z  * [new tag]           v0.1.151   -> v0.1.151
+Policy	Checkout repository history	2026-09-16T21:41:49.5674039Z  * [new tag]           v0.1.152   -> v0.1.152
+Policy	Checkout repository history	2026-09-16T21:41:49.5675158Z  * [new tag]           v0.1.153   -> v0.1.153
+Policy	Checkout repository history	2026-09-16T21:41:49.5676279Z  * [new tag]           v0.1.154   -> v0.1.154
+Policy	Checkout repository history	2026-09-16T21:41:49.5677381Z  * [new tag]           v0.1.155   -> v0.1.155
+Policy	Checkout repository history	2026-09-16T21:41:49.5678496Z  * [new tag]           v0.1.156   -> v0.1.156
+Policy	Checkout repository history	2026-09-16T21:41:49.5679607Z  * [new tag]           v0.1.157   -> v0.1.157
+Policy	Checkout repository history	2026-09-16T21:41:49.5680725Z  * [new tag]           v0.1.158   -> v0.1.158
+Policy	Checkout repository history	2026-09-16T21:41:49.5682053Z  * [new tag]           v0.1.159   -> v0.1.159
+Policy	Checkout repository history	2026-09-16T21:41:49.5683187Z  * [new tag]           v0.1.16    -> v0.1.16
+Policy	Checkout repository history	2026-09-16T21:41:49.5684308Z  * [new tag]           v0.1.160   -> v0.1.160
+Policy	Checkout repository history	2026-09-16T21:41:49.5685430Z  * [new tag]           v0.1.161   -> v0.1.161
+Policy	Checkout repository history	2026-09-16T21:41:49.5686540Z  * [new tag]           v0.1.162   -> v0.1.162
+Policy	Checkout repository history	2026-09-16T21:41:49.5687885Z  * [new tag]           v0.1.163   -> v0.1.163
+Policy	Checkout repository history	2026-09-16T21:41:49.5689006Z  * [new tag]           v0.1.164   -> v0.1.164
+Policy	Checkout repository history	2026-09-16T21:41:49.5690112Z  * [new tag]           v0.1.165   -> v0.1.165
+Policy	Checkout repository history	2026-09-16T21:41:49.5691217Z  * [new tag]           v0.1.166   -> v0.1.166
+Policy	Checkout repository history	2026-09-16T21:41:49.5692549Z  * [new tag]           v0.1.167   -> v0.1.167
+Policy	Checkout repository history	2026-09-16T21:41:49.5693698Z  * [new tag]           v0.1.168   -> v0.1.168
+Policy	Checkout repository history	2026-09-16T21:41:49.5694795Z  * [new tag]           v0.1.17    -> v0.1.17
+Policy	Checkout repository history	2026-09-16T21:41:49.5696518Z  * [new tag]           v0.1.170   -> v0.1.170
+Policy	Checkout repository history	2026-09-16T21:41:49.5697244Z  * [new tag]           v0.1.171   -> v0.1.171
+Policy	Checkout repository history	2026-09-16T21:41:49.5697933Z  * [new tag]           v0.1.172   -> v0.1.172
+Policy	Checkout repository history	2026-09-16T21:41:49.5698609Z  * [new tag]           v0.1.173   -> v0.1.173
+Policy	Checkout repository history	2026-09-16T21:41:49.5699288Z  * [new tag]           v0.1.174   -> v0.1.174
+Policy	Checkout repository history	2026-09-16T21:41:49.5699961Z  * [new tag]           v0.1.175   -> v0.1.175
+Policy	Checkout repository history	2026-09-16T21:41:49.5700630Z  * [new tag]           v0.1.176   -> v0.1.176
+Policy	Checkout repository history	2026-09-16T21:41:49.5701599Z  * [new tag]           v0.1.177   -> v0.1.177
+Policy	Checkout repository history	2026-09-16T21:41:49.5702702Z  * [new tag]           v0.1.178   -> v0.1.178
+Policy	Checkout repository history	2026-09-16T21:41:49.5703742Z  * [new tag]           v0.1.179   -> v0.1.179
+Policy	Checkout repository history	2026-09-16T21:41:49.5704863Z  * [new tag]           v0.1.18    -> v0.1.18
+Policy	Checkout repository history	2026-09-16T21:41:49.5705841Z  * [new tag]           v0.1.180   -> v0.1.180
+Policy	Checkout repository history	2026-09-16T21:41:49.5706602Z  * [new tag]           v0.1.181   -> v0.1.181
+Policy	Checkout repository history	2026-09-16T21:41:49.5707313Z  * [new tag]           v0.1.182   -> v0.1.182
+Policy	Checkout repository history	2026-09-16T21:41:49.5707989Z  * [new tag]           v0.1.183   -> v0.1.183
+Policy	Checkout repository history	2026-09-16T21:41:49.5708653Z  * [new tag]           v0.1.184   -> v0.1.184
+Policy	Checkout repository history	2026-09-16T21:41:49.5709332Z  * [new tag]           v0.1.185   -> v0.1.185
+Policy	Checkout repository history	2026-09-16T21:41:49.5709997Z  * [new tag]           v0.1.186   -> v0.1.186
+Policy	Checkout repository history	2026-09-16T21:41:49.5710662Z  * [new tag]           v0.1.187   -> v0.1.187
+Policy	Checkout repository history	2026-09-16T21:41:49.5711328Z  * [new tag]           v0.1.188   -> v0.1.188
+Policy	Checkout repository history	2026-09-16T21:41:49.5712295Z  * [new tag]           v0.1.189   -> v0.1.189
+Policy	Checkout repository history	2026-09-16T21:41:49.5713212Z  * [new tag]           v0.1.19    -> v0.1.19
+Policy	Checkout repository history	2026-09-16T21:41:49.5713902Z  * [new tag]           v0.1.190   -> v0.1.190
+Policy	Checkout repository history	2026-09-16T21:41:49.5714572Z  * [new tag]           v0.1.191   -> v0.1.191
+Policy	Checkout repository history	2026-09-16T21:41:49.5715240Z  * [new tag]           v0.1.192   -> v0.1.192
+Policy	Checkout repository history	2026-09-16T21:41:49.5716475Z  * [new tag]           v0.1.193   -> v0.1.193
+Policy	Checkout repository history	2026-09-16T21:41:49.5717589Z  * [new tag]           v0.1.194   -> v0.1.194
+Policy	Checkout repository history	2026-09-16T21:41:49.5718592Z  * [new tag]           v0.1.195   -> v0.1.195
+Policy	Checkout repository history	2026-09-16T21:41:49.5719671Z  * [new tag]           v0.1.196   -> v0.1.196
+Policy	Checkout repository history	2026-09-16T21:41:49.5720708Z  * [new tag]           v0.1.197   -> v0.1.197
+Policy	Checkout repository history	2026-09-16T21:41:49.5721994Z  * [new tag]           v0.1.198   -> v0.1.198
+Policy	Checkout repository history	2026-09-16T21:41:49.5723053Z  * [new tag]           v0.1.199   -> v0.1.199
+Policy	Checkout repository history	2026-09-16T21:41:49.5724124Z  * [new tag]           v0.1.2     -> v0.1.2
+Policy	Checkout repository history	2026-09-16T21:41:49.5725153Z  * [new tag]           v0.1.20    -> v0.1.20
+Policy	Checkout repository history	2026-09-16T21:41:49.5726243Z  * [new tag]           v0.1.200   -> v0.1.200
+Policy	Checkout repository history	2026-09-16T21:41:49.5727316Z  * [new tag]           v0.1.201   -> v0.1.201
+Policy	Checkout repository history	2026-09-16T21:41:49.5728512Z  * [new tag]           v0.1.202   -> v0.1.202
+Policy	Checkout repository history	2026-09-16T21:41:49.5729695Z  * [new tag]           v0.1.203   -> v0.1.203
+Policy	Checkout repository history	2026-09-16T21:41:49.5730825Z  * [new tag]           v0.1.204   -> v0.1.204
+Policy	Checkout repository history	2026-09-16T21:41:49.5732182Z  * [new tag]           v0.1.205   -> v0.1.205
+Policy	Checkout repository history	2026-09-16T21:41:49.5733254Z  * [new tag]           v0.1.206   -> v0.1.206
+Policy	Checkout repository history	2026-09-16T21:41:49.5734358Z  * [new tag]           v0.1.207   -> v0.1.207
+Policy	Checkout repository history	2026-09-16T21:41:49.5735473Z  * [new tag]           v0.1.208   -> v0.1.208
+Policy	Checkout repository history	2026-09-16T21:41:49.5736590Z  * [new tag]           v0.1.209   -> v0.1.209
+Policy	Checkout repository history	2026-09-16T21:41:49.5737688Z  * [new tag]           v0.1.21    -> v0.1.21
+Policy	Checkout repository history	2026-09-16T21:41:49.5738783Z  * [new tag]           v0.1.210   -> v0.1.210
+Policy	Checkout repository history	2026-09-16T21:41:49.5739877Z  * [new tag]           v0.1.211   -> v0.1.211
+Policy	Checkout repository history	2026-09-16T21:41:49.5740970Z  * [new tag]           v0.1.212   -> v0.1.212
+Policy	Checkout repository history	2026-09-16T21:41:49.5742583Z  * [new tag]           v0.1.213   -> v0.1.213
+Policy	Checkout repository history	2026-09-16T21:41:49.5743480Z  * [new tag]           v0.1.214   -> v0.1.214
+Policy	Checkout repository history	2026-09-16T21:41:49.5744201Z  * [new tag]           v0.1.215   -> v0.1.215
+Policy	Checkout repository history	2026-09-16T21:41:49.5744862Z  * [new tag]           v0.1.217   -> v0.1.217
+Policy	Checkout repository history	2026-09-16T21:41:49.5745531Z  * [new tag]           v0.1.218   -> v0.1.218
+Policy	Checkout repository history	2026-09-16T21:41:49.5746175Z  * [new tag]           v0.1.219   -> v0.1.219
+Policy	Checkout repository history	2026-09-16T21:41:49.5746837Z  * [new tag]           v0.1.22    -> v0.1.22
+Policy	Checkout repository history	2026-09-16T21:41:49.5747493Z  * [new tag]           v0.1.220   -> v0.1.220
+Policy	Checkout repository history	2026-09-16T21:41:49.5748171Z  * [new tag]           v0.1.221   -> v0.1.221
+Policy	Checkout repository history	2026-09-16T21:41:49.5748840Z  * [new tag]           v0.1.222   -> v0.1.222
+Policy	Checkout repository history	2026-09-16T21:41:49.5749540Z  * [new tag]           v0.1.223   -> v0.1.223
+Policy	Checkout repository history	2026-09-16T21:41:49.5750257Z  * [new tag]           v0.1.224   -> v0.1.224
+Policy	Checkout repository history	2026-09-16T21:41:49.5751040Z  * [new tag]           v0.1.225   -> v0.1.225
+Policy	Checkout repository history	2026-09-16T21:41:49.5752374Z  * [new tag]           v0.1.226   -> v0.1.226
+Policy	Checkout repository history	2026-09-16T21:41:49.5753391Z  * [new tag]           v0.1.227   -> v0.1.227
+Policy	Checkout repository history	2026-09-16T21:41:49.5754198Z  * [new tag]           v0.1.228   -> v0.1.228
+Policy	Checkout repository history	2026-09-16T21:41:49.5754907Z  * [new tag]           v0.1.229   -> v0.1.229
+Policy	Checkout repository history	2026-09-16T21:41:49.5755557Z  * [new tag]           v0.1.23    -> v0.1.23
+Policy	Checkout repository history	2026-09-16T21:41:49.5756192Z  * [new tag]           v0.1.230   -> v0.1.230
+Policy	Checkout repository history	2026-09-16T21:41:49.5756831Z  * [new tag]           v0.1.231   -> v0.1.231
+Policy	Checkout repository history	2026-09-16T21:41:49.5757459Z  * [new tag]           v0.1.232   -> v0.1.232
+Policy	Checkout repository history	2026-09-16T21:41:49.5758089Z  * [new tag]           v0.1.233   -> v0.1.233
+Policy	Checkout repository history	2026-09-16T21:41:49.5758720Z  * [new tag]           v0.1.234   -> v0.1.234
+Policy	Checkout repository history	2026-09-16T21:41:49.5759348Z  * [new tag]           v0.1.235   -> v0.1.235
+Policy	Checkout repository history	2026-09-16T21:41:49.5759988Z  * [new tag]           v0.1.236   -> v0.1.236
+Policy	Checkout repository history	2026-09-16T21:41:49.5760649Z  * [new tag]           v0.1.237   -> v0.1.237
+Policy	Checkout repository history	2026-09-16T21:41:49.5761759Z  * [new tag]           v0.1.238   -> v0.1.238
+Policy	Checkout repository history	2026-09-16T21:41:49.5762673Z  * [new tag]           v0.1.239   -> v0.1.239
+Policy	Checkout repository history	2026-09-16T21:41:49.5763327Z  * [new tag]           v0.1.24    -> v0.1.24
+Policy	Checkout repository history	2026-09-16T21:41:49.5763977Z  * [new tag]           v0.1.240   -> v0.1.240
+Policy	Checkout repository history	2026-09-16T21:41:49.5764634Z  * [new tag]           v0.1.241   -> v0.1.241
+Policy	Checkout repository history	2026-09-16T21:41:49.5765287Z  * [new tag]           v0.1.242   -> v0.1.242
+Policy	Checkout repository history	2026-09-16T21:41:49.5765923Z  * [new tag]           v0.1.243   -> v0.1.243
+Policy	Checkout repository history	2026-09-16T21:41:49.5766559Z  * [new tag]           v0.1.244   -> v0.1.244
+Policy	Checkout repository history	2026-09-16T21:41:49.5767193Z  * [new tag]           v0.1.245   -> v0.1.245
+Policy	Checkout repository history	2026-09-16T21:41:49.5767817Z  * [new tag]           v0.1.246   -> v0.1.246
+Policy	Checkout repository history	2026-09-16T21:41:49.5768441Z  * [new tag]           v0.1.247   -> v0.1.247
+Policy	Checkout repository history	2026-09-16T21:41:49.5769068Z  * [new tag]           v0.1.248   -> v0.1.248
+Policy	Checkout repository history	2026-09-16T21:41:49.5769705Z  * [new tag]           v0.1.249   -> v0.1.249
+Policy	Checkout repository history	2026-09-16T21:41:49.5770359Z  * [new tag]           v0.1.25    -> v0.1.25
+Policy	Checkout repository history	2026-09-16T21:41:49.5770984Z  * [new tag]           v0.1.250   -> v0.1.250
+Policy	Checkout repository history	2026-09-16T21:41:49.5771995Z  * [new tag]           v0.1.251   -> v0.1.251
+Policy	Checkout repository history	2026-09-16T21:41:49.5773007Z  * [new tag]           v0.1.252   -> v0.1.252
+Policy	Checkout repository history	2026-09-16T21:41:49.5774039Z  * [new tag]           v0.1.253   -> v0.1.253
+Policy	Checkout repository history	2026-09-16T21:41:49.5775071Z  * [new tag]           v0.1.254   -> v0.1.254
+Policy	Checkout repository history	2026-09-16T21:41:49.5775743Z  * [new tag]           v0.1.255   -> v0.1.255
+Policy	Checkout repository history	2026-09-16T21:41:49.5776387Z  * [new tag]           v0.1.256   -> v0.1.256
+Policy	Checkout repository history	2026-09-16T21:41:49.5777025Z  * [new tag]           v0.1.257   -> v0.1.257
+Policy	Checkout repository history	2026-09-16T21:41:49.5777662Z  * [new tag]           v0.1.258   -> v0.1.258
+Policy	Checkout repository history	2026-09-16T21:41:49.5778291Z  * [new tag]           v0.1.259   -> v0.1.259
+Policy	Checkout repository history	2026-09-16T21:41:49.5778921Z  * [new tag]           v0.1.26    -> v0.1.26
+Policy	Checkout repository history	2026-09-16T21:41:49.5779544Z  * [new tag]           v0.1.260   -> v0.1.260
+Policy	Checkout repository history	2026-09-16T21:41:49.5780168Z  * [new tag]           v0.1.261   -> v0.1.261
+Policy	Checkout repository history	2026-09-16T21:41:49.5780799Z  * [new tag]           v0.1.262   -> v0.1.262
+Policy	Checkout repository history	2026-09-16T21:41:49.5781700Z  * [new tag]           v0.1.263   -> v0.1.263
+Policy	Checkout repository history	2026-09-16T21:41:49.5782669Z  * [new tag]           v0.1.264   -> v0.1.264
+Policy	Checkout repository history	2026-09-16T21:41:49.5783321Z  * [new tag]           v0.1.265   -> v0.1.265
+Policy	Checkout repository history	2026-09-16T21:41:49.5783961Z  * [new tag]           v0.1.266   -> v0.1.266
+Policy	Checkout repository history	2026-09-16T21:41:49.5784604Z  * [new tag]           v0.1.267   -> v0.1.267
+Policy	Checkout repository history	2026-09-16T21:41:49.5785246Z  * [new tag]           v0.1.268   -> v0.1.268
+Policy	Checkout repository history	2026-09-16T21:41:49.5785897Z  * [new tag]           v0.1.269   -> v0.1.269
+Policy	Checkout repository history	2026-09-16T21:41:49.5786530Z  * [new tag]           v0.1.27    -> v0.1.27
+Policy	Checkout repository history	2026-09-16T21:41:49.5787139Z  * [new tag]           v0.1.270   -> v0.1.270
+Policy	Checkout repository history	2026-09-16T21:41:49.5787750Z  * [new tag]           v0.1.271   -> v0.1.271
+Policy	Checkout repository history	2026-09-16T21:41:49.5788377Z  * [new tag]           v0.1.272   -> v0.1.272
+Policy	Checkout repository history	2026-09-16T21:41:49.5789005Z  * [new tag]           v0.1.273   -> v0.1.273
+Policy	Checkout repository history	2026-09-16T21:41:49.5789646Z  * [new tag]           v0.1.274   -> v0.1.274
+Policy	Checkout repository history	2026-09-16T21:41:49.5790422Z  * [new tag]           v0.1.28    -> v0.1.28
+Policy	Checkout repository history	2026-09-16T21:41:49.5791092Z  * [new tag]           v0.1.29    -> v0.1.29
+Policy	Checkout repository history	2026-09-16T21:41:49.5792055Z  * [new tag]           v0.1.3     -> v0.1.3
+Policy	Checkout repository history	2026-09-16T21:41:49.5792713Z  * [new tag]           v0.1.30    -> v0.1.30
+Policy	Checkout repository history	2026-09-16T21:41:49.5793351Z  * [new tag]           v0.1.31    -> v0.1.31
+Policy	Checkout repository history	2026-09-16T21:41:49.5793973Z  * [new tag]           v0.1.32    -> v0.1.32
+Policy	Checkout repository history	2026-09-16T21:41:49.5794753Z  * [new tag]           v0.1.33    -> v0.1.33
+Policy	Checkout repository history	2026-09-16T21:41:49.5795381Z  * [new tag]           v0.1.34    -> v0.1.34
+Policy	Checkout repository history	2026-09-16T21:41:49.5796001Z  * [new tag]           v0.1.35    -> v0.1.35
+Policy	Checkout repository history	2026-09-16T21:41:49.5796622Z  * [new tag]           v0.1.36    -> v0.1.36
+Policy	Checkout repository history	2026-09-16T21:41:49.5797433Z  * [new tag]           v0.1.37    -> v0.1.37
+Policy	Checkout repository history	2026-09-16T21:41:49.5798364Z  * [new tag]           v0.1.38    -> v0.1.38
+Policy	Checkout repository history	2026-09-16T21:41:49.5799025Z  * [new tag]           v0.1.39    -> v0.1.39
+Policy	Checkout repository history	2026-09-16T21:41:49.5799669Z  * [new tag]           v0.1.4     -> v0.1.4
+Policy	Checkout repository history	2026-09-16T21:41:49.5800499Z  * [new tag]           v0.1.40    -> v0.1.40
+Policy	Checkout repository history	2026-09-16T21:41:49.5801625Z  * [new tag]           v0.1.41    -> v0.1.41
+Policy	Checkout repository history	2026-09-16T21:41:49.5802518Z  * [new tag]           v0.1.42    -> v0.1.42
+Policy	Checkout repository history	2026-09-16T21:41:49.5803236Z  * [new tag]           v0.1.43    -> v0.1.43
+Policy	Checkout repository history	2026-09-16T21:41:49.5803928Z  * [new tag]           v0.1.44    -> v0.1.44
+Policy	Checkout repository history	2026-09-16T21:41:49.5804584Z  * [new tag]           v0.1.45    -> v0.1.45
+Policy	Checkout repository history	2026-09-16T21:41:49.5805561Z  * [new tag]           v0.1.46    -> v0.1.46
+Policy	Checkout repository history	2026-09-16T21:41:49.5806354Z  * [new tag]           v0.1.47    -> v0.1.47
+Policy	Checkout repository history	2026-09-16T21:41:49.5807132Z  * [new tag]           v0.1.48    -> v0.1.48
+Policy	Checkout repository history	2026-09-16T21:41:49.5807826Z  * [new tag]           v0.1.49    -> v0.1.49
+Policy	Checkout repository history	2026-09-16T21:41:49.5808463Z  * [new tag]           v0.1.5     -> v0.1.5
+Policy	Checkout repository history	2026-09-16T21:41:49.5809085Z  * [new tag]           v0.1.50    -> v0.1.50
+Policy	Checkout repository history	2026-09-16T21:41:49.5809708Z  * [new tag]           v0.1.51    -> v0.1.51
+Policy	Checkout repository history	2026-09-16T21:41:49.5810338Z  * [new tag]           v0.1.52    -> v0.1.52
+Policy	Checkout repository history	2026-09-16T21:41:49.5810968Z  * [new tag]           v0.1.53    -> v0.1.53
+Policy	Checkout repository history	2026-09-16T21:41:49.5811980Z  * [new tag]           v0.1.54    -> v0.1.54
+Policy	Checkout repository history	2026-09-16T21:41:49.5812663Z  * [new tag]           v0.1.55    -> v0.1.55
+Policy	Checkout repository history	2026-09-16T21:41:49.5813308Z  * [new tag]           v0.1.56    -> v0.1.56
+Policy	Checkout repository history	2026-09-16T21:41:49.5814124Z  * [new tag]           v0.1.57    -> v0.1.57
+Policy	Checkout repository history	2026-09-16T21:41:49.5814809Z  * [new tag]           v0.1.58    -> v0.1.58
+Policy	Checkout repository history	2026-09-16T21:41:49.5815443Z  * [new tag]           v0.1.59    -> v0.1.59
+Policy	Checkout repository history	2026-09-16T21:41:49.5816062Z  * [new tag]           v0.1.6     -> v0.1.6
+Policy	Checkout repository history	2026-09-16T21:41:49.5816685Z  * [new tag]           v0.1.60    -> v0.1.60
+Policy	Checkout repository history	2026-09-16T21:41:49.5817322Z  * [new tag]           v0.1.61    -> v0.1.61
+Policy	Checkout repository history	2026-09-16T21:41:49.5817949Z  * [new tag]           v0.1.62    -> v0.1.62
+Policy	Checkout repository history	2026-09-16T21:41:49.5818572Z  * [new tag]           v0.1.63    -> v0.1.63
+Policy	Checkout repository history	2026-09-16T21:41:49.5819204Z  * [new tag]           v0.1.64    -> v0.1.64
+Policy	Checkout repository history	2026-09-16T21:41:49.5819836Z  * [new tag]           v0.1.65    -> v0.1.65
+Policy	Checkout repository history	2026-09-16T21:41:49.5820493Z  * [new tag]           v0.1.66    -> v0.1.66
+Policy	Checkout repository history	2026-09-16T21:41:49.5821493Z  * [new tag]           v0.1.67    -> v0.1.67
+Policy	Checkout repository history	2026-09-16T21:41:49.5822153Z  * [new tag]           v0.1.68    -> v0.1.68
+Policy	Checkout repository history	2026-09-16T21:41:49.5822803Z  * [new tag]           v0.1.69    -> v0.1.69
+Policy	Checkout repository history	2026-09-16T21:41:49.5823451Z  * [new tag]           v0.1.7     -> v0.1.7
+Policy	Checkout repository history	2026-09-16T21:41:49.5824313Z  * [new tag]           v0.1.70    -> v0.1.70
+Policy	Checkout repository history	2026-09-16T21:41:49.5825531Z  * [new tag]           v0.1.71    -> v0.1.71
+Policy	Checkout repository history	2026-09-16T21:41:49.5826333Z  * [new tag]           v0.1.72    -> v0.1.72
+Policy	Checkout repository history	2026-09-16T21:41:49.5826989Z  * [new tag]           v0.1.73    -> v0.1.73
+Policy	Checkout repository history	2026-09-16T21:41:49.5827638Z  * [new tag]           v0.1.74    -> v0.1.74
+Policy	Checkout repository history	2026-09-16T21:41:49.5828286Z  * [new tag]           v0.1.75    -> v0.1.75
+Policy	Checkout repository history	2026-09-16T21:41:49.5828925Z  * [new tag]           v0.1.76    -> v0.1.76
+Policy	Checkout repository history	2026-09-16T21:41:49.5829570Z  * [new tag]           v0.1.77    -> v0.1.77
+Policy	Checkout repository history	2026-09-16T21:41:49.5830215Z  * [new tag]           v0.1.78    -> v0.1.78
+Policy	Checkout repository history	2026-09-16T21:41:49.5830858Z  * [new tag]           v0.1.79    -> v0.1.79
+Policy	Checkout repository history	2026-09-16T21:41:49.5831783Z  * [new tag]           v0.1.8     -> v0.1.8
+Policy	Checkout repository history	2026-09-16T21:41:49.5832454Z  * [new tag]           v0.1.80    -> v0.1.80
+Policy	Checkout repository history	2026-09-16T21:41:49.5833114Z  * [new tag]           v0.1.81    -> v0.1.81
+Policy	Checkout repository history	2026-09-16T21:41:49.5833761Z  * [new tag]           v0.1.82    -> v0.1.82
+Policy	Checkout repository history	2026-09-16T21:41:49.5834483Z  * [new tag]           v0.1.83    -> v0.1.83
+Policy	Checkout repository history	2026-09-16T21:41:49.5835262Z  * [new tag]           v0.1.84    -> v0.1.84
+Policy	Checkout repository history	2026-09-16T21:41:49.5835919Z  * [new tag]           v0.1.85    -> v0.1.85
+Policy	Checkout repository history	2026-09-16T21:41:49.5836591Z  * [new tag]           v0.1.86    -> v0.1.86
+Policy	Checkout repository history	2026-09-16T21:41:49.5837253Z  * [new tag]           v0.1.87    -> v0.1.87
+Policy	Checkout repository history	2026-09-16T21:41:49.5837934Z  * [new tag]           v0.1.88    -> v0.1.88
+Policy	Checkout repository history	2026-09-16T21:41:49.5838837Z  * [new tag]           v0.1.89    -> v0.1.89
+Policy	Checkout repository history	2026-09-16T21:41:49.5839549Z  * [new tag]           v0.1.9     -> v0.1.9
+Policy	Checkout repository history	2026-09-16T21:41:49.5840246Z  * [new tag]           v0.1.90    -> v0.1.90
+Policy	Checkout repository history	2026-09-16T21:41:49.5840895Z  * [new tag]           v0.1.91    -> v0.1.91
+Policy	Checkout repository history	2026-09-16T21:41:49.5842007Z  * [new tag]           v0.1.92    -> v0.1.92
+Policy	Checkout repository history	2026-09-16T21:41:49.5843283Z  * [new tag]           v0.1.93    -> v0.1.93
+Policy	Checkout repository history	2026-09-16T21:41:49.5844177Z  * [new tag]           v0.1.94    -> v0.1.94
+Policy	Checkout repository history	2026-09-16T21:41:49.5844855Z  * [new tag]           v0.1.95    -> v0.1.95
+Policy	Checkout repository history	2026-09-16T21:41:49.5845501Z  * [new tag]           v0.1.96    -> v0.1.96
+Policy	Checkout repository history	2026-09-16T21:41:49.5846153Z  * [new tag]           v0.1.97    -> v0.1.97
+Policy	Checkout repository history	2026-09-16T21:41:49.5846803Z  * [new tag]           v0.1.98    -> v0.1.98
+Policy	Checkout repository history	2026-09-16T21:41:49.5847441Z  * [new tag]           v0.1.99    -> v0.1.99
+Policy	Checkout repository history	2026-09-16T21:41:49.5848623Z  * [new tag]           velnor-workflow-runtime-v1-203eb9b79141e5a2 -> velnor-workflow-runtime-v1-203eb9b79141e5a2
+Policy	Checkout repository history	2026-09-16T21:41:49.5850390Z  * [new tag]           velnor-workflow-runtime-v1-2bd48976b59bf084 -> velnor-workflow-runtime-v1-2bd48976b59bf084
+Policy	Checkout repository history	2026-09-16T21:41:49.5852674Z  * [new tag]           velnor-workflow-runtime-v1-6ae4ca31ef453567 -> velnor-workflow-runtime-v1-6ae4ca31ef453567
+Policy	Checkout repository history	2026-09-16T21:41:49.5854507Z  * [new tag]           velnor-workflow-runtime-v1-78673ee16c42581e -> velnor-workflow-runtime-v1-78673ee16c42581e
+Policy	Checkout repository history	2026-09-16T21:41:49.5856269Z  * [new tag]           velnor-workflow-runtime-v1-ad493401f003a130 -> velnor-workflow-runtime-v1-ad493401f003a130
+Policy	Checkout repository history	2026-09-16T21:41:49.5858021Z  * [new tag]           velnor-workflow-runtime-v1-c0ce56f09b27859c -> velnor-workflow-runtime-v1-c0ce56f09b27859c
+Policy	Checkout repository history	2026-09-16T21:41:49.5859788Z  * [new tag]           velnor-workflow-runtime-v1-d39cbf21e351b410 -> velnor-workflow-runtime-v1-d39cbf21e351b410
+Policy	Checkout repository history	2026-09-16T21:41:49.5861691Z  * [new tag]           velnor-workflow-runtime-v1-e5ad6f4f923cd154 -> velnor-workflow-runtime-v1-e5ad6f4f923cd154
+Policy	Checkout repository history	2026-09-16T21:41:49.5863469Z  * [new tag]           velnor-workflow-runtime-v1-f1f88c200e5b3b82 -> velnor-workflow-runtime-v1-f1f88c200e5b3b82
+Policy	Checkout repository history	2026-09-16T21:41:49.5865660Z [command]/usr/bin/git branch --list --remote origin/main
+Policy	Checkout repository history	2026-09-16T21:41:49.5866472Z   origin/main
+Policy	Checkout repository history	2026-09-16T21:41:49.5867819Z [command]/usr/bin/git rev-parse refs/remotes/origin/main
+Policy	Checkout repository history	2026-09-16T21:41:49.5868603Z 49eaeea37a625f78cd57bd026bedf4acba63be3d
+Policy	Checkout repository history	2026-09-16T21:41:49.5870111Z ##[endgroup]
+Policy	Checkout repository history	2026-09-16T21:41:49.5870862Z ##[group]Determining the checkout info
+Policy	Checkout repository history	2026-09-16T21:41:49.5872052Z ##[endgroup]
+Policy	Checkout repository history	2026-09-16T21:41:49.5872588Z [command]/usr/bin/git sparse-checkout disable
+Policy	Checkout repository history	2026-09-16T21:41:49.5874194Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+Policy	Checkout repository history	2026-09-16T21:41:49.5875987Z ##[group]Checking out the ref
+Policy	Checkout repository history	2026-09-16T21:41:49.5876915Z [command]/usr/bin/git checkout --progress --force -B main refs/remotes/origin/main
+Policy	Checkout repository history	2026-09-16T21:41:49.6670037Z Switched to a new branch 'main'
+Policy	Checkout repository history	2026-09-16T21:41:49.6674700Z branch 'main' set up to track 'origin/main'.
+Policy	Checkout repository history	2026-09-16T21:41:49.6693685Z ##[endgroup]
+Policy	Checkout repository history	2026-09-16T21:41:49.6749363Z [command]/usr/bin/git log -1 --format=%H
+Policy	Checkout repository history	2026-09-16T21:41:49.6778690Z 49eaeea37a625f78cd57bd026bedf4acba63be3d
+Policy	Checkout repository history	2026-09-16T21:41:49.6792295Z ##[group]Removing auth
+Policy	Checkout repository history	2026-09-16T21:41:49.6793133Z Removing SSH command configuration
+Policy	Checkout repository history	2026-09-16T21:41:49.6804106Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Policy	Checkout repository history	2026-09-16T21:41:49.6831732Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Policy	Checkout repository history	2026-09-16T21:41:49.7052789Z Removing HTTP extra header
+Policy	Checkout repository history	2026-09-16T21:41:49.7056341Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Policy	Checkout repository history	2026-09-16T21:41:49.7090891Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Policy	Checkout repository history	2026-09-16T21:41:49.7311026Z Removing includeIf entries pointing to credentials config files
+Policy	Checkout repository history	2026-09-16T21:41:49.7314213Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Policy	Checkout repository history	2026-09-16T21:41:49.7345112Z includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git.path
+Policy	Checkout repository history	2026-09-16T21:41:49.7347240Z includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git/worktrees/*.path
+Policy	Checkout repository history	2026-09-16T21:41:49.7349046Z includeif.gitdir:/github/workspace/policy-checkout/.git.path
+Policy	Checkout repository history	2026-09-16T21:41:49.7350767Z includeif.gitdir:/github/workspace/policy-checkout/.git/worktrees/*.path
+Policy	Checkout repository history	2026-09-16T21:41:49.7355811Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git.path
+Policy	Checkout repository history	2026-09-16T21:41:49.7383013Z /home/runner/work/_temp/git-credentials-0375ed44-7541-4d82-9b27-204f0f6f0dde.config
+Policy	Checkout repository history	2026-09-16T21:41:49.7395130Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git.path \/home\/runner\/work\/_temp\/git\-credentials\-0375ed44\-7541\-4d82\-9b27\-204f0f6f0dde\.config
+Policy	Checkout repository history	2026-09-16T21:41:49.7431908Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git/worktrees/*.path
+Policy	Checkout repository history	2026-09-16T21:41:49.7457419Z /home/runner/work/_temp/git-credentials-0375ed44-7541-4d82-9b27-204f0f6f0dde.config
+Policy	Checkout repository history	2026-09-16T21:41:49.7470449Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git/worktrees/*.path \/home\/runner\/work\/_temp\/git\-credentials\-0375ed44\-7541\-4d82\-9b27\-204f0f6f0dde\.config
+Policy	Checkout repository history	2026-09-16T21:41:49.7511696Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/policy-checkout/.git.path
+Policy	Checkout repository history	2026-09-16T21:41:49.7538381Z /github/runner_temp/git-credentials-0375ed44-7541-4d82-9b27-204f0f6f0dde.config
+Policy	Checkout repository history	2026-09-16T21:41:49.7547009Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/policy-checkout/.git.path \/github\/runner_temp\/git\-credentials\-0375ed44\-7541\-4d82\-9b27\-204f0f6f0dde\.config
+Policy	Checkout repository history	2026-09-16T21:41:49.7580917Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/policy-checkout/.git/worktrees/*.path
+Policy	Checkout repository history	2026-09-16T21:41:49.7606763Z /github/runner_temp/git-credentials-0375ed44-7541-4d82-9b27-204f0f6f0dde.config
+Policy	Checkout repository history	2026-09-16T21:41:49.7614509Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/policy-checkout/.git/worktrees/*.path \/github\/runner_temp\/git\-credentials\-0375ed44\-7541\-4d82\-9b27\-204f0f6f0dde\.config
+Policy	Checkout repository history	2026-09-16T21:41:49.7648470Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Policy	Checkout repository history	2026-09-16T21:41:49.7870459Z Removing credentials config '/home/runner/work/_temp/git-credentials-0375ed44-7541-4d82-9b27-204f0f6f0dde.config'
+Policy	Checkout repository history	2026-09-16T21:41:49.7878756Z ##[endgroup]
+Policy	Check out audited head	﻿2026-09-16T21:41:49.8129885Z ##[group]Run set -euo pipefail
+Policy	Check out audited head	2026-09-16T21:41:49.8130801Z set -euo pipefail
+Policy	Check out audited head	2026-09-16T21:41:49.8132011Z if ! git cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null; then
+Policy	Check out audited head	2026-09-16T21:41:49.8133370Z   git fetch --no-tags "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$HEAD_SHA"
+Policy	Check out audited head	2026-09-16T21:41:49.8134414Z fi
+Policy	Check out audited head	2026-09-16T21:41:49.8135024Z git checkout --quiet --detach "$HEAD_SHA"
+Policy	Check out audited head	2026-09-16T21:41:49.8176555Z shell: /usr/bin/bash -e {0}
+Policy	Check out audited head	2026-09-16T21:41:49.8177297Z env:
+Policy	Check out audited head	2026-09-16T21:41:49.8177916Z   HEAD_SHA: 7f603522c2967ccb0376c4dc73aea1bed5bf2cf1
+Policy	Check out audited head	2026-09-16T21:41:49.8178755Z   HEAD_REPOSITORY: tailrocks/velnor
+Policy	Check out audited head	2026-09-16T21:41:49.8179514Z ##[endgroup]
+Policy	Check out base setup action	﻿2026-09-16T21:41:49.8977103Z ##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+Policy	Check out base setup action	2026-09-16T21:41:49.8978002Z with:
+Policy	Check out base setup action	2026-09-16T21:41:49.8978470Z   ref: ced2311b88acc5c665258c1802e25ff1930257d2
+Policy	Check out base setup action	2026-09-16T21:41:49.8979137Z   path: policy-setup-action
+Policy	Check out base setup action	2026-09-16T21:41:49.8979780Z   sparse-checkout: .github/actions/setup-velnor-workflow
+Policy	Check out base setup action	2026-09-16T21:41:49.8980496Z   fetch-depth: 1
+Policy	Check out base setup action	2026-09-16T21:41:49.8980955Z   persist-credentials: false
+Policy	Check out base setup action	2026-09-16T21:41:49.8981684Z   repository: tailrocks/velnor
+Policy	Check out base setup action	2026-09-16T21:41:49.8986520Z   token: ***
+Policy	Check out base setup action	2026-09-16T21:41:49.8986949Z   ssh-strict: true
+Policy	Check out base setup action	2026-09-16T21:41:49.8987591Z   ssh-user: git
+Policy	Check out base setup action	2026-09-16T21:41:49.8988010Z   clean: true
+Policy	Check out base setup action	2026-09-16T21:41:49.8988457Z   sparse-checkout-cone-mode: true
+Policy	Check out base setup action	2026-09-16T21:41:49.8989009Z   fetch-tags: false
+Policy	Check out base setup action	2026-09-16T21:41:49.8989468Z   show-progress: true
+Policy	Check out base setup action	2026-09-16T21:41:49.8989927Z   lfs: false
+Policy	Check out base setup action	2026-09-16T21:41:49.8990340Z   submodules: false
+Policy	Check out base setup action	2026-09-16T21:41:49.8990793Z   set-safe-directory: true
+Policy	Check out base setup action	2026-09-16T21:41:49.8991320Z   allow-unsafe-pr-checkout: false
+Policy	Check out base setup action	2026-09-16T21:41:49.8992039Z ##[endgroup]
+Policy	Check out base setup action	2026-09-16T21:41:49.9792541Z Syncing repository: tailrocks/velnor
+Policy	Check out base setup action	2026-09-16T21:41:49.9807097Z ##[group]Getting Git version info
+Policy	Check out base setup action	2026-09-16T21:41:49.9808494Z Working directory is '/home/runner/work/velnor/velnor/policy-setup-action'
+Policy	Check out base setup action	2026-09-16T21:41:49.9847455Z [command]/usr/bin/git version
+Policy	Check out base setup action	2026-09-16T21:41:49.9890882Z git version 2.55.0
+Policy	Check out base setup action	2026-09-16T21:41:49.9915097Z ##[endgroup]
+Policy	Check out base setup action	2026-09-16T21:41:49.9925060Z Temporarily overriding HOME='/home/runner/work/_temp/34b10632-9073-4e51-a5c4-07ae45570a64' before making global git config changes
+Policy	Check out base setup action	2026-09-16T21:41:49.9926960Z Adding repository directory to the temporary git global config as a safe directory
+Policy	Check out base setup action	2026-09-16T21:41:49.9930852Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor/policy-setup-action
+Policy	Check out base setup action	2026-09-16T21:41:49.9963602Z ##[group]Determining repository object format
+Policy	Check out base setup action	2026-09-16T21:41:49.9965218Z ##[endgroup]
+Policy	Check out base setup action	2026-09-16T21:41:49.9966552Z ##[group]Initializing the repository
+Policy	Check out base setup action	2026-09-16T21:41:49.9969472Z [command]/usr/bin/git init /home/runner/work/velnor/velnor/policy-setup-action
+Policy	Check out base setup action	2026-09-16T21:41:50.0008912Z hint: Using 'master' as the name for the initial branch. This default branch name
+Policy	Check out base setup action	2026-09-16T21:41:50.0011207Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+Policy	Check out base setup action	2026-09-16T21:41:50.0013602Z hint: to use in all of your new repositories, which will suppress this warning,
+Policy	Check out base setup action	2026-09-16T21:41:50.0015331Z hint: call:
+Policy	Check out base setup action	2026-09-16T21:41:50.0016272Z hint:
+Policy	Check out base setup action	2026-09-16T21:41:50.0017337Z hint: 	git config --global init.defaultBranch <name>
+Policy	Check out base setup action	2026-09-16T21:41:50.0018719Z hint:
+Policy	Check out base setup action	2026-09-16T21:41:50.0020011Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+Policy	Check out base setup action	2026-09-16T21:41:50.0023211Z hint: 'development'. The just-created branch can be renamed via this command:
+Policy	Check out base setup action	2026-09-16T21:41:50.0071862Z hint:
+Policy	Check out base setup action	2026-09-16T21:41:50.0073165Z hint: 	git branch -m <name>
+Policy	Check out base setup action	2026-09-16T21:41:50.0074510Z hint:
+Policy	Check out base setup action	2026-09-16T21:41:50.0075999Z hint: Disable this message with "git config set advice.defaultBranchName false"
+Policy	Check out base setup action	2026-09-16T21:41:50.0078569Z Initialized empty Git repository in /home/runner/work/velnor/velnor/policy-setup-action/.git/
+Policy	Check out base setup action	2026-09-16T21:41:50.0083623Z [command]/usr/bin/git remote add origin https://github.com/tailrocks/velnor
+Policy	Check out base setup action	2026-09-16T21:41:50.0090510Z ##[endgroup]
+Policy	Check out base setup action	2026-09-16T21:41:50.0092727Z ##[group]Disabling automatic garbage collection
+Policy	Check out base setup action	2026-09-16T21:41:50.0094185Z [command]/usr/bin/git config --local gc.auto 0
+Policy	Check out base setup action	2026-09-16T21:41:50.0097374Z ##[endgroup]
+Policy	Check out base setup action	2026-09-16T21:41:50.0098786Z ##[group]Setting up auth
+Policy	Check out base setup action	2026-09-16T21:41:50.0099861Z Removing SSH command configuration
+Policy	Check out base setup action	2026-09-16T21:41:50.0101712Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Policy	Check out base setup action	2026-09-16T21:41:50.0135952Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Policy	Check out base setup action	2026-09-16T21:41:50.0388244Z Removing HTTP extra header
+Policy	Check out base setup action	2026-09-16T21:41:50.0395754Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Policy	Check out base setup action	2026-09-16T21:41:50.0432672Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Policy	Check out base setup action	2026-09-16T21:41:50.0677100Z Removing includeIf entries pointing to credentials config files
+Policy	Check out base setup action	2026-09-16T21:41:50.0681284Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Policy	Check out base setup action	2026-09-16T21:41:50.0719794Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Policy	Check out base setup action	2026-09-16T21:41:50.0973278Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-af551db7-10a1-48cb-ac89-188b2f2a11f8.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+Policy	Check out base setup action	2026-09-16T21:41:50.1017523Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/policy-setup-action/.git.path /home/runner/work/_temp/git-credentials-af551db7-10a1-48cb-ac89-188b2f2a11f8.config
+Policy	Check out base setup action	2026-09-16T21:41:50.1050955Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/policy-setup-action/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-af551db7-10a1-48cb-ac89-188b2f2a11f8.config
+Policy	Check out base setup action	2026-09-16T21:41:50.1084499Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/policy-setup-action/.git.path /github/runner_temp/git-credentials-af551db7-10a1-48cb-ac89-188b2f2a11f8.config
+Policy	Check out base setup action	2026-09-16T21:41:50.1119560Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/policy-setup-action/.git/worktrees/*.path /github/runner_temp/git-credentials-af551db7-10a1-48cb-ac89-188b2f2a11f8.config
+Policy	Check out base setup action	2026-09-16T21:41:50.1149760Z ##[endgroup]
+Policy	Check out base setup action	2026-09-16T21:41:50.1150758Z ##[group]Fetching the repository
+Policy	Check out base setup action	2026-09-16T21:41:50.1156136Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --filter=blob:none --depth=1 origin ced2311b88acc5c665258c1802e25ff1930257d2
+Policy	Check out base setup action	2026-09-16T21:41:50.3146530Z From https://github.com/tailrocks/velnor
+Policy	Check out base setup action	2026-09-16T21:41:50.3147852Z  * branch            ced2311b88acc5c665258c1802e25ff1930257d2 -> FETCH_HEAD
+Policy	Check out base setup action	2026-09-16T21:41:50.3157988Z [command]/usr/bin/git rev-parse --verify --quiet ced2311b88acc5c665258c1802e25ff1930257d2^{object}
+Policy	Check out base setup action	2026-09-16T21:41:50.3187058Z ced2311b88acc5c665258c1802e25ff1930257d2
+Policy	Check out base setup action	2026-09-16T21:41:50.3192527Z ##[endgroup]
+Policy	Check out base setup action	2026-09-16T21:41:50.3193836Z ##[group]Determining the checkout info
+Policy	Check out base setup action	2026-09-16T21:41:50.3195382Z ##[endgroup]
+Policy	Check out base setup action	2026-09-16T21:41:50.3196843Z ##[group]Setting up sparse checkout
+Policy	Check out base setup action	2026-09-16T21:41:50.3198636Z [command]/usr/bin/git sparse-checkout set .github/actions/setup-velnor-workflow
+Policy	Check out base setup action	2026-09-16T21:41:50.3238198Z ##[endgroup]
+Policy	Check out base setup action	2026-09-16T21:41:50.3239651Z ##[group]Checking out the ref
+Policy	Check out base setup action	2026-09-16T21:41:50.3243427Z [command]/usr/bin/git checkout --progress --force ced2311b88acc5c665258c1802e25ff1930257d2
+Policy	Check out base setup action	2026-09-16T21:41:50.8759284Z Note: switching to 'ced2311b88acc5c665258c1802e25ff1930257d2'.
+Policy	Check out base setup action	2026-09-16T21:41:50.8760835Z 
+Policy	Check out base setup action	2026-09-16T21:41:50.8762621Z You are in 'detached HEAD' state. You can look around, make experimental
+Policy	Check out base setup action	2026-09-16T21:41:50.8766523Z changes and commit them, and you can discard any commits you make in this
+Policy	Check out base setup action	2026-09-16T21:41:50.8771027Z state without impacting any branches by switching back to a branch.
+Policy	Check out base setup action	2026-09-16T21:41:50.8773410Z 
+Policy	Check out base setup action	2026-09-16T21:41:50.8774761Z If you want to create a new branch to retain commits you create, you may
+Policy	Check out base setup action	2026-09-16T21:41:50.8778185Z do so (now or later) by using -c with the switch command. Example:
+Policy	Check out base setup action	2026-09-16T21:41:50.8779899Z 
+Policy	Check out base setup action	2026-09-16T21:41:50.8780586Z   git switch -c <new-branch-name>
+Policy	Check out base setup action	2026-09-16T21:41:50.8782379Z 
+Policy	Check out base setup action	2026-09-16T21:41:50.8783076Z Or undo this operation with:
+Policy	Check out base setup action	2026-09-16T21:41:50.8784172Z 
+Policy	Check out base setup action	2026-09-16T21:41:50.8784760Z   git switch -
+Policy	Check out base setup action	2026-09-16T21:41:50.8785545Z 
+Policy	Check out base setup action	2026-09-16T21:41:50.8787195Z Turn off this advice by setting config variable advice.detachedHead to false
+Policy	Check out base setup action	2026-09-16T21:41:50.8789220Z 
+Policy	Check out base setup action	2026-09-16T21:41:50.8790514Z HEAD is now at ced2311 Merge pull request #909 from tailrocks/fix/policy-action-pins-sibling-path
+Policy	Check out base setup action	2026-09-16T21:41:50.8794946Z ##[endgroup]
+Policy	Check out base setup action	2026-09-16T21:41:50.8820485Z [command]/usr/bin/git log -1 --format=%H
+Policy	Check out base setup action	2026-09-16T21:41:50.8850361Z ced2311b88acc5c665258c1802e25ff1930257d2
+Policy	Check out base setup action	2026-09-16T21:41:50.8860537Z ##[group]Removing auth
+Policy	Check out base setup action	2026-09-16T21:41:50.8861900Z Removing SSH command configuration
+Policy	Check out base setup action	2026-09-16T21:41:50.8864722Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Policy	Check out base setup action	2026-09-16T21:41:50.8903373Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Policy	Check out base setup action	2026-09-16T21:41:50.9132484Z Removing HTTP extra header
+Policy	Check out base setup action	2026-09-16T21:41:50.9136689Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Policy	Check out base setup action	2026-09-16T21:41:50.9180284Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Policy	Check out base setup action	2026-09-16T21:41:50.9404405Z Removing includeIf entries pointing to credentials config files
+Policy	Check out base setup action	2026-09-16T21:41:50.9407284Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Policy	Check out base setup action	2026-09-16T21:41:50.9435452Z includeif.gitdir:/home/runner/work/velnor/velnor/policy-setup-action/.git.path
+Policy	Check out base setup action	2026-09-16T21:41:50.9438618Z includeif.gitdir:/home/runner/work/velnor/velnor/policy-setup-action/.git/worktrees/*.path
+Policy	Check out base setup action	2026-09-16T21:41:50.9442356Z includeif.gitdir:/github/workspace/policy-setup-action/.git.path
+Policy	Check out base setup action	2026-09-16T21:41:50.9445645Z includeif.gitdir:/github/workspace/policy-setup-action/.git/worktrees/*.path
+Policy	Check out base setup action	2026-09-16T21:41:50.9450287Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/policy-setup-action/.git.path
+Policy	Check out base setup action	2026-09-16T21:41:50.9471713Z /home/runner/work/_temp/git-credentials-af551db7-10a1-48cb-ac89-188b2f2a11f8.config
+Policy	Check out base setup action	2026-09-16T21:41:50.9483020Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/policy-setup-action/.git.path \/home\/runner\/work\/_temp\/git\-credentials\-af551db7\-10a1\-48cb\-ac89\-188b2f2a11f8\.config
+Policy	Check out base setup action	2026-09-16T21:41:50.9518985Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/policy-setup-action/.git/worktrees/*.path
+Policy	Check out base setup action	2026-09-16T21:41:50.9572769Z /home/runner/work/_temp/git-credentials-af551db7-10a1-48cb-ac89-188b2f2a11f8.config
+Policy	Check out base setup action	2026-09-16T21:41:50.9581830Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/policy-setup-action/.git/worktrees/*.path \/home\/runner\/work\/_temp\/git\-credentials\-af551db7\-10a1\-48cb\-ac89\-188b2f2a11f8\.config
+Policy	Check out base setup action	2026-09-16T21:41:50.9616827Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/policy-setup-action/.git.path
+Policy	Check out base setup action	2026-09-16T21:41:50.9643925Z /github/runner_temp/git-credentials-af551db7-10a1-48cb-ac89-188b2f2a11f8.config
+Policy	Check out base setup action	2026-09-16T21:41:50.9653252Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/policy-setup-action/.git.path \/github\/runner_temp\/git\-credentials\-af551db7\-10a1\-48cb\-ac89\-188b2f2a11f8\.config
+Policy	Check out base setup action	2026-09-16T21:41:50.9693984Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/policy-setup-action/.git/worktrees/*.path
+Policy	Check out base setup action	2026-09-16T21:41:50.9735969Z /github/runner_temp/git-credentials-af551db7-10a1-48cb-ac89-188b2f2a11f8.config
+Policy	Check out base setup action	2026-09-16T21:41:50.9746152Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/policy-setup-action/.git/worktrees/*.path \/github\/runner_temp\/git\-credentials\-af551db7\-10a1\-48cb\-ac89\-188b2f2a11f8\.config
+Policy	Check out base setup action	2026-09-16T21:41:50.9805562Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Policy	Check out base setup action	2026-09-16T21:41:51.0039311Z Removing credentials config '/home/runner/work/_temp/git-credentials-af551db7-10a1-48cb-ac89-188b2f2a11f8.config'
+Policy	Check out base setup action	2026-09-16T21:41:51.0045644Z ##[endgroup]
+Policy	Set up Velnor workflow runtime	﻿2026-09-16T21:41:51.0624646Z Prepare all required actions
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.0626233Z Getting action download info
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.1373910Z Download action repository 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9' (SHA:55cc8345863c7cc4c66a329aec7e433d2d1c52a9)
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3721075Z ##[group]Run ./policy-setup-action/.github/actions/setup-velnor-workflow
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3722865Z with:
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3723698Z   rev: 012fbf1b3ed69b72fc1aef1a4f9ecda45103a0db
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3725076Z   checkout-path: /home/runner/work/velnor/velnor/policy-checkout
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3726339Z   cache: true
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3727149Z   cache-key-prefix: velnor-workflow-v3
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3736604Z   github-token: ***
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3737406Z ##[endgroup]
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3808079Z ##[start-action display=Resolve source closure;id=__self.closure]
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3860349Z ##[group]Run set -euo pipefail
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3861563Z set -euo pipefail
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3862484Z sha256_digest() {
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3863564Z   if command -v sha256sum >/dev/null 2>&1; then
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3864741Z     sha256sum | awk '{print $1}'
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3865885Z   elif command -v shasum >/dev/null 2>&1; then
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3867080Z     shasum -a 256 | awk '{print $1}'
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3868094Z   else
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3869334Z     echo "::error::no SHA-256 checksum tool available (sha256sum or shasum)" >&2
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3870780Z     return 1
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3872097Z   fi
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3872882Z }
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3874091Z test "$INSTALL_REV" != '' || { echo "::error::runtime revision is empty" >&2; exit 1; }
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3876466Z [[ "$INSTALL_REV" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::runtime revision must be a full commit SHA, got $INSTALL_REV" >&2; exit 1; }
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3878361Z listing=""
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3879634Z if git -C "$CHECKOUT_PATH" cat-file -e "$INSTALL_REV^{commit}" 2>/dev/null; then
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3882513Z   listing="$(git -C "$CHECKOUT_PATH" ls-tree -r "$INSTALL_REV" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)"
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3884777Z else
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3886769Z   tree="$(gh api "repos/$PRODUCT_REPOSITORY/git/trees/$INSTALL_REV?recursive=1")" || { echo "::error::unknown generator revision $INSTALL_REV" >&2; exit 1; }
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3890079Z   [[ "$(jq -r '.truncated // false' <<<"$tree")" != "true" ]] || { echo "::error::tree API response is truncated; the closure cannot be proven" >&2; exit 1; }
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3895050Z   listing="$(jq -r '[.tree[] | select(.type != "tree") | select(.path == "Cargo.toml" or .path == "Cargo.lock" or .path == "rust-toolchain.toml" or .path == "rust-toolchain" or (.path | startswith("crates/velnor-workflow/")) or (.path | startswith(".cargo/"))) | "\(.mode) \(.type) \(.sha)\t\(.path)"] | sort | join("\n")' <<<"$tree")"
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3898816Z fi
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3900167Z test "$listing" != '' || { echo "::error::revision $INSTALL_REV has no closure inputs" >&2; exit 1; }
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3902822Z closure="$(printf '%s\nclosure-version:1\nfeatures:\nprofile:release\n' "$(LC_ALL=C sort <<<"$listing")" | sha256_digest)"
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3905232Z [[ "$closure" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::closure resolution failed" >&2; exit 1; }
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3906828Z echo "value=$closure" >> "$GITHUB_OUTPUT"
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3948070Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3949265Z env:
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3958527Z   GH_TOKEN: ***
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3959498Z   INSTALL_REV: 012fbf1b3ed69b72fc1aef1a4f9ecda45103a0db
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3960917Z   CHECKOUT_PATH: /home/runner/work/velnor/velnor/policy-checkout
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3962392Z   PRODUCT_REPOSITORY: tailrocks/velnor
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.3963729Z ##[endgroup]
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.4150246Z ##[end-action id=__self.closure;outcome=success;conclusion=success;duration_ms=33]
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.4158761Z ##[start-action display=Restore runtime cache;id=__self.cache]
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.4276560Z ##[group]Run actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.4278063Z with:
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.4278821Z   path: ~/.cache/velnor/workflow-runtime
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.4280625Z   key: velnor-workflow-v3-Linux-X64-c0ce56f09b27859c3dda80041819cecfe3067d09978c113b0644f1826e9a4648
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.4282659Z   enableCrossOsArchive: false
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.4283575Z   fail-on-cache-miss: false
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.4284429Z   lookup-only: false
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.4285203Z ##[endgroup]
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.6632010Z Cache hit for: velnor-workflow-v3-Linux-X64-c0ce56f09b27859c3dda80041819cecfe3067d09978c113b0644f1826e9a4648
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.7605030Z Received 2222583 of 2222583 (100.0%), 40.0 MBs/sec
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.7606019Z Cache Size: ~2 MB (2222583 B)
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.7636390Z [command]/usr/bin/tar -xf /home/runner/work/_temp/85271105-4a68-4890-a174-4a0f4e700719/cache.tzst -P -C /home/runner/work/velnor/velnor --use-compress-program unzstd
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.7828134Z Cache restored successfully
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.7907723Z Cache restored from key: velnor-workflow-v3-Linux-X64-c0ce56f09b27859c3dda80041819cecfe3067d09978c113b0644f1826e9a4648
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8034084Z ##[end-action id=__self.cache;outcome=success;conclusion=success;duration_ms=387]
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8039266Z ##[start-action display=Download runtime product;id=__self.__run]
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8050039Z ##[end-action id=__self.__run;outcome=skipped;conclusion=skipped;duration_ms=0]
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8053146Z ##[start-action display=Verify runtime product;id=__self.__run_2]
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8078550Z ##[group]Run set -euo pipefail
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8078878Z set -euo pipefail
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8079223Z runtime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8079578Z jq -e \
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8079809Z   --arg closure "$CLOSURE" \
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8080137Z   --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8080738Z   '.closure == $closure and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$"))' \
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8081563Z   "$runtime/manifest.json" >/dev/null
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8081949Z if command -v sha256sum >/dev/null 2>&1; then
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8082389Z   actual="$(sha256sum "$runtime/bin/velnor-workflow" | awk '{print $1}')"
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8082786Z else
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8083116Z   actual="$(shasum -a 256 "$runtime/bin/velnor-workflow" | awk '{print $1}')"
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8083504Z fi
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8083980Z expected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "$runtime/manifest.json")"
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8084699Z [[ "$actual" == "$expected" ]] || { echo "::error::cached runtime digest mismatch" >&2; exit 1; }
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8122297Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8122659Z env:
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8122985Z   CLOSURE: c0ce56f09b27859c3dda80041819cecfe3067d09978c113b0644f1826e9a4648
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8123409Z ##[endgroup]
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8306393Z ##[end-action id=__self.__run_2;outcome=success;conclusion=success;duration_ms=25]
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8309690Z ##[start-action display=Add runtime to PATH;id=__self.__run_3]
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8334951Z ##[group]Run set -euo pipefail
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8335255Z set -euo pipefail
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8335611Z runtime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8336017Z test -x "$runtime/bin/velnor-workflow"
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8336363Z test -s "$runtime/manifest.json"
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8336935Z reported="$("$runtime/bin/velnor-workflow" --closure)"
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8337593Z [[ "$reported" == "$CLOSURE" ]] || { echo "::error::runtime at $runtime reports closure $reported, expected $CLOSURE" >&2; exit 1; }
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8338203Z echo "$runtime/bin" >> "$GITHUB_PATH"
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8373220Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8373587Z env:
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8373915Z   CLOSURE: c0ce56f09b27859c3dda80041819cecfe3067d09978c113b0644f1826e9a4648
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8374322Z ##[endgroup]
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8449621Z ##[end-action id=__self.__run_3;outcome=success;conclusion=success;duration_ms=13]
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8451854Z ##[start-action display=Save runtime cache;id=__self.__actions_cache]
+Policy	Set up Velnor workflow runtime	2026-09-16T21:41:51.8461283Z ##[end-action id=__self.__actions_cache;outcome=skipped;conclusion=skipped;duration_ms=0]
+Policy	Acquire candidate generator product	﻿2026-09-16T21:41:51.8524415Z ##[group]Run set -euo pipefail
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8524819Z set -euo pipefail
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8525373Z pin="$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' .github-gen/velnor-workflow.toml | head -n 1)"
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8526294Z test "$pin" != '' || pin="$(sed -n -E 's/^.*VELNOR_WORKFLOW_POLICY_REVISION:[[:space:]]*([0-9a-f]{40}).*/\1/p' .github/workflows/ci-policy.yml | head -n 1)"
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8527091Z test "$pin" != '' || { echo "::error::audited tree declares no generator pin" >&2; exit 1; }
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8527821Z base_closure="$(velnor-workflow closure --rev="$BASE_PIN")"
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8528283Z pin_closure="$(velnor-workflow closure --rev="$pin")"
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8528692Z if [[ "$pin_closure" == "$base_closure" ]]; then
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8529146Z   echo "pin $pin shares the base closure; the Stage-0 validator renders"
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8529636Z   echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=" >> "$GITHUB_ENV"
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8530032Z   exit 0
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8530239Z fi
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8530980Z [[ "$HEAD_REPOSITORY" == "$GITHUB_REPOSITORY" ]] || { echo "::error::generator changes from forks cannot be verified here; open the generator change from a branch of $GITHUB_REPOSITORY" >&2; exit 1; }
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8532203Z pin_candidate="$(velnor-workflow closure --rev="$pin" --candidate)"
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8532793Z name="velnor-workflow-candidate-${pin_candidate:0:16}-${RUNNER_OS}-${RUNNER_ARCH}"
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8533291Z deadline=$((SECONDS + 900))
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8533571Z run_id=""
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8533817Z while (( SECONDS < deadline )); do
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8534679Z   runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=5" --jq '[.workflow_runs[] | select(.head_repository.id == .repository.id)]')"
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8535522Z   waiting=false
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8535763Z   seen=false
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8536014Z   while read -r candidate_run; do
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8536348Z     test "$candidate_run" != '' || continue
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8536662Z     seen=true
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8536948Z     status="$(jq -r .status <<<"$candidate_run")"
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8537301Z     id="$(jq -r .id <<<"$candidate_run")"
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8537695Z     # $name in the filter is a jq variable, not a shell expansion.
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8538087Z     # shellcheck disable=SC2016
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8538888Z     if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts?per_page=100" --jq --arg name "$name" -e '[.artifacts[] | select(.name == $name and .expired == false)] | length > 0' >/dev/null; then
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8539674Z       run_id="$id"
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8539919Z       break 2
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8540142Z     fi
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8540391Z     [[ "$status" == "completed" ]] || waiting=true
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8540741Z   done <<<"$(jq -c '.[]' <<<"$runs")"
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8541126Z   # No runs yet means the API has not indexed the sibling run, not
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8542135Z   # that it will never come: keep polling until the deadline.
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8542525Z   [[ "$seen" == "true" ]] || waiting=true
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8543063Z   [[ "$waiting" == "true" ]] || { echo "::error::no same-repository PR run published candidate $name" >&2; exit 1; }
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8543585Z   sleep 15
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8543800Z done
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8544243Z [[ -n "$run_id" ]] || { echo "::error::no candidate product $name was published within 15 minutes" >&2; exit 1; }
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8544822Z candidate="$RUNNER_TEMP/velnor-workflow-candidate"
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8545377Z rm -rf "$candidate"
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8545642Z mkdir -p "$candidate"
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8546079Z gh run download "$run_id" --name "$name" --dir "$candidate" --repo "$GITHUB_REPOSITORY"
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8547526Z jq -e --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg repo "$GITHUB_REPOSITORY" --arg run "$run_id" '.profile == "debug" and .platform == $platform and .repository == $repo and .run_id == $run and (.revision | test("^[0-9a-f]{40}$")) and (.closure | test("^[0-9a-f]{64}$")) and (.binary_sha256 | test("^[0-9a-f]{64}$"))' "$candidate/candidate-manifest.json" >/dev/null
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8548839Z if command -v sha256sum >/dev/null 2>&1; then
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8549278Z   actual="$(sha256sum "$candidate/velnor-workflow" | awk '{print $1}')"
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8549682Z else
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8550019Z   actual="$(shasum -a 256 "$candidate/velnor-workflow" | awk '{print $1}')"
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8550423Z fi
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8550773Z expected="$(jq -er .binary_sha256 "$candidate/candidate-manifest.json")"
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8551580Z [[ "$actual" == "$expected" ]] || { echo "::error::candidate digest mismatch" >&2; exit 1; }
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8552090Z chmod 0755 "$candidate/velnor-workflow"
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8552539Z manifest_closure="$(jq -er .closure "$candidate/candidate-manifest.json")"
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8553376Z [[ "$manifest_closure" == "$pin_candidate" ]] || { echo "::error::candidate manifest closure $manifest_closure is not the pin's candidate $pin_candidate" >&2; exit 1; }
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8554220Z reported="$(GH_TOKEN="" GITHUB_TOKEN="" "$candidate/velnor-workflow" --closure)"
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8554996Z [[ "$reported" == "$manifest_closure" ]] || { echo "::error::candidate reports closure $reported, manifest claims $manifest_closure" >&2; exit 1; }
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8555785Z echo "VELNOR_WORKFLOW_PINNED_BINARY=$candidate/velnor-workflow" >> "$GITHUB_ENV"
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8556443Z echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=$candidate/candidate-manifest.json" >> "$GITHUB_ENV"
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8593776Z shell: /usr/bin/bash -e {0}
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8594053Z env:
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8596831Z   GH_TOKEN: ***
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8597120Z   HEAD_SHA: 7f603522c2967ccb0376c4dc73aea1bed5bf2cf1
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8597463Z   HEAD_REPOSITORY: tailrocks/velnor
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8597789Z   BASE_PIN: 012fbf1b3ed69b72fc1aef1a4f9ecda45103a0db
+Policy	Acquire candidate generator product	2026-09-16T21:41:51.8598100Z ##[endgroup]
+Policy	Acquire candidate generator product	2026-09-16T21:41:52.4224196Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:41:52.4224508Z 
+Policy	Acquire candidate generator product	2026-09-16T21:41:52.4224641Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:41:52.4224841Z 
+Policy	Acquire candidate generator product	2026-09-16T21:41:52.4224917Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:41:52.4225247Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:41:52.4225763Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:41:52.4226528Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:41:52.4227230Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:41:52.4227776Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:41:52.4228673Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:41:52.4229284Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:41:52.4229881Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:41:52.4230386Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:41:52.4230897Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:41:52.4231893Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:41:52.4232442Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:41:52.4232887Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:41:52.4233424Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:41:52.4234074Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:41:52.4234630Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:41:52.4234997Z   
+Policy	Acquire candidate generator product	2026-09-16T21:42:07.8060573Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:42:07.8061023Z 
+Policy	Acquire candidate generator product	2026-09-16T21:42:07.8061205Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:42:07.8061785Z 
+Policy	Acquire candidate generator product	2026-09-16T21:42:07.8061926Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:42:07.8062488Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:42:07.8063347Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:42:07.8064452Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:42:07.8065562Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:42:07.8066429Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:42:07.8067349Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:42:07.8068332Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:42:07.8069078Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:42:07.8069632Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:42:07.8070167Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:42:07.8070723Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:42:07.8071243Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:42:07.8072109Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:42:07.8072951Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:42:07.8073985Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:42:07.8074861Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:42:07.8075446Z   
+Policy	Acquire candidate generator product	2026-09-16T21:42:23.2199085Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:42:23.2199547Z 
+Policy	Acquire candidate generator product	2026-09-16T21:42:23.2199726Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:42:23.2200037Z 
+Policy	Acquire candidate generator product	2026-09-16T21:42:23.2200162Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:42:23.2200684Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:42:23.2201739Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:42:23.2202835Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:42:23.2204309Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:42:23.2205204Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:42:23.2206115Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:42:23.2207118Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:42:23.2209965Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:42:23.2210836Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:42:23.2211932Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:42:23.2212897Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:42:23.2213867Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:42:23.2214617Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:42:23.2215505Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:42:23.2216602Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:42:23.2217519Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:42:23.2217953Z   
+Policy	Acquire candidate generator product	2026-09-16T21:42:38.6743466Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:42:38.6743897Z 
+Policy	Acquire candidate generator product	2026-09-16T21:42:38.6744072Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:42:38.6744380Z 
+Policy	Acquire candidate generator product	2026-09-16T21:42:38.6744511Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:42:38.6745034Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:42:38.6745886Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:42:38.6746962Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:42:38.6748042Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:42:38.6748909Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:42:38.6749842Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:42:38.6750865Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:42:38.6752054Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:42:38.6752880Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:42:38.6753750Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:42:38.6754687Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:42:38.6755576Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:42:38.6756331Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:42:38.6757199Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:42:38.6758271Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:42:38.6759231Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:42:38.6759976Z   
+Policy	Acquire candidate generator product	2026-09-16T21:42:54.1786440Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:42:54.1804816Z 
+Policy	Acquire candidate generator product	2026-09-16T21:42:54.1806457Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:42:54.1806711Z 
+Policy	Acquire candidate generator product	2026-09-16T21:42:54.1807294Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:42:54.1807633Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:42:54.1808158Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:42:54.1808822Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:42:54.1809482Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:42:54.1810017Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:42:54.1810752Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:42:54.1811636Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:42:54.1812271Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:42:54.1812799Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:42:54.1813326Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:42:54.1813899Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:42:54.1814436Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:42:54.1814886Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:42:54.1815423Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:42:54.1816088Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:42:54.1816654Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:42:54.1817033Z   
+Policy	Acquire candidate generator product	2026-09-16T21:43:09.6864275Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:43:09.6864668Z 
+Policy	Acquire candidate generator product	2026-09-16T21:43:09.6864785Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:43:09.6864970Z 
+Policy	Acquire candidate generator product	2026-09-16T21:43:09.6865049Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:43:09.6865381Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:43:09.6865865Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:43:09.6866957Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:43:09.6868040Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:43:09.6868762Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:43:09.6869331Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:43:09.6869932Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:43:09.6870508Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:43:09.6870985Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:43:09.6871767Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:43:09.6872308Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:43:09.6872819Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:43:09.6873240Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:43:09.6873761Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:43:09.6874384Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:43:09.6874911Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:43:09.6875616Z   
+Policy	Acquire candidate generator product	2026-09-16T21:43:25.1283229Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:43:25.1283651Z 
+Policy	Acquire candidate generator product	2026-09-16T21:43:25.1283837Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:43:25.1284159Z 
+Policy	Acquire candidate generator product	2026-09-16T21:43:25.1284284Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:43:25.1284810Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:43:25.1285630Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:43:25.1286698Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:43:25.1287774Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:43:25.1288296Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:43:25.1288841Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:43:25.1289432Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:43:25.1289999Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:43:25.1290497Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:43:25.1290991Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:43:25.1291785Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:43:25.1292315Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:43:25.1292739Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:43:25.1293248Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:43:25.1293868Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:43:25.1294403Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:43:25.1294756Z   
+Policy	Acquire candidate generator product	2026-09-16T21:43:40.5704872Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:43:40.5705279Z 
+Policy	Acquire candidate generator product	2026-09-16T21:43:40.5705486Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:43:40.5705791Z 
+Policy	Acquire candidate generator product	2026-09-16T21:43:40.5705925Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:43:40.5706433Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:43:40.5707067Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:43:40.5707747Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:43:40.5708420Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:43:40.5708935Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:43:40.5709492Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:43:40.5710062Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:43:40.5710628Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:43:40.5711104Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:43:40.5711846Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:43:40.5712412Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:43:40.5712938Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:43:40.5713371Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:43:40.5713884Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:43:40.5714880Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:43:40.5715409Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:43:40.5715772Z   
+Policy	Acquire candidate generator product	2026-09-16T21:43:55.9953150Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:43:55.9953438Z 
+Policy	Acquire candidate generator product	2026-09-16T21:43:55.9953573Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:43:55.9953763Z 
+Policy	Acquire candidate generator product	2026-09-16T21:43:55.9953840Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:43:55.9954162Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:43:55.9955051Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:43:55.9955696Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:43:55.9956340Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:43:55.9956873Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:43:55.9957411Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:43:55.9958042Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:43:55.9958615Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:43:55.9959094Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:43:55.9959597Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:43:55.9960120Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:43:55.9960627Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:43:55.9961046Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:43:55.9961958Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:43:55.9962625Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:43:55.9963164Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:43:55.9963529Z   
+Policy	Acquire candidate generator product	2026-09-16T21:44:11.4047776Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:44:11.4048220Z 
+Policy	Acquire candidate generator product	2026-09-16T21:44:11.4048380Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:44:11.4048596Z 
+Policy	Acquire candidate generator product	2026-09-16T21:44:11.4048676Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:44:11.4048993Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:44:11.4049490Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:44:11.4050129Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:44:11.4050782Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:44:11.4051298Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:44:11.4052415Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:44:11.4053385Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:44:11.4054326Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:44:11.4055127Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:44:11.4055939Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:44:11.4056832Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:44:11.4058075Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:44:11.4058756Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:44:11.4059585Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:44:11.4075428Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:44:11.4076175Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:44:11.4076693Z   
+Policy	Acquire candidate generator product	2026-09-16T21:44:26.7407462Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:44:26.7407850Z 
+Policy	Acquire candidate generator product	2026-09-16T21:44:26.7407961Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:44:26.7408159Z 
+Policy	Acquire candidate generator product	2026-09-16T21:44:26.7408233Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:44:26.7408560Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:44:26.7409044Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:44:26.7409699Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:44:26.7410332Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:44:26.7410836Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:44:26.7411681Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:44:26.7412401Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:44:26.7413004Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:44:26.7413486Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:44:26.7413982Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:44:26.7414513Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:44:26.7415029Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:44:26.7415447Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:44:26.7415957Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:44:26.7416587Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:44:26.7417112Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:44:26.7417469Z   
+Policy	Acquire candidate generator product	2026-09-16T21:44:42.1775989Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:44:42.1776369Z 
+Policy	Acquire candidate generator product	2026-09-16T21:44:42.1776698Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:44:42.1777070Z 
+Policy	Acquire candidate generator product	2026-09-16T21:44:42.1777824Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:44:42.1779700Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:44:42.1780348Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:44:42.1780991Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:44:42.1781902Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:44:42.1782437Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:44:42.1782973Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:44:42.1783572Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:44:42.1784141Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:44:42.1784640Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:44:42.1785556Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:44:42.1786103Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:44:42.1786620Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:44:42.1787046Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:44:42.1787567Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:44:42.1788372Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:44:42.1788912Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:44:42.1789274Z   
+Policy	Acquire candidate generator product	2026-09-16T21:44:57.5875572Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:44:57.5875992Z 
+Policy	Acquire candidate generator product	2026-09-16T21:44:57.5876103Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:44:57.5876319Z 
+Policy	Acquire candidate generator product	2026-09-16T21:44:57.5876393Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:44:57.5876726Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:44:57.5877505Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:44:57.5878593Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:44:57.5879692Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:44:57.5880552Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:44:57.5881717Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:44:57.5882656Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:44:57.5883247Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:44:57.5883738Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:44:57.5884230Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:44:57.5884762Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:44:57.5885290Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:44:57.5885713Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:44:57.5886230Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:44:57.5886864Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:44:57.5887387Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:44:57.5887741Z   
+Policy	Acquire candidate generator product	2026-09-16T21:45:13.0897048Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:45:13.0897457Z 
+Policy	Acquire candidate generator product	2026-09-16T21:45:13.0897579Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:45:13.0897765Z 
+Policy	Acquire candidate generator product	2026-09-16T21:45:13.0897844Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:45:13.0898161Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:45:13.0898662Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:45:13.0899300Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:45:13.0899924Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:45:13.0900454Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:45:13.0900982Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:45:13.0901922Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:45:13.0902904Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:45:13.0903390Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:45:13.0903893Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:45:13.0904447Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:45:13.0904958Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:45:13.0905544Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:45:13.0906074Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:45:13.0906710Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:45:13.0907268Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:45:13.0907633Z   
+Policy	Acquire candidate generator product	2026-09-16T21:45:28.5695266Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:45:28.5695670Z 
+Policy	Acquire candidate generator product	2026-09-16T21:45:28.5695809Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:45:28.5696008Z 
+Policy	Acquire candidate generator product	2026-09-16T21:45:28.5696085Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:45:28.5696401Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:45:28.5696890Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:45:28.5697537Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:45:28.5698180Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:45:28.5698688Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:45:28.5699221Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:45:28.5699808Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:45:28.5700366Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:45:28.5700840Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:45:28.5701580Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:45:28.5702144Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:45:28.5702656Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:45:28.5703078Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:45:28.5703589Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:45:28.5704211Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:45:28.5704733Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:45:28.5705097Z   
+Policy	Acquire candidate generator product	2026-09-16T21:45:43.9782028Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:45:43.9782455Z 
+Policy	Acquire candidate generator product	2026-09-16T21:45:43.9782632Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:45:43.9782918Z 
+Policy	Acquire candidate generator product	2026-09-16T21:45:43.9783055Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:45:43.9783595Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:45:43.9784381Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:45:43.9785496Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:45:43.9786571Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:45:43.9787429Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:45:43.9788439Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:45:43.9789047Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:45:43.9789615Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:45:43.9790099Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:45:43.9790602Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:45:43.9791309Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:45:43.9792404Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:45:43.9793098Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:45:43.9793964Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:45:43.9795010Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:45:43.9795889Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:45:43.9796491Z   
+Policy	Acquire candidate generator product	2026-09-16T21:45:59.4488636Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:45:59.4491903Z 
+Policy	Acquire candidate generator product	2026-09-16T21:45:59.4492109Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:45:59.4492415Z 
+Policy	Acquire candidate generator product	2026-09-16T21:45:59.4492561Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:45:59.4493105Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:45:59.4493685Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:45:59.4494346Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:45:59.4494994Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:45:59.4495503Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:45:59.4496034Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:45:59.4496620Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:45:59.4497185Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:45:59.4497660Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:45:59.4498158Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:45:59.4498683Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:45:59.4499228Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:45:59.4499656Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:45:59.4500169Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:45:59.4500790Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:45:59.4501312Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:45:59.4501901Z   
+Policy	Acquire candidate generator product	2026-09-16T21:46:14.8960983Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:46:14.8961598Z 
+Policy	Acquire candidate generator product	2026-09-16T21:46:14.8961807Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:46:14.8962118Z 
+Policy	Acquire candidate generator product	2026-09-16T21:46:14.8962243Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:46:14.8962786Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:46:14.8963604Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:46:14.8964671Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:46:14.8973335Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:46:14.8974204Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:46:14.8975105Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:46:14.8976084Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:46:14.8977279Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:46:14.8978153Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:46:14.8979021Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:46:14.8979948Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:46:14.8980834Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:46:14.8981736Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:46:14.8982557Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:46:14.8983209Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:46:14.8983758Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:46:14.8984130Z   
+Policy	Acquire candidate generator product	2026-09-16T21:46:30.3175622Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:46:30.3176048Z 
+Policy	Acquire candidate generator product	2026-09-16T21:46:30.3176238Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:46:30.3176533Z 
+Policy	Acquire candidate generator product	2026-09-16T21:46:30.3176663Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:46:30.3177171Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:46:30.3178037Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:46:30.3179129Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:46:30.3180173Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:46:30.3180998Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:46:30.3182149Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:46:30.3183113Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:46:30.3184101Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:46:30.3184929Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:46:30.3185783Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:46:30.3186686Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:46:30.3187553Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:46:30.3188255Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:46:30.3188787Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:46:30.3189430Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:46:30.3189982Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:46:30.3190345Z   
+Policy	Acquire candidate generator product	2026-09-16T21:46:45.7565505Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:46:45.7565945Z 
+Policy	Acquire candidate generator product	2026-09-16T21:46:45.7566060Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:46:45.7566252Z 
+Policy	Acquire candidate generator product	2026-09-16T21:46:45.7566658Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:46:45.7566981Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:46:45.7567719Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:46:45.7568732Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:46:45.7569363Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:46:45.7569868Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:46:45.7570604Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:46:45.7571184Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:46:45.7572282Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:46:45.7573126Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:46:45.7573974Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:46:45.7574887Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:46:45.7575756Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:46:45.7576461Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:46:45.7577342Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:46:45.7578403Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:46:45.7579287Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:46:45.7579906Z   
+Policy	Acquire candidate generator product	2026-09-16T21:47:01.1575899Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:47:01.1576360Z 
+Policy	Acquire candidate generator product	2026-09-16T21:47:01.1592215Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:47:01.1592704Z 
+Policy	Acquire candidate generator product	2026-09-16T21:47:01.1592919Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:47:01.1593505Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:47:01.1594457Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:47:01.1595775Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:47:01.1597281Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:47:01.1598607Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:47:01.1599472Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:47:01.1600201Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:47:01.1600905Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:47:01.1601852Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:47:01.1602843Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:47:01.1603666Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:47:01.1604178Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:47:01.1604610Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:47:01.1605130Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:47:01.1605755Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:47:01.1606282Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:47:01.1606855Z   
+Policy	Acquire candidate generator product	2026-09-16T21:47:16.5593654Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:47:16.5594098Z 
+Policy	Acquire candidate generator product	2026-09-16T21:47:16.5594269Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:47:16.5594566Z 
+Policy	Acquire candidate generator product	2026-09-16T21:47:16.5594689Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:47:16.5595061Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:47:16.5595576Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:47:16.5596226Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:47:16.5597249Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:47:16.5597758Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:47:16.5598302Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:47:16.5598883Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:47:16.5599444Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:47:16.5599922Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:47:16.5600417Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:47:16.5600946Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:47:16.5601754Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:47:16.5602211Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:47:16.5602728Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:47:16.5603353Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:47:16.5603897Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:47:16.5604257Z   
+Policy	Acquire candidate generator product	2026-09-16T21:47:31.9718940Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:47:31.9719322Z 
+Policy	Acquire candidate generator product	2026-09-16T21:47:31.9719434Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:47:31.9719620Z 
+Policy	Acquire candidate generator product	2026-09-16T21:47:31.9719702Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:47:31.9720020Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:47:31.9720522Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:47:31.9721189Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:47:31.9722249Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:47:31.9722773Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:47:31.9723314Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:47:31.9723892Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:47:31.9724458Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:47:31.9724935Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:47:31.9725426Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:47:31.9725955Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:47:31.9726461Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:47:31.9726878Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:47:31.9727411Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:47:31.9728367Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:47:31.9728896Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:47:31.9729254Z   
+Policy	Acquire candidate generator product	2026-09-16T21:47:47.4100856Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:47:47.4101619Z 
+Policy	Acquire candidate generator product	2026-09-16T21:47:47.4101903Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:47:47.4102304Z 
+Policy	Acquire candidate generator product	2026-09-16T21:47:47.4102511Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:47:47.4103058Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:47:47.4104165Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:47:47.4104871Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:47:47.4105546Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:47:47.4106115Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:47:47.4106696Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:47:47.4107318Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:47:47.4107932Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:47:47.4108453Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:47:47.4108997Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:47:47.4109574Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:47:47.4110135Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:47:47.4110600Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:47:47.4111167Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:47:47.4112275Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:47:47.4114351Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:47:47.4115031Z   
+Policy	Acquire candidate generator product	2026-09-16T21:48:02.7990920Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:48:02.8001876Z 
+Policy	Acquire candidate generator product	2026-09-16T21:48:02.8002106Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:48:02.8002459Z 
+Policy	Acquire candidate generator product	2026-09-16T21:48:02.8002585Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:48:02.8003122Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:48:02.8003917Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:48:02.8004951Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:48:02.8006019Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:48:02.8006625Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:48:02.8007171Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:48:02.8007743Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:48:02.8008480Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:48:02.8009107Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:48:02.8009609Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:48:02.8010139Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:48:02.8010988Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:48:02.8011671Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:48:02.8012297Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:48:02.8012921Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:48:02.8013451Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:48:02.8013799Z   
+Policy	Acquire candidate generator product	2026-09-16T21:48:18.2501765Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:48:18.2502637Z 
+Policy	Acquire candidate generator product	2026-09-16T21:48:18.2502864Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:48:18.2503182Z 
+Policy	Acquire candidate generator product	2026-09-16T21:48:18.2503318Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:48:18.2503856Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:48:18.2504689Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:48:18.2505795Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:48:18.2506879Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:48:18.2507670Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:48:18.2508230Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:48:18.2508828Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:48:18.2509457Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:48:18.2510085Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:48:18.2510708Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:48:18.2511243Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:48:18.2512017Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:48:18.2512451Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:48:18.2512962Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:48:18.2513590Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:48:18.2514119Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:48:18.2514484Z   
+Policy	Acquire candidate generator product	2026-09-16T21:48:33.6588386Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:48:33.6588807Z 
+Policy	Acquire candidate generator product	2026-09-16T21:48:33.6603126Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:48:33.6603444Z 
+Policy	Acquire candidate generator product	2026-09-16T21:48:33.6603522Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:48:33.6603857Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:48:33.6604379Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:48:33.6605202Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:48:33.6606580Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:48:33.6607371Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:48:33.6608229Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:48:33.6609269Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:48:33.6610368Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:48:33.6611227Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:48:33.6612777Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:48:33.6613727Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:48:33.6614644Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:48:33.6615383Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:48:33.6616268Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:48:33.6616990Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:48:33.6618002Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:48:33.6618374Z   
+Policy	Acquire candidate generator product	2026-09-16T21:48:49.0302360Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:48:49.0302812Z 
+Policy	Acquire candidate generator product	2026-09-16T21:48:49.0302932Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:48:49.0303158Z 
+Policy	Acquire candidate generator product	2026-09-16T21:48:49.0303234Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:48:49.0303551Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:48:49.0304060Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:48:49.0304702Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:48:49.0305328Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:48:49.0305834Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:48:49.0306382Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:48:49.0306956Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:48:49.0307535Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:48:49.0308030Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:48:49.0308523Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:48:49.0309061Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:48:49.0309574Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:48:49.0310008Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:48:49.0310516Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:48:49.0311147Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:48:49.0312075Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:48:49.0312726Z   
+Policy	Acquire candidate generator product	2026-09-16T21:49:04.4878007Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:49:04.4878435Z 
+Policy	Acquire candidate generator product	2026-09-16T21:49:04.4878601Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:49:04.4878900Z 
+Policy	Acquire candidate generator product	2026-09-16T21:49:04.4879023Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:49:04.4879467Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:49:04.4879976Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:49:04.4880629Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:49:04.4881262Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:49:04.4882063Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:49:04.4882596Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:49:04.4883171Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:49:04.4884102Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:49:04.4884586Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:49:04.4885073Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:49:04.4885603Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:49:04.4886139Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:49:04.4886739Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:49:04.4887246Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:49:04.4887872Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:49:04.4888399Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:49:04.4888752Z   
+Policy	Acquire candidate generator product	2026-09-16T21:49:19.8770242Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:49:19.8770654Z 
+Policy	Acquire candidate generator product	2026-09-16T21:49:19.8770833Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:49:19.8771156Z 
+Policy	Acquire candidate generator product	2026-09-16T21:49:19.8771247Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:49:19.8771979Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:49:19.8772817Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:49:19.8773869Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:49:19.8774560Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:49:19.8775070Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:49:19.8775654Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:49:19.8776241Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:49:19.8776808Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:49:19.8777291Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:49:19.8777786Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:49:19.8778311Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:49:19.8778816Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:49:19.8779247Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:49:19.8779752Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:49:19.8780376Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:49:19.8780904Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:49:19.8781263Z   
+Policy	Acquire candidate generator product	2026-09-16T21:49:35.2780356Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:49:35.2780647Z 
+Policy	Acquire candidate generator product	2026-09-16T21:49:35.2780754Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:49:35.2780942Z 
+Policy	Acquire candidate generator product	2026-09-16T21:49:35.2781015Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:49:35.2781594Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:49:35.2782153Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:49:35.2782801Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:49:35.2783420Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:49:35.2783930Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:49:35.2784806Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:49:35.2785396Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:49:35.2785977Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:49:35.2786460Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:49:35.2786954Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:49:35.2787632Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:49:35.2788147Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:49:35.2788567Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:49:35.2789096Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:49:35.2789727Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:49:35.2790262Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:49:35.2790619Z   
+Policy	Acquire candidate generator product	2026-09-16T21:49:50.7082899Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:49:50.7083308Z 
+Policy	Acquire candidate generator product	2026-09-16T21:49:50.7084227Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:49:50.7084518Z 
+Policy	Acquire candidate generator product	2026-09-16T21:49:50.7084635Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:49:50.7085147Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:49:50.7085943Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:49:50.7087006Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:49:50.7088031Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:49:50.7088875Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:49:50.7089750Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:49:50.7090670Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:49:50.7091623Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:49:50.7092135Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:49:50.7092647Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:49:50.7093191Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:49:50.7093706Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:49:50.7094180Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:49:50.7094700Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:49:50.7095326Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:49:50.7095876Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:49:50.7096235Z   
+Policy	Acquire candidate generator product	2026-09-16T21:50:06.1445014Z unknown shorthand flag: 'e' in -e
+Policy	Acquire candidate generator product	2026-09-16T21:50:06.1445441Z 
+Policy	Acquire candidate generator product	2026-09-16T21:50:06.1445593Z Usage:  gh api <endpoint> [flags]
+Policy	Acquire candidate generator product	2026-09-16T21:50:06.1445800Z 
+Policy	Acquire candidate generator product	2026-09-16T21:50:06.1445878Z Flags:
+Policy	Acquire candidate generator product	2026-09-16T21:50:06.1446195Z       --allow-escape-sequences   Allow printing terminal escape sequences
+Policy	Acquire candidate generator product	2026-09-16T21:50:06.1446683Z       --cache duration           Cache the response, e.g. "3600s", "60m", "1h"
+Policy	Acquire candidate generator product	2026-09-16T21:50:06.1447314Z   -F, --field key=value          Add a typed parameter in key=value format (use "@<path>" or "@-" to read value from file or stdin)
+Policy	Acquire candidate generator product	2026-09-16T21:50:06.1448305Z   -H, --header key:value         Add a HTTP request header in key:value format
+Policy	Acquire candidate generator product	2026-09-16T21:50:06.1448815Z       --hostname string          The GitHub hostname for the request (default "github.com")
+Policy	Acquire candidate generator product	2026-09-16T21:50:06.1449361Z   -i, --include                  Include HTTP response status line and headers in the output
+Policy	Acquire candidate generator product	2026-09-16T21:50:06.1449946Z       --input file               The file to use as body for the HTTP request (use "-" to read from standard input)
+Policy	Acquire candidate generator product	2026-09-16T21:50:06.1450512Z   -q, --jq string                Query to select values from the response using jq syntax
+Policy	Acquire candidate generator product	2026-09-16T21:50:06.1451217Z   -X, --method string            The HTTP method for the request (default "GET")
+Policy	Acquire candidate generator product	2026-09-16T21:50:06.1452215Z       --paginate                 Make additional HTTP requests to fetch all pages of results
+Policy	Acquire candidate generator product	2026-09-16T21:50:06.1453117Z   -p, --preview strings          Opt into GitHub API previews (names should omit '-preview')
+Policy	Acquire candidate generator product	2026-09-16T21:50:06.1453974Z   -f, --raw-field key=value      Add a string parameter in key=value format
+Policy	Acquire candidate generator product	2026-09-16T21:50:06.1454667Z       --silent                   Do not print the response body
+Policy	Acquire candidate generator product	2026-09-16T21:50:06.1455519Z       --slurp                    Use with "--paginate" to return an array of all pages of either JSON arrays or objects
+Policy	Acquire candidate generator product	2026-09-16T21:50:06.1456582Z   -t, --template string          Format JSON output using a Go template; see "gh help formatting"
+Policy	Acquire candidate generator product	2026-09-16T21:50:06.1457481Z       --verbose                  Include full HTTP request and response in the output
+Policy	Acquire candidate generator product	2026-09-16T21:50:06.1458074Z   
+Policy	Acquire candidate generator product	2026-09-16T21:50:06.1492906Z ##[error]no same-repository PR run published candidate velnor-workflow-candidate-b98d20fa9b4d3294-Linux-X64
+Policy	Acquire candidate generator product	2026-09-16T21:50:06.1501171Z ##[error]Process completed with exit code 1.
+Policy	Post Check out base setup action	﻿2026-09-16T21:50:06.1628596Z Post job cleanup.
+Policy	Post Check out base setup action	2026-09-16T21:50:06.2493979Z [command]/usr/bin/git version
+Policy	Post Check out base setup action	2026-09-16T21:50:06.2536268Z git version 2.55.0
+Policy	Post Check out base setup action	2026-09-16T21:50:06.2572978Z Temporarily overriding HOME='/home/runner/work/_temp/ca18cf75-ebe7-4b16-8cec-17d9d22baf8f' before making global git config changes
+Policy	Post Check out base setup action	2026-09-16T21:50:06.2573790Z Adding repository directory to the temporary git global config as a safe directory
+Policy	Post Check out base setup action	2026-09-16T21:50:06.2577889Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor/policy-setup-action
+Policy	Post Check out base setup action	2026-09-16T21:50:06.2611117Z Removing SSH command configuration
+Policy	Post Check out base setup action	2026-09-16T21:50:06.2617618Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Policy	Post Check out base setup action	2026-09-16T21:50:06.2652995Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Policy	Post Check out base setup action	2026-09-16T21:50:06.2891037Z Removing HTTP extra header
+Policy	Post Check out base setup action	2026-09-16T21:50:06.2897607Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Policy	Post Check out base setup action	2026-09-16T21:50:06.2942433Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Policy	Post Check out base setup action	2026-09-16T21:50:06.3197611Z Removing includeIf entries pointing to credentials config files
+Policy	Post Check out base setup action	2026-09-16T21:50:06.3205146Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Policy	Post Check out base setup action	2026-09-16T21:50:06.3243257Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Policy	Post Checkout repository history	﻿2026-09-16T21:50:06.3642634Z Post job cleanup.
+Policy	Post Checkout repository history	2026-09-16T21:50:06.4524059Z [command]/usr/bin/git version
+Policy	Post Checkout repository history	2026-09-16T21:50:06.4575106Z git version 2.55.0
+Policy	Post Checkout repository history	2026-09-16T21:50:06.4621720Z Temporarily overriding HOME='/home/runner/work/_temp/969f60bf-ee08-4005-8a5e-d6eaade67ed4' before making global git config changes
+Policy	Post Checkout repository history	2026-09-16T21:50:06.4623173Z Adding repository directory to the temporary git global config as a safe directory
+Policy	Post Checkout repository history	2026-09-16T21:50:06.4628226Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor/policy-checkout
+Policy	Post Checkout repository history	2026-09-16T21:50:06.4667749Z Removing SSH command configuration
+Policy	Post Checkout repository history	2026-09-16T21:50:06.4676505Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Policy	Post Checkout repository history	2026-09-16T21:50:06.4721766Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Policy	Post Checkout repository history	2026-09-16T21:50:06.5011852Z Removing HTTP extra header
+Policy	Post Checkout repository history	2026-09-16T21:50:06.5017120Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Policy	Post Checkout repository history	2026-09-16T21:50:06.5052070Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Policy	Post Checkout repository history	2026-09-16T21:50:06.5299411Z Removing includeIf entries pointing to credentials config files
+Policy	Post Checkout repository history	2026-09-16T21:50:06.5309956Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Policy	Post Checkout repository history	2026-09-16T21:50:06.5347718Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Policy	Complete job	﻿2026-09-16T21:50:06.5793030Z Cleaning up orphan processes

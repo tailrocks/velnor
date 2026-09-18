@@ -1,0 +1,6 @@
+error: invalid generation config /private/tmp/vb1-gen/badarch/.github-gen/velnor-workflow.toml: TOML parse error at line 25, column 1
+   |
+25 | apt_arches = ["amd64", "i386"]
+   | ^^^^^^^^^^
+unknown field `apt_arches`, expected one of `primitive`, `units`, `file`, `args`
+

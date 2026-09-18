@@ -1,0 +1,1070 @@
+Docker · Docker · velnor — docker / velnor · trusted	UNKNOWN STEP	2026-09-17T22:11:38.0744963Z ##[group]Velnor rejected job (operational_store)
+Docker · Docker · velnor — docker / velnor · trusted	UNKNOWN STEP	2026-09-17T22:11:38.0744963Z ##[error]Velnor rejected this job before workflow execution.
+Docker · Docker · velnor — docker / velnor · trusted	UNKNOWN STEP	2026-09-17T22:11:38.0744963Z phase: operational_store
+Docker · Docker · velnor — docker / velnor · trusted	UNKNOWN STEP	2026-09-17T22:11:38.0744963Z reason: operational store rejected the sanitized admission row; job failed closed before execution
+Docker · Docker · velnor — docker / velnor · trusted	UNKNOWN STEP	2026-09-17T22:11:38.0744963Z effect: no declared workflow command was executed
+Docker · Docker · velnor — docker / velnor · trusted	UNKNOWN STEP	2026-09-17T22:11:38.0744963Z remediation: correct the rejected workflow field/action/ref or add the exact reviewed capability to Velnor, publish and deploy that Velnor release, then rerun
+Docker · Docker · velnor — docker / velnor · trusted	UNKNOWN STEP	2026-09-17T22:11:38.0744963Z ##[endgroup]
+Bun · Bun package (velnor) · velnor — bun-velnor / velnor	UNKNOWN STEP	2026-09-17T22:11:49.8926191Z ##[group]Velnor rejected job (operational_store)
+Bun · Bun package (velnor) · velnor — bun-velnor / velnor	UNKNOWN STEP	2026-09-17T22:11:49.8926191Z ##[error]Velnor rejected this job before workflow execution.
+Bun · Bun package (velnor) · velnor — bun-velnor / velnor	UNKNOWN STEP	2026-09-17T22:11:49.8926191Z phase: operational_store
+Bun · Bun package (velnor) · velnor — bun-velnor / velnor	UNKNOWN STEP	2026-09-17T22:11:49.8926191Z reason: operational store rejected the sanitized admission row; job failed closed before execution
+Bun · Bun package (velnor) · velnor — bun-velnor / velnor	UNKNOWN STEP	2026-09-17T22:11:49.8926191Z effect: no declared workflow command was executed
+Bun · Bun package (velnor) · velnor — bun-velnor / velnor	UNKNOWN STEP	2026-09-17T22:11:49.8926191Z remediation: correct the rejected workflow field/action/ref or add the exact reviewed capability to Velnor, publish and deploy that Velnor release, then rerun
+Bun · Bun package (velnor) · velnor — bun-velnor / velnor	UNKNOWN STEP	2026-09-17T22:11:49.8926191Z ##[endgroup]
+Control / Prepare Cargo / prepare-cargo	UNKNOWN STEP	2026-09-17T22:11:37.9993991Z ##[group]Velnor rejected job (operational_store)
+Control / Prepare Cargo / prepare-cargo	UNKNOWN STEP	2026-09-17T22:11:37.9993991Z ##[error]Velnor rejected this job before workflow execution.
+Control / Prepare Cargo / prepare-cargo	UNKNOWN STEP	2026-09-17T22:11:37.9993991Z phase: operational_store
+Control / Prepare Cargo / prepare-cargo	UNKNOWN STEP	2026-09-17T22:11:37.9993991Z reason: operational store rejected the sanitized admission row; job failed closed before execution
+Control / Prepare Cargo / prepare-cargo	UNKNOWN STEP	2026-09-17T22:11:37.9993991Z effect: no declared workflow command was executed
+Control / Prepare Cargo / prepare-cargo	UNKNOWN STEP	2026-09-17T22:11:37.9993991Z remediation: correct the rejected workflow field/action/ref or add the exact reviewed capability to Velnor, publish and deploy that Velnor release, then rerun
+Control / Prepare Cargo / prepare-cargo	UNKNOWN STEP	2026-09-17T22:11:37.9993991Z ##[endgroup]
+Documentation · Documentation · velnor — docs / velnor	UNKNOWN STEP	2026-09-17T22:11:38.0379798Z ##[group]Velnor rejected job (operational_store)
+Documentation · Documentation · velnor — docs / velnor	UNKNOWN STEP	2026-09-17T22:11:38.0379798Z ##[error]Velnor rejected this job before workflow execution.
+Documentation · Documentation · velnor — docs / velnor	UNKNOWN STEP	2026-09-17T22:11:38.0379798Z phase: operational_store
+Documentation · Documentation · velnor — docs / velnor	UNKNOWN STEP	2026-09-17T22:11:38.0379798Z reason: operational store rejected the sanitized admission row; job failed closed before execution
+Documentation · Documentation · velnor — docs / velnor	UNKNOWN STEP	2026-09-17T22:11:38.0379798Z effect: no declared workflow command was executed
+Documentation · Documentation · velnor — docs / velnor	UNKNOWN STEP	2026-09-17T22:11:38.0379798Z remediation: correct the rejected workflow field/action/ref or add the exact reviewed capability to Velnor, publish and deploy that Velnor release, then rerun
+Documentation · Documentation · velnor — docs / velnor	UNKNOWN STEP	2026-09-17T22:11:38.0379798Z ##[endgroup]
+OpenTofu · OpenTofu · velnor — opentofu / velnor	UNKNOWN STEP	2026-09-17T22:11:50.1657714Z ##[group]Velnor rejected job (operational_store)
+OpenTofu · OpenTofu · velnor — opentofu / velnor	UNKNOWN STEP	2026-09-17T22:11:50.1657714Z ##[error]Velnor rejected this job before workflow execution.
+OpenTofu · OpenTofu · velnor — opentofu / velnor	UNKNOWN STEP	2026-09-17T22:11:50.1657714Z phase: operational_store
+OpenTofu · OpenTofu · velnor — opentofu / velnor	UNKNOWN STEP	2026-09-17T22:11:50.1657714Z reason: operational store rejected the sanitized admission row; job failed closed before execution
+OpenTofu · OpenTofu · velnor — opentofu / velnor	UNKNOWN STEP	2026-09-17T22:11:50.1657714Z effect: no declared workflow command was executed
+OpenTofu · OpenTofu · velnor — opentofu / velnor	UNKNOWN STEP	2026-09-17T22:11:50.1657714Z remediation: correct the rejected workflow field/action/ref or add the exact reviewed capability to Velnor, publish and deploy that Velnor release, then rerun
+OpenTofu · OpenTofu · velnor — opentofu / velnor	UNKNOWN STEP	2026-09-17T22:11:50.1657714Z ##[endgroup]
+ci-required	Validate generated stack results	﻿2026-09-17T22:20:23.6091110Z ##[group]Run set -euo pipefail
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6093068Z ^[[36;1mset -euo pipefail^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6093450Z ^[[36;1mif [[ -z "$PLAN_DIGEST" ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6156321Z ^[[36;1m  echo "plan did not freeze a plan digest: the expected set has no identity" >&2^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6156828Z ^[[36;1m  exit 1^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6157083Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6157369Z ^[[36;1mecho "verdict binds plan digest $PLAN_DIGEST"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6157717Z ^[[36;1mresult_for_job() {^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6158076Z ^[[36;1m  jq -r --arg job "$1" '.[$job].result // empty' <<<"$NEEDS_JSON"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6158454Z ^[[36;1m}^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6158699Z ^[[36;1mplan_expects() {^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6159295Z ^[[36;1m  [[ "$(jq -r --arg unit "$1" --arg provider "$2" '[.[] | select(.unit_id == $unit) | .providers[] | select(. == $provider)] | length' <<<"$SELECTED_UNITS")" -gt 0 ]]^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6160087Z ^[[36;1m}^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6160339Z ^[[36;1mplan_expects_local() {^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6160906Z ^[[36;1m  [[ "$(jq -r --arg unit "$1" '[.[] | select(.unit_id == $unit) | .providers[] | select(. == "velnor")] | length' <<<"$SELECTED_UNITS")" -gt 0 ]]^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6161442Z ^[[36;1m}^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6161690Z ^[[36;1mresult="$(result_for_job plan)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6162020Z ^[[36;1mif [[ "$result" != success ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6162428Z ^[[36;1m  echo "required CI prerequisite plan did not pass: $result" >&2^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6162834Z ^[[36;1m  exit 1^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6163073Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6163365Z ^[[36;1mif plan_expects "bun-velnor" "github-hosted"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6163781Z ^[[36;1m  result="$(result_for_job github-hosted-bun-velnor)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6164202Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6164572Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6164850Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6165396Z ^[[36;1m      skipped) echo "expected CI job github-hosted-bun-velnor was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6166253Z ^[[36;1m      cancelled) echo "expected CI job github-hosted-bun-velnor was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6167213Z ^[[36;1m      *) echo "expected CI job github-hosted-bun-velnor did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6167671Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6167909Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6168155Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6168432Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6169116Z ^[[36;1m      *) echo "selected CI job github-hosted-bun-velnor ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6169897Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6170129Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6170377Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6170722Z ^[[36;1m  result="$(result_for_job github-hosted-bun-velnor)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6171080Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6171348Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6171916Z ^[[36;1m    success) echo "unexpected CI job github-hosted-bun-velnor succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6172751Z ^[[36;1m    *) echo "unexpected CI job github-hosted-bun-velnor ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6173249Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6173482Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6173747Z ^[[36;1mif plan_expects "bun-velnor" "velnor"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6174113Z ^[[36;1m  result="$(result_for_job velnor-bun-velnor)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6174510Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6174876Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6175149Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6175766Z ^[[36;1m      skipped) echo "expected CI job velnor-bun-velnor was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6176562Z ^[[36;1m      cancelled) echo "expected CI job velnor-bun-velnor was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6177247Z ^[[36;1m      *) echo "expected CI job velnor-bun-velnor did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6177669Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6177897Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6178132Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6178402Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6179071Z ^[[36;1m      *) echo "selected CI job velnor-bun-velnor ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6179824Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6180057Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6180285Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6180560Z ^[[36;1m  result="$(result_for_job velnor-bun-velnor)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6180897Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6181163Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6181706Z ^[[36;1m    success) echo "unexpected CI job velnor-bun-velnor succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6182472Z ^[[36;1m    *) echo "unexpected CI job velnor-bun-velnor ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6182944Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6183183Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6183504Z ^[[36;1mif plan_expects "docker" "github-hosted"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6183890Z ^[[36;1m  result="$(result_for_job github-hosted-docker)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6184328Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED_TRUSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6184717Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6184992Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6185516Z ^[[36;1m      skipped) echo "expected CI job github-hosted-docker was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6186333Z ^[[36;1m      cancelled) echo "expected CI job github-hosted-docker was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6187174Z ^[[36;1m      *) echo "expected CI job github-hosted-docker did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6187608Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6187844Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6188080Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6188354Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6189099Z ^[[36;1m      *) echo "selected CI job github-hosted-docker ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED_TRUSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED_TRUSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6189923Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6190155Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6190385Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6190666Z ^[[36;1m  result="$(result_for_job github-hosted-docker)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6191011Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6191280Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6191832Z ^[[36;1m    success) echo "unexpected CI job github-hosted-docker succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6192623Z ^[[36;1m    *) echo "unexpected CI job github-hosted-docker ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6193108Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6193334Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6193588Z ^[[36;1mif plan_expects "docker" "velnor"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6193944Z ^[[36;1m  result="$(result_for_job velnor-docker)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6194331Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6194694Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6194967Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6195554Z ^[[36;1m      skipped) echo "expected CI job velnor-docker was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6196318Z ^[[36;1m      cancelled) echo "expected CI job velnor-docker was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6196974Z ^[[36;1m      *) echo "expected CI job velnor-docker did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6197384Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6197616Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6197855Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6198129Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6198777Z ^[[36;1m      *) echo "selected CI job velnor-docker ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6199449Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6199692Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6200093Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6200361Z ^[[36;1m  result="$(result_for_job velnor-docker)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6200686Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6200953Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6201479Z ^[[36;1m    success) echo "unexpected CI job velnor-docker succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6202217Z ^[[36;1m    *) echo "unexpected CI job velnor-docker ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6202677Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6202905Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6203172Z ^[[36;1mif plan_expects "docs" "github-hosted"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6203543Z ^[[36;1m  result="$(result_for_job github-hosted-docs)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6203933Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6204291Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6204564Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6205067Z ^[[36;1m      skipped) echo "expected CI job github-hosted-docs was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6205867Z ^[[36;1m      cancelled) echo "expected CI job github-hosted-docs was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6206556Z ^[[36;1m      *) echo "expected CI job github-hosted-docs did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6207077Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6207308Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6207545Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6207815Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6208491Z ^[[36;1m      *) echo "selected CI job github-hosted-docs ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6209177Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6209405Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6209632Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6210097Z ^[[36;1m  result="$(result_for_job github-hosted-docs)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6210434Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6210700Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6211238Z ^[[36;1m    success) echo "unexpected CI job github-hosted-docs succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6212002Z ^[[36;1m    *) echo "unexpected CI job github-hosted-docs ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6212475Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6212700Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6212952Z ^[[36;1mif plan_expects "docs" "velnor"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6213290Z ^[[36;1m  result="$(result_for_job velnor-docs)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6213668Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6214029Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6214301Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6214780Z ^[[36;1m      skipped) echo "expected CI job velnor-docs was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6215617Z ^[[36;1m      cancelled) echo "expected CI job velnor-docs was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6216254Z ^[[36;1m      *) echo "expected CI job velnor-docs did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6216660Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6216889Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6217123Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6217395Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6218035Z ^[[36;1m      *) echo "selected CI job velnor-docs ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6218700Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6218926Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6219150Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6219409Z ^[[36;1m  result="$(result_for_job velnor-docs)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6219733Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6220071Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6220593Z ^[[36;1m    success) echo "unexpected CI job velnor-docs succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6221306Z ^[[36;1m    *) echo "unexpected CI job velnor-docs ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6221758Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6221985Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6222262Z ^[[36;1mif plan_expects "opentofu" "github-hosted"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6222654Z ^[[36;1m  result="$(result_for_job github-hosted-opentofu)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6223058Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6223415Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6223684Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6224198Z ^[[36;1m      skipped) echo "expected CI job github-hosted-opentofu was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6225038Z ^[[36;1m      cancelled) echo "expected CI job github-hosted-opentofu was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6225751Z ^[[36;1m      *) echo "expected CI job github-hosted-opentofu did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6226287Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6226516Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6226750Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6227016Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6227682Z ^[[36;1m      *) echo "selected CI job github-hosted-opentofu ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6228377Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6228603Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6228823Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6229107Z ^[[36;1m  result="$(result_for_job github-hosted-opentofu)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6229457Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6229723Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6230344Z ^[[36;1m    success) echo "unexpected CI job github-hosted-opentofu succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6231139Z ^[[36;1m    *) echo "unexpected CI job github-hosted-opentofu ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6231622Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6231840Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6232095Z ^[[36;1mif plan_expects "opentofu" "velnor"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6232449Z ^[[36;1m  result="$(result_for_job velnor-opentofu)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6232831Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6233185Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6233450Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6233939Z ^[[36;1m      skipped) echo "expected CI job velnor-opentofu was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6234797Z ^[[36;1m      cancelled) echo "expected CI job velnor-opentofu was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6235459Z ^[[36;1m      *) echo "expected CI job velnor-opentofu did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6235872Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6236111Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6236340Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6236605Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6237253Z ^[[36;1m      *) echo "selected CI job velnor-opentofu ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6237933Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6238157Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6238376Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6238637Z ^[[36;1m  result="$(result_for_job velnor-opentofu)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6238967Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6239230Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6239877Z ^[[36;1m    success) echo "unexpected CI job velnor-opentofu succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6240672Z ^[[36;1m    *) echo "unexpected CI job velnor-opentofu ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6241135Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6241355Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6243018Z ^[[36;1mif plan_expects_local "rust-unit-collector" || plan_expects_local "rust-velnor-bench" || plan_expects_local "rust-velnor-client" || plan_expects_local "rust-velnor-control" || plan_expects_local "rust-velnor-model" || plan_expects_local "rust-velnor-render" || plan_expects_local "rust-velnor-runner" || plan_expects_local "rust-velnor-tools" || plan_expects_local "rust-velnor-workflow" || plan_expects_local "rust-velnor-workflow-contract" || plan_expects_local "rust-velnorctl" || plan_expects_local "rust-production-topology"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6244786Z ^[[36;1m  result="$(result_for_job prepare-cargo)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6245177Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6245544Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6245902Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6246423Z ^[[36;1m      skipped) echo "expected CI prerequisite prepare-cargo was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6247241Z ^[[36;1m      cancelled) echo "expected CI prerequisite prepare-cargo was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6247951Z ^[[36;1m      *) echo "expected CI prerequisite prepare-cargo did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6248385Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6248611Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6248844Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6249113Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6249921Z ^[[36;1m      *) echo "selected CI prerequisite prepare-cargo ran outside its provider admission (PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED=$PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6250643Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6250869Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6251089Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6251347Z ^[[36;1m  result="$(result_for_job prepare-cargo)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6251670Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6251931Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6252481Z ^[[36;1m    success) echo "unexpected CI prerequisite prepare-cargo succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6253274Z ^[[36;1m    *) echo "unexpected CI prerequisite prepare-cargo ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6253756Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6253974Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6254335Z ^[[36;1mif plan_expects "rust-policy" "github-hosted"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6254738Z ^[[36;1m  result="$(result_for_job github-hosted-rust-policy)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6255157Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6255503Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6255823Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6256343Z ^[[36;1m      skipped) echo "expected CI job github-hosted-rust-policy was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6257179Z ^[[36;1m      cancelled) echo "expected CI job github-hosted-rust-policy was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6257920Z ^[[36;1m      *) echo "expected CI job github-hosted-rust-policy did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6258362Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6258603Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6258831Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6259095Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6259833Z ^[[36;1m      *) echo "selected CI job github-hosted-rust-policy ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6260545Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6260765Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6260978Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6261262Z ^[[36;1m  result="$(result_for_job github-hosted-rust-policy)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6261607Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6261869Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6262428Z ^[[36;1m    success) echo "unexpected CI job github-hosted-rust-policy succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6263235Z ^[[36;1m    *) echo "unexpected CI job github-hosted-rust-policy ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6263722Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6263941Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6264196Z ^[[36;1mif plan_expects "rust-policy" "velnor"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6264557Z ^[[36;1m  result="$(result_for_job velnor-rust-policy)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6264942Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6265386Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6265649Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6266146Z ^[[36;1m      skipped) echo "expected CI job velnor-rust-policy was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6266936Z ^[[36;1m      cancelled) echo "expected CI job velnor-rust-policy was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6267613Z ^[[36;1m      *) echo "expected CI job velnor-rust-policy did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6268031Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6268457Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6271311Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6273562Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6275595Z ^[[36;1m      *) echo "selected CI job velnor-rust-policy ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6276275Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6276495Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6276709Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6276973Z ^[[36;1m  result="$(result_for_job velnor-rust-policy)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6277351Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6277605Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6278141Z ^[[36;1m    success) echo "unexpected CI job velnor-rust-policy succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6278908Z ^[[36;1m    *) echo "unexpected CI job velnor-rust-policy ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6279370Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6279671Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6280139Z ^[[36;1mif plan_expects "rust-unit-collector" "github-hosted"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6280586Z ^[[36;1m  result="$(result_for_job github-hosted-rust-unit-collector)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6281009Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6281361Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6281623Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6282170Z ^[[36;1m      skipped) echo "expected CI job github-hosted-rust-unit-collector was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6283276Z ^[[36;1m      cancelled) echo "expected CI job github-hosted-rust-unit-collector was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6284062Z ^[[36;1m      *) echo "expected CI job github-hosted-rust-unit-collector did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6284527Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6284753Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6284984Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6285245Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6285942Z ^[[36;1m      *) echo "selected CI job github-hosted-rust-unit-collector ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6286667Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6286887Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6287101Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6287404Z ^[[36;1m  result="$(result_for_job github-hosted-rust-unit-collector)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6287775Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6288033Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6288618Z ^[[36;1m    success) echo "unexpected CI job github-hosted-rust-unit-collector succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6289494Z ^[[36;1m    *) echo "unexpected CI job github-hosted-rust-unit-collector ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6290439Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6290665Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6290941Z ^[[36;1mif plan_expects "rust-unit-collector" "velnor"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6291348Z ^[[36;1m  result="$(result_for_job velnor-rust-unit-collector)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6291855Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6292209Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6292472Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6292994Z ^[[36;1m      skipped) echo "expected CI job velnor-rust-unit-collector was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6293833Z ^[[36;1m      cancelled) echo "expected CI job velnor-rust-unit-collector was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6294563Z ^[[36;1m      *) echo "expected CI job velnor-rust-unit-collector did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6295010Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6295229Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6295460Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6295721Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6296397Z ^[[36;1m      *) echo "selected CI job velnor-rust-unit-collector ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6297104Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6297323Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6297536Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6297819Z ^[[36;1m  result="$(result_for_job velnor-rust-unit-collector)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6298168Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6298424Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6298987Z ^[[36;1m    success) echo "unexpected CI job velnor-rust-unit-collector succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6299996Z ^[[36;1m    *) echo "unexpected CI job velnor-rust-unit-collector ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6300485Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6300699Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6300989Z ^[[36;1mif plan_expects "rust-velnor-bench" "github-hosted"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6301423Z ^[[36;1m  result="$(result_for_job github-hosted-rust-velnor-bench)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6301836Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6302176Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6302431Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6302963Z ^[[36;1m      skipped) echo "expected CI job github-hosted-rust-velnor-bench was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6303831Z ^[[36;1m      cancelled) echo "expected CI job github-hosted-rust-velnor-bench was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6304611Z ^[[36;1m      *) echo "expected CI job github-hosted-rust-velnor-bench did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6305067Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6305287Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6305517Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6305779Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6306469Z ^[[36;1m      *) echo "selected CI job github-hosted-rust-velnor-bench ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6307179Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6307399Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6307611Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6307904Z ^[[36;1m  result="$(result_for_job github-hosted-rust-velnor-bench)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6308263Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6308517Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6309093Z ^[[36;1m    success) echo "unexpected CI job github-hosted-rust-velnor-bench succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6310076Z ^[[36;1m    *) echo "unexpected CI job github-hosted-rust-velnor-bench ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6310581Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6310890Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6311159Z ^[[36;1mif plan_expects "rust-velnor-bench" "velnor"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6311549Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-bench)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6311947Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6312296Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6312555Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6313066Z ^[[36;1m      skipped) echo "expected CI job velnor-rust-velnor-bench was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6313888Z ^[[36;1m      cancelled) echo "expected CI job velnor-rust-velnor-bench was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6314601Z ^[[36;1m      *) echo "expected CI job velnor-rust-velnor-bench did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6315031Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6315250Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6315480Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6315739Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6316421Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-bench ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6317122Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6317340Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6317553Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6317829Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-bench)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6318169Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6318425Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6319055Z ^[[36;1m    success) echo "unexpected CI job velnor-rust-velnor-bench succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6320002Z ^[[36;1m    *) echo "unexpected CI job velnor-rust-velnor-bench ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6320499Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6320714Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6321009Z ^[[36;1mif plan_expects "rust-velnor-client" "github-hosted"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6321446Z ^[[36;1m  result="$(result_for_job github-hosted-rust-velnor-client)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6321863Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6322208Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6322467Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6323006Z ^[[36;1m      skipped) echo "expected CI job github-hosted-rust-velnor-client was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6323881Z ^[[36;1m      cancelled) echo "expected CI job github-hosted-rust-velnor-client was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6324654Z ^[[36;1m      *) echo "expected CI job github-hosted-rust-velnor-client did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6325114Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6325336Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6325565Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6325823Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6326512Z ^[[36;1m      *) echo "selected CI job github-hosted-rust-velnor-client ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6327229Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6327449Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6327664Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6327963Z ^[[36;1m  result="$(result_for_job github-hosted-rust-velnor-client)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6328329Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6328589Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6329169Z ^[[36;1m    success) echo "unexpected CI job github-hosted-rust-velnor-client succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6330148Z ^[[36;1m    *) echo "unexpected CI job github-hosted-rust-velnor-client ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6330751Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6330967Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6331239Z ^[[36;1mif plan_expects "rust-velnor-client" "velnor"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6331635Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-client)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6332035Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6332386Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6332647Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6333166Z ^[[36;1m      skipped) echo "expected CI job velnor-rust-velnor-client was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6333997Z ^[[36;1m      cancelled) echo "expected CI job velnor-rust-velnor-client was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6334716Z ^[[36;1m      *) echo "expected CI job velnor-rust-velnor-client did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6335153Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6335373Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6335603Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6335862Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6336532Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-client ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6337228Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6337449Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6337662Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6337944Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-client)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6338369Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6338623Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6339175Z ^[[36;1m    success) echo "unexpected CI job velnor-rust-velnor-client succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6340103Z ^[[36;1m    *) echo "unexpected CI job velnor-rust-velnor-client ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6340588Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6340803Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6341098Z ^[[36;1mif plan_expects "rust-velnor-control" "github-hosted"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6341541Z ^[[36;1m  result="$(result_for_job github-hosted-rust-velnor-control)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6341976Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6342320Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6342581Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6343125Z ^[[36;1m      skipped) echo "expected CI job github-hosted-rust-velnor-control was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6344093Z ^[[36;1m      cancelled) echo "expected CI job github-hosted-rust-velnor-control was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6346041Z ^[[36;1m      *) echo "expected CI job github-hosted-rust-velnor-control did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6347947Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6348187Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6348415Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6349722Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6352716Z ^[[36;1m      *) echo "selected CI job github-hosted-rust-velnor-control ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6353431Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6353650Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6353867Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6354168Z ^[[36;1m  result="$(result_for_job github-hosted-rust-velnor-control)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6354535Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6354791Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6355373Z ^[[36;1m    success) echo "unexpected CI job github-hosted-rust-velnor-control succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6356321Z ^[[36;1m    *) echo "unexpected CI job github-hosted-rust-velnor-control ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6356832Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6357049Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6357327Z ^[[36;1mif plan_expects "rust-velnor-control" "velnor"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6357731Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-control)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6358135Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6358483Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6358747Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6359265Z ^[[36;1m      skipped) echo "expected CI job velnor-rust-velnor-control was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6360261Z ^[[36;1m      cancelled) echo "expected CI job velnor-rust-velnor-control was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6360999Z ^[[36;1m      *) echo "expected CI job velnor-rust-velnor-control did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6361436Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6361657Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6361885Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6362143Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6362814Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-control ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6363600Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6363818Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6364031Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6364334Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-control)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6364682Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6364940Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6365501Z ^[[36;1m    success) echo "unexpected CI job velnor-rust-velnor-control succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6366303Z ^[[36;1m    *) echo "unexpected CI job velnor-rust-velnor-control ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6368338Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6368556Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6368867Z ^[[36;1mif plan_expects "rust-velnor-model" "github-hosted"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6369300Z ^[[36;1m  result="$(result_for_job github-hosted-rust-velnor-model)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6369716Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6370194Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6370452Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6370986Z ^[[36;1m      skipped) echo "expected CI job github-hosted-rust-velnor-model was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6371857Z ^[[36;1m      cancelled) echo "expected CI job github-hosted-rust-velnor-model was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6372618Z ^[[36;1m      *) echo "expected CI job github-hosted-rust-velnor-model did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6373073Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6373293Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6373519Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6373780Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6374467Z ^[[36;1m      *) echo "selected CI job github-hosted-rust-velnor-model ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6375181Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6375401Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6375613Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6375912Z ^[[36;1m  result="$(result_for_job github-hosted-rust-velnor-model)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6376366Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6376627Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6377200Z ^[[36;1m    success) echo "unexpected CI job github-hosted-rust-velnor-model succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6379060Z ^[[36;1m    *) echo "unexpected CI job github-hosted-rust-velnor-model ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6379941Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6380271Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6380704Z ^[[36;1mif plan_expects "rust-velnor-model" "velnor"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6381306Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-model)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6381912Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6382460Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6382874Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6383713Z ^[[36;1m      skipped) echo "expected CI job velnor-rust-velnor-model was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6385098Z ^[[36;1m      cancelled) echo "expected CI job velnor-rust-velnor-model was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6386290Z ^[[36;1m      *) echo "expected CI job velnor-rust-velnor-model did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6386936Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6387252Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6387581Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6387988Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6390736Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-model ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6392044Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6392388Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6392710Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6393122Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-model)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6393661Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6394053Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6394949Z ^[[36;1m    success) echo "unexpected CI job velnor-rust-velnor-model succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6396041Z ^[[36;1m    *) echo "unexpected CI job velnor-rust-velnor-model ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6396522Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6396738Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6397033Z ^[[36;1mif plan_expects "rust-velnor-render" "github-hosted"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6397475Z ^[[36;1m  result="$(result_for_job github-hosted-rust-velnor-render)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6397893Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6398238Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6398500Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6399046Z ^[[36;1m      skipped) echo "expected CI job github-hosted-rust-velnor-render was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6400111Z ^[[36;1m      cancelled) echo "expected CI job github-hosted-rust-velnor-render was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6400879Z ^[[36;1m      *) echo "expected CI job github-hosted-rust-velnor-render did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6401338Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6401557Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6401785Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6402043Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6402739Z ^[[36;1m      *) echo "selected CI job github-hosted-rust-velnor-render ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6403451Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6403666Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6403996Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6404294Z ^[[36;1m  result="$(result_for_job github-hosted-rust-velnor-render)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6404654Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6404910Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6405486Z ^[[36;1m    success) echo "unexpected CI job github-hosted-rust-velnor-render succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6406328Z ^[[36;1m    *) echo "unexpected CI job github-hosted-rust-velnor-render ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6406831Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6407043Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6407320Z ^[[36;1mif plan_expects "rust-velnor-render" "velnor"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6407714Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-render)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6408113Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6408462Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6408724Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6409237Z ^[[36;1m      skipped) echo "expected CI job velnor-rust-velnor-render was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6410224Z ^[[36;1m      cancelled) echo "expected CI job velnor-rust-velnor-render was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6410938Z ^[[36;1m      *) echo "expected CI job velnor-rust-velnor-render did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6411368Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6411587Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6411812Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6412154Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6412820Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-render ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6413516Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6413730Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6413941Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6414219Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-render)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6414559Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6414815Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6415364Z ^[[36;1m    success) echo "unexpected CI job velnor-rust-velnor-render succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6416156Z ^[[36;1m    *) echo "unexpected CI job velnor-rust-velnor-render ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6416642Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6416854Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6417156Z ^[[36;1mif plan_expects "rust-velnor-runner" "github-hosted"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6417589Z ^[[36;1m  result="$(result_for_job github-hosted-rust-velnor-runner)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6418001Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6418344Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6418599Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6419136Z ^[[36;1m      skipped) echo "expected CI job github-hosted-rust-velnor-runner was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6420155Z ^[[36;1m      cancelled) echo "expected CI job github-hosted-rust-velnor-runner was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6420918Z ^[[36;1m      *) echo "expected CI job github-hosted-rust-velnor-runner did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6421374Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6421595Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6421818Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6422077Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6422761Z ^[[36;1m      *) echo "selected CI job github-hosted-rust-velnor-runner ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6423562Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6423776Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6423984Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6424277Z ^[[36;1m  result="$(result_for_job github-hosted-rust-velnor-runner)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6424636Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6424889Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6425464Z ^[[36;1m    success) echo "unexpected CI job github-hosted-rust-velnor-runner succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6426304Z ^[[36;1m    *) echo "unexpected CI job github-hosted-rust-velnor-runner ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6426813Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6427024Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6427292Z ^[[36;1mif plan_expects "rust-velnor-runner" "velnor"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6427682Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-runner)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6428082Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6428424Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6428678Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6429187Z ^[[36;1m      skipped) echo "expected CI job velnor-rust-velnor-runner was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6430238Z ^[[36;1m      cancelled) echo "expected CI job velnor-rust-velnor-runner was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6430949Z ^[[36;1m      *) echo "expected CI job velnor-rust-velnor-runner did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6431469Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6431699Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6431925Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6432180Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6432846Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-runner ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6433544Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6433756Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6433962Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6434239Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-runner)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6434578Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6434833Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6435380Z ^[[36;1m    success) echo "unexpected CI job velnor-rust-velnor-runner succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6436176Z ^[[36;1m    *) echo "unexpected CI job velnor-rust-velnor-runner ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6436657Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6436871Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6437157Z ^[[36;1mif plan_expects "rust-velnor-tools" "github-hosted"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6437591Z ^[[36;1m  result="$(result_for_job github-hosted-rust-velnor-tools)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6438004Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6438433Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6438693Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6439225Z ^[[36;1m      skipped) echo "expected CI job github-hosted-rust-velnor-tools was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6440223Z ^[[36;1m      cancelled) echo "expected CI job github-hosted-rust-velnor-tools was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6441468Z ^[[36;1m      *) echo "expected CI job github-hosted-rust-velnor-tools did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6442177Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6442449Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6442677Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6442936Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6443773Z ^[[36;1m      *) echo "selected CI job github-hosted-rust-velnor-tools ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6444481Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6444697Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6444905Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6445200Z ^[[36;1m  result="$(result_for_job github-hosted-rust-velnor-tools)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6445556Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6445811Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6446384Z ^[[36;1m    success) echo "unexpected CI job github-hosted-rust-velnor-tools succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6447233Z ^[[36;1m    *) echo "unexpected CI job github-hosted-rust-velnor-tools ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6447735Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6447956Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6448224Z ^[[36;1mif plan_expects "rust-velnor-tools" "velnor"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6448614Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-tools)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6449008Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6449355Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6449607Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6450291Z ^[[36;1m      skipped) echo "expected CI job velnor-rust-velnor-tools was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6451115Z ^[[36;1m      cancelled) echo "expected CI job velnor-rust-velnor-tools was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6451923Z ^[[36;1m      *) echo "expected CI job velnor-rust-velnor-tools did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6452357Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6452571Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6452796Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6453054Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6453729Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-tools ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6454421Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6454650Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6454858Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6455129Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-tools)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6455469Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6455724Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6456281Z ^[[36;1m    success) echo "unexpected CI job velnor-rust-velnor-tools succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6457068Z ^[[36;1m    *) echo "unexpected CI job velnor-rust-velnor-tools ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6457550Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6457760Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6458057Z ^[[36;1mif plan_expects "rust-velnor-workflow" "github-hosted"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6458502Z ^[[36;1m  result="$(result_for_job github-hosted-rust-velnor-workflow)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6458930Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6459270Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6459525Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6460315Z ^[[36;1m      skipped) echo "expected CI job github-hosted-rust-velnor-workflow was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6461202Z ^[[36;1m      cancelled) echo "expected CI job github-hosted-rust-velnor-workflow was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6461976Z ^[[36;1m      *) echo "expected CI job github-hosted-rust-velnor-workflow did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6462531Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6462749Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6462973Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6506775Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6507520Z ^[[36;1m      *) echo "selected CI job github-hosted-rust-velnor-workflow ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6508241Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6508457Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6508665Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6508977Z ^[[36;1m  result="$(result_for_job github-hosted-rust-velnor-workflow)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6509353Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6509602Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6510322Z ^[[36;1m    success) echo "unexpected CI job github-hosted-rust-velnor-workflow succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6511171Z ^[[36;1m    *) echo "unexpected CI job github-hosted-rust-velnor-workflow ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6511675Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6511883Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6512154Z ^[[36;1mif plan_expects "rust-velnor-workflow" "velnor"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6512552Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-workflow)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6512949Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6513294Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6513546Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6514061Z ^[[36;1m      skipped) echo "expected CI job velnor-rust-velnor-workflow was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6515019Z ^[[36;1m      cancelled) echo "expected CI job velnor-rust-velnor-workflow was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6515743Z ^[[36;1m      *) echo "expected CI job velnor-rust-velnor-workflow did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6516176Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6516387Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6516605Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6516858Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6517526Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-workflow ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6518215Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6518425Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6518629Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6518907Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-workflow)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6519250Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6519497Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6520131Z ^[[36;1m    success) echo "unexpected CI job velnor-rust-velnor-workflow succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6520949Z ^[[36;1m    *) echo "unexpected CI job velnor-rust-velnor-workflow ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6521430Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6521639Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6521959Z ^[[36;1mif plan_expects "rust-velnor-workflow-contract" "github-hosted"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6522457Z ^[[36;1m  result="$(result_for_job github-hosted-rust-velnor-workflow-contract)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6522915Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6523254Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6523506Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6524081Z ^[[36;1m      skipped) echo "expected CI job github-hosted-rust-velnor-workflow-contract was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6525021Z ^[[36;1m      cancelled) echo "expected CI job github-hosted-rust-velnor-workflow-contract was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6525947Z ^[[36;1m      *) echo "expected CI job github-hosted-rust-velnor-workflow-contract did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6526444Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6526656Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6526878Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6527131Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6527849Z ^[[36;1m      *) echo "selected CI job github-hosted-rust-velnor-workflow-contract ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6528588Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6528800Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6529004Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6529329Z ^[[36;1m  result="$(result_for_job github-hosted-rust-velnor-workflow-contract)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6529716Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6530134Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6530771Z ^[[36;1m    success) echo "unexpected CI job github-hosted-rust-velnor-workflow-contract succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6531692Z ^[[36;1m    *) echo "unexpected CI job github-hosted-rust-velnor-workflow-contract ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6532237Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6532446Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6532744Z ^[[36;1mif plan_expects "rust-velnor-workflow-contract" "velnor"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6533197Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-workflow-contract)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6533711Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6534050Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6534298Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6534842Z ^[[36;1m      skipped) echo "expected CI job velnor-rust-velnor-workflow-contract was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6535739Z ^[[36;1m      cancelled) echo "expected CI job velnor-rust-velnor-workflow-contract was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6536519Z ^[[36;1m      *) echo "expected CI job velnor-rust-velnor-workflow-contract did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6536980Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6537194Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6537412Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6537664Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6538377Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-workflow-contract ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6539216Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6539427Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6539632Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6540061Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-workflow-contract)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6540427Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6540686Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6541266Z ^[[36;1m    success) echo "unexpected CI job velnor-rust-velnor-workflow-contract succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6542123Z ^[[36;1m    *) echo "unexpected CI job velnor-rust-velnor-workflow-contract ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6542634Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6542841Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6543112Z ^[[36;1mif plan_expects "rust-velnorctl" "github-hosted"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6543511Z ^[[36;1m  result="$(result_for_job github-hosted-rust-velnorctl)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6543909Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6544242Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6544582Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6545098Z ^[[36;1m      skipped) echo "expected CI job github-hosted-rust-velnorctl was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6545927Z ^[[36;1m      cancelled) echo "expected CI job github-hosted-rust-velnorctl was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6546648Z ^[[36;1m      *) echo "expected CI job github-hosted-rust-velnorctl did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6547084Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6547294Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6547511Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6547780Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6548440Z ^[[36;1m      *) echo "selected CI job github-hosted-rust-velnorctl ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6549123Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6549335Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6549540Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6549883Z ^[[36;1m  result="$(result_for_job github-hosted-rust-velnorctl)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6550227Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6550475Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6551024Z ^[[36;1m    success) echo "unexpected CI job github-hosted-rust-velnorctl succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6551826Z ^[[36;1m    *) echo "unexpected CI job github-hosted-rust-velnorctl ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6552307Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6552596Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6552851Z ^[[36;1mif plan_expects "rust-velnorctl" "velnor"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6553212Z ^[[36;1m  result="$(result_for_job velnor-rust-velnorctl)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6553593Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6553945Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6554196Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6554685Z ^[[36;1m      skipped) echo "expected CI job velnor-rust-velnorctl was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6555468Z ^[[36;1m      cancelled) echo "expected CI job velnor-rust-velnorctl was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6556154Z ^[[36;1m      *) echo "expected CI job velnor-rust-velnorctl did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6556563Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6556774Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6557009Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6557260Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6557906Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnorctl ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6558591Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6558801Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6559009Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6559268Z ^[[36;1m  result="$(result_for_job velnor-rust-velnorctl)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6559589Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6559902Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6560431Z ^[[36;1m    success) echo "unexpected CI job velnor-rust-velnorctl succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6561184Z ^[[36;1m    *) echo "unexpected CI job velnor-rust-velnorctl ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6561643Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6561853Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6562157Z ^[[36;1mif plan_expects "rust-production-topology" "github-hosted"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6562623Z ^[[36;1m  result="$(result_for_job github-hosted-rust-production-topology)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6563056Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6563481Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6563732Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6564284Z ^[[36;1m      skipped) echo "expected CI job github-hosted-rust-production-topology was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6565186Z ^[[36;1m      cancelled) echo "expected CI job github-hosted-rust-production-topology was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6565983Z ^[[36;1m      *) echo "expected CI job github-hosted-rust-production-topology did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6566456Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6566669Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6566887Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6567137Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6567838Z ^[[36;1m      *) echo "selected CI job github-hosted-rust-production-topology ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6568576Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6568788Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6568993Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6569300Z ^[[36;1m  result="$(result_for_job github-hosted-rust-production-topology)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6569677Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6570100Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6570694Z ^[[36;1m    success) echo "unexpected CI job github-hosted-rust-production-topology succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6571662Z ^[[36;1m    *) echo "unexpected CI job github-hosted-rust-production-topology ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6572180Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6572387Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6572674Z ^[[36;1mif plan_expects "rust-production-topology" "velnor"; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6573119Z ^[[36;1m  result="$(result_for_job velnor-rust-production-topology)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6573531Z ^[[36;1m  if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6573867Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6574118Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6574645Z ^[[36;1m      skipped) echo "expected CI job velnor-rust-production-topology was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6575504Z ^[[36;1m      cancelled) echo "expected CI job velnor-rust-production-topology was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6576260Z ^[[36;1m      *) echo "expected CI job velnor-rust-production-topology did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6576709Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6576923Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6577143Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6577413Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6578102Z ^[[36;1m      *) echo "selected CI job velnor-rust-production-topology ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6578804Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6579017Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6579225Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6579518Z ^[[36;1m  result="$(result_for_job velnor-rust-production-topology)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6580029Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6580289Z ^[[36;1m    skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6580866Z ^[[36;1m    success) echo "unexpected CI job velnor-rust-production-topology succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6581708Z ^[[36;1m    *) echo "unexpected CI job velnor-rust-production-topology ran outside the expected set: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6582204Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.6582411Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T22:20:23.7604411Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+ci-required	Validate generated stack results	2026-09-17T22:20:23.7605271Z env:
+ci-required	Validate generated stack results	2026-09-17T22:20:23.7633691Z   NEEDS_JSON: {
+ci-required	Validate generated stack results	  "plan": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {
+ci-required	Validate generated stack results	      "head_sha": "ccc1851c16a3ed55950aa5bc8562e1938262ed0e",
+ci-required	Validate generated stack results	      "units": "[{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"bun-velnor\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"docker\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"docs\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"opentofu\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"rust-policy\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"rust-production-topology\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"rust-unit-collector\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"rust-velnor-bench\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"rust-velnor-client\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"rust-velnor-control\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"rust-velnor-model\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"rust-velnor-render\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"rust-velnor-runner\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"rust-velnor-tools\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"rust-velnor-workflow\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"rust-velnor-workflow-contract\"},{\"providers\":[\"github-hosted\",\"velnor\"],\"unit_id\":\"rust-velnorctl\"}]",
+ci-required	Validate generated stack results	      "full_units": "bun-velnor,docker,docs,opentofu,rust-policy,rust-production-topology,rust-unit-collector,rust-velnor-bench,rust-velnor-client,rust-velnor-control,rust-velnor-model,rust-velnor-render,rust-velnor-runner,rust-velnor-tools,rust-velnor-workflow,rust-velnor-workflow-contract,rust-velnorctl",
+ci-required	Validate generated stack results	      "excluded": "[]",
+ci-required	Validate generated stack results	      "bun_matrix": "[{\"label\":\"Bun package (velnor)\",\"unit\":\"bun-velnor\"}]",
+ci-required	Validate generated stack results	      "docs_matrix": "[{\"label\":\"Documentation\",\"unit\":\"docs\"}]",
+ci-required	Validate generated stack results	      "opentofu_matrix": "[{\"label\":\"OpenTofu\",\"unit\":\"opentofu\"}]",
+ci-required	Validate generated stack results	      "rust_matrix": "[{\"label\":\"Rust dependency policy\",\"unit\":\"rust-policy\"},{\"label\":\"Rust crate (unit-collector)\",\"unit\":\"rust-unit-collector\"},{\"label\":\"Rust crate (velnor-bench)\",\"unit\":\"rust-velnor-bench\"},{\"label\":\"Rust crate (velnor-client)\",\"unit\":\"rust-velnor-client\"},{\"label\":\"Rust crate (velnor-control)\",\"unit\":\"rust-velnor-control\"},{\"label\":\"Rust crate (velnor-model)\",\"unit\":\"rust-velnor-model\"},{\"label\":\"Rust crate (velnor-render)\",\"unit\":\"rust-velnor-render\"},{\"label\":\"Rust crate (velnor-runner)\",\"unit\":\"rust-velnor-runner\"},{\"label\":\"Rust crate (velnor-tools)\",\"unit\":\"rust-velnor-tools\"},{\"label\":\"Rust crate (velnor-workflow)\",\"unit\":\"rust-velnor-workflow\"},{\"label\":\"Rust crate (velnor-workflow-contract)\",\"unit\":\"rust-velnor-workflow-contract\"},{\"label\":\"Rust crate (velnorctl)\",\"unit\":\"rust-velnorctl\"},{\"label\":\"Rust production topology\",\"unit\":\"rust-production-topology\"}]",
+ci-required	Validate generated stack results	      "scope": "affected",
+ci-required	Validate generated stack results	      "base_sha": "19811e71c2a365f3fa93286fdff7dbc298fb37c2",
+ci-required	Validate generated stack results	      "unit_ids": "bun-velnor,docker,docs,opentofu,rust-policy,rust-production-topology,rust-unit-collector,rust-velnor-bench,rust-velnor-client,rust-velnor-control,rust-velnor-model,rust-velnor-render,rust-velnor-runner,rust-velnor-tools,rust-velnor-workflow,rust-velnor-workflow-contract,rust-velnorctl",
+ci-required	Validate generated stack results	      "plan_digest": "8563e4d2f58b08d6",
+ci-required	Validate generated stack results	      "docker_matrix": "[{\"label\":\"Docker\",\"unit\":\"docker\"}]"
+ci-required	Validate generated stack results	    }
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-hosted-bun-velnor": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-bun-velnor": {
+ci-required	Validate generated stack results	    "result": "failure",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-hosted-docker": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-docker": {
+ci-required	Validate generated stack results	    "result": "failure",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-hosted-docs": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-docs": {
+ci-required	Validate generated stack results	    "result": "failure",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-hosted-opentofu": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-opentofu": {
+ci-required	Validate generated stack results	    "result": "failure",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "prepare-cargo": {
+ci-required	Validate generated stack results	    "result": "failure",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-hosted-rust-policy": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-rust-policy": {
+ci-required	Validate generated stack results	    "result": "skipped",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-hosted-rust-unit-collector": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-rust-unit-collector": {
+ci-required	Validate generated stack results	    "result": "skipped",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-hosted-rust-velnor-bench": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-rust-velnor-bench": {
+ci-required	Validate generated stack results	    "result": "skipped",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-hosted-rust-velnor-client": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-rust-velnor-client": {
+ci-required	Validate generated stack results	    "result": "skipped",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-hosted-rust-velnor-control": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-rust-velnor-control": {
+ci-required	Validate generated stack results	    "result": "skipped",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-hosted-rust-velnor-model": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-rust-velnor-model": {
+ci-required	Validate generated stack results	    "result": "skipped",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-hosted-rust-velnor-render": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-rust-velnor-render": {
+ci-required	Validate generated stack results	    "result": "skipped",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-hosted-rust-velnor-runner": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-rust-velnor-runner": {
+ci-required	Validate generated stack results	    "result": "skipped",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-hosted-rust-velnor-tools": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-rust-velnor-tools": {
+ci-required	Validate generated stack results	    "result": "skipped",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-hosted-rust-velnor-workflow": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-rust-velnor-workflow": {
+ci-required	Validate generated stack results	    "result": "skipped",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-hosted-rust-velnor-workflow-contract": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-rust-velnor-workflow-contract": {
+ci-required	Validate generated stack results	    "result": "skipped",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-hosted-rust-velnorctl": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-rust-velnorctl": {
+ci-required	Validate generated stack results	    "result": "skipped",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-hosted-rust-production-topology": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-rust-production-topology": {
+ci-required	Validate generated stack results	    "result": "skipped",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  }
+ci-required	Validate generated stack results	}
+ci-required	Validate generated stack results	2026-09-17T22:20:23.7685403Z   SELECTED_UNITS: [{"providers":["github-hosted","velnor"],"unit_id":"bun-velnor"},{"providers":["github-hosted","velnor"],"unit_id":"docker"},{"providers":["github-hosted","velnor"],"unit_id":"docs"},{"providers":["github-hosted","velnor"],"unit_id":"opentofu"},{"providers":["github-hosted","velnor"],"unit_id":"rust-policy"},{"providers":["github-hosted","velnor"],"unit_id":"rust-production-topology"},{"providers":["github-hosted","velnor"],"unit_id":"rust-unit-collector"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-bench"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-client"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-control"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-model"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-render"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-runner"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-tools"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-workflow"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-workflow-contract"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnorctl"}]
+ci-required	Validate generated stack results	2026-09-17T22:20:23.7692255Z   PLAN_DIGEST: 8563e4d2f58b08d6
+ci-required	Validate generated stack results	2026-09-17T22:20:23.7692690Z   EXCLUDED: []
+ci-required	Validate generated stack results	2026-09-17T22:20:23.7693069Z   PROVIDER_ADMITTED_GITHUB_HOSTED: true
+ci-required	Validate generated stack results	2026-09-17T22:20:23.7694893Z   PROVIDER_ADMITTED_GITHUB_HOSTED_TRUSTED: true
+ci-required	Validate generated stack results	2026-09-17T22:20:23.7695412Z   PROVIDER_ADMITTED_VELNOR_TRUSTED: true
+ci-required	Validate generated stack results	2026-09-17T22:20:23.7698602Z   PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED: true
+ci-required	Validate generated stack results	2026-09-17T22:20:23.7699070Z ##[endgroup]
+ci-required	Validate generated stack results	2026-09-17T22:20:23.7942619Z verdict binds plan digest 8563e4d2f58b08d6
+ci-required	Validate generated stack results	2026-09-17T22:20:23.8211996Z expected CI job velnor-bun-velnor did not pass: failure
+ci-required	Validate generated stack results	2026-09-17T22:20:23.8250277Z ##[error]Process completed with exit code 1.
+Control / Required	UNKNOWN STEP	﻿2026-09-17T22:20:31.0001770Z Current runner version: '2.337.0'
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0028290Z ##[group]Runner Image Provisioner
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0029252Z Hosted Compute Agent
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0029870Z Version: 20260828.587
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0030558Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0031698Z Build Date: 2026-08-28T16:44:25Z
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0032392Z Worker ID: {5c8119ec-48f8-4436-a263-9d5fd12f922f}
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0033125Z Azure Region: westus2
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0033807Z ##[endgroup]
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0036015Z ##[group]Operating System
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0036766Z Ubuntu
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0037295Z 24.04.5
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0037797Z LTS
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0038379Z ##[endgroup]
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0038975Z ##[group]Runner Image
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0039610Z Image: ubuntu-24.04
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0040199Z Version: 20260907.300.1
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0041729Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260907.300/images/ubuntu/Ubuntu2404-Readme.md
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0043350Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260907.300
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0044359Z ##[endgroup]
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0045632Z ##[group]GITHUB_TOKEN Permissions
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0047677Z Actions: read
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0048350Z Contents: read
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0048928Z Metadata: read
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0049550Z ##[endgroup]
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0052004Z Secret source: Actions
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0053032Z Cache mode: write
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0053827Z Prepare workflow directory
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0402361Z Prepare all required actions
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.0514129Z Complete job name: Control / Required
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.1382600Z ##[group]Run exit 1
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.1383403Z ^[[36;1mexit 1^[[0m
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.2002254Z shell: /usr/bin/bash -e {0}
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.2004213Z ##[endgroup]
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.2317847Z ##[error]Process completed with exit code 1.
+Control / Required	UNKNOWN STEP	2026-09-17T22:20:31.2654288Z Cleaning up orphan processes

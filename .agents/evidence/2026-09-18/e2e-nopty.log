@@ -1,0 +1,7 @@
+
+[1m[jackin][0m debug mode — invocation id:
+    0fa8b34a-03b6-44bc-81e8-8d8c52ca60b6
+[jackin] OTLP export: disabled
+telemetry: invocation 0fa8b34a-03b6-44bc-81e8-8d8c52ca60b6 - OpenTelemetry export disabled
+
+  [38;2;210;100;100merror:[39m [1m[38;2;210;100;100mjackin load requires a rich terminal: stdin/stdout/stderr must be TTYs, TERM must not be dumb, CI must be unset, and the terminal must be at least 80x24[39m[0m

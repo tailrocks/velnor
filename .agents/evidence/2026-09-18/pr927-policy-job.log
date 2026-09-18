@@ -1,0 +1,84 @@
+Policy	Acquire candidate generator product	﻿2026-09-17T09:53:01.2916962Z ##[group]Run set -euo pipefail
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2917375Z ^[[36;1mset -euo pipefail^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2917919Z ^[[36;1mpin="$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' .github-gen/velnor-workflow.toml | head -n 1)"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2919038Z ^[[36;1mtest "$pin" != '' || pin="$(sed -n -E 's/^.*VELNOR_WORKFLOW_POLICY_REVISION:[[:space:]]*([0-9a-f]{40}).*/\1/p' .github/workflows/ci-policy.yml | head -n 1)"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2919812Z ^[[36;1mtest "$pin" != '' || { echo "::error::audited tree declares no generator pin" >&2; exit 1; }^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2920350Z ^[[36;1mbase_closure="$(velnor-workflow closure --rev="$BASE_PIN")"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2920810Z ^[[36;1mpin_closure="$(velnor-workflow closure --rev="$pin")"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2921205Z ^[[36;1mif [[ "$pin_closure" == "$base_closure" ]]; then^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2921617Z ^[[36;1m  # Same closure means the running base validator IS the pin's^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2922072Z ^[[36;1m  # renderer, so --check decides tree==pin-render with no extra^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2922569Z ^[[36;1m  # provisioning. A match exits early; a differ falls through to^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2923026Z ^[[36;1m  # the candidate path (a generator change in flight) instead of^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2923474Z ^[[36;1m  # stranding the validator with a cleared manifest and a red pin^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2923930Z ^[[36;1m  # leg. The check output stays visible: on a fall-through it is^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2924320Z ^[[36;1m  # the diagnosis, on a match it is one line.^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2924672Z ^[[36;1m  if velnor-workflow --plain --check; then^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2925156Z ^[[36;1m    echo "pin $pin shares the base closure and renders the tree; the Stage-0 validator renders"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2925708Z ^[[36;1m    echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=" >> "$GITHUB_ENV"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2926058Z ^[[36;1m    exit 0^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2926276Z ^[[36;1m  fi^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2926747Z ^[[36;1m  echo "pin $pin shares the base closure but the tree differs from its render; falling through to the candidate path"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2927257Z ^[[36;1mfi^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2927950Z ^[[36;1m[[ "$HEAD_REPOSITORY" == "$GITHUB_REPOSITORY" ]] || { echo "::error::generator changes from forks cannot be verified here; open the generator change from a branch of $GITHUB_REPOSITORY" >&2; exit 1; }^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2929028Z ^[[36;1mif ! git cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null; then^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2929501Z ^[[36;1m  git fetch --no-tags "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$HEAD_SHA"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2929879Z ^[[36;1mfi^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2930216Z ^[[36;1mhead_candidate="$(velnor-workflow closure --rev="$HEAD_SHA" --candidate)"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2930801Z ^[[36;1mname="velnor-workflow-candidate-${head_candidate:0:16}-${RUNNER_OS}-${RUNNER_ARCH}"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2931250Z ^[[36;1mdeadline=$((SECONDS + 900))^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2931514Z ^[[36;1mrun_id=""^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2931763Z ^[[36;1mwhile (( SECONDS < deadline )); do^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2932569Z ^[[36;1m  runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=5" --jq '[.workflow_runs[] | select(.head_repository.id == .repository.id)]')"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2933326Z ^[[36;1m  waiting=false^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2933578Z ^[[36;1m  seen=false^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2933840Z ^[[36;1m  while read -r candidate_run; do^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2934162Z ^[[36;1m    test "$candidate_run" != '' || continue^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2934456Z ^[[36;1m    seen=true^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2934734Z ^[[36;1m    status="$(jq -r .status <<<"$candidate_run")"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2935276Z ^[[36;1m    id="$(jq -r .id <<<"$candidate_run")"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2935654Z ^[[36;1m    # $name in the filter is a jq variable, not a shell expansion.^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2936030Z ^[[36;1m    # shellcheck disable=SC2016^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2936764Z ^[[36;1m    if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts?per_page=100" | jq -e --arg name "$name" '[.artifacts[] | select(.name == $name and .expired == false)] | length > 0' >/dev/null; then^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2937672Z ^[[36;1m      run_id="$id"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2937923Z ^[[36;1m      break 2^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2938148Z ^[[36;1m    fi^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2938409Z ^[[36;1m    [[ "$status" == "completed" ]] || waiting=true^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2938924Z ^[[36;1m  done <<<"$(jq -c '.[]' <<<"$runs")"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2939303Z ^[[36;1m  # No runs yet means the API has not indexed the sibling run, not^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2939743Z ^[[36;1m  # that it will never come: keep polling until the deadline.^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2940130Z ^[[36;1m  [[ "$seen" == "true" ]] || waiting=true^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2940633Z ^[[36;1m  [[ "$waiting" == "true" ]] || { echo "::error::no same-repository PR run published candidate $name" >&2; exit 1; }^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2941113Z ^[[36;1m  sleep 15^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2941340Z ^[[36;1mdone^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2941767Z ^[[36;1m[[ -n "$run_id" ]] || { echo "::error::no candidate product $name was published within 15 minutes" >&2; exit 1; }^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2942305Z ^[[36;1mcandidate="$RUNNER_TEMP/velnor-workflow-candidate"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2942643Z ^[[36;1mrm -rf "$candidate"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2942906Z ^[[36;1mmkdir -p "$candidate"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2943325Z ^[[36;1mgh run download "$run_id" --name "$name" --dir "$candidate" --repo "$GITHUB_REPOSITORY"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2944621Z ^[[36;1mjq -e --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg repo "$GITHUB_REPOSITORY" --arg run "$run_id" '.profile == "debug" and .platform == $platform and .repository == $repo and .run_id == $run and (.revision | test("^[0-9a-f]{40}$")) and (.closure | test("^[0-9a-f]{64}$")) and (.binary_sha256 | test("^[0-9a-f]{64}$"))' "$candidate/candidate-manifest.json" >/dev/null^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2945778Z ^[[36;1mif command -v sha256sum >/dev/null 2>&1; then^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2946201Z ^[[36;1m  actual="$(sha256sum "$candidate/velnor-workflow" | awk '{print $1}')"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2946581Z ^[[36;1melse^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2946901Z ^[[36;1m  actual="$(shasum -a 256 "$candidate/velnor-workflow" | awk '{print $1}')"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2947283Z ^[[36;1mfi^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2947613Z ^[[36;1mexpected="$(jq -er .binary_sha256 "$candidate/candidate-manifest.json")"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2948139Z ^[[36;1m[[ "$actual" == "$expected" ]] || { echo "::error::candidate digest mismatch" >&2; exit 1; }^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2948760Z ^[[36;1mchmod 0755 "$candidate/velnor-workflow"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2949195Z ^[[36;1mmanifest_closure="$(jq -er .closure "$candidate/candidate-manifest.json")"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2949985Z ^[[36;1m[[ "$manifest_closure" == "$head_candidate" ]] || { echo "::error::candidate manifest closure $manifest_closure is not the head's candidate $head_candidate" >&2; exit 1; }^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2950763Z ^[[36;1mreported="$(GH_TOKEN="" GITHUB_TOKEN="" "$candidate/velnor-workflow" --closure)"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2951496Z ^[[36;1m[[ "$reported" == "$manifest_closure" ]] || { echo "::error::candidate reports closure $reported, manifest claims $manifest_closure" >&2; exit 1; }^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2952212Z ^[[36;1mecho "VELNOR_WORKFLOW_PINNED_BINARY=$candidate/velnor-workflow" >> "$GITHUB_ENV"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2952829Z ^[[36;1mecho "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=$candidate/candidate-manifest.json" >> "$GITHUB_ENV"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2995654Z shell: /usr/bin/bash -e {0}
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2995937Z env:
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2998447Z   GH_TOKEN: ***
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2998941Z   HEAD_SHA: f66356eb418f7643c4526f18a7675c427f846eb9
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2999465Z   HEAD_REPOSITORY: tailrocks/velnor
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.2999786Z   BASE_PIN: a6fa8d4a5096e6df37250b59a8105abfebdb9013
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.3000091Z ##[endgroup]
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.7152971Z error: generated files differ: .github/ci/project.toml, .github/workflows/ci-main.yml, .github/workflows/ci-pr.yml, .github/workflows/ci-unit-docker.yml, .github/ci/.github-actions-generator-state; rerun generate
+Policy	Acquire candidate generator product	2026-09-17T09:53:01.7160062Z pin a6fa8d4a5096e6df37250b59a8105abfebdb9013 shares the base closure but the tree differs from its render; falling through to the candidate path
+Policy	Acquire candidate generator product	2026-09-17T09:58:00.4610648Z ##[error]no same-repository PR run published candidate velnor-workflow-candidate-f2c8d9668d593d19-Linux-X64
+Policy	Acquire candidate generator product	2026-09-17T09:58:00.4619763Z ##[error]Process completed with exit code 1.

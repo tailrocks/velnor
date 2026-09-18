@@ -1,0 +1,5 @@
+# Recursive listing of /private/tmp/jackin-inv (evidence stub; only evidence-type files copied under jackin-inv/)
+# Generated: 2026-09-18T09:57:09Z
+# git HEAD: 92f347ac39fbf0d6f9853168e2896a6c60522924
+# du:  39M	/private/tmp/jackin-inv
+drwxr-xr-x@ 14 donbeave  wheel  448 Sep 17 06:26 /private/tmp/jackin-inv/.git

@@ -1,0 +1,13 @@
+error: no velnor-workflow renderer for the declared pin 7341ef4bdf750c1fbe419e94fb3848c5b8dde718 is provisioned and building one is forbidden here (/Users/donbeave/.cargo/bin/velnor-workflow: /Users/donbeave/.cargo/bin/velnor-workflow: `--closure` failed (exit status: 1): error: unexpected argument '--closure' found
+
+  tip: to pass '--closure' as a value, use '-- --closure'
+
+Usage: velnor-workflow [OPTIONS] [TARGET] [TARGET]
+
+For more information, try '--help'.; /Users/donbeave/.local/share/mise/shims/velnor-workflow: /Users/donbeave/.local/share/mise/shims/velnor-workflow: `--closure` failed (exit status: 1): error: unexpected argument '--closure' found
+
+  tip: to pass '--closure' as a value, use '-- --closure'
+
+Usage: velnor-workflow [OPTIONS] [TARGET] [TARGET]
+
+For more information, try '--help'.); export VELNOR_WORKFLOW_PINNED_BINARY=<binary for 7341ef4bdf750c1fbe419e94fb3848c5b8dde718>, put one on PATH, or rerun with --pin-build to compile the pin from source (local development only; never emitted into CI)

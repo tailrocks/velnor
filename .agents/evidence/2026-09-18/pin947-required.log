@@ -1,0 +1,36 @@
+Control / Required	UNKNOWN STEP	﻿2026-09-18T09:34:30.0713902Z Current runner version: '2.337.0'
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.0741325Z ##[group]Runner Image Provisioner
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.0742169Z Hosted Compute Agent
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.0743136Z Version: 20260828.587
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.0743756Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.0744445Z Build Date: 2026-08-28T16:44:25Z
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.0745098Z Worker ID: {8fd98c53-48d4-452d-b099-60fd4bf9c80b}
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.0745728Z Azure Region: southcentralus
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.0746290Z ##[endgroup]
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.0747787Z ##[group]Operating System
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.0748396Z Ubuntu
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.0748888Z 24.04.5
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.0749336Z LTS
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.0749844Z ##[endgroup]
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.0750328Z ##[group]Runner Image
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.0750875Z Image: ubuntu-24.04
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.0751408Z Version: 20260907.300.1
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.0752728Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260907.300/images/ubuntu/Ubuntu2404-Readme.md
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.0754101Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260907.300
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.0754959Z ##[endgroup]
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.0756061Z ##[group]GITHUB_TOKEN Permissions
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.0758556Z Actions: read
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.0759102Z Contents: read
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.0759594Z Metadata: read
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.0760128Z ##[endgroup]
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.0762593Z Secret source: Actions
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.0763606Z Cache mode: write
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.0764479Z Prepare workflow directory
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.1100119Z Prepare all required actions
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.1209968Z Complete job name: Control / Required
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.1918534Z ##[group]Run exit 1
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.1919173Z ^[[36;1mexit 1^[[0m
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.2690055Z shell: /usr/bin/bash -e {0}
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.2691956Z ##[endgroup]
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.3051464Z ##[error]Process completed with exit code 1.
+Control / Required	UNKNOWN STEP	2026-09-18T09:34:30.3262360Z Cleaning up orphan processes

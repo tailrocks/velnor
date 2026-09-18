@@ -1,0 +1,7 @@
+# Recursive listing of /private/tmp/b3-product (evidence stub; only evidence-type files copied under b3-product/)
+# Generated: 2026-09-18T09:59:40Z
+# du:  26M	/private/tmp/b3-product
+-rwxr-xr-x@ 1 donbeave  wheel  8344160 Sep 18 08:29 /private/tmp/b3-product/velnor-workflow-macOS-ARM64
+-rw-r--r--@ 1 donbeave  wheel  10277904 Sep 18 08:29 /private/tmp/b3-product/velnor-workflow-Linux-X64
+-rw-r--r--@ 1 donbeave  wheel  8328104 Sep 18 08:29 /private/tmp/b3-product/velnor-workflow-Linux-ARM64
+-rw-r--r--@ 1 donbeave  wheel  671 Sep 18 08:29 /private/tmp/b3-product/manifest.json

@@ -1,0 +1,26 @@
+      ┌─────────┐  mr boxington
+     ╱ ═══════ ╱│
+    ╱─────────╱ │
+    │ •    (◉)│≡│
+    │  ◟▄▄▄◞  │ ╱
+    │   ◀◆▶   │╱
+    └─────────┘
+   Compiling jackin-usage v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-usage)
+   Compiling jackin-host v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-host)
+   Compiling jackin-isolation v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-isolation)
+   Compiling jackin-env v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-env)
+error: unnecessary qualification
+   --> crates/jackin-usage/src/usage/kimi.rs:689:23
+    |
+689 |     pub(crate) other: std::collections::HashMap<String, serde_json::Value>,
+    |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: requested on the command line with `-D unused-qualifications`
+help: remove the unnecessary path segments
+    |
+689 -     pub(crate) other: std::collections::HashMap<String, serde_json::Value>,
+689 +     pub(crate) other: HashMap<String, serde_json::Value>,
+    |
+
+error: could not compile `jackin-usage` (lib) due to 1 previous error
+mbx[savings]: the checkouts are gone. their 488.1 GiB logical has gone to join them.

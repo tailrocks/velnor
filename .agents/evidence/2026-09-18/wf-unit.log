@@ -1,0 +1,1165 @@
+﻿2026-09-16T18:50:57.8796622Z Current runner version: '2.337.0'
+2026-09-16T18:50:57.8823356Z ##[group]Runner Image Provisioner
+2026-09-16T18:50:57.8824257Z Hosted Compute Agent
+2026-09-16T18:50:57.8825146Z Version: 20260828.587
+2026-09-16T18:50:57.8825808Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+2026-09-16T18:50:57.8826538Z Build Date: 2026-08-28T16:44:25Z
+2026-09-16T18:50:57.8827371Z Worker ID: {757edd17-e54f-48c6-bfef-66c568201993}
+2026-09-16T18:50:57.8828131Z Azure Region: northcentralus
+2026-09-16T18:50:57.8828874Z ##[endgroup]
+2026-09-16T18:50:57.8830292Z ##[group]Operating System
+2026-09-16T18:50:57.8830909Z Ubuntu
+2026-09-16T18:50:57.8831580Z 24.04.5
+2026-09-16T18:50:57.8832116Z LTS
+2026-09-16T18:50:57.8833027Z ##[endgroup]
+2026-09-16T18:50:57.8833629Z ##[group]Runner Image
+2026-09-16T18:50:57.8834259Z Image: ubuntu-24.04
+2026-09-16T18:50:57.8835437Z Version: 20260907.300.1
+2026-09-16T18:50:57.8836775Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260907.300/images/ubuntu/Ubuntu2404-Readme.md
+2026-09-16T18:50:57.8838396Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260907.300
+2026-09-16T18:50:57.8839358Z ##[endgroup]
+2026-09-16T18:50:57.8840687Z ##[group]GITHUB_TOKEN Permissions
+2026-09-16T18:50:57.8842937Z Actions: read
+2026-09-16T18:50:57.8843701Z Contents: read
+2026-09-16T18:50:57.8844289Z Metadata: read
+2026-09-16T18:50:57.8845260Z ##[endgroup]
+2026-09-16T18:50:57.8847426Z Secret source: Actions
+2026-09-16T18:50:57.8848437Z Cache mode: write
+2026-09-16T18:50:57.8849602Z Prepare workflow directory
+2026-09-16T18:50:57.9191818Z Prepare all required actions
+2026-09-16T18:50:57.9240567Z Getting action download info
+2026-09-16T18:50:58.2107257Z Download action repository 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' (SHA:3d3c42e5aac5ba805825da76410c181273ba90b1)
+2026-09-16T18:50:58.3376417Z Download action repository 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' (SHA:3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c)
+2026-09-16T18:50:58.6519721Z Download action repository 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9' (SHA:55cc8345863c7cc4c66a329aec7e433d2d1c52a9)
+2026-09-16T18:50:58.7793890Z Download action repository 'jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c' (SHA:c2a87611a18de5b3828c5652fe268e992400cb5c)
+2026-09-16T18:50:59.2234315Z Download action repository 'jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777' (SHA:7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777)
+2026-09-16T18:50:59.4878349Z Download action repository 'taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3' (SHA:0758d235715de2f3551eacc980d9ae8fce9342c3)
+2026-09-16T18:50:59.8539502Z Download action repository 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' (SHA:043fb46d1a93c77aae656e7c1c64a875d1fc6a0a)
+2026-09-16T18:51:00.1022888Z Uses: tailrocks/velnor/.github/workflows/ci-unit-rust.yml@refs/pull/904/merge (b2e22d834057de0c43c54ae557ab50a307772371)
+2026-09-16T18:51:00.1027403Z ##[group] Inputs
+2026-09-16T18:51:00.1027798Z   unit: rust-velnor-workflow
+2026-09-16T18:51:00.1029866Z   selected_units: bun-velnor,docker,docs,opentofu,rust-policy,rust-unit-collector,rust-velnor-model,rust-velnor-render,rust-velnor-workflow-contract,rust-production-topology,rust-velnor-client,rust-velnor-control,rust-velnor-runner,rust-velnor-tools,rust-velnor-workflow,rust-velnorctl,rust-velnor-bench
+2026-09-16T18:51:00.1031914Z   scope: affected
+2026-09-16T18:51:00.1033889Z   full_units: bun-velnor,docker,docs,opentofu,rust-policy,rust-production-topology,rust-unit-collector,rust-velnor-bench,rust-velnor-client,rust-velnor-control,rust-velnor-model,rust-velnor-render,rust-velnor-runner,rust-velnor-tools,rust-velnor-workflow,rust-velnor-workflow-contract,rust-velnorctl
+2026-09-16T18:51:00.1036162Z   base_sha: 3353310c7648fca22698b6c0f4a69ab245127786
+2026-09-16T18:51:00.1036573Z   head_sha: b2e22d834057de0c43c54ae557ab50a307772371
+2026-09-16T18:51:00.1036942Z   lane: github
+2026-09-16T18:51:00.1037578Z   mise_tools: aqua:nextest-rs/nextest/cargo-nextest
+2026-09-16T18:51:00.1038529Z   mise_runner: false
+2026-09-16T18:51:00.1038847Z   mbx_compat: 434caa7ff878
+2026-09-16T18:51:00.1039300Z   mbx_dependency_files: .cargo/**
+Cargo.lock
+rust-toolchain
+rust-toolchain.toml
+
+2026-09-16T18:51:00.1048031Z   mbx_freshness_files: Dockerfile
+config/fleet/**
+crates/velnor-control/**/*.rs
+crates/velnor-control/benches/**
+crates/velnor-control/examples/**
+crates/velnor-control/src/**
+crates/velnor-control/tests/**
+crates/velnor-model/**/*.rs
+crates/velnor-model/benches/**
+crates/velnor-model/examples/**
+crates/velnor-model/src/**
+crates/velnor-model/tests/**
+crates/velnor-runner/**/*.rs
+crates/velnor-runner/benches/**
+crates/velnor-runner/build.rs
+crates/velnor-runner/debian/postinst
+crates/velnor-runner/debian/postrm
+crates/velnor-runner/debian/preinst
+crates/velnor-runner/debian/prerm
+crates/velnor-runner/debian/velnor-control.slice
+crates/velnor-runner/debian/velnor-controller@.service
+crates/velnor-runner/debian/velnor-daemon.service
+crates/velnor-runner/debian/velnor-daemon@.service
+crates/velnor-runner/debian/velnor-doctor.service
+crates/velnor-runner/debian/velnor-doctor@.service
+crates/velnor-runner/debian/velnor-guardian.service
+crates/velnor-runner/debian/velnor-job@.service
+crates/velnor-runner/debian/velnor-jobs.slice
+crates/velnor-runner/debian/velnor-runner.tmpfiles
+crates/velnor-runner/debian/velnor-slot@.service
+crates/velnor-runner/debian/velnor.env
+crates/velnor-runner/examples/**
+crates/velnor-runner/src/**
+crates/velnor-runner/src/cache.rs
+crates/velnor-runner/src/execution/mod.rs
+crates/velnor-runner/src/executor.rs
+crates/velnor-runner/src/leftover_disk.rs
+crates/velnor-runner/src/node/complete.rs
+crates/velnor-runner/src/node/guardian.rs
+crates/velnor-runner/src/node/job.rs
+crates/velnor-runner/src/node/slot.rs
+crates/velnor-runner/src/release.rs
+crates/velnor-runner/src/runner.rs
+crates/velnor-runner/tests/**
+crates/velnor-runner/tests/fixtures/backend-parity.yml
+crates/velnor-runner/tests/fixtures/telemetry.golden.ndjson
+crates/velnor-tools/debian/velnor-fleet-policy-audit.service
+crates/velnor-tools/debian/velnor-fleet-policy-audit.timer
+crates/velnor-workflow/**/*.rs
+crates/velnor-workflow/README.md
+crates/velnor-workflow/benches/**
+crates/velnor-workflow/build.rs
+crates/velnor-workflow/examples/**
+crates/velnor-workflow/src/**
+crates/velnor-workflow/src/runtime.rs
+crates/velnor-workflow/templates/**
+crates/velnor-workflow/templates/release-package-signer.yml
+crates/velnor-workflow/tests/**
+docker/build-mise.*
+docker/job-mise.lock
+docker/job-ubuntu.Dockerfile
+microvm/**
+microvm/kernel.config
+microvm/manifest.json
+microvm/pins.json
+mise.lock
+schemas/**
+schemas/velnor.telemetry.v1.json
+
+2026-09-16T18:51:00.1056674Z   cargo_bin_tools: 
+2026-09-16T18:51:00.1056951Z   tool_version: 
+2026-09-16T18:51:00.1057244Z   node_cache_dependency_path: 
+2026-09-16T18:51:00.1057602Z   cache_paths: ~/.cargo/registry
+~/.cargo/git
+
+2026-09-16T18:51:00.1058101Z   cache_key_files: .cargo/**
+Cargo.lock
+rust-toolchain.toml
+rust-toolchain
+
+2026-09-16T18:51:00.1058543Z   seed_compat: 
+2026-09-16T18:51:00.1058826Z   seed_dependency_files: 
+2026-09-16T18:51:00.1059135Z   seed_freshness_files: 
+2026-09-16T18:51:00.1059458Z   cargo_root: crates/velnor-workflow
+2026-09-16T18:51:00.1059799Z   cargo_fetch_skip_when_warm: false
+2026-09-16T18:51:00.1060140Z   cargo_net_offline: true
+2026-09-16T18:51:00.1060446Z   host_warm_layers: 
+2026-09-16T18:51:00.1060800Z   policy_runtime: false
+2026-09-16T18:51:00.1061109Z   candidate_publish: true
+2026-09-16T18:51:00.1061426Z ##[endgroup]
+2026-09-16T18:51:00.1061757Z Complete job name: Rust · velnor-workflow / GitHub
+2026-09-16T18:51:00.1780012Z ##[group]Run timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+2026-09-16T18:51:00.1781076Z [36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"[0m
+2026-09-16T18:51:00.1781680Z [36;1mumask 077[0m
+2026-09-16T18:51:00.1782053Z [36;1mmkdir -p "$timing_dir"[0m
+2026-09-16T18:51:00.1782610Z [36;1mmarker="$timing_dir/JOB_STARTED"[0m
+2026-09-16T18:51:00.1782974Z [36;1mif [[ ! -e "$marker" ]]; then[0m
+2026-09-16T18:51:00.1783411Z [36;1m  if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then[0m
+2026-09-16T18:51:00.1783882Z [36;1m    chmod 0444 "$marker" 2>/dev/null || true[0m
+2026-09-16T18:51:00.1784222Z [36;1m  fi[0m
+2026-09-16T18:51:00.1784685Z [36;1mfi[0m
+2026-09-16T18:51:00.1828361Z shell: /usr/bin/bash -e {0}
+2026-09-16T18:51:00.1828936Z ##[endgroup]
+2026-09-16T18:51:00.2226806Z ##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+2026-09-16T18:51:00.2227327Z with:
+2026-09-16T18:51:00.2227618Z   persist-credentials: false
+2026-09-16T18:51:00.2227977Z   ref: b2e22d834057de0c43c54ae557ab50a307772371
+2026-09-16T18:51:00.2228366Z   repository: tailrocks/velnor
+2026-09-16T18:51:00.2231529Z   token: ***
+2026-09-16T18:51:00.2231801Z   ssh-strict: true
+2026-09-16T18:51:00.2232076Z   ssh-user: git
+2026-09-16T18:51:00.2232337Z   clean: true
+2026-09-16T18:51:00.2232653Z   sparse-checkout-cone-mode: true
+2026-09-16T18:51:00.2232976Z   fetch-depth: 1
+2026-09-16T18:51:00.2233241Z   fetch-tags: false
+2026-09-16T18:51:00.2233516Z   show-progress: true
+2026-09-16T18:51:00.2233788Z   lfs: false
+2026-09-16T18:51:00.2234053Z   submodules: false
+2026-09-16T18:51:00.2234331Z   set-safe-directory: true
+2026-09-16T18:51:00.2234947Z   allow-unsafe-pr-checkout: false
+2026-09-16T18:51:00.2235265Z ##[endgroup]
+2026-09-16T18:51:00.3225252Z Syncing repository: tailrocks/velnor
+2026-09-16T18:51:00.3227484Z ##[group]Getting Git version info
+2026-09-16T18:51:00.3228042Z Working directory is '/home/runner/work/velnor/velnor'
+2026-09-16T18:51:00.3228703Z [command]/usr/bin/git version
+2026-09-16T18:51:00.3256676Z git version 2.55.0
+2026-09-16T18:51:00.3279000Z ##[endgroup]
+2026-09-16T18:51:00.3291352Z Temporarily overriding HOME='/home/runner/work/_temp/f010e7f2-f1f3-46b4-8890-eb3c79bfb22b' before making global git config changes
+2026-09-16T18:51:00.3292859Z Adding repository directory to the temporary git global config as a safe directory
+2026-09-16T18:51:00.3297981Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor
+2026-09-16T18:51:00.3359783Z Deleting the contents of '/home/runner/work/velnor/velnor'
+2026-09-16T18:51:00.3363848Z ##[group]Determining repository object format
+2026-09-16T18:51:00.3372579Z ##[endgroup]
+2026-09-16T18:51:00.3373479Z ##[group]Initializing the repository
+2026-09-16T18:51:00.3382664Z [command]/usr/bin/git init /home/runner/work/velnor/velnor
+2026-09-16T18:51:00.3454548Z hint: Using 'master' as the name for the initial branch. This default branch name
+2026-09-16T18:51:00.3455915Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+2026-09-16T18:51:00.3457268Z hint: to use in all of your new repositories, which will suppress this warning,
+2026-09-16T18:51:00.3458031Z hint: call:
+2026-09-16T18:51:00.3458403Z hint:
+2026-09-16T18:51:00.3459030Z hint: 	git config --global init.defaultBranch <name>
+2026-09-16T18:51:00.3459656Z hint:
+2026-09-16T18:51:00.3460255Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2026-09-16T18:51:00.3461179Z hint: 'development'. The just-created branch can be renamed via this command:
+2026-09-16T18:51:00.3461895Z hint:
+2026-09-16T18:51:00.3462320Z hint: 	git branch -m <name>
+2026-09-16T18:51:00.3462774Z hint:
+2026-09-16T18:51:00.3463375Z hint: Disable this message with "git config set advice.defaultBranchName false"
+2026-09-16T18:51:00.3464711Z Initialized empty Git repository in /home/runner/work/velnor/velnor/.git/
+2026-09-16T18:51:00.3473869Z [command]/usr/bin/git remote add origin https://github.com/tailrocks/velnor
+2026-09-16T18:51:00.3526872Z ##[endgroup]
+2026-09-16T18:51:00.3527647Z ##[group]Disabling automatic garbage collection
+2026-09-16T18:51:00.3528319Z [command]/usr/bin/git config --local gc.auto 0
+2026-09-16T18:51:00.3592988Z ##[endgroup]
+2026-09-16T18:51:00.3593818Z ##[group]Setting up auth
+2026-09-16T18:51:00.3594927Z Removing SSH command configuration
+2026-09-16T18:51:00.3603462Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-09-16T18:51:00.3637817Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-09-16T18:51:00.3981708Z Removing HTTP extra header
+2026-09-16T18:51:00.3995297Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-09-16T18:51:00.4039002Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-09-16T18:51:00.4293229Z Removing includeIf entries pointing to credentials config files
+2026-09-16T18:51:00.4299473Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-09-16T18:51:00.4339420Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-09-16T18:51:00.4583071Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-94e0cf47-39c7-43cc-8890-c0dd97f56545.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-09-16T18:51:00.4626751Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/.git.path /home/runner/work/_temp/git-credentials-94e0cf47-39c7-43cc-8890-c0dd97f56545.config
+2026-09-16T18:51:00.4665933Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-94e0cf47-39c7-43cc-8890-c0dd97f56545.config
+2026-09-16T18:51:00.4711401Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-94e0cf47-39c7-43cc-8890-c0dd97f56545.config
+2026-09-16T18:51:00.4753135Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-94e0cf47-39c7-43cc-8890-c0dd97f56545.config
+2026-09-16T18:51:00.4788479Z ##[endgroup]
+2026-09-16T18:51:00.4789214Z ##[group]Fetching the repository
+2026-09-16T18:51:00.4796356Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin b2e22d834057de0c43c54ae557ab50a307772371
+2026-09-16T18:51:01.6175738Z From https://github.com/tailrocks/velnor
+2026-09-16T18:51:01.6176989Z  * branch            b2e22d834057de0c43c54ae557ab50a307772371 -> FETCH_HEAD
+2026-09-16T18:51:01.6185749Z [command]/usr/bin/git rev-parse --verify --quiet b2e22d834057de0c43c54ae557ab50a307772371^{object}
+2026-09-16T18:51:01.6220208Z b2e22d834057de0c43c54ae557ab50a307772371
+2026-09-16T18:51:01.6226278Z ##[endgroup]
+2026-09-16T18:51:01.6227561Z ##[group]Determining the checkout info
+2026-09-16T18:51:01.6228886Z ##[endgroup]
+2026-09-16T18:51:01.6231362Z [command]/usr/bin/git sparse-checkout disable
+2026-09-16T18:51:01.6288996Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+2026-09-16T18:51:01.6329247Z ##[group]Checking out the ref
+2026-09-16T18:51:01.6334658Z [command]/usr/bin/git checkout --progress --force b2e22d834057de0c43c54ae557ab50a307772371
+2026-09-16T18:51:01.7068729Z Note: switching to 'b2e22d834057de0c43c54ae557ab50a307772371'.
+2026-09-16T18:51:01.7069304Z 
+2026-09-16T18:51:01.7069684Z You are in 'detached HEAD' state. You can look around, make experimental
+2026-09-16T18:51:01.7070356Z changes and commit them, and you can discard any commits you make in this
+2026-09-16T18:51:01.7070923Z state without impacting any branches by switching back to a branch.
+2026-09-16T18:51:01.7071232Z 
+2026-09-16T18:51:01.7071449Z If you want to create a new branch to retain commits you create, you may
+2026-09-16T18:51:01.7071939Z do so (now or later) by using -c with the switch command. Example:
+2026-09-16T18:51:01.7072230Z 
+2026-09-16T18:51:01.7072370Z   git switch -c <new-branch-name>
+2026-09-16T18:51:01.7072924Z 
+2026-09-16T18:51:01.7073114Z Or undo this operation with:
+2026-09-16T18:51:01.7073301Z 
+2026-09-16T18:51:01.7073428Z   git switch -
+2026-09-16T18:51:01.7073595Z 
+2026-09-16T18:51:01.7073856Z Turn off this advice by setting config variable advice.detachedHead to false
+2026-09-16T18:51:01.7074190Z 
+2026-09-16T18:51:01.7074812Z HEAD is now at b2e22d8 Merge 62a74bf58993c8c073d47274897f0db88cbd6159 into 3353310c7648fca22698b6c0f4a69ab245127786
+2026-09-16T18:51:01.7079476Z ##[endgroup]
+2026-09-16T18:51:01.7131355Z [command]/usr/bin/git log -1 --format=%H
+2026-09-16T18:51:01.7164651Z b2e22d834057de0c43c54ae557ab50a307772371
+2026-09-16T18:51:01.7175274Z ##[group]Removing auth
+2026-09-16T18:51:01.7175652Z Removing SSH command configuration
+2026-09-16T18:51:01.7179528Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-09-16T18:51:01.7219027Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-09-16T18:51:01.7470488Z Removing HTTP extra header
+2026-09-16T18:51:01.7482544Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-09-16T18:51:01.7524750Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-09-16T18:51:01.7782750Z Removing includeIf entries pointing to credentials config files
+2026-09-16T18:51:01.7787814Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-09-16T18:51:01.7822525Z includeif.gitdir:/home/runner/work/velnor/velnor/.git.path
+2026-09-16T18:51:01.7823801Z includeif.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path
+2026-09-16T18:51:01.7824855Z includeif.gitdir:/github/workspace/.git.path
+2026-09-16T18:51:01.7825542Z includeif.gitdir:/github/workspace/.git/worktrees/*.path
+2026-09-16T18:51:01.7832754Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/.git.path
+2026-09-16T18:51:01.7863219Z /home/runner/work/_temp/git-credentials-94e0cf47-39c7-43cc-8890-c0dd97f56545.config
+2026-09-16T18:51:01.7881892Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/.git.path \/home\/runner\/work\/_temp\/git\-credentials\-94e0cf47\-39c7\-43cc\-8890\-c0dd97f56545\.config
+2026-09-16T18:51:01.7921636Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path
+2026-09-16T18:51:01.7954218Z /home/runner/work/_temp/git-credentials-94e0cf47-39c7-43cc-8890-c0dd97f56545.config
+2026-09-16T18:51:01.7964160Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path \/home\/runner\/work\/_temp\/git\-credentials\-94e0cf47\-39c7\-43cc\-8890\-c0dd97f56545\.config
+2026-09-16T18:51:01.8004235Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git.path
+2026-09-16T18:51:01.8036765Z /github/runner_temp/git-credentials-94e0cf47-39c7-43cc-8890-c0dd97f56545.config
+2026-09-16T18:51:01.8055698Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git.path \/github\/runner_temp\/git\-credentials\-94e0cf47\-39c7\-43cc\-8890\-c0dd97f56545\.config
+2026-09-16T18:51:01.8092151Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git/worktrees/*.path
+2026-09-16T18:51:01.8124350Z /github/runner_temp/git-credentials-94e0cf47-39c7-43cc-8890-c0dd97f56545.config
+2026-09-16T18:51:01.8142099Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git/worktrees/*.path \/github\/runner_temp\/git\-credentials\-94e0cf47\-39c7\-43cc\-8890\-c0dd97f56545\.config
+2026-09-16T18:51:01.8174192Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-09-16T18:51:01.8431804Z Removing credentials config '/home/runner/work/_temp/git-credentials-94e0cf47-39c7-43cc-8890-c0dd97f56545.config'
+2026-09-16T18:51:01.8443971Z ##[endgroup]
+2026-09-16T18:51:01.8656259Z ##[group]Run actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+2026-09-16T18:51:01.8656761Z with:
+2026-09-16T18:51:01.8657224Z   name: velnor-workflow-runtime-48a66ad7d56636f8bfa6069fbaf810d0089fef39-Linux-X64
+2026-09-16T18:51:01.8657764Z   path: .velnor-workflow-runtime
+2026-09-16T18:51:01.8658118Z   merge-multiple: false
+2026-09-16T18:51:01.8658432Z   repository: tailrocks/velnor
+2026-09-16T18:51:01.8658743Z   run-id: 35136207272
+2026-09-16T18:51:01.8659037Z   skip-decompress: false
+2026-09-16T18:51:01.8659336Z   digest-mismatch: error
+2026-09-16T18:51:01.8659631Z ##[endgroup]
+2026-09-16T18:51:02.0032452Z Downloading single artifact
+2026-09-16T18:51:02.1370654Z Preparing to download the following artifacts:
+2026-09-16T18:51:02.1372457Z - velnor-workflow-runtime-48a66ad7d56636f8bfa6069fbaf810d0089fef39-Linux-X64 (ID: 10463751165, Size: 4684297, Expected Digest: sha256:89dee9d0836564b290b3288a65000e2a6f197849d54593495a400ef5db1c6b10)
+2026-09-16T18:51:02.3754914Z Redirecting to blob download url: https://productionresultssa13.blob.core.windows.net/actions-results/ffcba5c3-07b9-49f6-8d01-87786803a324/workflow-job-run-465bcd29-08d9-562e-b4bb-b1ff509edaea/artifacts/1caf4fa48f6ff7ca9eb832f9dfebc2dd8ec9a8cf7940a6488cda32a44302a525.zip
+2026-09-16T18:51:02.3756364Z Starting download of artifact to: /home/runner/work/velnor/velnor/.velnor-workflow-runtime
+2026-09-16T18:51:02.5147921Z (node:2357) [DEP0005] DeprecationWarning: Buffer() is deprecated due to security and usability issues. Please use the Buffer.alloc(), Buffer.allocUnsafe(), or Buffer.from() methods instead.
+2026-09-16T18:51:02.5149467Z (Use `node --trace-deprecation ...` to show where the warning was created)
+2026-09-16T18:51:02.7827330Z SHA256 digest of downloaded artifact is 89dee9d0836564b290b3288a65000e2a6f197849d54593495a400ef5db1c6b10
+2026-09-16T18:51:02.7828321Z Artifact download completed successfully.
+2026-09-16T18:51:02.7828782Z Total of 1 artifact(s) downloaded
+2026-09-16T18:51:02.7832136Z Download artifact has finished successfully
+2026-09-16T18:51:02.7952876Z ##[group]Run set -euo pipefail
+2026-09-16T18:51:02.7953233Z [36;1mset -euo pipefail[0m
+2026-09-16T18:51:02.7953561Z [36;1mmanifest=.velnor-workflow-runtime/manifest.json[0m
+2026-09-16T18:51:02.7955594Z [36;1mjq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$")) and (.policy_binary_sha256 | test("^[0-9a-f]{64}$")) and (.closure | test("^[0-9a-f]{64}$")) and (.policy_closure | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null[0m
+2026-09-16T18:51:02.7957350Z [36;1mexpected="$(jq -er '.binary_sha256' "$manifest")"[0m
+2026-09-16T18:51:02.7957853Z [36;1mactual="$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{print $1}')"[0m
+2026-09-16T18:51:02.7958484Z [36;1m[[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }[0m
+2026-09-16T18:51:02.7958993Z [36;1mexpected="$(jq -er '.policy_binary_sha256' "$manifest")"[0m
+2026-09-16T18:51:02.7959535Z [36;1mactual="$(sha256sum .velnor-workflow-runtime/velnor-workflow-policy | awk '{print $1}')"[0m
+2026-09-16T18:51:02.7960199Z [36;1m[[ "$actual" == "$expected" ]] || { echo "::error::policy runtime digest mismatch" >&2; exit 1; }[0m
+2026-09-16T18:51:02.8001429Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-09-16T18:51:02.8001790Z env:
+2026-09-16T18:51:02.8002077Z   EXPECTED_REVISION: 48a66ad7d56636f8bfa6069fbaf810d0089fef39
+2026-09-16T18:51:02.8002439Z ##[endgroup]
+2026-09-16T18:51:02.8338773Z ##[group]Run set -euo pipefail
+2026-09-16T18:51:02.8339324Z [36;1mset -euo pipefail[0m
+2026-09-16T18:51:02.8339669Z [36;1mhome="$RUNNER_TEMP/velnor-workflow-runtime-artifact"[0m
+2026-09-16T18:51:02.8340214Z [36;1minstall -Dm0755 .velnor-workflow-runtime/velnor-workflow "$home/bin/velnor-workflow"[0m
+2026-09-16T18:51:02.8340916Z [36;1minstall -Dm0755 .velnor-workflow-runtime/velnor-workflow-policy "$home/bin/velnor-workflow-policy"[0m
+2026-09-16T18:51:02.8341630Z [36;1mexpected_closure="$(jq -er '.policy_closure' .velnor-workflow-runtime/manifest.json)"[0m
+2026-09-16T18:51:02.8342169Z [36;1mreported="$("$home/bin/velnor-workflow-policy" --closure)"[0m
+2026-09-16T18:51:02.8342856Z [36;1m[[ "$reported" == "$expected_closure" ]] || { echo "::error::policy runtime reports closure $reported, expected $expected_closure" >&2; exit 1; }[0m
+2026-09-16T18:51:02.8343475Z [36;1mecho "$home/bin" >> "$GITHUB_PATH"[0m
+2026-09-16T18:51:02.8343992Z [36;1mecho "VELNOR_WORKFLOW_PINNED_BINARY=$home/bin/velnor-workflow-policy" >> "$GITHUB_ENV"[0m
+2026-09-16T18:51:02.8382056Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-09-16T18:51:02.8382418Z env:
+2026-09-16T18:51:02.8382717Z   EXPECTED_REVISION: 48a66ad7d56636f8bfa6069fbaf810d0089fef39
+2026-09-16T18:51:02.8383061Z ##[endgroup]
+2026-09-16T18:51:02.8615847Z ##[group]Run timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+2026-09-16T18:51:02.8617290Z [36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"[0m
+2026-09-16T18:51:02.8618177Z [36;1mumask 077[0m
+2026-09-16T18:51:02.8618562Z [36;1mmkdir -p "$timing_dir"[0m
+2026-09-16T18:51:02.8619045Z [36;1mmarker="$timing_dir/RUNNER_SETUP_ENDED"[0m
+2026-09-16T18:51:02.8619547Z [36;1mif [[ ! -e "$marker" ]]; then[0m
+2026-09-16T18:51:02.8620147Z [36;1m  if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then[0m
+2026-09-16T18:51:02.8620819Z [36;1m    chmod 0444 "$marker" 2>/dev/null || true[0m
+2026-09-16T18:51:02.8621345Z [36;1m  fi[0m
+2026-09-16T18:51:02.8621666Z [36;1mfi[0m
+2026-09-16T18:51:02.8661759Z shell: /usr/bin/bash -e {0}
+2026-09-16T18:51:02.8662045Z env:
+2026-09-16T18:51:02.8662585Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+2026-09-16T18:51:02.8663132Z ##[endgroup]
+2026-09-16T18:51:02.8800361Z ##[group]Run set -euo pipefail
+2026-09-16T18:51:02.8800680Z [36;1mset -euo pipefail[0m
+2026-09-16T18:51:02.8800958Z [36;1mmkdir -p .velnor-ci-selection[0m
+2026-09-16T18:51:02.8801233Z [36;1m{[0m
+2026-09-16T18:51:02.8801446Z [36;1m  printf 'version=1\n'[0m
+2026-09-16T18:51:02.8801748Z [36;1m  printf 'base_sha=%s\n' "$SELECTION_BASE_SHA"[0m
+2026-09-16T18:51:02.8802100Z [36;1m  printf 'head_sha=%s\n' "$SELECTION_HEAD_SHA"[0m
+2026-09-16T18:51:02.8802425Z [36;1m  printf 'scope=%s\n' "$SELECTION_SCOPE"[0m
+2026-09-16T18:51:02.8802746Z [36;1m  printf 'units=%s\n' "$SELECTION_UNITS"[0m
+2026-09-16T18:51:02.8803095Z [36;1m  printf 'full_units=%s\n' "$SELECTION_FULL_UNITS"[0m
+2026-09-16T18:51:02.8803473Z [36;1m} > .velnor-ci-selection/velnor-ci-selection[0m
+2026-09-16T18:51:02.8840641Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-09-16T18:51:02.8840997Z env:
+2026-09-16T18:51:02.8841540Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+2026-09-16T18:51:02.8842159Z   SELECTION_BASE_SHA: 3353310c7648fca22698b6c0f4a69ab245127786
+2026-09-16T18:51:02.8842574Z   SELECTION_HEAD_SHA: b2e22d834057de0c43c54ae557ab50a307772371
+2026-09-16T18:51:02.8842925Z   SELECTION_SCOPE: affected
+2026-09-16T18:51:02.8845101Z   SELECTION_UNITS: bun-velnor,docker,docs,opentofu,rust-policy,rust-unit-collector,rust-velnor-model,rust-velnor-render,rust-velnor-workflow-contract,rust-production-topology,rust-velnor-client,rust-velnor-control,rust-velnor-runner,rust-velnor-tools,rust-velnor-workflow,rust-velnorctl,rust-velnor-bench
+2026-09-16T18:51:02.8849012Z   SELECTION_FULL_UNITS: bun-velnor,docker,docs,opentofu,rust-policy,rust-production-topology,rust-unit-collector,rust-velnor-bench,rust-velnor-client,rust-velnor-control,rust-velnor-model,rust-velnor-render,rust-velnor-runner,rust-velnor-tools,rust-velnor-workflow,rust-velnor-workflow-contract,rust-velnorctl
+2026-09-16T18:51:02.8851001Z ##[endgroup]
+2026-09-16T18:51:02.8957065Z ##[group]Run timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+2026-09-16T18:51:02.8957959Z [36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"[0m
+2026-09-16T18:51:02.8958501Z [36;1mumask 077[0m
+2026-09-16T18:51:02.8958758Z [36;1mmkdir -p "$timing_dir"[0m
+2026-09-16T18:51:02.8959058Z [36;1mmarker="$timing_dir/SELECTION_ENDED"[0m
+2026-09-16T18:51:02.8959371Z [36;1mif [[ ! -e "$marker" ]]; then[0m
+2026-09-16T18:51:02.8959772Z [36;1m  if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then[0m
+2026-09-16T18:51:02.8960197Z [36;1m    chmod 0444 "$marker" 2>/dev/null || true[0m
+2026-09-16T18:51:02.8960493Z [36;1m  fi[0m
+2026-09-16T18:51:02.8960699Z [36;1mfi[0m
+2026-09-16T18:51:02.8997410Z shell: /usr/bin/bash -e {0}
+2026-09-16T18:51:02.8997682Z env:
+2026-09-16T18:51:02.8998221Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+2026-09-16T18:51:02.8998764Z ##[endgroup]
+2026-09-16T18:51:02.9746938Z ##[group]Run actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+2026-09-16T18:51:02.9747370Z with:
+2026-09-16T18:51:02.9747587Z   path: ~/.rustup
+
+2026-09-16T18:51:02.9748060Z   key: velnor-rustup-Linux-X64-01ca15e1b24a13a2533dc81d701f5db1ad9bd6bd978dbd566dac8f8bf1d492dd
+2026-09-16T18:51:02.9748595Z   enableCrossOsArchive: false
+2026-09-16T18:51:02.9748872Z   fail-on-cache-miss: false
+2026-09-16T18:51:02.9749140Z   lookup-only: false
+2026-09-16T18:51:02.9749362Z env:
+2026-09-16T18:51:02.9749851Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+2026-09-16T18:51:02.9750414Z ##[endgroup]
+2026-09-16T18:51:03.2081552Z Cache hit for: velnor-rustup-Linux-X64-01ca15e1b24a13a2533dc81d701f5db1ad9bd6bd978dbd566dac8f8bf1d492dd
+2026-09-16T18:51:04.3410212Z Received 134217728 of 595466735 (22.5%), 127.9 MBs/sec
+2026-09-16T18:51:05.3418878Z Received 373293056 of 595466735 (62.7%), 177.8 MBs/sec
+2026-09-16T18:51:06.1947406Z Received 595466735 of 595466735 (100.0%), 198.9 MBs/sec
+2026-09-16T18:51:06.1949602Z Cache Size: ~568 MB (595466735 B)
+2026-09-16T18:51:06.2015104Z [command]/usr/bin/tar -xf /home/runner/work/_temp/a31dcaa5-55f7-41ed-ae39-27527fae4bd1/cache.tzst -P -C /home/runner/work/velnor/velnor --use-compress-program unzstd
+2026-09-16T18:51:09.4202589Z Cache restored successfully
+2026-09-16T18:51:09.4554887Z Cache restored from key: velnor-rustup-Linux-X64-01ca15e1b24a13a2533dc81d701f5db1ad9bd6bd978dbd566dac8f8bf1d492dd
+2026-09-16T18:51:09.4742166Z ##[group]Run set -euo pipefail
+2026-09-16T18:51:09.4742511Z [36;1mset -euo pipefail[0m
+2026-09-16T18:51:09.4742791Z [36;1mrustup toolchain install[0m
+2026-09-16T18:51:09.4743461Z [36;1mrustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'[0m
+2026-09-16T18:51:09.4783408Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-09-16T18:51:09.4783768Z env:
+2026-09-16T18:51:09.4784283Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+2026-09-16T18:51:09.4784972Z ##[endgroup]
+2026-09-16T18:51:09.6500206Z info: using existing install for 1.98.1-x86_64-unknown-linux-gnu
+2026-09-16T18:51:09.6688660Z info: the active toolchain `1.98.1-x86_64-unknown-linux-gnu` has been installed
+2026-09-16T18:51:09.6689619Z info: it's active because: overridden by '/home/runner/work/velnor/velnor/rust-toolchain.toml'
+2026-09-16T18:51:09.7280914Z info: component rust-std for target aarch64-apple-darwin is up to date
+2026-09-16T18:51:09.7281926Z info: component rust-std for target aarch64-unknown-linux-gnu is up to date
+2026-09-16T18:51:09.7282437Z info: component rust-std for target x86_64-apple-darwin is up to date
+2026-09-16T18:51:09.7283022Z info: component rust-std is up to date
+2026-09-16T18:51:09.7283543Z info: component rust-std for target x86_64-unknown-linux-musl is up to date
+2026-09-16T18:51:09.7441821Z ##[group]Run jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c
+2026-09-16T18:51:09.7442217Z with:
+2026-09-16T18:51:09.7442483Z   install_args: aqua:nextest-rs/nextest/cargo-nextest
+2026-09-16T18:51:09.7442815Z   cache: true
+2026-09-16T18:51:09.7443030Z   cache_save: false
+2026-09-16T18:51:09.7443255Z   install: true
+2026-09-16T18:51:09.7443480Z   bootstrap: false
+2026-09-16T18:51:09.7443712Z   cache_key_prefix: mise-v1
+2026-09-16T18:51:09.7443972Z   experimental: false
+2026-09-16T18:51:09.7444204Z   log_level: info
+2026-09-16T18:51:09.7444630Z   reshim: false
+2026-09-16T18:51:09.7444890Z   add_shims_to_path: true
+2026-09-16T18:51:09.7447976Z   github_token: ***
+2026-09-16T18:51:09.7448220Z   fetch_from_github: true
+2026-09-16T18:51:09.7448462Z   env: true
+2026-09-16T18:51:09.7448670Z   export_path: true
+2026-09-16T18:51:09.7448900Z   wings_enabled: false
+2026-09-16T18:51:09.7449126Z env:
+2026-09-16T18:51:09.7449638Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+2026-09-16T18:51:09.7450193Z ##[endgroup]
+2026-09-16T18:51:09.8716780Z ##[group]Restoring mise cache
+2026-09-16T18:51:09.8759089Z [command]/usr/bin/ldd --version
+2026-09-16T18:51:09.8817691Z ldd (Ubuntu GLIBC 2.39-0ubuntu8.8) 2.39
+2026-09-16T18:51:09.8819739Z Copyright (C) 2024 Free Software Foundation, Inc.
+2026-09-16T18:51:09.8820488Z This is free software; see the source for copying conditions.  There is NO
+2026-09-16T18:51:09.8821380Z warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+2026-09-16T18:51:09.8822138Z Written by Roland McGrath and Ulrich Drepper.
+2026-09-16T18:51:10.2000484Z Cache hit for: mise-v1-linux-x64-ubuntu24-a5063e727332d1c9af8b487f9cdc11a46fc36896710ec0340e7016cefd70dc92-a2d3eb46b1ede300854cfd71a4066475568c679bb557e8150c397da82da349c8
+2026-09-16T18:51:10.8708044Z Received 51436521 of 51436521 (100.0%), 85.9 MBs/sec
+2026-09-16T18:51:10.8708732Z Cache Size: ~49 MB (51436521 B)
+2026-09-16T18:51:10.8822442Z [command]/usr/bin/tar -xf /home/runner/work/_temp/e51d9515-ddb9-4666-b7a9-d657f0fc73d5/cache.tzst -P -C /home/runner/work/velnor/velnor --use-compress-program unzstd
+2026-09-16T18:51:11.1463050Z Cache restored successfully
+2026-09-16T18:51:11.1497427Z mise cache restored from key: mise-v1-linux-x64-ubuntu24-a5063e727332d1c9af8b487f9cdc11a46fc36896710ec0340e7016cefd70dc92-a2d3eb46b1ede300854cfd71a4066475568c679bb557e8150c397da82da349c8
+2026-09-16T18:51:11.1505834Z ##[group]Setting env vars
+2026-09-16T18:51:11.1506302Z Setting MISE_LOG_LEVEL=info
+2026-09-16T18:51:11.1510942Z Setting MISE_GITHUB_TOKEN=***
+2026-09-16T18:51:11.1511522Z Setting MISE_TRUSTED_CONFIG_PATHS=/home/runner/work/velnor/velnor
+2026-09-16T18:51:11.1511919Z Setting MISE_YES=1
+2026-09-16T18:51:11.1512214Z Adding /home/runner/.local/share/mise/shims to PATH
+2026-09-16T18:51:11.1512788Z ##[group]Running mise --version
+2026-09-16T18:51:11.1529194Z [command]/home/runner/.local/share/mise/bin/mise --version
+2026-09-16T18:51:11.1623856Z 2026.9.9 linux-x64 (2026-09-15)
+2026-09-16T18:51:11.1645681Z ##[endgroup]
+2026-09-16T18:51:11.1777027Z Detected a mise lock file, running `mise install --locked`
+2026-09-16T18:51:11.1777825Z ##[group]Running mise install --locked aqua:nextest-rs/nextest/cargo-nextest
+2026-09-16T18:51:11.1791635Z [command]/home/runner/.local/share/mise/bin/mise install --locked aqua:nextest-rs/nextest/cargo-nextest
+2026-09-16T18:51:11.1933755Z [2mmise[0m [2mby @jdx[0m – installing 1 tool
+2026-09-16T18:51:12.5342329Z [2mmise[0m [38;5;11m⇢[0m [34maqua:nextest-rs/nextest/cargo-nextest[0m@0.9.143  1.3s · already installed
+2026-09-16T18:51:12.5343979Z [2mmise[0m [36m████████████████[0m[31m[0m[2m[0m 1/1 · installed 0 tools · 1 already installed in 1.3s
+2026-09-16T18:51:12.5507677Z ##[endgroup]
+2026-09-16T18:51:12.5508333Z ##[group]Running mise ls
+2026-09-16T18:51:12.5524277Z [command]/home/runner/.local/share/mise/bin/mise ls
+2026-09-16T18:51:12.5685684Z actionlint                             1.7.12 (missing)  ~/work/velnor/velnor/mise.toml  1.7.12
+2026-09-16T18:51:12.5686630Z aqua:EmbarkStudios/cargo-deny          0.20.2 (missing)  ~/work/velnor/velnor/mise.toml  0.20.2
+2026-09-16T18:51:12.5688412Z aqua:nextest-rs/nextest/cargo-nextest  0.9.143           ~/work/velnor/velnor/mise.toml  0.9.143
+2026-09-16T18:51:12.5689580Z aqua:oven-sh/bun                       1.4.0 (missing)   ~/work/velnor/velnor/mise.toml  1.4.0
+2026-09-16T18:51:12.5690711Z aqua:rust-cross/cargo-zigbuild         0.23.3 (missing)  ~/work/velnor/velnor/mise.toml  0.23.3
+2026-09-16T18:51:12.5691813Z cargo-binstall                         1.22.0 (missing)  ~/work/velnor/velnor/mise.toml  1.22.0
+2026-09-16T18:51:12.5692821Z zig                                    0.16.0 (missing)  ~/work/velnor/velnor/mise.toml  0.16.0
+2026-09-16T18:51:12.5707311Z ##[endgroup]
+2026-09-16T18:51:12.5710233Z ##[group]Exporting mise environment variables
+2026-09-16T18:51:12.5936218Z [command]/home/runner/.local/share/mise/bin/mise env --json
+2026-09-16T18:51:12.6104800Z {
+2026-09-16T18:51:12.6107503Z   "PATH": "/home/runner/.local/share/mise/installs/aqua-nextest-rs-nextest-cargo-nextest/0.9.143/.mise-bins:/home/runner/.local/share/mise/shims:/home/runner/.local/share/mise/bin:/home/runner/work/_temp/velnor-workflow-runtime-artifact/bin:/snap/bin:/home/runner/.local/bin:/opt/pipx_bin:/home/runner/.cargo/bin:/home/runner/.config/composer/vendor/bin:/usr/local/.ghcup/bin:/home/runner/.dotnet/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games"
+2026-09-16T18:51:12.6109315Z }
+2026-09-16T18:51:12.6127346Z Adding /home/runner/.local/share/mise/installs/aqua-nextest-rs-nextest-cargo-nextest/0.9.143/.mise-bins to PATH
+2026-09-16T18:51:12.6128393Z ##[endgroup]
+2026-09-16T18:51:12.6277855Z ##[group]Run echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
+2026-09-16T18:51:12.6278303Z [36;1mecho "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"[0m
+2026-09-16T18:51:12.6318933Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-09-16T18:51:12.6319315Z env:
+2026-09-16T18:51:12.6319820Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+2026-09-16T18:51:12.6320387Z   MISE_LOG_LEVEL: info
+2026-09-16T18:51:12.6323582Z   MISE_GITHUB_TOKEN: ***
+2026-09-16T18:51:12.6323929Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor/velnor
+2026-09-16T18:51:12.6324292Z   MISE_YES: 1
+2026-09-16T18:51:12.6324749Z ##[endgroup]
+2026-09-16T18:51:13.0643097Z ##[group]Run jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777
+2026-09-16T18:51:13.0643554Z with:
+2026-09-16T18:51:13.0643801Z   backend: github
+2026-09-16T18:51:13.0644047Z   github-cache-mode: objects
+2026-09-16T18:51:13.0644316Z   version: 1.11.1
+2026-09-16T18:51:13.0645653Z   cache-key: velnor-mbx-v3-434caa7ff878-Linux-X64-rust-velnor-workflow-c44682eef9d76c7ba6ee840ea757487825d0a27427c5376b4146260368079d5d-caae2da4138f46f6612906eb7f3035f1cbd2cb80ba7368b3f7ef7a3e82495335
+2026-09-16T18:51:13.0647428Z   restore-keys: velnor-mbx-v3-434caa7ff878-Linux-X64-rust-velnor-workflow-c44682eef9d76c7ba6ee840ea757487825d0a27427c5376b4146260368079d5d-
+velnor-mbx-v3-434caa7ff878-Linux-X64-rust-velnor-workflow-
+
+2026-09-16T18:51:13.0648410Z   save-on-workflow-dispatch: true
+2026-09-16T18:51:13.0651555Z   github-token: ***
+2026-09-16T18:51:13.0651810Z   cache-generation: v1
+2026-09-16T18:51:13.0652061Z   cache-links: auto
+2026-09-16T18:51:13.0652305Z   server-mode: read-write
+2026-09-16T18:51:13.0652600Z env:
+2026-09-16T18:51:13.0653098Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+2026-09-16T18:51:13.0653983Z   MISE_LOG_LEVEL: info
+2026-09-16T18:51:13.0657422Z   MISE_GITHUB_TOKEN: ***
+2026-09-16T18:51:13.0657761Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor/velnor
+2026-09-16T18:51:13.0658143Z   MISE_YES: 1
+2026-09-16T18:51:13.0658376Z   MBX_GC_MAX_SIZE: 12GiB
+2026-09-16T18:51:13.0658619Z ##[endgroup]
+2026-09-16T18:51:13.6944323Z [command]/usr/bin/tar xz --warning=no-unknown-keyword --overwrite -C /home/runner/work/_temp/32279097-806e-4108-8c70-8229923cf641 -f /home/runner/work/_temp/d0aa879d-6ec6-41a4-98e4-fb3119c6eabe
+2026-09-16T18:51:13.9716207Z Cache hit for restore-key: velnor-mbx-v3-434caa7ff878-Linux-X64-rust-velnor-workflow-c44682eef9d76c7ba6ee840ea757487825d0a27427c5376b4146260368079d5d-1a32e4e5dc1cf71bc09c30081c0fc514abf8f491da78ff4074c5ecadb7b6baa8
+2026-09-16T18:51:15.0942406Z Received 109051904 of 1036369738 (10.5%), 104.1 MBs/sec
+2026-09-16T18:51:16.0965510Z Received 306184192 of 1036369738 (29.5%), 145.9 MBs/sec
+2026-09-16T18:51:17.0965152Z Received 507510784 of 1036369738 (49.0%), 161.2 MBs/sec
+2026-09-16T18:51:18.1035673Z Received 683671552 of 1036369738 (66.0%), 162.7 MBs/sec
+2026-09-16T18:51:19.1015473Z Received 914358272 of 1036369738 (88.2%), 174.2 MBs/sec
+2026-09-16T18:51:19.8890018Z Received 1036369738 of 1036369738 (100.0%), 170.6 MBs/sec
+2026-09-16T18:51:19.8891129Z Cache Size: ~988 MB (1036369738 B)
+2026-09-16T18:51:19.9082458Z [command]/usr/bin/tar -xf /home/runner/work/_temp/89b37e97-8aab-4cf1-9acf-ff05a7eaa37b/cache.tzst -P -C /home/runner/work/velnor/velnor --use-compress-program unzstd
+2026-09-16T18:51:29.2260894Z Cache restored successfully
+2026-09-16T18:51:29.2733520Z Set up mbx 1.11.1
+2026-09-16T18:51:29.2743111Z [command]/opt/hostedtoolcache/mbx-3075b697c4475ee8ddc24c97a58342252f166f293d57c7546d274021b29af14f/1.11.1/x64/mbx cache import /home/runner/.cache/mbx/actions/github-actions-cache-v1.tar
+2026-09-16T18:51:53.1306397Z imported 29 actions and 1691 objects from /home/runner/.cache/mbx/actions/github-actions-cache-v1.tar (4.4 GiB)
+2026-09-16T18:51:53.1307106Z restored Cargo workspace state (2027 referenced files, 4.5 GiB)
+2026-09-16T18:51:53.1311912Z Restored mbx cache from velnor-mbx-v3-434caa7ff878-Linux-X64-rust-velnor-workflow-c44682eef9d76c7ba6ee840ea757487825d0a27427c5376b4146260368079d5d-1a32e4e5dc1cf71bc09c30081c0fc514abf8f491da78ff4074c5ecadb7b6baa8
+2026-09-16T18:51:53.8344056Z ##[group]Run actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+2026-09-16T18:51:53.8344730Z with:
+2026-09-16T18:51:53.8344979Z   path: ~/.cache/velnor/mold/2.42.0
+2026-09-16T18:51:53.8345301Z   key: velnor-mold-2.42.0-Linux-X64
+2026-09-16T18:51:53.8345600Z   enableCrossOsArchive: false
+2026-09-16T18:51:53.8345886Z   fail-on-cache-miss: false
+2026-09-16T18:51:53.8346159Z   lookup-only: false
+2026-09-16T18:51:53.8346416Z env:
+2026-09-16T18:51:53.8346908Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+2026-09-16T18:51:53.8347465Z   MISE_LOG_LEVEL: info
+2026-09-16T18:51:53.8350640Z   MISE_GITHUB_TOKEN: ***
+2026-09-16T18:51:53.8351004Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor/velnor
+2026-09-16T18:51:53.8351373Z   MISE_YES: 1
+2026-09-16T18:51:53.8351613Z   MBX_GC_MAX_SIZE: 12GiB
+2026-09-16T18:51:53.8351873Z   MBX_CACHE_LINKS: 1
+2026-09-16T18:51:53.8352332Z   MBX_CACHE_EXPORT_GROUP: github-actions-35136207272-2-2c5529e8-956a-4cb2-9f85-f407c3126ac8
+2026-09-16T18:51:53.8352806Z ##[endgroup]
+2026-09-16T18:51:54.7087251Z Cache hit for: velnor-mold-2.42.0-Linux-X64
+2026-09-16T18:51:55.2523502Z Received 6002288 of 6002288 (100.0%), 14.3 MBs/sec
+2026-09-16T18:51:55.2524121Z Cache Size: ~6 MB (6002288 B)
+2026-09-16T18:51:55.2552511Z [command]/usr/bin/tar -xf /home/runner/work/_temp/233a4d6e-e28a-43cd-9786-341840b9a73a/cache.tzst -P -C /home/runner/work/velnor/velnor --use-compress-program unzstd
+2026-09-16T18:51:55.3321859Z Cache restored successfully
+2026-09-16T18:51:55.8231445Z Cache restored from key: velnor-mold-2.42.0-Linux-X64
+2026-09-16T18:51:55.8351598Z ##[group]Run set -euo pipefail
+2026-09-16T18:51:55.8352471Z [36;1mset -euo pipefail[0m
+2026-09-16T18:51:55.8352921Z [36;1mcase "$(uname -m)" in[0m
+2026-09-16T18:51:55.8353790Z [36;1m  x86_64) mold_arch=x86_64; expected='f5ed2f6e31d1ada4f07fe766fe0de7a73104d1c5cdc59086fcecc16a43720b6d' ;;[0m
+2026-09-16T18:51:55.8355408Z [36;1m  aarch64) mold_arch=aarch64; expected='3c9a0a3624aac8a2007569ae50c33b3129a0f0ae8bcc974aeee2f8939d295190' ;;[0m
+2026-09-16T18:51:55.8356527Z [36;1m  *) echo "unsupported mold architecture: $(uname -m)" >&2; exit 1 ;;[0m
+2026-09-16T18:51:55.8357182Z [36;1mesac[0m
+2026-09-16T18:51:55.8357528Z [36;1mcache_dir="$HOME/.cache/velnor/mold/$MOLD_VERSION"[0m
+2026-09-16T18:51:55.8358005Z [36;1marchive="$cache_dir/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz"[0m
+2026-09-16T18:51:55.8358421Z [36;1mmkdir -p "$cache_dir"[0m
+2026-09-16T18:51:55.8358723Z [36;1mif [[ ! -s "$archive" ]]; then[0m
+2026-09-16T18:51:55.8359071Z [36;1m  temporary="$archive.download"[0m
+2026-09-16T18:51:55.8359383Z [36;1m  trap 'rm -f "$temporary"' EXIT[0m
+2026-09-16T18:51:55.8359840Z [36;1m  curl --fail --silent --show-error --location --retry 3 --retry-delay 2 \[0m
+2026-09-16T18:51:55.8360293Z [36;1m    --output "$temporary" \[0m
+2026-09-16T18:51:55.8360902Z [36;1m    "https://github.com/rui314/mold/releases/download/v$MOLD_VERSION/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz"[0m
+2026-09-16T18:51:55.8361631Z [36;1m  printf '%s  %s\n' "$expected" "$temporary" | sha256sum --check --strict[0m
+2026-09-16T18:51:55.8362082Z [36;1m  mv "$temporary" "$archive"[0m
+2026-09-16T18:51:55.8362395Z [36;1m  trap - EXIT[0m
+2026-09-16T18:51:55.8362658Z [36;1mfi[0m
+2026-09-16T18:51:55.8363003Z [36;1mprintf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict[0m
+2026-09-16T18:51:55.8363415Z [36;1mif [[ "$(id -u)" -eq 0 ]]; then[0m
+2026-09-16T18:51:55.8363899Z [36;1m  tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"[0m
+2026-09-16T18:51:55.8364788Z [36;1melse[0m
+2026-09-16T18:51:55.8365251Z [36;1m  sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"[0m
+2026-09-16T18:51:55.8365732Z [36;1mfi[0m
+2026-09-16T18:51:55.8365978Z [36;1mcommand -v mold >/dev/null[0m
+2026-09-16T18:51:55.8366322Z [36;1mmold --version | grep -F "$MOLD_VERSION"[0m
+2026-09-16T18:51:55.8418881Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-09-16T18:51:55.8419276Z env:
+2026-09-16T18:51:55.8419808Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+2026-09-16T18:51:55.8420400Z   MISE_LOG_LEVEL: info
+2026-09-16T18:51:55.8423655Z   MISE_GITHUB_TOKEN: ***
+2026-09-16T18:51:55.8424034Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor/velnor
+2026-09-16T18:51:55.8424587Z   MISE_YES: 1
+2026-09-16T18:51:55.8424834Z   MBX_GC_MAX_SIZE: 12GiB
+2026-09-16T18:51:55.8425115Z   MBX_CACHE_LINKS: 1
+2026-09-16T18:51:55.8425566Z   MBX_CACHE_EXPORT_GROUP: github-actions-35136207272-2-2c5529e8-956a-4cb2-9f85-f407c3126ac8
+2026-09-16T18:51:55.8426070Z   MOLD_VERSION: 2.42.0
+2026-09-16T18:51:55.8426325Z ##[endgroup]
+2026-09-16T18:51:55.8590564Z /home/runner/.cache/velnor/mold/2.42.0/mold-2.42.0-x86_64-linux.tar.gz: OK
+2026-09-16T18:51:56.0236115Z mold 2.42.0 (441dc1d1fd3c72f41bc9d30f440431d34738def3; compatible with GNU ld)
+2026-09-16T18:51:56.0282387Z ##[group]Run timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+2026-09-16T18:51:56.0283299Z [36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"[0m
+2026-09-16T18:51:56.0283884Z [36;1mumask 077[0m
+2026-09-16T18:51:56.0284165Z [36;1mmkdir -p "$timing_dir"[0m
+2026-09-16T18:51:56.0284767Z [36;1mmarker="$timing_dir/TOOL_BOOTSTRAP_ENDED"[0m
+2026-09-16T18:51:56.0285130Z [36;1mif [[ ! -e "$marker" ]]; then[0m
+2026-09-16T18:51:56.0285544Z [36;1m  if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then[0m
+2026-09-16T18:51:56.0286185Z [36;1m    chmod 0444 "$marker" 2>/dev/null || true[0m
+2026-09-16T18:51:56.0286505Z [36;1m  fi[0m
+2026-09-16T18:51:56.0286742Z [36;1mfi[0m
+2026-09-16T18:51:56.0326964Z shell: /usr/bin/bash -e {0}
+2026-09-16T18:51:56.0327262Z env:
+2026-09-16T18:51:56.0327833Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+2026-09-16T18:51:56.0328550Z   MISE_LOG_LEVEL: info
+2026-09-16T18:51:56.0331817Z   MISE_GITHUB_TOKEN: ***
+2026-09-16T18:51:56.0332179Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor/velnor
+2026-09-16T18:51:56.0332547Z   MISE_YES: 1
+2026-09-16T18:51:56.0332794Z   MBX_GC_MAX_SIZE: 12GiB
+2026-09-16T18:51:56.0333054Z   MBX_CACHE_LINKS: 1
+2026-09-16T18:51:56.0333488Z   MBX_CACHE_EXPORT_GROUP: github-actions-35136207272-2-2c5529e8-956a-4cb2-9f85-f407c3126ac8
+2026-09-16T18:51:56.0333974Z ##[endgroup]
+2026-09-16T18:51:56.1836742Z ##[group]Run actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+2026-09-16T18:51:56.1837213Z with:
+2026-09-16T18:51:56.1837482Z   path: ~/.cargo/registry
+~/.cargo/git
+
+
+2026-09-16T18:51:56.1838003Z   key: ci-Linux-X64-rust-c44682eef9d76c7ba6ee840ea757487825d0a27427c5376b4146260368079d5d
+2026-09-16T18:51:56.1838555Z   restore-keys: ci-Linux-X64-rust-
+
+2026-09-16T18:51:56.1838884Z   enableCrossOsArchive: false
+2026-09-16T18:51:56.1839182Z   fail-on-cache-miss: false
+2026-09-16T18:51:56.1839461Z   lookup-only: false
+2026-09-16T18:51:56.1839707Z env:
+2026-09-16T18:51:56.1840212Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+2026-09-16T18:51:56.1840774Z   MISE_LOG_LEVEL: info
+2026-09-16T18:51:56.1844099Z   MISE_GITHUB_TOKEN: ***
+2026-09-16T18:51:56.1844731Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor/velnor
+2026-09-16T18:51:56.1845118Z   MISE_YES: 1
+2026-09-16T18:51:56.1845399Z   MBX_GC_MAX_SIZE: 12GiB
+2026-09-16T18:51:56.1845672Z   MBX_CACHE_LINKS: 1
+2026-09-16T18:51:56.1846111Z   MBX_CACHE_EXPORT_GROUP: github-actions-35136207272-2-2c5529e8-956a-4cb2-9f85-f407c3126ac8
+2026-09-16T18:51:56.1846602Z ##[endgroup]
+2026-09-16T18:51:56.4136770Z Cache hit for: ci-Linux-X64-rust-c44682eef9d76c7ba6ee840ea757487825d0a27427c5376b4146260368079d5d
+2026-09-16T18:51:57.5360622Z Received 117440512 of 174088332 (67.5%), 111.9 MBs/sec
+2026-09-16T18:51:57.8692794Z Received 174088332 of 174088332 (100.0%), 124.5 MBs/sec
+2026-09-16T18:51:57.8693414Z Cache Size: ~166 MB (174088332 B)
+2026-09-16T18:51:57.9152629Z [command]/usr/bin/tar -xf /home/runner/work/_temp/1d4ae6d6-1a76-450a-bce8-2c6a2c5e9c8b/cache.tzst -P -C /home/runner/work/velnor/velnor --use-compress-program unzstd
+2026-09-16T18:52:00.3681531Z Cache restored successfully
+2026-09-16T18:52:00.3846714Z Cache restored from key: ci-Linux-X64-rust-c44682eef9d76c7ba6ee840ea757487825d0a27427c5376b4146260368079d5d
+2026-09-16T18:52:00.4041489Z ##[group]Run timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+2026-09-16T18:52:00.4042526Z [36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"[0m
+2026-09-16T18:52:00.4043112Z [36;1mumask 077[0m
+2026-09-16T18:52:00.4043404Z [36;1mmkdir -p "$timing_dir"[0m
+2026-09-16T18:52:00.4043748Z [36;1mmarker="$timing_dir/CACHE_PREP_ENDED"[0m
+2026-09-16T18:52:00.4044106Z [36;1mif [[ ! -e "$marker" ]]; then[0m
+2026-09-16T18:52:00.4044795Z [36;1m  if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then[0m
+2026-09-16T18:52:00.4045276Z [36;1m    chmod 0444 "$marker" 2>/dev/null || true[0m
+2026-09-16T18:52:00.4045616Z [36;1m  fi[0m
+2026-09-16T18:52:00.4045859Z [36;1mfi[0m
+2026-09-16T18:52:00.4107492Z shell: /usr/bin/bash -e {0}
+2026-09-16T18:52:00.4107806Z env:
+2026-09-16T18:52:00.4108396Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+2026-09-16T18:52:00.4109003Z   MISE_LOG_LEVEL: info
+2026-09-16T18:52:00.4112204Z   MISE_GITHUB_TOKEN: ***
+2026-09-16T18:52:00.4112777Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor/velnor
+2026-09-16T18:52:00.4113174Z   MISE_YES: 1
+2026-09-16T18:52:00.4113436Z   MBX_GC_MAX_SIZE: 12GiB
+2026-09-16T18:52:00.4113712Z   MBX_CACHE_LINKS: 1
+2026-09-16T18:52:00.4114162Z   MBX_CACHE_EXPORT_GROUP: github-actions-35136207272-2-2c5529e8-956a-4cb2-9f85-f407c3126ac8
+2026-09-16T18:52:00.4114903Z ##[endgroup]
+2026-09-16T18:52:00.4268127Z ##[group]Run timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+2026-09-16T18:52:00.4269065Z [36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"[0m
+2026-09-16T18:52:00.4269648Z [36;1mumask 077[0m
+2026-09-16T18:52:00.4269923Z [36;1mmkdir -p "$timing_dir"[0m
+2026-09-16T18:52:00.4270262Z [36;1mmarker="$timing_dir/CARGO_FETCH_ENDED"[0m
+2026-09-16T18:52:00.4270617Z [36;1mif [[ ! -e "$marker" ]]; then[0m
+2026-09-16T18:52:00.4271035Z [36;1m  if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then[0m
+2026-09-16T18:52:00.4271526Z [36;1m    chmod 0444 "$marker" 2>/dev/null || true[0m
+2026-09-16T18:52:00.4271861Z [36;1m  fi[0m
+2026-09-16T18:52:00.4272106Z [36;1mfi[0m
+2026-09-16T18:52:00.4324695Z shell: /usr/bin/bash -e {0}
+2026-09-16T18:52:00.4325167Z env:
+2026-09-16T18:52:00.4326105Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+2026-09-16T18:52:00.4327131Z   MISE_LOG_LEVEL: info
+2026-09-16T18:52:00.4333110Z   MISE_GITHUB_TOKEN: ***
+2026-09-16T18:52:00.4333728Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor/velnor
+2026-09-16T18:52:00.4334341Z   MISE_YES: 1
+2026-09-16T18:52:00.4334967Z   MBX_GC_MAX_SIZE: 12GiB
+2026-09-16T18:52:00.4335403Z   MBX_CACHE_LINKS: 1
+2026-09-16T18:52:00.4336134Z   MBX_CACHE_EXPORT_GROUP: github-actions-35136207272-2-2c5529e8-956a-4cb2-9f85-f407c3126ac8
+2026-09-16T18:52:00.4336954Z ##[endgroup]
+2026-09-16T18:52:00.4502331Z ##[group]Run set -o pipefail
+2026-09-16T18:52:00.4502764Z [36;1mset -o pipefail[0m
+2026-09-16T18:52:00.4503350Z [36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"[0m
+2026-09-16T18:52:00.4503935Z [36;1mumask 077[0m
+2026-09-16T18:52:00.4504215Z [36;1mmkdir -p "$timing_dir"[0m
+2026-09-16T18:52:00.4504808Z [36;1mmarker="$timing_dir/CHECKS_STARTED"[0m
+2026-09-16T18:52:00.4505145Z [36;1mif [[ ! -e "$marker" ]]; then[0m
+2026-09-16T18:52:00.4505562Z [36;1m  if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then[0m
+2026-09-16T18:52:00.4506049Z [36;1m    chmod 0444 "$marker" 2>/dev/null || true[0m
+2026-09-16T18:52:00.4506375Z [36;1m  fi[0m
+2026-09-16T18:52:00.4506612Z [36;1mfi[0m
+2026-09-16T18:52:00.4506840Z [36;1mrc=0[0m
+2026-09-16T18:52:00.4507472Z [36;1mvelnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?[0m
+2026-09-16T18:52:00.4508434Z [36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"[0m
+2026-09-16T18:52:00.4508993Z [36;1mumask 077[0m
+2026-09-16T18:52:00.4509258Z [36;1mmkdir -p "$timing_dir"[0m
+2026-09-16T18:52:00.4509576Z [36;1mmarker="$timing_dir/CHECKS_ENDED"[0m
+2026-09-16T18:52:00.4509907Z [36;1mif [[ ! -e "$marker" ]]; then[0m
+2026-09-16T18:52:00.4510324Z [36;1m  if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then[0m
+2026-09-16T18:52:00.4510762Z [36;1m    chmod 0444 "$marker" 2>/dev/null || true[0m
+2026-09-16T18:52:00.4511084Z [36;1m  fi[0m
+2026-09-16T18:52:00.4511310Z [36;1mfi[0m
+2026-09-16T18:52:00.4511546Z [36;1mexit $rc[0m
+2026-09-16T18:52:00.4563117Z shell: /usr/bin/bash -e {0}
+2026-09-16T18:52:00.4563436Z env:
+2026-09-16T18:52:00.4563988Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+2026-09-16T18:52:00.4564857Z   MISE_LOG_LEVEL: info
+2026-09-16T18:52:00.4568293Z   MISE_GITHUB_TOKEN: ***
+2026-09-16T18:52:00.4568672Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor/velnor
+2026-09-16T18:52:00.4569055Z   MISE_YES: 1
+2026-09-16T18:52:00.4569305Z   MBX_GC_MAX_SIZE: 12GiB
+2026-09-16T18:52:00.4569575Z   MBX_CACHE_LINKS: 1
+2026-09-16T18:52:00.4570022Z   MBX_CACHE_EXPORT_GROUP: github-actions-35136207272-2-2c5529e8-956a-4cb2-9f85-f407c3126ac8
+2026-09-16T18:52:00.4570508Z   CI_SCOPE: affected
+2026-09-16T18:52:00.4570770Z   CI_UNIT_ID: rust-velnor-workflow
+2026-09-16T18:52:00.4571084Z   EVENT_NAME: pull_request
+2026-09-16T18:52:00.4571398Z   BASE_SHA: 3353310c7648fca22698b6c0f4a69ab245127786
+2026-09-16T18:52:00.4571778Z   HEAD_SHA: b2e22d834057de0c43c54ae557ab50a307772371
+2026-09-16T18:52:00.4572227Z   VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+2026-09-16T18:52:00.4572633Z   CARGO_NET_OFFLINE: true
+2026-09-16T18:52:00.4572910Z   MISE_AUTO_INSTALL: false
+2026-09-16T18:52:00.4573200Z   MISE_EXEC_AUTO_INSTALL: false
+2026-09-16T18:52:00.4573503Z   MISE_NOT_FOUND_AUTO_INSTALL: false
+2026-09-16T18:52:00.4573812Z ##[endgroup]
+2026-09-16T18:52:00.4776568Z ##[group]rust-velnor-workflow: cd -- 'crates/velnor-workflow' && mbx run --locked --manifest-path 'Cargo.toml' -- --plain --check ../..
+2026-09-16T18:52:00.6113955Z       ┌─────────┐  mr boxington
+2026-09-16T18:52:00.6114732Z      ╱ ═══════ ╱│
+2026-09-16T18:52:00.6115152Z     ╱─────────╱ │
+2026-09-16T18:52:00.6115612Z     │ •    (◉)│≡│
+2026-09-16T18:52:00.6116010Z     │  ◟▄▄▄◞  │ ╱
+2026-09-16T18:52:00.6116415Z     │   ◀◆▶   │╱
+2026-09-16T18:52:00.6116880Z     └─────────┘
+2026-09-16T18:52:00.9379847Z    Compiling velnor-workflow v0.1.0 (/home/runner/work/velnor/velnor/crates/velnor-workflow)
+2026-09-16T18:52:09.1888528Z     Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.54s
+2026-09-16T18:52:09.2020788Z      Running `mbx-launch /home/runner/work/velnor/velnor/target/debug/velnor-workflow --plain --check ../..`
+2026-09-16T18:52:09.2344113Z mbx[cache]: object cache: 0 hits, 0 misses, 3 not looked up, 1 bypassed; 0 B downloaded, 0 B uploaded, 206.5 MiB stored locally
+2026-09-16T18:52:09.2345436Z mbx[cache]: 8.63s session; 0ns estimated compiler time avoided (summed across compilations)
+2026-09-16T18:52:09.2346385Z mbx[cache]: 3 compilations had no usable prior inputs or matching prediction for a lookup
+2026-09-16T18:52:09.2347183Z mbx[cache]: bypass reasons: 1 build-script-always-rerun
+2026-09-16T18:52:09.2347891Z mbx[cache]: Cargo artifact reuse and CI cache archive transfers are not included above
+2026-09-16T18:52:10.6373145Z error: revision 48a66ad7d56636f8bfa6069fbaf810d0089fef39 is not a commit of /home/runner/work/velnor/velnor
+2026-09-16T18:52:10.7017565Z ##[endgroup]
+2026-09-16T18:52:10.7019702Z error: CI command failed for unit rust-velnor-workflow with exit status: 1
+2026-09-16T18:52:10.7089825Z ##[error]Process completed with exit code 1.
+2026-09-16T18:52:10.7162300Z ##[group]Run timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+2026-09-16T18:52:10.7163229Z [36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"[0m
+2026-09-16T18:52:10.7163808Z [36;1mumask 077[0m
+2026-09-16T18:52:10.7164103Z [36;1mmkdir -p "$timing_dir"[0m
+2026-09-16T18:52:10.7164901Z [36;1mmarker="$timing_dir/CLEANUP_ENDED"[0m
+2026-09-16T18:52:10.7165534Z [36;1mif [[ ! -e "$marker" ]]; then[0m
+2026-09-16T18:52:10.7166385Z [36;1m  if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then[0m
+2026-09-16T18:52:10.7167220Z [36;1m    chmod 0444 "$marker" 2>/dev/null || true[0m
+2026-09-16T18:52:10.7167758Z [36;1m  fi[0m
+2026-09-16T18:52:10.7168203Z [36;1mfi[0m
+2026-09-16T18:52:10.7224714Z shell: /usr/bin/bash -e {0}
+2026-09-16T18:52:10.7225172Z env:
+2026-09-16T18:52:10.7226057Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+2026-09-16T18:52:10.7227010Z   MISE_LOG_LEVEL: info
+2026-09-16T18:52:10.7231906Z   MISE_GITHUB_TOKEN: ***
+2026-09-16T18:52:10.7232543Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor/velnor
+2026-09-16T18:52:10.7233114Z   MISE_YES: 1
+2026-09-16T18:52:10.7233490Z   MBX_GC_MAX_SIZE: 12GiB
+2026-09-16T18:52:10.7233901Z   MBX_CACHE_LINKS: 1
+2026-09-16T18:52:10.7234594Z   MBX_CACHE_EXPORT_GROUP: github-actions-35136207272-2-2c5529e8-956a-4cb2-9f85-f407c3126ac8
+2026-09-16T18:52:10.7235668Z ##[endgroup]
+2026-09-16T18:52:10.7955894Z Prepare all required actions
+2026-09-16T18:52:10.8104019Z ##[group]Run ./.github/actions/report-velnor-ci-outcomes
+2026-09-16T18:52:10.8104604Z with:
+2026-09-16T18:52:10.8104869Z   job_label: rust-velnor-workflow
+2026-09-16T18:52:10.8105171Z   ci_lane: github
+2026-09-16T18:52:10.8105732Z   cache_rustup_primary: velnor-rustup-Linux-X64-01ca15e1b24a13a2533dc81d701f5db1ad9bd6bd978dbd566dac8f8bf1d492dd
+2026-09-16T18:52:10.8106621Z   cache_rustup_matched: velnor-rustup-Linux-X64-01ca15e1b24a13a2533dc81d701f5db1ad9bd6bd978dbd566dac8f8bf1d492dd
+2026-09-16T18:52:10.8107273Z   cache_mold_primary: velnor-mold-2.42.0-Linux-X64
+2026-09-16T18:52:10.8107658Z   cache_mold_matched: velnor-mold-2.42.0-Linux-X64
+2026-09-16T18:52:10.8107987Z   cache_mbx_hit: false
+2026-09-16T18:52:10.8109041Z   cache_mbx_primary: velnor-mbx-v3-434caa7ff878-Linux-X64-rust-velnor-workflow-c44682eef9d76c7ba6ee840ea757487825d0a27427c5376b4146260368079d5d-caae2da4138f46f6612906eb7f3035f1cbd2cb80ba7368b3f7ef7a3e82495335
+2026-09-16T18:52:10.8110394Z   cache_cargo_primary: ci-Linux-X64-rust-c44682eef9d76c7ba6ee840ea757487825d0a27427c5376b4146260368079d5d
+2026-09-16T18:52:10.8111167Z   cache_cargo_matched: ci-Linux-X64-rust-c44682eef9d76c7ba6ee840ea757487825d0a27427c5376b4146260368079d5d
+2026-09-16T18:52:10.8111692Z env:
+2026-09-16T18:52:10.8112201Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+2026-09-16T18:52:10.8112766Z   MISE_LOG_LEVEL: info
+2026-09-16T18:52:10.8116364Z   MISE_GITHUB_TOKEN: ***
+2026-09-16T18:52:10.8116751Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor/velnor
+2026-09-16T18:52:10.8117132Z   MISE_YES: 1
+2026-09-16T18:52:10.8117384Z   MBX_GC_MAX_SIZE: 12GiB
+2026-09-16T18:52:10.8117646Z   MBX_CACHE_LINKS: 1
+2026-09-16T18:52:10.8118091Z   MBX_CACHE_EXPORT_GROUP: github-actions-35136207272-2-2c5529e8-956a-4cb2-9f85-f407c3126ac8
+2026-09-16T18:52:10.8118573Z ##[endgroup]
+2026-09-16T18:52:10.8180680Z ##[start-action display=Report phase timings and cache outcomes;id=__self.__run]
+2026-09-16T18:52:10.8206492Z ##[group]Run set -uo pipefail
+2026-09-16T18:52:10.8207481Z [36;1mset -uo pipefail[0m
+2026-09-16T18:52:10.8207823Z [36;1mmax_telemetry_seconds=$((7 * 24 * 60 * 60))[0m
+2026-09-16T18:52:10.8208461Z [36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"[0m
+2026-09-16T18:52:10.8209049Z [36;1mjob_ended="$(date +%s)"[0m
+2026-09-16T18:52:10.8209393Z [36;1mlog="$RUNNER_TEMP/velnor-unit-log.txt"[0m
+2026-09-16T18:52:10.8209746Z [36;1mlog_present=false[0m
+2026-09-16T18:52:10.8210096Z [36;1mif [[ -s "$log" ]]; then log_present=true; fi[0m
+2026-09-16T18:52:10.8210449Z [36;1mread_marker() {[0m
+2026-09-16T18:52:10.8210728Z [36;1m  local marker="$1"[0m
+2026-09-16T18:52:10.8211016Z [36;1m  local value=""[0m
+2026-09-16T18:52:10.8211332Z [36;1m  if [[ -r "$timing_dir/$marker" ]]; then[0m
+2026-09-16T18:52:10.8211746Z [36;1m    IFS= read -r value < "$timing_dir/$marker" || true[0m
+2026-09-16T18:52:10.8212110Z [36;1m  fi[0m
+2026-09-16T18:52:10.8212366Z [36;1m  printf '%s' "$value"[0m
+2026-09-16T18:52:10.8212653Z [36;1m}[0m
+2026-09-16T18:52:10.8212985Z [36;1mvalid_epoch() {[0m
+2026-09-16T18:52:10.8213300Z [36;1m  [[ "${1:-}" =~ ^[1-9][0-9]{9}$ ]][0m
+2026-09-16T18:52:10.8213616Z [36;1m}[0m
+2026-09-16T18:52:10.8213865Z [36;1mbounded_duration() {[0m
+2026-09-16T18:52:10.8214161Z [36;1m  local duration="${1:-}"[0m
+2026-09-16T18:52:10.8214632Z [36;1m  [[ "$duration" =~ ^[0-9]+$ ]] || return 1[0m
+2026-09-16T18:52:10.8215002Z [36;1m  [[ "${#duration}" -le 6 ]] || return 1[0m
+2026-09-16T18:52:10.8215592Z [36;1m  (( 10#$duration <= max_telemetry_seconds ))[0m
+2026-09-16T18:52:10.8215926Z [36;1m}[0m
+2026-09-16T18:52:10.8216191Z [36;1mphase_seconds() {[0m
+2026-09-16T18:52:10.8216495Z [36;1m  local start="${1:-}" end="${2:-}"[0m
+2026-09-16T18:52:10.8216936Z [36;1m  if valid_epoch "$start" && valid_epoch "$end" && valid_epoch "$job_ended" \[0m
+2026-09-16T18:52:10.8217627Z [36;1m    && (( 10#$end >= 10#$start && 10#$end <= 10#$job_ended \[0m
+2026-09-16T18:52:10.8218102Z [36;1m      && 10#$job_ended - 10#$start <= max_telemetry_seconds )); then[0m
+2026-09-16T18:52:10.8218534Z [36;1m    local duration=$((10#$end - 10#$start))[0m
+2026-09-16T18:52:10.8218919Z [36;1m    if bounded_duration "$duration"; then[0m
+2026-09-16T18:52:10.8219260Z [36;1m      echo "$duration"[0m
+2026-09-16T18:52:10.8219558Z [36;1m      return 0[0m
+2026-09-16T18:52:10.8219827Z [36;1m    fi[0m
+2026-09-16T18:52:10.8220068Z [36;1m  fi[0m
+2026-09-16T18:52:10.8220315Z [36;1m  return 1[0m
+2026-09-16T18:52:10.8220563Z [36;1m}[0m
+2026-09-16T18:52:10.8220837Z [36;1mjob_started="$(read_marker JOB_STARTED)"[0m
+2026-09-16T18:52:10.8221186Z [36;1mjob_started_usable=false[0m
+2026-09-16T18:52:10.8221504Z [36;1mtotal_source="unusable_job_start"[0m
+2026-09-16T18:52:10.8221831Z [36;1mtotal=""[0m
+2026-09-16T18:52:10.8222109Z [36;1mif valid_epoch "$job_started"; then[0m
+2026-09-16T18:52:10.8222556Z [36;1m  total_candidate="$(phase_seconds "$job_started" "$job_ended" || true)"[0m
+2026-09-16T18:52:10.8223010Z [36;1m  if [[ -n "$total_candidate" ]]; then[0m
+2026-09-16T18:52:10.8223351Z [36;1m    total="$total_candidate"[0m
+2026-09-16T18:52:10.8223667Z [36;1m    job_started_usable=true[0m
+2026-09-16T18:52:10.8223985Z [36;1m    total_source="job_markers"[0m
+2026-09-16T18:52:10.8224289Z [36;1m  fi[0m
+2026-09-16T18:52:10.8224641Z [36;1mfi[0m
+2026-09-16T18:52:10.8224959Z [36;1mrunner_setup_end="$(read_marker RUNNER_SETUP_ENDED)"[0m
+2026-09-16T18:52:10.8225400Z [36;1mselection_end="$(read_marker SELECTION_ENDED)"[0m
+2026-09-16T18:52:10.8225832Z [36;1mtool_bootstrap_end="$(read_marker TOOL_BOOTSTRAP_ENDED)"[0m
+2026-09-16T18:52:10.8226275Z [36;1mcache_prep_end="$(read_marker CACHE_PREP_ENDED)"[0m
+2026-09-16T18:52:10.8226697Z [36;1mcargo_fetch_end="$(read_marker CARGO_FETCH_ENDED)"[0m
+2026-09-16T18:52:10.8227108Z [36;1mchecks_started="$(read_marker CHECKS_STARTED)"[0m
+2026-09-16T18:52:10.8227502Z [36;1mchecks_ended="$(read_marker CHECKS_ENDED)"[0m
+2026-09-16T18:52:10.8227878Z [36;1mcleanup_end="$(read_marker CLEANUP_ENDED)"[0m
+2026-09-16T18:52:10.8228328Z [36;1mrunner_setup="$(phase_seconds "$job_started" "$runner_setup_end" || true)"[0m
+2026-09-16T18:52:10.8228924Z [36;1mselection_transport="$(phase_seconds "$runner_setup_end" "$selection_end" || true)"[0m
+2026-09-16T18:52:10.8229546Z [36;1mtool_bootstrap="$(phase_seconds "$selection_end" "$tool_bootstrap_end" || true)"[0m
+2026-09-16T18:52:10.8230133Z [36;1mcache_prep="$(phase_seconds "$tool_bootstrap_end" "$cache_prep_end" || true)"[0m
+2026-09-16T18:52:10.8230699Z [36;1mcargo_fetch="$(phase_seconds "$cache_prep_end" "$cargo_fetch_end" || true)"[0m
+2026-09-16T18:52:10.8231249Z [36;1mchecks_wall="$(phase_seconds "$checks_started" "$checks_ended" || true)"[0m
+2026-09-16T18:52:10.8231773Z [36;1mcleanup="$(phase_seconds "$checks_ended" "$cleanup_end" || true)"[0m
+2026-09-16T18:52:10.8232177Z [36;1mqueue=""[0m
+2026-09-16T18:52:10.8232437Z [36;1mqueue_source=""[0m
+2026-09-16T18:52:10.8232734Z [36;1mjob_name="${VELNOR_JOB_NAME:-}"[0m
+2026-09-16T18:52:10.8233170Z [36;1mrun_started="${VELNOR_CONTEXT_RUN_STARTED_AT:-${VELNOR_RUN_STARTED_AT:-}}"[0m
+2026-09-16T18:52:10.8233625Z [36;1mqueue_at="${VELNOR_JOB_QUEUED_AT:-}"[0m
+2026-09-16T18:52:10.8233955Z [36;1mrfc3339_epoch() {[0m
+2026-09-16T18:52:10.8234246Z [36;1m  local value="${1:-}"[0m
+2026-09-16T18:52:10.8234663Z [36;1m  [[ -n "$value" ]] || return 1[0m
+2026-09-16T18:52:10.8234983Z [36;1m  jq -nr --arg value "$value" '[0m
+2026-09-16T18:52:10.8235523Z [36;1m    try ($value | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)[0m
+2026-09-16T18:52:10.8235902Z [36;1m    catch empty[0m
+2026-09-16T18:52:10.8236172Z [36;1m  ' 2>/dev/null[0m
+2026-09-16T18:52:10.8236425Z [36;1m}[0m
+2026-09-16T18:52:10.8236688Z [36;1mqueue_seconds_from_timestamp() {[0m
+2026-09-16T18:52:10.8237024Z [36;1m  local timestamp="${1:-}"[0m
+2026-09-16T18:52:10.8237470Z [36;1m  local queued_epoch=""[0m
+2026-09-16T18:52:10.8237784Z [36;1m  local queue_candidate=""[0m
+2026-09-16T18:52:10.8238147Z [36;1m  queued_epoch="$(rfc3339_epoch "$timestamp" || true)"[0m
+2026-09-16T18:52:10.8238628Z [36;1m  if valid_epoch "$queued_epoch" && [[ "$job_started_usable" == true ]] \[0m
+2026-09-16T18:52:10.8239083Z [36;1m    && (( 10#$job_started >= 10#$queued_epoch )); then[0m
+2026-09-16T18:52:10.8239510Z [36;1m    queue_candidate=$((10#$job_started - 10#$queued_epoch))[0m
+2026-09-16T18:52:10.8239945Z [36;1m    if bounded_duration "$queue_candidate"; then[0m
+2026-09-16T18:52:10.8240322Z [36;1m      echo "$queue_candidate"[0m
+2026-09-16T18:52:10.8240681Z [36;1m      return 0[0m
+2026-09-16T18:52:10.8240953Z [36;1m    fi[0m
+2026-09-16T18:52:10.8241203Z [36;1m  fi[0m
+2026-09-16T18:52:10.8241441Z [36;1m  return 1[0m
+2026-09-16T18:52:10.8241697Z [36;1m}[0m
+2026-09-16T18:52:10.8242072Z [36;1mif command -v jq >/dev/null 2>&1 && [[ "$job_started_usable" == true ]]; then[0m
+2026-09-16T18:52:10.8242525Z [36;1m  if [[ -n "$queue_at" ]]; then[0m
+2026-09-16T18:52:10.8242950Z [36;1m    queue_candidate="$(queue_seconds_from_timestamp "$queue_at" || true)"[0m
+2026-09-16T18:52:10.8243421Z [36;1m    if bounded_duration "$queue_candidate"; then[0m
+2026-09-16T18:52:10.8243779Z [36;1m      queue="$queue_candidate"[0m
+2026-09-16T18:52:10.8244116Z [36;1m      queue_source="job_queue_time"[0m
+2026-09-16T18:52:10.8244670Z [36;1m    fi[0m
+2026-09-16T18:52:10.8244982Z [36;1m  fi[0m
+2026-09-16T18:52:10.8245275Z [36;1m  if [[ -z "$queue" && -n "$run_started" ]]; then[0m
+2026-09-16T18:52:10.8245748Z [36;1m    queue_candidate="$(queue_seconds_from_timestamp "$run_started" || true)"[0m
+2026-09-16T18:52:10.8246215Z [36;1m    if bounded_duration "$queue_candidate"; then[0m
+2026-09-16T18:52:10.8246567Z [36;1m      queue="$queue_candidate"[0m
+2026-09-16T18:52:10.8246912Z [36;1m      queue_source="workflow_run_started_at"[0m
+2026-09-16T18:52:10.8247235Z [36;1m    fi[0m
+2026-09-16T18:52:10.8247472Z [36;1m  fi[0m
+2026-09-16T18:52:10.8247703Z [36;1mfi[0m
+2026-09-16T18:52:10.8247950Z [36;1mif [[ -z "$job_name" ]]; then[0m
+2026-09-16T18:52:10.8248255Z [36;1m  job_name="unknown"[0m
+2026-09-16T18:52:10.8248530Z [36;1mfi[0m
+2026-09-16T18:52:10.8248768Z [36;1mclassify_gha_cache() {[0m
+2026-09-16T18:52:10.8249105Z [36;1m  local primary="${1:-}" matched="${2:-}"[0m
+2026-09-16T18:52:10.8249478Z [36;1m  if [[ -z "$primary" && -z "$matched" ]]; then[0m
+2026-09-16T18:52:10.8249823Z [36;1m    return 0[0m
+2026-09-16T18:52:10.8250078Z [36;1m  fi[0m
+2026-09-16T18:52:10.8250328Z [36;1m  if [[ -z "$matched" ]]; then[0m
+2026-09-16T18:52:10.8250631Z [36;1m    echo cold[0m
+2026-09-16T18:52:10.8250935Z [36;1m  elif [[ "$primary" == "$matched" ]]; then[0m
+2026-09-16T18:52:10.8251258Z [36;1m    echo exact[0m
+2026-09-16T18:52:10.8251517Z [36;1m  else[0m
+2026-09-16T18:52:10.8251758Z [36;1m    echo prefix[0m
+2026-09-16T18:52:10.8252022Z [36;1m  fi[0m
+2026-09-16T18:52:10.8252252Z [36;1m}[0m
+2026-09-16T18:52:10.8252501Z [36;1mhost_warm_layer() {[0m
+2026-09-16T18:52:10.8252791Z [36;1m  local layer="$1"[0m
+2026-09-16T18:52:10.8253114Z [36;1m  local layers="${VELNOR_HOST_WARM_LAYERS:-}"[0m
+2026-09-16T18:52:10.8253469Z [36;1m  [[ -n "$layers" ]] || return 1[0m
+2026-09-16T18:52:10.8253802Z [36;1m  [[ ",$layers," == *",$layer,"* ]][0m
+2026-09-16T18:52:10.8254109Z [36;1m}[0m
+2026-09-16T18:52:10.8254349Z [36;1mclassify_mbx() {[0m
+2026-09-16T18:52:10.8254773Z [36;1m  if host_warm_layer mbx; then[0m
+2026-09-16T18:52:10.8255081Z [36;1m    echo host_warm[0m
+2026-09-16T18:52:10.8255508Z [36;1m    return[0m
+2026-09-16T18:52:10.8255758Z [36;1m  fi[0m
+2026-09-16T18:52:10.8256033Z [36;1m  local hit="${VELNOR_CACHE_MBX_HIT:-}"[0m
+2026-09-16T18:52:10.8256493Z [36;1m  if [[ "$hit" == "true" ]]; then[0m
+2026-09-16T18:52:10.8256816Z [36;1m    echo exact[0m
+2026-09-16T18:52:10.8257075Z [36;1m    return[0m
+2026-09-16T18:52:10.8257317Z [36;1m  fi[0m
+2026-09-16T18:52:10.8257692Z [36;1m  if [[ -s "$log" ]]; then[0m
+2026-09-16T18:52:10.8258028Z [36;1m    if grep -qiE 'exact hit' "$log"; then[0m
+2026-09-16T18:52:10.8259056Z [36;1m      echo exact[0m
+2026-09-16T18:52:10.8259338Z [36;1m      return[0m
+2026-09-16T18:52:10.8259590Z [36;1m    fi[0m
+2026-09-16T18:52:10.8259867Z [36;1m    if grep -qiE 'warm start' "$log"; then[0m
+2026-09-16T18:52:10.8260197Z [36;1m      echo prefix[0m
+2026-09-16T18:52:10.8260472Z [36;1m      return[0m
+2026-09-16T18:52:10.8260717Z [36;1m    fi[0m
+2026-09-16T18:52:10.8261016Z [36;1m    if grep -qiE '(^|[^a-z])miss([^a-z]|$)' "$log"; then[0m
+2026-09-16T18:52:10.8261380Z [36;1m      echo cold[0m
+2026-09-16T18:52:10.8261639Z [36;1m      return[0m
+2026-09-16T18:52:10.8261882Z [36;1m    fi[0m
+2026-09-16T18:52:10.8262125Z [36;1m  fi[0m
+2026-09-16T18:52:10.8262374Z [36;1m  if [[ "$hit" == "false" ]]; then[0m
+2026-09-16T18:52:10.8262681Z [36;1m    echo prefix[0m
+2026-09-16T18:52:10.8262945Z [36;1m    return[0m
+2026-09-16T18:52:10.8263188Z [36;1m  fi[0m
+2026-09-16T18:52:10.8263432Z [36;1m  echo cold[0m
+2026-09-16T18:52:10.8263682Z [36;1m}[0m
+2026-09-16T18:52:10.8263924Z [36;1mcache_outcome_for() {[0m
+2026-09-16T18:52:10.8264218Z [36;1m  local layer="$1"[0m
+2026-09-16T18:52:10.8264653Z [36;1m  local primary="${2:-}" matched="${3:-}"[0m
+2026-09-16T18:52:10.8265164Z [36;1m  if host_warm_layer "$layer"; then[0m
+2026-09-16T18:52:10.8265486Z [36;1m    echo host_warm[0m
+2026-09-16T18:52:10.8265752Z [36;1m    return[0m
+2026-09-16T18:52:10.8265993Z [36;1m  fi[0m
+2026-09-16T18:52:10.8266238Z [36;1m  if [[ "$layer" == mbx ]]; then[0m
+2026-09-16T18:52:10.8266560Z [36;1m    classify_mbx[0m
+2026-09-16T18:52:10.8266824Z [36;1m    return[0m
+2026-09-16T18:52:10.8267067Z [36;1m  fi[0m
+2026-09-16T18:52:10.8267331Z [36;1m  classify_gha_cache "$primary" "$matched"[0m
+2026-09-16T18:52:10.8267664Z [36;1m}[0m
+2026-09-16T18:52:10.8268164Z [36;1mrustup_outcome="$(cache_outcome_for rustup "${VELNOR_CACHE_RUSTUP_PRIMARY:-}" "${VELNOR_CACHE_RUSTUP_MATCHED:-}")"[0m
+2026-09-16T18:52:10.8268954Z [36;1mmold_outcome="$(cache_outcome_for mold "${VELNOR_CACHE_MOLD_PRIMARY:-}" "${VELNOR_CACHE_MOLD_MATCHED:-}")"[0m
+2026-09-16T18:52:10.8269708Z [36;1mcargo_outcome="$(cache_outcome_for cargo "${VELNOR_CACHE_CARGO_PRIMARY:-}" "${VELNOR_CACHE_CARGO_MATCHED:-}")"[0m
+2026-09-16T18:52:10.8270450Z [36;1mmbx_outcome="$(cache_outcome_for mbx "" "")"[0m
+2026-09-16T18:52:10.8271122Z [36;1mdocker_seed_outcome="$(cache_outcome_for docker_seed "${VELNOR_CACHE_DOCKER_SEED_PRIMARY:-}" "${VELNOR_CACHE_DOCKER_SEED_MATCHED:-}")"[0m
+2026-09-16T18:52:10.8271748Z [36;1mupdating_index=0[0m
+2026-09-16T18:52:10.8272026Z [36;1mupdating_git=0[0m
+2026-09-16T18:52:10.8272314Z [36;1mdownloading_crates=0[0m
+2026-09-16T18:52:10.8272616Z [36;1mcompiling_count=0[0m
+2026-09-16T18:52:10.8272912Z [36;1mdownloaded_lines=""[0m
+2026-09-16T18:52:10.8273195Z [36;1mmbx_lines=""[0m
+2026-09-16T18:52:10.8273453Z [36;1mfinished_lines=""[0m
+2026-09-16T18:52:10.8273740Z [36;1mif [[ -s "$log" ]]; then[0m
+2026-09-16T18:52:10.8274236Z [36;1m  updating_index="$(grep -c 'Updating crates.io index' "$log" || true)"[0m
+2026-09-16T18:52:10.8274920Z [36;1m  updating_git="$(grep -cE 'Updating git (repository|submodule)' "$log" || true)"[0m
+2026-09-16T18:52:10.8275491Z [36;1m  downloading_crates="$(grep -c 'Downloading crates' "$log" || true)"[0m
+2026-09-16T18:52:10.8276005Z [36;1m  compiling_count="$(grep -c 'Compiling ' "$log" || true)"[0m
+2026-09-16T18:52:10.8276502Z [36;1m  downloaded_lines="$(grep -E 'Downloaded [0-9]+ crate' "$log" || true)"[0m
+2026-09-16T18:52:10.8277207Z [36;1m  mbx_lines="$(grep -E 'mbx(\[cache\])?:' "$log" | grep -E 'hits|misses' || true)"[0m
+2026-09-16T18:52:10.8277850Z [36;1m  finished_lines="$(grep -E 'Finished .* in ' "$log" || true)"[0m
+2026-09-16T18:52:10.8278232Z [36;1mfi[0m
+2026-09-16T18:52:10.8278476Z [36;1mpositive_int() {[0m
+2026-09-16T18:52:10.8278754Z [36;1m  local value="$1"[0m
+2026-09-16T18:52:10.8279198Z [36;1m  [[ "$value" =~ ^[0-9]+$ ]] || value=0[0m
+2026-09-16T18:52:10.8279542Z [36;1m  printf '%s' "$value"[0m
+2026-09-16T18:52:10.8279825Z [36;1m}[0m
+2026-09-16T18:52:10.8280071Z [36;1mcache_outcomes_json='{}'[0m
+2026-09-16T18:52:10.8280405Z [36;1mif command -v jq >/dev/null 2>&1; then[0m
+2026-09-16T18:52:10.8280834Z [36;1m  cache_outcomes_json="$(jq -nc \[0m
+2026-09-16T18:52:10.8281181Z [36;1m    --arg lane "${VELNOR_CI_LANE:-}" \[0m
+2026-09-16T18:52:10.8281529Z [36;1m    --arg rustup "$rustup_outcome" \[0m
+2026-09-16T18:52:10.8281879Z [36;1m    --arg mold "$mold_outcome" \[0m
+2026-09-16T18:52:10.8282226Z [36;1m    --arg cargo "$cargo_outcome" \[0m
+2026-09-16T18:52:10.8282564Z [36;1m    --arg mbx "$mbx_outcome" \[0m
+2026-09-16T18:52:10.8282922Z [36;1m    --arg docker_seed "$docker_seed_outcome" \[0m
+2026-09-16T18:52:10.8283346Z [36;1m    '{[0m
+2026-09-16T18:52:10.8283652Z [36;1m      lane: ($lane | if length > 0 then . else null end),[0m
+2026-09-16T18:52:10.8284095Z [36;1m      rustup: ($rustup | if length > 0 then . else null end),[0m
+2026-09-16T18:52:10.8285003Z [36;1m      mold: ($mold | if length > 0 then . else null end),[0m
+2026-09-16T18:52:10.8285581Z [36;1m      cargo: ($cargo | if length > 0 then . else null end),[0m
+2026-09-16T18:52:10.8286007Z [36;1m      mbx: ($mbx | if length > 0 then . else null end),[0m
+2026-09-16T18:52:10.8286516Z [36;1m      docker_seed: ($docker_seed | if length > 0 then . else null end)[0m
+2026-09-16T18:52:10.8286937Z [36;1m    }' 2>/dev/null || echo '{}')"[0m
+2026-09-16T18:52:10.8287237Z [36;1mfi[0m
+2026-09-16T18:52:10.8287545Z [36;1mcold_layers=()[0m
+2026-09-16T18:52:10.8287884Z [36;1mfor layer in rustup mold cargo mbx docker_seed; do[0m
+2026-09-16T18:52:10.8288320Z [36;1m  outcome=""[0m
+2026-09-16T18:52:10.8288590Z [36;1m  case "$layer" in[0m
+2026-09-16T18:52:10.8288900Z [36;1m    rustup) outcome="$rustup_outcome" ;;[0m
+2026-09-16T18:52:10.8289267Z [36;1m    mold) outcome="$mold_outcome" ;;[0m
+2026-09-16T18:52:10.8289618Z [36;1m    cargo) outcome="$cargo_outcome" ;;[0m
+2026-09-16T18:52:10.8290129Z [36;1m    mbx) outcome="$mbx_outcome" ;;[0m
+2026-09-16T18:52:10.8290495Z [36;1m    docker_seed) outcome="$docker_seed_outcome" ;;[0m
+2026-09-16T18:52:10.8290833Z [36;1m  esac[0m
+2026-09-16T18:52:10.8291092Z [36;1m  if [[ "$outcome" == cold ]]; then[0m
+2026-09-16T18:52:10.8291417Z [36;1m    cold_layers+=("$layer")[0m
+2026-09-16T18:52:10.8291709Z [36;1m  fi[0m
+2026-09-16T18:52:10.8291942Z [36;1mdone[0m
+2026-09-16T18:52:10.8292191Z [36;1mreport_json="$(jq -nc \[0m
+2026-09-16T18:52:10.8292495Z [36;1m  --arg job "$job_name" \[0m
+2026-09-16T18:52:10.8292805Z [36;1m  --arg queue "$queue" \[0m
+2026-09-16T18:52:10.8293122Z [36;1m  --arg queue_source "$queue_source" \[0m
+2026-09-16T18:52:10.8293468Z [36;1m  --arg total_source "$total_source" \[0m
+2026-09-16T18:52:10.8293817Z [36;1m  --arg runner_setup "$runner_setup" \[0m
+2026-09-16T18:52:10.8294207Z [36;1m  --arg selection_transport "$selection_transport" \[0m
+2026-09-16T18:52:10.8294731Z [36;1m  --arg tool_bootstrap "$tool_bootstrap" \[0m
+2026-09-16T18:52:10.8295098Z [36;1m  --arg cache_prep "$cache_prep" \[0m
+2026-09-16T18:52:10.8295437Z [36;1m  --arg cargo_fetch "$cargo_fetch" \[0m
+2026-09-16T18:52:10.8295774Z [36;1m  --arg checks_wall "$checks_wall" \[0m
+2026-09-16T18:52:10.8296101Z [36;1m  --arg cleanup "$cleanup" \[0m
+2026-09-16T18:52:10.8296417Z [36;1m  --arg total "$total" \[0m
+2026-09-16T18:52:10.8296739Z [36;1m  --argjson log_present "$log_present" \[0m
+2026-09-16T18:52:10.8297178Z [36;1m  --argjson updating_index "$(positive_int "$updating_index")" \[0m
+2026-09-16T18:52:10.8297869Z [36;1m  --argjson updating_git "$(positive_int "$updating_git")" \[0m
+2026-09-16T18:52:10.8298397Z [36;1m  --argjson downloading_crates "$(positive_int "$downloading_crates")" \[0m
+2026-09-16T18:52:10.8298943Z [36;1m  --argjson compiling_count "$(positive_int "$compiling_count")" \[0m
+2026-09-16T18:52:10.8299751Z [36;1m  --argjson downloaded_lines "$(printf '%s' "$downloaded_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \[0m
+2026-09-16T18:52:10.8300502Z [36;1m  --argjson mbx "$(printf '%s' "$mbx_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \[0m
+2026-09-16T18:52:10.8301205Z [36;1m  --argjson finished "$(printf '%s' "$finished_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \[0m
+2026-09-16T18:52:10.8301791Z [36;1m  --argjson cache_outcomes "$cache_outcomes_json" \[0m
+2026-09-16T18:52:10.8302151Z [36;1m  '{[0m
+2026-09-16T18:52:10.8302407Z [36;1m    schema_version: 1,[0m
+2026-09-16T18:52:10.8302708Z [36;1m    job: $job,[0m
+2026-09-16T18:52:10.8302995Z [36;1m    log_present: $log_present,[0m
+2026-09-16T18:52:10.8303444Z [36;1m    queue_seconds: ($queue | if test("^[0-9]+$") then tonumber else null end),[0m
+2026-09-16T18:52:10.8303982Z [36;1m    queue_source: ($queue_source | if length > 0 then . else null end),[0m
+2026-09-16T18:52:10.8304532Z [36;1m    total_source: $total_source,[0m
+2026-09-16T18:52:10.8305149Z [36;1m    runner_setup_seconds: ($runner_setup | if test("^[0-9]+$") then tonumber else null end),[0m
+2026-09-16T18:52:10.8305842Z [36;1m    selection_transport_seconds: ($selection_transport | if test("^[0-9]+$") then tonumber else null end),[0m
+2026-09-16T18:52:10.8306544Z [36;1m    tool_bootstrap_seconds: ($tool_bootstrap | if test("^[0-9]+$") then tonumber else null end),[0m
+2026-09-16T18:52:10.8307315Z [36;1m    cache_prep_seconds: ($cache_prep | if test("^[0-9]+$") then tonumber else null end),[0m
+2026-09-16T18:52:10.8307954Z [36;1m    cargo_fetch_seconds: ($cargo_fetch | if test("^[0-9]+$") then tonumber else null end),[0m
+2026-09-16T18:52:10.8308884Z [36;1m    checks_wall_seconds: ($checks_wall | if test("^[0-9]+$") then tonumber else null end),[0m
+2026-09-16T18:52:10.8309551Z [36;1m    checks_seconds: ($checks_wall | if test("^[0-9]+$") then tonumber else null end),[0m
+2026-09-16T18:52:10.8310140Z [36;1m    cleanup_seconds: ($cleanup | if test("^[0-9]+$") then tonumber else null end),[0m
+2026-09-16T18:52:10.8310776Z [36;1m    total_seconds: ($total | if test("^[0-9]+$") then tonumber else null end),[0m
+2026-09-16T18:52:10.8311284Z [36;1m    cache_outcomes: $cache_outcomes,[0m
+2026-09-16T18:52:10.8311632Z [36;1m    origin_downloads: {[0m
+2026-09-16T18:52:10.8311994Z [36;1m      updating_crates_io_index: $updating_index,[0m
+2026-09-16T18:52:10.8312371Z [36;1m      updating_git: $updating_git,[0m
+2026-09-16T18:52:10.8312752Z [36;1m      downloading_crates: $downloading_crates,[0m
+2026-09-16T18:52:10.8313128Z [36;1m      downloaded_lines: $downloaded_lines[0m
+2026-09-16T18:52:10.8313461Z [36;1m    },[0m
+2026-09-16T18:52:10.8313715Z [36;1m    compiler: {[0m
+2026-09-16T18:52:10.8314226Z [36;1m      mbx_outcomes: $mbx,[0m
+2026-09-16T18:52:10.8314674Z [36;1m      finished_segments: $finished,[0m
+2026-09-16T18:52:10.8315038Z [36;1m      compiling_lines: $compiling_count[0m
+2026-09-16T18:52:10.8315362Z [36;1m    }[0m
+2026-09-16T18:52:10.8315629Z [36;1m  }' 2>/dev/null || true)"[0m
+2026-09-16T18:52:10.8315960Z [36;1mif [[ -z "$report_json" ]]; then[0m
+2026-09-16T18:52:10.8316410Z [36;1m  report_json="VELNOR_CI_REPORT_FALLBACK job=$job_name"[0m
+2026-09-16T18:52:10.8316789Z [36;1mfi[0m
+2026-09-16T18:52:10.8317067Z [36;1mecho "VELNOR_CI_REPORT $report_json"[0m
+2026-09-16T18:52:10.8317393Z [36;1m{[0m
+2026-09-16T18:52:10.8317622Z [36;1m  echo ""[0m
+2026-09-16T18:52:10.8317927Z [36;1m  echo '### Phase timings and cache outcomes'[0m
+2026-09-16T18:52:10.8318265Z [36;1m  echo ""[0m
+2026-09-16T18:52:10.8318515Z [36;1m  echo '```json'[0m
+2026-09-16T18:52:10.8318948Z [36;1m  echo "$report_json"[0m
+2026-09-16T18:52:10.8319239Z [36;1m  echo '```'[0m
+2026-09-16T18:52:10.8319494Z [36;1m  echo ""[0m
+2026-09-16T18:52:10.8319755Z [36;1m  echo "| metric | value |"[0m
+2026-09-16T18:52:10.8320062Z [36;1m  echo "| --- | --- |"[0m
+2026-09-16T18:52:10.8320395Z [36;1m  echo "| lane | ${VELNOR_CI_LANE:-unknown} |"[0m
+2026-09-16T18:52:10.8320933Z [36;1m  echo "| cache_outcomes.rustup | ${rustup_outcome:-n/a} |"[0m
+2026-09-16T18:52:10.8321387Z [36;1m  echo "| cache_outcomes.mold | ${mold_outcome:-n/a} |"[0m
+2026-09-16T18:52:10.8321895Z [36;1m  echo "| cache_outcomes.cargo | ${cargo_outcome:-n/a} |"[0m
+2026-09-16T18:52:10.8322762Z [36;1m  echo "| cache_outcomes.mbx | ${mbx_outcome:-n/a} |"[0m
+2026-09-16T18:52:10.8323373Z [36;1m  echo "| cache_outcomes.docker_seed | ${docker_seed_outcome:-n/a} |"[0m
+2026-09-16T18:52:10.8345447Z [36;1m  echo "| queue_seconds | ${queue:-unknown} |"[0m
+2026-09-16T18:52:10.8345943Z [36;1m  echo "| runner_setup_seconds | ${runner_setup:-unknown} |"[0m
+2026-09-16T18:52:10.8346493Z [36;1m  echo "| selection_transport_seconds | ${selection_transport:-unknown} |"[0m
+2026-09-16T18:52:10.8347029Z [36;1m  echo "| tool_bootstrap_seconds | ${tool_bootstrap:-unknown} |"[0m
+2026-09-16T18:52:10.8347501Z [36;1m  echo "| cache_prep_seconds | ${cache_prep:-unknown} |"[0m
+2026-09-16T18:52:10.8347944Z [36;1m  echo "| cargo_fetch_seconds | ${cargo_fetch:-unknown} |"[0m
+2026-09-16T18:52:10.8348374Z [36;1m  echo "| checks_wall_seconds | ${checks_wall:-unknown} |"[0m
+2026-09-16T18:52:10.8348786Z [36;1m  echo "| cleanup_seconds | ${cleanup:-unknown} |"[0m
+2026-09-16T18:52:10.8349176Z [36;1m  echo "| total_seconds | ${total:-unknown} |"[0m
+2026-09-16T18:52:10.8349581Z [36;1m  echo "| updating_crates_io_index | $updating_index |"[0m
+2026-09-16T18:52:10.8349990Z [36;1m  echo "| updating_git | $updating_git |"[0m
+2026-09-16T18:52:10.8350413Z [36;1m  echo "| downloading_crates | $downloading_crates |"[0m
+2026-09-16T18:52:10.8350831Z [36;1m  echo "| compiling_lines | $compiling_count |"[0m
+2026-09-16T18:52:10.8351208Z [36;1m} >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true[0m
+2026-09-16T18:52:10.8351554Z [36;1mif ((${#cold_layers[@]} > 0)); then[0m
+2026-09-16T18:52:10.8352035Z [36;1m  echo "::warning::Cold cache layer(s): ${cold_layers[*]} (lane=${VELNOR_CI_LANE:-unknown})"[0m
+2026-09-16T18:52:10.8352502Z [36;1mfi[0m
+2026-09-16T18:52:10.8352746Z [36;1mexit 0[0m
+2026-09-16T18:52:10.8393647Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-09-16T18:52:10.8394050Z env:
+2026-09-16T18:52:10.8394703Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+2026-09-16T18:52:10.8395294Z   MISE_LOG_LEVEL: info
+2026-09-16T18:52:10.8398539Z   MISE_GITHUB_TOKEN: ***
+2026-09-16T18:52:10.8398921Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor/velnor
+2026-09-16T18:52:10.8399299Z   MISE_YES: 1
+2026-09-16T18:52:10.8399546Z   MBX_GC_MAX_SIZE: 12GiB
+2026-09-16T18:52:10.8399834Z   MBX_CACHE_LINKS: 1
+2026-09-16T18:52:10.8400287Z   MBX_CACHE_EXPORT_GROUP: github-actions-35136207272-2-2c5529e8-956a-4cb2-9f85-f407c3126ac8
+2026-09-16T18:52:10.8400807Z   VELNOR_JOB_NAME: rust-velnor-workflow
+2026-09-16T18:52:10.8401141Z   VELNOR_CONTEXT_RUN_STARTED_AT: 
+2026-09-16T18:52:10.8401447Z   VELNOR_CI_LANE: github
+2026-09-16T18:52:10.8401720Z   VELNOR_HOST_WARM_LAYERS: 
+2026-09-16T18:52:10.8402008Z   VELNOR_RUN_STARTED_AT: 
+2026-09-16T18:52:10.8402281Z   VELNOR_JOB_QUEUED_AT: 
+2026-09-16T18:52:10.8402868Z   VELNOR_CACHE_RUSTUP_PRIMARY: velnor-rustup-Linux-X64-01ca15e1b24a13a2533dc81d701f5db1ad9bd6bd978dbd566dac8f8bf1d492dd
+2026-09-16T18:52:10.8403800Z   VELNOR_CACHE_RUSTUP_MATCHED: velnor-rustup-Linux-X64-01ca15e1b24a13a2533dc81d701f5db1ad9bd6bd978dbd566dac8f8bf1d492dd
+2026-09-16T18:52:10.8404721Z   VELNOR_CACHE_MOLD_PRIMARY: velnor-mold-2.42.0-Linux-X64
+2026-09-16T18:52:10.8405194Z   VELNOR_CACHE_MOLD_MATCHED: velnor-mold-2.42.0-Linux-X64
+2026-09-16T18:52:10.8405818Z   VELNOR_CACHE_CARGO_PRIMARY: ci-Linux-X64-rust-c44682eef9d76c7ba6ee840ea757487825d0a27427c5376b4146260368079d5d
+2026-09-16T18:52:10.8406879Z   VELNOR_CACHE_CARGO_MATCHED: ci-Linux-X64-rust-c44682eef9d76c7ba6ee840ea757487825d0a27427c5376b4146260368079d5d
+2026-09-16T18:52:10.8407447Z   VELNOR_CACHE_MBX_HIT: false
+2026-09-16T18:52:10.8408699Z   VELNOR_CACHE_MBX_PRIMARY: velnor-mbx-v3-434caa7ff878-Linux-X64-rust-velnor-workflow-c44682eef9d76c7ba6ee840ea757487825d0a27427c5376b4146260368079d5d-caae2da4138f46f6612906eb7f3035f1cbd2cb80ba7368b3f7ef7a3e82495335
+2026-09-16T18:52:10.8409837Z   VELNOR_CACHE_DOCKER_SEED_PRIMARY: 
+2026-09-16T18:52:10.8410154Z   VELNOR_CACHE_DOCKER_SEED_MATCHED: 
+2026-09-16T18:52:10.8410447Z ##[endgroup]
+2026-09-16T18:52:10.9309669Z VELNOR_CI_REPORT {"schema_version":1,"job":"rust-velnor-workflow","log_present":true,"queue_seconds":null,"queue_source":null,"total_source":"job_markers","runner_setup_seconds":2,"selection_transport_seconds":0,"tool_bootstrap_seconds":54,"cache_prep_seconds":4,"cargo_fetch_seconds":0,"checks_wall_seconds":10,"checks_seconds":10,"cleanup_seconds":0,"total_seconds":70,"cache_outcomes":{"lane":"github","rustup":"exact","mold":"exact","cargo":"exact","mbx":"prefix","docker_seed":null},"origin_downloads":{"updating_crates_io_index":0,"updating_git":0,"downloading_crates":0,"downloaded_lines":[]},"compiler":{"mbx_outcomes":["mbx[cache]: object cache: 0 hits, 0 misses, 3 not looked up, 1 bypassed; 0 B downloaded, 0 B uploaded, 206.5 MiB stored locally"],"finished_segments":["    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.54s"],"compiling_lines":1}}
+2026-09-16T18:52:10.9342450Z ##[end-action id=__self.__run;outcome=success;conclusion=success;duration_ms=116]
+2026-09-16T18:52:10.9753631Z Post job cleanup.
+2026-09-16T18:52:11.0872006Z [command]/usr/bin/git version
+2026-09-16T18:52:11.0956015Z git version 2.55.0
+2026-09-16T18:52:11.0995463Z Temporarily overriding HOME='/home/runner/work/_temp/d7d69312-d3b0-4da8-9a25-c3eefcdf9d10' before making global git config changes
+2026-09-16T18:52:11.0997201Z Adding repository directory to the temporary git global config as a safe directory
+2026-09-16T18:52:11.0998475Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor
+2026-09-16T18:52:11.1152964Z Removing SSH command configuration
+2026-09-16T18:52:11.1161955Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-09-16T18:52:11.1224968Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-09-16T18:52:11.1510087Z Removing HTTP extra header
+2026-09-16T18:52:11.1517028Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-09-16T18:52:11.1561843Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-09-16T18:52:11.1846130Z Removing includeIf entries pointing to credentials config files
+2026-09-16T18:52:11.1853448Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-09-16T18:52:11.1919423Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-09-16T18:52:11.2368634Z Cleaning up orphan processes

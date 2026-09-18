@@ -1,0 +1,23 @@
+==> actionlint .github/workflows/ci-main.yml .github/workflows/ci-policy.yml .github/workflows/ci-pr.yml .github/workflows/ci-unit-bun.yml .github/workflows/ci-unit-docker.yml .github/workflows/ci-unit-rust.yml .github/workflows/ci-unit-swift.yml .github/workflows/desktop-merge.yml .github/workflows/desktop-scheduled.yml .github/workflows/maintenance.yml .github/workflows/nightly.yml .github/workflows/release.yml .github/workflows/renovate-upstream-sources.yml .github/workflows/renovate-validate.yml .github/workflows/renovate.yml
+==> cargo fmt --check
+==> cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+==> cargo xtask lint --strict
+==> cargo check --workspace --all-targets --locked
+==> cargo nextest run --workspace --all-features --locked
+==> cargo test --doc --workspace --locked
+==> cargo audit
+==> cargo deny check advisories bans licenses sources
+==> cargo xtask schema-check --base origin/main
+==> cargo shear --deny-warnings
+==> cargo hack check --workspace --feature-powerset --all-targets --locked
+==> cargo xtask roadmap audit
+==> cargo xtask docs repo-links
+==> cargo xtask research check
+==> cargo nextest run -p jackin-capsule -p jackin-console --locked
+==> docker info
+==> cargo run --bin build-jackin-capsule -- --export
+==> cargo nextest run -p jackin --features e2e --profile docker-e2e --locked --offline
+ci gate OK
+mbx[cache]: 87 hits, 2 misses, 29 bypassed; 0 B downloaded, 0 B uploaded, 57.9 KiB stored locally
+mbx[savings]: lent the same 314.3 GiB to every checkout at once. none of them has checked.
+FULL_CI3_EXIT=0

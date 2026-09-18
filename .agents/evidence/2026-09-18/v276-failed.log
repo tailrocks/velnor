@@ -1,0 +1,643 @@
+Control / Verify release	UNKNOWN STEP	﻿2026-09-18T04:15:17.2295070Z Current runner version: '2.337.0'
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2312979Z ##[group]Runner Image Provisioner
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2313661Z Hosted Compute Agent
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2314054Z Version: 20260828.587
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2314463Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2315072Z Build Date: 2026-08-28T16:44:25Z
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2315534Z Worker ID: {3bf7b6b5-17b5-4472-86eb-5d34141c5a85}
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2316013Z Azure Region: centralus
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2316408Z ##[endgroup]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2317476Z ##[group]Operating System
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2317908Z Ubuntu
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2318255Z 24.04.5
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2318600Z LTS
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2318953Z ##[endgroup]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2319337Z ##[group]Runner Image
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2319745Z Image: ubuntu-24.04
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2320123Z Version: 20260907.300.1
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2320992Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260907.300/images/ubuntu/Ubuntu2404-Readme.md
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2322273Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260907.300
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2323210Z ##[endgroup]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2323978Z ##[group]GITHUB_TOKEN Permissions
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2325686Z Contents: read
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2326084Z Metadata: read
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2326511Z ##[endgroup]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2328017Z Secret source: Actions
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2328607Z Cache mode: write
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2329134Z Prepare workflow directory
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2563589Z Prepare all required actions
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.2599270Z Getting action download info
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:17.5021449Z Download action repository 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' (SHA:3d3c42e5aac5ba805825da76410c181273ba90b1)
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.1489710Z Download action repository 'mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba' (SHA:fc920bf0ec8de6ee65d409111f7ec508035751ba)
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.5202187Z Complete job name: Control / Verify release
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.5716960Z ##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.5717727Z with:
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.5718136Z   fetch-depth: 0
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.5718517Z   persist-credentials: false
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.5718930Z   repository: tailrocks/velnor
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.5722175Z   token: ***
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.5722574Z   ssh-strict: true
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.5722960Z   ssh-user: git
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.5723356Z   clean: true
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.5723714Z   sparse-checkout-cone-mode: true
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.5724176Z   fetch-tags: false
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.5724566Z   show-progress: true
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.5724943Z   lfs: false
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.5725334Z   submodules: false
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.5725692Z   set-safe-directory: true
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.5726135Z   allow-unsafe-pr-checkout: false
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.5726722Z ##[endgroup]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6489123Z Syncing repository: tailrocks/velnor
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6491130Z ##[group]Getting Git version info
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6492306Z Working directory is '/home/runner/work/velnor/velnor'
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6493456Z [command]/usr/bin/git version
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6649552Z git version 2.55.0
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6665987Z ##[endgroup]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6674413Z Temporarily overriding HOME='/home/runner/work/_temp/420afc0c-b52e-4e1b-bcb9-b7e8093de22c' before making global git config changes
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6679135Z Adding repository directory to the temporary git global config as a safe directory
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6680390Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6717430Z Deleting the contents of '/home/runner/work/velnor/velnor'
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6720502Z ##[group]Determining repository object format
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6721683Z ##[endgroup]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6722534Z ##[group]Initializing the repository
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6725561Z [command]/usr/bin/git init /home/runner/work/velnor/velnor
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6829920Z hint: Using 'master' as the name for the initial branch. This default branch name
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6831523Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6832689Z hint: to use in all of your new repositories, which will suppress this warning,
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6833450Z hint: call:
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6833833Z hint:
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6834293Z hint: 	git config --global init.defaultBranch <name>
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6834774Z hint:
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6835273Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6836182Z hint: 'development'. The just-created branch can be renamed via this command:
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6836803Z hint:
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6837152Z hint: 	git branch -m <name>
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6837524Z hint:
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6838050Z hint: Disable this message with "git config set advice.defaultBranchName false"
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6838887Z Initialized empty Git repository in /home/runner/work/velnor/velnor/.git/
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6842180Z [command]/usr/bin/git remote add origin https://github.com/tailrocks/velnor
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6881432Z ##[endgroup]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6882311Z ##[group]Disabling automatic garbage collection
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6886692Z [command]/usr/bin/git config --local gc.auto 0
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6909910Z ##[endgroup]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6910577Z ##[group]Setting up auth
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6916475Z Removing SSH command configuration
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6928215Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.6945154Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.7206256Z Removing HTTP extra header
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.7210849Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.7231276Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.7369900Z Removing includeIf entries pointing to credentials config files
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.7373167Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.7394787Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.7540782Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-3fdd1758-d88a-4a8c-b05b-1023f79a5aa7.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.7565072Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/.git.path /home/runner/work/_temp/git-credentials-3fdd1758-d88a-4a8c-b05b-1023f79a5aa7.config
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.7585188Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-3fdd1758-d88a-4a8c-b05b-1023f79a5aa7.config
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.7613049Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-3fdd1758-d88a-4a8c-b05b-1023f79a5aa7.config
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.7632253Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-3fdd1758-d88a-4a8c-b05b-1023f79a5aa7.config
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.7654447Z ##[endgroup]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.7655463Z ##[group]Fetching the repository
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:18.7656801Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules origin +refs/heads/*:refs/remotes/origin/* +refs/tags/*:refs/tags/*
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0924241Z From https://github.com/tailrocks/velnor
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0925161Z  * [new branch]        feat/a2-consumer-negatives -> origin/feat/a2-consumer-negatives
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0926076Z  * [new branch]        feat/a2-provision-promotion -> origin/feat/a2-provision-promotion
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0926737Z  * [new branch]        feat/a2-signer-order    -> origin/feat/a2-signer-order
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0927328Z  * [new branch]        feat/a2-source-identity -> origin/feat/a2-source-identity
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0927991Z  * [new branch]        feat/b1-apt-primitives  -> origin/feat/b1-apt-primitives
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0928616Z  * [new branch]        feat/c2-unbounded-global-n -> origin/feat/c2-unbounded-global-n
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0929177Z  * [new branch]        feat/d1-daemon-wiring   -> origin/feat/d1-daemon-wiring
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0929750Z  * [new branch]        feat/d1-processor-loop  -> origin/feat/d1-processor-loop
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0930356Z  * [new branch]        feat/d1-scaleset-protocol -> origin/feat/d1-scaleset-protocol
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0930980Z  * [new branch]        feat/d1-worker-lane     -> origin/feat/d1-worker-lane
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0931643Z  * [new branch]        feat/d2-provider-schema -> origin/feat/d2-provider-schema
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0932518Z  * [new branch]        feat/d2-provider-schema-rest -> origin/feat/d2-provider-schema-rest
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0933156Z  * [new branch]        fix/opstore-rejection-cause -> origin/fix/opstore-rejection-cause
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0933826Z  * [new branch]        fix/pin-fetch-in-tool   -> origin/fix/pin-fetch-in-tool
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0934431Z  * [new branch]        fix/preview-guest-upload -> origin/fix/preview-guest-upload
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0934960Z  * [new branch]        fix/publish-403         -> origin/fix/publish-403
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0935480Z  * [new branch]        fix/security-audit-batch1 -> origin/fix/security-audit-batch1
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0936037Z  * [new branch]        fix/typed-docker-contexts -> origin/fix/typed-docker-contexts
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0936565Z  * [new branch]        main                    -> origin/main
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0937332Z  * [new branch]        perf/main-docker-gha-cache -> origin/perf/main-docker-gha-cache
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0938072Z  * [new tag]           archive/velnor2-pre-rebuild-20260831-bc593406 -> archive/velnor2-pre-rebuild-20260831-bc593406
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0938815Z  * [new tag]           dima/velnor6-archive-4d81a14 -> dima/velnor6-archive-4d81a14
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0939358Z  * [new tag]           preview                 -> preview
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0939836Z  * [new tag]           v0.0.0-b3probe          -> v0.0.0-b3probe
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0940271Z  * [new tag]           v0.1.10                 -> v0.1.10
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0940729Z  * [new tag]           v0.1.100                -> v0.1.100
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0941154Z  * [new tag]           v0.1.101                -> v0.1.101
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0941618Z  * [new tag]           v0.1.102                -> v0.1.102
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0942264Z  * [new tag]           v0.1.103                -> v0.1.103
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0942733Z  * [new tag]           v0.1.104                -> v0.1.104
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0943085Z  * [new tag]           v0.1.105                -> v0.1.105
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0943431Z  * [new tag]           v0.1.106                -> v0.1.106
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0943773Z  * [new tag]           v0.1.107                -> v0.1.107
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0944105Z  * [new tag]           v0.1.108                -> v0.1.108
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0944440Z  * [new tag]           v0.1.109                -> v0.1.109
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0944766Z  * [new tag]           v0.1.11                 -> v0.1.11
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0945092Z  * [new tag]           v0.1.110                -> v0.1.110
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0945410Z  * [new tag]           v0.1.111                -> v0.1.111
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0945759Z  * [new tag]           v0.1.112                -> v0.1.112
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0946078Z  * [new tag]           v0.1.113                -> v0.1.113
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0946403Z  * [new tag]           v0.1.114                -> v0.1.114
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0946870Z  * [new tag]           v0.1.115                -> v0.1.115
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0947733Z  * [new tag]           v0.1.116                -> v0.1.116
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0948069Z  * [new tag]           v0.1.117                -> v0.1.117
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0948372Z  * [new tag]           v0.1.118                -> v0.1.118
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0948713Z  * [new tag]           v0.1.119                -> v0.1.119
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0949052Z  * [new tag]           v0.1.12                 -> v0.1.12
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0949389Z  * [new tag]           v0.1.120                -> v0.1.120
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0949699Z  * [new tag]           v0.1.121                -> v0.1.121
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0949995Z  * [new tag]           v0.1.122                -> v0.1.122
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0950322Z  * [new tag]           v0.1.123                -> v0.1.123
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0950631Z  * [new tag]           v0.1.124                -> v0.1.124
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0950948Z  * [new tag]           v0.1.125                -> v0.1.125
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0951322Z  * [new tag]           v0.1.126                -> v0.1.126
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0951654Z  * [new tag]           v0.1.127                -> v0.1.127
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0952534Z  * [new tag]           v0.1.128                -> v0.1.128
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0953266Z  * [new tag]           v0.1.129                -> v0.1.129
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0953679Z  * [new tag]           v0.1.13                 -> v0.1.13
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0953993Z  * [new tag]           v0.1.130                -> v0.1.130
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0954297Z  * [new tag]           v0.1.131                -> v0.1.131
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0954633Z  * [new tag]           v0.1.132                -> v0.1.132
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0954965Z  * [new tag]           v0.1.133                -> v0.1.133
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0955306Z  * [new tag]           v0.1.134                -> v0.1.134
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0955625Z  * [new tag]           v0.1.135                -> v0.1.135
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0956052Z  * [new tag]           v0.1.136                -> v0.1.136
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0956430Z  * [new tag]           v0.1.137                -> v0.1.137
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0956755Z  * [new tag]           v0.1.138                -> v0.1.138
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0957127Z  * [new tag]           v0.1.139                -> v0.1.139
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0957490Z  * [new tag]           v0.1.14                 -> v0.1.14
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0957977Z  * [new tag]           v0.1.140                -> v0.1.140
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0958416Z  * [new tag]           v0.1.141                -> v0.1.141
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0958739Z  * [new tag]           v0.1.142                -> v0.1.142
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0959078Z  * [new tag]           v0.1.143                -> v0.1.143
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0959401Z  * [new tag]           v0.1.144                -> v0.1.144
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0959714Z  * [new tag]           v0.1.145                -> v0.1.145
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0960060Z  * [new tag]           v0.1.146                -> v0.1.146
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0960421Z  * [new tag]           v0.1.147                -> v0.1.147
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0960739Z  * [new tag]           v0.1.148                -> v0.1.148
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0961059Z  * [new tag]           v0.1.149                -> v0.1.149
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0961386Z  * [new tag]           v0.1.15                 -> v0.1.15
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0961708Z  * [new tag]           v0.1.150                -> v0.1.150
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0962199Z  * [new tag]           v0.1.151                -> v0.1.151
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0962563Z  * [new tag]           v0.1.152                -> v0.1.152
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0962877Z  * [new tag]           v0.1.153                -> v0.1.153
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0963188Z  * [new tag]           v0.1.154                -> v0.1.154
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0963501Z  * [new tag]           v0.1.155                -> v0.1.155
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0963830Z  * [new tag]           v0.1.156                -> v0.1.156
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0964138Z  * [new tag]           v0.1.157                -> v0.1.157
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0964538Z  * [new tag]           v0.1.158                -> v0.1.158
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0964846Z  * [new tag]           v0.1.159                -> v0.1.159
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0965203Z  * [new tag]           v0.1.16                 -> v0.1.16
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0965539Z  * [new tag]           v0.1.160                -> v0.1.160
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0965842Z  * [new tag]           v0.1.161                -> v0.1.161
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0966173Z  * [new tag]           v0.1.162                -> v0.1.162
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0966486Z  * [new tag]           v0.1.163                -> v0.1.163
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0966804Z  * [new tag]           v0.1.164                -> v0.1.164
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0967151Z  * [new tag]           v0.1.165                -> v0.1.165
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0967473Z  * [new tag]           v0.1.166                -> v0.1.166
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0967819Z  * [new tag]           v0.1.167                -> v0.1.167
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0968140Z  * [new tag]           v0.1.168                -> v0.1.168
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0968474Z  * [new tag]           v0.1.17                 -> v0.1.17
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0968826Z  * [new tag]           v0.1.170                -> v0.1.170
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0969156Z  * [new tag]           v0.1.171                -> v0.1.171
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0969532Z  * [new tag]           v0.1.172                -> v0.1.172
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0969859Z  * [new tag]           v0.1.173                -> v0.1.173
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0970170Z  * [new tag]           v0.1.174                -> v0.1.174
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0970558Z  * [new tag]           v0.1.175                -> v0.1.175
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0970883Z  * [new tag]           v0.1.176                -> v0.1.176
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0971214Z  * [new tag]           v0.1.177                -> v0.1.177
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0971531Z  * [new tag]           v0.1.178                -> v0.1.178
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0971962Z  * [new tag]           v0.1.179                -> v0.1.179
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0972457Z  * [new tag]           v0.1.18                 -> v0.1.18
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0972790Z  * [new tag]           v0.1.180                -> v0.1.180
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0973116Z  * [new tag]           v0.1.181                -> v0.1.181
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0973473Z  * [new tag]           v0.1.182                -> v0.1.182
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0973786Z  * [new tag]           v0.1.183                -> v0.1.183
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0974145Z  * [new tag]           v0.1.184                -> v0.1.184
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0974470Z  * [new tag]           v0.1.185                -> v0.1.185
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0974798Z  * [new tag]           v0.1.186                -> v0.1.186
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0975132Z  * [new tag]           v0.1.187                -> v0.1.187
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0975462Z  * [new tag]           v0.1.188                -> v0.1.188
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0975831Z  * [new tag]           v0.1.189                -> v0.1.189
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0976151Z  * [new tag]           v0.1.19                 -> v0.1.19
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0976500Z  * [new tag]           v0.1.190                -> v0.1.190
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0976834Z  * [new tag]           v0.1.191                -> v0.1.191
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0977177Z  * [new tag]           v0.1.192                -> v0.1.192
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0977504Z  * [new tag]           v0.1.193                -> v0.1.193
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0977818Z  * [new tag]           v0.1.194                -> v0.1.194
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0978121Z  * [new tag]           v0.1.195                -> v0.1.195
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0978491Z  * [new tag]           v0.1.196                -> v0.1.196
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0978831Z  * [new tag]           v0.1.197                -> v0.1.197
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0979159Z  * [new tag]           v0.1.198                -> v0.1.198
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0979486Z  * [new tag]           v0.1.199                -> v0.1.199
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0979850Z  * [new tag]           v0.1.2                  -> v0.1.2
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0980200Z  * [new tag]           v0.1.20                 -> v0.1.20
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0980590Z  * [new tag]           v0.1.200                -> v0.1.200
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0980907Z  * [new tag]           v0.1.201                -> v0.1.201
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0981259Z  * [new tag]           v0.1.202                -> v0.1.202
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0981566Z  * [new tag]           v0.1.203                -> v0.1.203
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0982025Z  * [new tag]           v0.1.204                -> v0.1.204
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0982385Z  * [new tag]           v0.1.205                -> v0.1.205
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0982714Z  * [new tag]           v0.1.206                -> v0.1.206
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0983036Z  * [new tag]           v0.1.207                -> v0.1.207
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0983356Z  * [new tag]           v0.1.208                -> v0.1.208
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0983672Z  * [new tag]           v0.1.209                -> v0.1.209
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0984028Z  * [new tag]           v0.1.21                 -> v0.1.21
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0984361Z  * [new tag]           v0.1.210                -> v0.1.210
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0984688Z  * [new tag]           v0.1.211                -> v0.1.211
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0985008Z  * [new tag]           v0.1.212                -> v0.1.212
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0985334Z  * [new tag]           v0.1.213                -> v0.1.213
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0985670Z  * [new tag]           v0.1.214                -> v0.1.214
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0985975Z  * [new tag]           v0.1.215                -> v0.1.215
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0986314Z  * [new tag]           v0.1.217                -> v0.1.217
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0986770Z  * [new tag]           v0.1.218                -> v0.1.218
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0987185Z  * [new tag]           v0.1.219                -> v0.1.219
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0987599Z  * [new tag]           v0.1.22                 -> v0.1.22
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0987916Z  * [new tag]           v0.1.220                -> v0.1.220
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0988315Z  * [new tag]           v0.1.221                -> v0.1.221
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0988746Z  * [new tag]           v0.1.222                -> v0.1.222
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0989093Z  * [new tag]           v0.1.223                -> v0.1.223
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0989474Z  * [new tag]           v0.1.224                -> v0.1.224
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0989785Z  * [new tag]           v0.1.225                -> v0.1.225
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0990177Z  * [new tag]           v0.1.226                -> v0.1.226
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0990496Z  * [new tag]           v0.1.227                -> v0.1.227
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0990806Z  * [new tag]           v0.1.228                -> v0.1.228
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0991139Z  * [new tag]           v0.1.229                -> v0.1.229
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0991469Z  * [new tag]           v0.1.23                 -> v0.1.23
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0991812Z  * [new tag]           v0.1.230                -> v0.1.230
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0992369Z  * [new tag]           v0.1.231                -> v0.1.231
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0992717Z  * [new tag]           v0.1.232                -> v0.1.232
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0993037Z  * [new tag]           v0.1.233                -> v0.1.233
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0993349Z  * [new tag]           v0.1.234                -> v0.1.234
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0993679Z  * [new tag]           v0.1.235                -> v0.1.235
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0993997Z  * [new tag]           v0.1.236                -> v0.1.236
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0994301Z  * [new tag]           v0.1.237                -> v0.1.237
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0994657Z  * [new tag]           v0.1.238                -> v0.1.238
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0994988Z  * [new tag]           v0.1.239                -> v0.1.239
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0995320Z  * [new tag]           v0.1.24                 -> v0.1.24
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0995634Z  * [new tag]           v0.1.240                -> v0.1.240
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0995957Z  * [new tag]           v0.1.241                -> v0.1.241
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0996322Z  * [new tag]           v0.1.242                -> v0.1.242
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0996856Z  * [new tag]           v0.1.243                -> v0.1.243
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0997372Z  * [new tag]           v0.1.244                -> v0.1.244
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0997710Z  * [new tag]           v0.1.245                -> v0.1.245
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0998054Z  * [new tag]           v0.1.246                -> v0.1.246
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0998388Z  * [new tag]           v0.1.247                -> v0.1.247
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0998713Z  * [new tag]           v0.1.248                -> v0.1.248
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0999033Z  * [new tag]           v0.1.249                -> v0.1.249
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0999365Z  * [new tag]           v0.1.25                 -> v0.1.25
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.0999704Z  * [new tag]           v0.1.250                -> v0.1.250
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1000015Z  * [new tag]           v0.1.251                -> v0.1.251
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1000388Z  * [new tag]           v0.1.252                -> v0.1.252
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1000828Z  * [new tag]           v0.1.253                -> v0.1.253
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1001166Z  * [new tag]           v0.1.254                -> v0.1.254
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1001502Z  * [new tag]           v0.1.255                -> v0.1.255
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1001975Z  * [new tag]           v0.1.256                -> v0.1.256
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1002410Z  * [new tag]           v0.1.257                -> v0.1.257
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1002743Z  * [new tag]           v0.1.258                -> v0.1.258
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1003079Z  * [new tag]           v0.1.259                -> v0.1.259
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1003439Z  * [new tag]           v0.1.26                 -> v0.1.26
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1003769Z  * [new tag]           v0.1.260                -> v0.1.260
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1004086Z  * [new tag]           v0.1.261                -> v0.1.261
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1004391Z  * [new tag]           v0.1.262                -> v0.1.262
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1004790Z  * [new tag]           v0.1.263                -> v0.1.263
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1005167Z  * [new tag]           v0.1.264                -> v0.1.264
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1005564Z  * [new tag]           v0.1.265                -> v0.1.265
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1005876Z  * [new tag]           v0.1.266                -> v0.1.266
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1006177Z  * [new tag]           v0.1.267                -> v0.1.267
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1006534Z  * [new tag]           v0.1.268                -> v0.1.268
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1006843Z  * [new tag]           v0.1.269                -> v0.1.269
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1007164Z  * [new tag]           v0.1.27                 -> v0.1.27
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1007512Z  * [new tag]           v0.1.270                -> v0.1.270
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1007825Z  * [new tag]           v0.1.271                -> v0.1.271
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1008180Z  * [new tag]           v0.1.272                -> v0.1.272
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1008500Z  * [new tag]           v0.1.273                -> v0.1.273
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1008828Z  * [new tag]           v0.1.274                -> v0.1.274
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1009162Z  * [new tag]           v0.1.275                -> v0.1.275
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1009488Z  * [new tag]           v0.1.276                -> v0.1.276
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1009842Z  * [new tag]           v0.1.28                 -> v0.1.28
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1010196Z  * [new tag]           v0.1.29                 -> v0.1.29
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1010619Z  * [new tag]           v0.1.3                  -> v0.1.3
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1011102Z  * [new tag]           v0.1.30                 -> v0.1.30
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1011495Z  * [new tag]           v0.1.31                 -> v0.1.31
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1012007Z  * [new tag]           v0.1.32                 -> v0.1.32
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1012421Z  * [new tag]           v0.1.33                 -> v0.1.33
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1012892Z  * [new tag]           v0.1.34                 -> v0.1.34
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1013340Z  * [new tag]           v0.1.35                 -> v0.1.35
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1013742Z  * [new tag]           v0.1.36                 -> v0.1.36
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1014336Z  * [new tag]           v0.1.37                 -> v0.1.37
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1014715Z  * [new tag]           v0.1.38                 -> v0.1.38
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1015043Z  * [new tag]           v0.1.39                 -> v0.1.39
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1015378Z  * [new tag]           v0.1.4                  -> v0.1.4
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1015718Z  * [new tag]           v0.1.40                 -> v0.1.40
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1016047Z  * [new tag]           v0.1.41                 -> v0.1.41
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1016368Z  * [new tag]           v0.1.42                 -> v0.1.42
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1016714Z  * [new tag]           v0.1.43                 -> v0.1.43
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1017108Z  * [new tag]           v0.1.44                 -> v0.1.44
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1017545Z  * [new tag]           v0.1.45                 -> v0.1.45
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1017884Z  * [new tag]           v0.1.46                 -> v0.1.46
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1018301Z  * [new tag]           v0.1.47                 -> v0.1.47
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1018619Z  * [new tag]           v0.1.48                 -> v0.1.48
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1018971Z  * [new tag]           v0.1.49                 -> v0.1.49
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1019340Z  * [new tag]           v0.1.5                  -> v0.1.5
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1019677Z  * [new tag]           v0.1.50                 -> v0.1.50
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1019999Z  * [new tag]           v0.1.51                 -> v0.1.51
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1020312Z  * [new tag]           v0.1.52                 -> v0.1.52
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1020665Z  * [new tag]           v0.1.53                 -> v0.1.53
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1021048Z  * [new tag]           v0.1.54                 -> v0.1.54
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1021596Z  * [new tag]           v0.1.55                 -> v0.1.55
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1022204Z  * [new tag]           v0.1.56                 -> v0.1.56
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1022567Z  * [new tag]           v0.1.57                 -> v0.1.57
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1022999Z  * [new tag]           v0.1.58                 -> v0.1.58
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1023344Z  * [new tag]           v0.1.59                 -> v0.1.59
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1023671Z  * [new tag]           v0.1.6                  -> v0.1.6
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1024008Z  * [new tag]           v0.1.60                 -> v0.1.60
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1024335Z  * [new tag]           v0.1.61                 -> v0.1.61
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1024666Z  * [new tag]           v0.1.62                 -> v0.1.62
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1025011Z  * [new tag]           v0.1.63                 -> v0.1.63
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1025360Z  * [new tag]           v0.1.64                 -> v0.1.64
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1025694Z  * [new tag]           v0.1.65                 -> v0.1.65
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1026018Z  * [new tag]           v0.1.66                 -> v0.1.66
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1026354Z  * [new tag]           v0.1.67                 -> v0.1.67
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1026743Z  * [new tag]           v0.1.68                 -> v0.1.68
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1027075Z  * [new tag]           v0.1.69                 -> v0.1.69
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1027529Z  * [new tag]           v0.1.7                  -> v0.1.7
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1027936Z  * [new tag]           v0.1.70                 -> v0.1.70
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1028363Z  * [new tag]           v0.1.71                 -> v0.1.71
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1028784Z  * [new tag]           v0.1.72                 -> v0.1.72
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1029141Z  * [new tag]           v0.1.73                 -> v0.1.73
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1029637Z  * [new tag]           v0.1.74                 -> v0.1.74
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1030017Z  * [new tag]           v0.1.75                 -> v0.1.75
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1030437Z  * [new tag]           v0.1.76                 -> v0.1.76
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1030818Z  * [new tag]           v0.1.77                 -> v0.1.77
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1031148Z  * [new tag]           v0.1.78                 -> v0.1.78
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1031506Z  * [new tag]           v0.1.79                 -> v0.1.79
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1032081Z  * [new tag]           v0.1.8                  -> v0.1.8
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1032456Z  * [new tag]           v0.1.80                 -> v0.1.80
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1032794Z  * [new tag]           v0.1.81                 -> v0.1.81
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1033126Z  * [new tag]           v0.1.82                 -> v0.1.82
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1033461Z  * [new tag]           v0.1.83                 -> v0.1.83
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1033783Z  * [new tag]           v0.1.84                 -> v0.1.84
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1034096Z  * [new tag]           v0.1.85                 -> v0.1.85
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1034496Z  * [new tag]           v0.1.86                 -> v0.1.86
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1034817Z  * [new tag]           v0.1.87                 -> v0.1.87
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1035148Z  * [new tag]           v0.1.88                 -> v0.1.88
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1035470Z  * [new tag]           v0.1.89                 -> v0.1.89
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1035812Z  * [new tag]           v0.1.9                  -> v0.1.9
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1036165Z  * [new tag]           v0.1.90                 -> v0.1.90
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1036485Z  * [new tag]           v0.1.91                 -> v0.1.91
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1036843Z  * [new tag]           v0.1.92                 -> v0.1.92
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1037160Z  * [new tag]           v0.1.93                 -> v0.1.93
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1037487Z  * [new tag]           v0.1.94                 -> v0.1.94
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1037826Z  * [new tag]           v0.1.95                 -> v0.1.95
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1038144Z  * [new tag]           v0.1.96                 -> v0.1.96
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1038462Z  * [new tag]           v0.1.97                 -> v0.1.97
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1038791Z  * [new tag]           v0.1.98                 -> v0.1.98
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1039135Z  * [new tag]           v0.1.99                 -> v0.1.99
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1039719Z  * [new tag]           velnor-workflow-runtime-v1-0a69e008ff8703af -> velnor-workflow-runtime-v1-0a69e008ff8703af
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1040333Z  * [new tag]           velnor-workflow-runtime-v1-12309460ffb8359c -> velnor-workflow-runtime-v1-12309460ffb8359c
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1040939Z  * [new tag]           velnor-workflow-runtime-v1-1b7e82ab726aa53b -> velnor-workflow-runtime-v1-1b7e82ab726aa53b
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1041559Z  * [new tag]           velnor-workflow-runtime-v1-1ff514a2852c82d3 -> velnor-workflow-runtime-v1-1ff514a2852c82d3
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1042846Z  * [new tag]           velnor-workflow-runtime-v1-203eb9b79141e5a2 -> velnor-workflow-runtime-v1-203eb9b79141e5a2
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1043467Z  * [new tag]           velnor-workflow-runtime-v1-2bd48976b59bf084 -> velnor-workflow-runtime-v1-2bd48976b59bf084
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1044104Z  * [new tag]           velnor-workflow-runtime-v1-304405643c571048 -> velnor-workflow-runtime-v1-304405643c571048
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1044703Z  * [new tag]           velnor-workflow-runtime-v1-32565cc6272a84d4 -> velnor-workflow-runtime-v1-32565cc6272a84d4
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1045329Z  * [new tag]           velnor-workflow-runtime-v1-3b8d2b29eca331f4 -> velnor-workflow-runtime-v1-3b8d2b29eca331f4
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1045944Z  * [new tag]           velnor-workflow-runtime-v1-49d0a3970c57d4d6 -> velnor-workflow-runtime-v1-49d0a3970c57d4d6
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1046551Z  * [new tag]           velnor-workflow-runtime-v1-4ef63457fa892a18 -> velnor-workflow-runtime-v1-4ef63457fa892a18
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1047143Z  * [new tag]           velnor-workflow-runtime-v1-561387508ee5fcc6 -> velnor-workflow-runtime-v1-561387508ee5fcc6
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1047868Z  * [new tag]           velnor-workflow-runtime-v1-64fdd0bf7a8a5800 -> velnor-workflow-runtime-v1-64fdd0bf7a8a5800
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1048490Z  * [new tag]           velnor-workflow-runtime-v1-6945ed5e15305462 -> velnor-workflow-runtime-v1-6945ed5e15305462
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1049089Z  * [new tag]           velnor-workflow-runtime-v1-69a010b248a76d58 -> velnor-workflow-runtime-v1-69a010b248a76d58
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1049775Z  * [new tag]           velnor-workflow-runtime-v1-6ae4ca31ef453567 -> velnor-workflow-runtime-v1-6ae4ca31ef453567
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1050366Z  * [new tag]           velnor-workflow-runtime-v1-6f74f2b31301972a -> velnor-workflow-runtime-v1-6f74f2b31301972a
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1050941Z  * [new tag]           velnor-workflow-runtime-v1-716a0b98ec7d1b4d -> velnor-workflow-runtime-v1-716a0b98ec7d1b4d
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1051601Z  * [new tag]           velnor-workflow-runtime-v1-71e623219d2db42c -> velnor-workflow-runtime-v1-71e623219d2db42c
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1052338Z  * [new tag]           velnor-workflow-runtime-v1-78673ee16c42581e -> velnor-workflow-runtime-v1-78673ee16c42581e
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1052939Z  * [new tag]           velnor-workflow-runtime-v1-81a6d4d42427c1f8 -> velnor-workflow-runtime-v1-81a6d4d42427c1f8
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1053534Z  * [new tag]           velnor-workflow-runtime-v1-93c8a35808d1210b -> velnor-workflow-runtime-v1-93c8a35808d1210b
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1054130Z  * [new tag]           velnor-workflow-runtime-v1-956c48e84c4f858e -> velnor-workflow-runtime-v1-956c48e84c4f858e
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1054761Z  * [new tag]           velnor-workflow-runtime-v1-997f662c6ee999c4 -> velnor-workflow-runtime-v1-997f662c6ee999c4
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1055388Z  * [new tag]           velnor-workflow-runtime-v1-9f236b40635970a4 -> velnor-workflow-runtime-v1-9f236b40635970a4
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1055988Z  * [new tag]           velnor-workflow-runtime-v1-a3dc1e44d51b3cb2 -> velnor-workflow-runtime-v1-a3dc1e44d51b3cb2
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1056595Z  * [new tag]           velnor-workflow-runtime-v1-a55ade440d4fd658 -> velnor-workflow-runtime-v1-a55ade440d4fd658
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1057180Z  * [new tag]           velnor-workflow-runtime-v1-a8356a89d2859dd3 -> velnor-workflow-runtime-v1-a8356a89d2859dd3
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1057815Z  * [new tag]           velnor-workflow-runtime-v1-ace4fa94864c59e5 -> velnor-workflow-runtime-v1-ace4fa94864c59e5
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1058465Z  * [new tag]           velnor-workflow-runtime-v1-ad493401f003a130 -> velnor-workflow-runtime-v1-ad493401f003a130
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1059099Z  * [new tag]           velnor-workflow-runtime-v1-c0ce56f09b27859c -> velnor-workflow-runtime-v1-c0ce56f09b27859c
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1059693Z  * [new tag]           velnor-workflow-runtime-v1-d39cbf21e351b410 -> velnor-workflow-runtime-v1-d39cbf21e351b410
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1060277Z  * [new tag]           velnor-workflow-runtime-v1-e5ad6f4f923cd154 -> velnor-workflow-runtime-v1-e5ad6f4f923cd154
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1060919Z  * [new tag]           velnor-workflow-runtime-v1-eee20d4ac15650f0 -> velnor-workflow-runtime-v1-eee20d4ac15650f0
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1061516Z  * [new tag]           velnor-workflow-runtime-v1-f1f88c200e5b3b82 -> velnor-workflow-runtime-v1-f1f88c200e5b3b82
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1062314Z  * [new tag]           velnor-workflow-runtime-v1-fd45efac853b6570 -> velnor-workflow-runtime-v1-fd45efac853b6570
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1062983Z  * [new tag]           velnor-workflow-runtime-v1-ff27a1c010cb4faf -> velnor-workflow-runtime-v1-ff27a1c010cb4faf
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1064435Z [command]/usr/bin/git tag --list v0.1.276
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1064795Z v0.1.276
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1065473Z [command]/usr/bin/git rev-parse refs/tags/v0.1.276^{commit}
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1065857Z 9f40f92925f930ef9359a71805fd386f0378d065
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1066720Z ##[endgroup]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1067211Z ##[group]Determining the checkout info
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1067653Z ##[endgroup]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.1068013Z [command]/usr/bin/git sparse-checkout disable
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.2367327Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.2389258Z ##[group]Checking out the ref
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.2392244Z [command]/usr/bin/git checkout --progress --force refs/tags/v0.1.276
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3279643Z Note: switching to 'refs/tags/v0.1.276'.
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3279926Z 
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3280242Z You are in 'detached HEAD' state. You can look around, make experimental
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3280959Z changes and commit them, and you can discard any commits you make in this
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3281468Z state without impacting any branches by switching back to a branch.
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3281722Z 
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3282067Z If you want to create a new branch to retain commits you create, you may
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3282494Z do so (now or later) by using -c with the switch command. Example:
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3282764Z 
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3282927Z   git switch -c <new-branch-name>
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3283085Z 
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3283233Z Or undo this operation with:
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3283454Z 
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3283607Z   git switch -
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3283737Z 
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3283963Z Turn off this advice by setting config variable advice.detachedHead to false
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3284227Z 
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3284454Z HEAD is now at 9f40f929 Merge pull request #944 from tailrocks/fix/b3-release-legs-plan-selection
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3297475Z ##[endgroup]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3330468Z [command]/usr/bin/git log -1 --format=%H
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3347733Z 9f40f92925f930ef9359a71805fd386f0378d065
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3354136Z ##[group]Removing auth
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3355140Z Removing SSH command configuration
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3357639Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3380571Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3518204Z Removing HTTP extra header
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3520779Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3540388Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3673009Z Removing includeIf entries pointing to credentials config files
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3675209Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3692844Z includeif.gitdir:/home/runner/work/velnor/velnor/.git.path
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3693486Z includeif.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3694079Z includeif.gitdir:/github/workspace/.git.path
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3694548Z includeif.gitdir:/github/workspace/.git/worktrees/*.path
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3698884Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/.git.path
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3713843Z /home/runner/work/_temp/git-credentials-3fdd1758-d88a-4a8c-b05b-1023f79a5aa7.config
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3719560Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/.git.path \/home\/runner\/work\/_temp\/git\-credentials\-3fdd1758\-d88a\-4a8c\-b05b\-1023f79a5aa7\.config
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3768882Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3784752Z /home/runner/work/_temp/git-credentials-3fdd1758-d88a-4a8c-b05b-1023f79a5aa7.config
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3790969Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path \/home\/runner\/work\/_temp\/git\-credentials\-3fdd1758\-d88a\-4a8c\-b05b\-1023f79a5aa7\.config
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3812961Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git.path
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3829820Z /github/runner_temp/git-credentials-3fdd1758-d88a-4a8c-b05b-1023f79a5aa7.config
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3839633Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git.path \/github\/runner_temp\/git\-credentials\-3fdd1758\-d88a\-4a8c\-b05b\-1023f79a5aa7\.config
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3901293Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git/worktrees/*.path
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3917785Z /github/runner_temp/git-credentials-3fdd1758-d88a-4a8c-b05b-1023f79a5aa7.config
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3923162Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git/worktrees/*.path \/github\/runner_temp\/git\-credentials\-3fdd1758\-d88a\-4a8c\-b05b\-1023f79a5aa7\.config
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.3945486Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.4083540Z Removing credentials config '/home/runner/work/_temp/git-credentials-3fdd1758-d88a-4a8c-b05b-1023f79a5aa7.config'
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.4090356Z ##[endgroup]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.4372395Z Prepare all required actions
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.4373097Z Getting action download info
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.5397374Z Download action repository 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9' (SHA:55cc8345863c7cc4c66a329aec7e433d2d1c52a9)
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8280072Z ##[group]Run ./.github/actions/setup-velnor-workflow
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8280444Z with:
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8280729Z   rev: 3e276ad81a84d325ff9241f2decc31104b6868fd
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8281096Z   checkout-path: /home/runner/work/velnor/velnor
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8281398Z   cache: true
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8281671Z   cache-key-prefix: velnor-workflow-v3
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8283783Z   github-token: ***
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8284073Z ##[endgroup]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8342128Z ##[start-action display=Resolve source closure;id=runtime.closure]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8377088Z ##[group]Run set -euo pipefail
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8377643Z ^[[36;1mset -euo pipefail^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8377928Z ^[[36;1msha256_digest() {^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8378404Z ^[[36;1m  if command -v sha256sum >/dev/null 2>&1; then^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8378745Z ^[[36;1m    sha256sum | awk '{print $1}'^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8379070Z ^[[36;1m  elif command -v shasum >/dev/null 2>&1; then^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8379407Z ^[[36;1m    shasum -a 256 | awk '{print $1}'^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8379726Z ^[[36;1m  else^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8380073Z ^[[36;1m    echo "::error::no SHA-256 checksum tool available (sha256sum or shasum)" >&2^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8380468Z ^[[36;1m    return 1^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8380778Z ^[[36;1m  fi^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8381023Z ^[[36;1m}^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8381371Z ^[[36;1mtest "$INSTALL_REV" != '' || { echo "::error::runtime revision is empty" >&2; exit 1; }^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8382069Z ^[[36;1m[[ "$INSTALL_REV" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::runtime revision must be a full commit SHA, got $INSTALL_REV" >&2; exit 1; }^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8382527Z ^[[36;1mlisting=""^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8382881Z ^[[36;1mif git -C "$CHECKOUT_PATH" cat-file -e "$INSTALL_REV^{commit}" 2>/dev/null; then^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8383553Z ^[[36;1m  listing="$(git -C "$CHECKOUT_PATH" ls-tree -r "$INSTALL_REV" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)"^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8384080Z ^[[36;1melse^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8384567Z ^[[36;1m  tree="$(gh api "repos/$PRODUCT_REPOSITORY/git/trees/$INSTALL_REV?recursive=1")" || { echo "::error::unknown generator revision $INSTALL_REV" >&2; exit 1; }^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8385270Z ^[[36;1m  [[ "$(jq -r '.truncated // false' <<<"$tree")" != "true" ]] || { echo "::error::tree API response is truncated; the closure cannot be proven" >&2; exit 1; }^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8386303Z ^[[36;1m  listing="$(jq -r '[.tree[] | select(.type != "tree") | select(.path == "Cargo.toml" or .path == "Cargo.lock" or .path == "rust-toolchain.toml" or .path == "rust-toolchain" or (.path | startswith("crates/velnor-workflow/")) or (.path | startswith(".cargo/"))) | "\(.mode) \(.type) \(.sha)\t\(.path)"] | sort | join("\n")' <<<"$tree")"^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8387120Z ^[[36;1mfi^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8387495Z ^[[36;1mtest "$listing" != '' || { echo "::error::revision $INSTALL_REV has no closure inputs" >&2; exit 1; }^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8388077Z ^[[36;1mclosure="$(printf '%s\nclosure-version:1\nfeatures:\nprofile:release\n' "$(LC_ALL=C sort <<<"$listing")" | sha256_digest)"^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8388803Z ^[[36;1m[[ "$closure" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::closure resolution failed" >&2; exit 1; }^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8389231Z ^[[36;1mecho "value=$closure" >> "$GITHUB_OUTPUT"^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8415662Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8416174Z env:
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8417979Z   GH_TOKEN: ***
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8418292Z   INSTALL_REV: 3e276ad81a84d325ff9241f2decc31104b6868fd
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8418646Z   CHECKOUT_PATH: /home/runner/work/velnor/velnor
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8419159Z   PRODUCT_REPOSITORY: tailrocks/velnor
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8419481Z ##[endgroup]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8575114Z ##[end-action id=runtime.closure;outcome=success;conclusion=success;duration_ms=23]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8578720Z ##[start-action display=Restore runtime cache;id=runtime.cache]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8637105Z ##[group]Run actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8637512Z with:
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8637779Z   path: ~/.cache/velnor/workflow-runtime
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8638271Z   key: velnor-workflow-v3-Linux-X64-6f74f2b31301972a8c99ccdc4fbd346fa9695a890f571bba4cb3968f8a643f67
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8638731Z   enableCrossOsArchive: false
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8639031Z   fail-on-cache-miss: false
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8639311Z   lookup-only: false
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:21.8639559Z ##[endgroup]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.0746894Z Cache hit for: velnor-workflow-v3-Linux-X64-6f74f2b31301972a8c99ccdc4fbd346fa9695a890f571bba4cb3968f8a643f67
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6075279Z Received 3693558 of 3693558 (100.0%), 9.3 MBs/sec
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6075856Z Cache Size: ~4 MB (3693558 B)
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6099706Z [command]/usr/bin/tar -xf /home/runner/work/_temp/fb433c5f-e3d5-43dc-b7b7-d6e26652499d/cache.tzst -P -C /home/runner/work/velnor/velnor --use-compress-program unzstd
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6279234Z Cache restored successfully
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6332468Z Cache restored from key: velnor-workflow-v3-Linux-X64-6f74f2b31301972a8c99ccdc4fbd346fa9695a890f571bba4cb3968f8a643f67
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6370618Z ##[end-action id=runtime.cache;outcome=success;conclusion=success;duration_ms=779]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6376005Z ##[start-action display=Download runtime product;id=runtime.__run]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6386155Z ##[end-action id=runtime.__run;outcome=skipped;conclusion=skipped;duration_ms=0]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6388919Z ##[start-action display=Verify runtime product;id=runtime.__run_2]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6403221Z ##[group]Run set -euo pipefail
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6403568Z ^[[36;1mset -euo pipefail^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6403865Z ^[[36;1mruntime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6404241Z ^[[36;1mjq -e \^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6404471Z ^[[36;1m  --arg closure "$CLOSURE" \^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6404774Z ^[[36;1m  --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6405296Z ^[[36;1m  '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$"))' \^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6405834Z ^[[36;1m  "$runtime/manifest.json" >/dev/null^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6406162Z ^[[36;1mif command -v sha256sum >/dev/null 2>&1; then^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6406511Z ^[[36;1m  actual="$(sha256sum "$runtime/bin/velnor-workflow" | awk '{print $1}')"^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6406866Z ^[[36;1melse^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6407160Z ^[[36;1m  actual="$(shasum -a 256 "$runtime/bin/velnor-workflow" | awk '{print $1}')"^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6407473Z ^[[36;1mfi^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6407884Z ^[[36;1mexpected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "$runtime/manifest.json")"^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6408407Z ^[[36;1m[[ "$actual" == "$expected" ]] || { echo "::error::cached runtime digest mismatch" >&2; exit 1; }^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6426804Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6427302Z env:
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6427648Z   CLOSURE: 6f74f2b31301972a8c99ccdc4fbd346fa9695a890f571bba4cb3968f8a643f67
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6427975Z ##[endgroup]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6597149Z ##[end-action id=runtime.__run_2;outcome=success;conclusion=success;duration_ms=20]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6600345Z ##[start-action display=Add runtime to PATH;id=runtime.__run_3]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6614334Z ##[group]Run set -euo pipefail
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6614639Z ^[[36;1mset -euo pipefail^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6614953Z ^[[36;1mruntime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6615408Z ^[[36;1mtest -x "$runtime/bin/velnor-workflow"^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6615835Z ^[[36;1mtest -s "$runtime/manifest.json"^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6616234Z ^[[36;1mreported="$("$runtime/bin/velnor-workflow" --closure)"^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6616775Z ^[[36;1m[[ "$reported" == "$CLOSURE" ]] || { echo "::error::runtime at $runtime reports closure $reported, expected $CLOSURE" >&2; exit 1; }^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6617326Z ^[[36;1mmanifest_revision="$(jq -er '.revision' "$runtime/manifest.json")"^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6617769Z ^[[36;1mreported_revision="$("$runtime/bin/velnor-workflow" --revision)"^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6618358Z ^[[36;1m[[ "$reported_revision" == "$manifest_revision" ]] || { echo "::error::runtime at $runtime reports revision $reported_revision, expected $manifest_revision" >&2; exit 1; }^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6618889Z ^[[36;1mecho "$runtime/bin" >> "$GITHUB_PATH"^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6635476Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6635897Z env:
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6636239Z   CLOSURE: 6f74f2b31301972a8c99ccdc4fbd346fa9695a890f571bba4cb3968f8a643f67
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6636590Z ##[endgroup]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6717758Z ##[end-action id=runtime.__run_3;outcome=success;conclusion=success;duration_ms=11]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6719916Z ##[start-action display=Save runtime cache;id=runtime.__actions_cache]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6733452Z ##[end-action id=runtime.__actions_cache;outcome=skipped;conclusion=skipped;duration_ms=0]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6778658Z ##[group]Run echo "VELNOR_WORKFLOW_POLICY_REVISION=3e276ad81a84d325ff9241f2decc31104b6868fd" >> "$GITHUB_ENV"
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6779218Z ^[[36;1mecho "VELNOR_WORKFLOW_POLICY_REVISION=3e276ad81a84d325ff9241f2decc31104b6868fd" >> "$GITHUB_ENV"^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6796641Z shell: /usr/bin/bash -e {0}
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6796917Z ##[endgroup]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6853376Z ##[group]Run velnor-workflow policy --workflow-root "$GITHUB_WORKSPACE"
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6853860Z ^[[36;1mvelnor-workflow policy --workflow-root "$GITHUB_WORKSPACE"^[[0m
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6868128Z shell: /usr/bin/bash -e {0}
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6868506Z env:
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6868797Z   VELNOR_WORKFLOW_POLICY_REVISION: 3e276ad81a84d325ff9241f2decc31104b6868fd
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6869112Z   EVENT_NAME: push
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:22.6869388Z ##[endgroup]
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.0545216Z error: workflow policy failed: generated-tree
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.0546017Z PASS pin-declared           .github-gen/velnor-workflow.toml [generator] revision = 3e276ad81a84d325ff9241f2decc31104b6868fd
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.0546925Z PASS pin-reachable          3e276ad81a84d325ff9241f2decc31104b6868fd is an ancestor of head 9f40f92925f930ef9359a71805fd386f0378d065 (inherited from the base branch)
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.0547797Z PASS pin-monotonic          the declared pin is the base validator 3e276ad81a84d325ff9241f2decc31104b6868fd
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.0548622Z PASS entrypoint-pin         .github/workflows/ci-policy.yml acquires and exports the declared pin (2 literals)
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.0549407Z FAIL generated-tree         the tree differs from the render of velnor-workflow at 3e276ad81a84d325ff9241f2decc31104b6868fd
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.0550223Z        - .github/ci/.github-actions-generator-state: differs from the pinned render
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.0550824Z        - .github/workflows/release.yml: differs from the pinned render
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.0551499Z PASS pull-request-target    only .github/workflows/ci-policy.yml runs on pull_request_target, with the reviewed trigger set
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.0552489Z PASS entrypoint-privileges  .github/workflows/ci-policy.yml holds contents: read only, references no secrets, and persists no credentials
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.0553154Z PASS trusted-runners        every self-hosted job is gated on a trusted event and an approved runner
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.0553692Z PASS action-pins            every action reference is a full-SHA pin or a reviewed local path
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.0554171Z PASS workflow-structure     every workflow parses as GitHub would run it
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.0554700Z PASS required-checks        .github/workflows/ci-pr.yml emits [ci-required]; no live ruleset supplied (--ruleset-contexts)
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.0555145Z policy: 11 rules, 1 failed
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.0565416Z ##[error]Process completed with exit code 1.
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.0688580Z Post job cleanup.
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.1425534Z [command]/usr/bin/git version
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.1454358Z git version 2.55.0
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.1484595Z Temporarily overriding HOME='/home/runner/work/_temp/d864d38e-608e-4ed1-adfa-cf10768078b6' before making global git config changes
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.1485692Z Adding repository directory to the temporary git global config as a safe directory
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.1493043Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.1512092Z Removing SSH command configuration
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.1516557Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.1539877Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.1695330Z Removing HTTP extra header
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.1699353Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.1720699Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.1894226Z Removing includeIf entries pointing to credentials config files
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.1898796Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.1921594Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.2222434Z Evaluate and set job outputs
+Control / Verify release	UNKNOWN STEP	2026-09-18T04:15:23.2229216Z Cleaning up orphan processes

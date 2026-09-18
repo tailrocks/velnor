@@ -1,0 +1,666 @@
+﻿2026-09-17T13:15:53.0486498Z Current runner version: '2.337.0'
+2026-09-17T13:15:53.0511560Z ##[group]Runner Image Provisioner
+2026-09-17T13:15:53.0512559Z Hosted Compute Agent
+2026-09-17T13:15:53.0513181Z Version: 20260828.587
+2026-09-17T13:15:53.0513925Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+2026-09-17T13:15:53.0514703Z Build Date: 2026-08-28T16:44:25Z
+2026-09-17T13:15:53.0515408Z Worker ID: {01d8ed76-b74d-437b-b901-08e01dd7cae1}
+2026-09-17T13:15:53.0516253Z Azure Region: westus
+2026-09-17T13:15:53.0516827Z ##[endgroup]
+2026-09-17T13:15:53.0518607Z ##[group]Operating System
+2026-09-17T13:15:53.0519276Z Ubuntu
+2026-09-17T13:15:53.0519795Z 24.04.5
+2026-09-17T13:15:53.0520398Z LTS
+2026-09-17T13:15:53.0520918Z ##[endgroup]
+2026-09-17T13:15:53.0521481Z ##[group]Runner Image
+2026-09-17T13:15:53.0522191Z Image: ubuntu-24.04
+2026-09-17T13:15:53.0522758Z Version: 20260907.300.1
+2026-09-17T13:15:53.0524093Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260907.300/images/ubuntu/Ubuntu2404-Readme.md
+2026-09-17T13:15:53.0525758Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260907.300
+2026-09-17T13:15:53.0526769Z ##[endgroup]
+2026-09-17T13:15:53.0528173Z ##[group]GITHUB_TOKEN Permissions
+2026-09-17T13:15:53.0530180Z Actions: read
+2026-09-17T13:15:53.0530825Z Contents: read
+2026-09-17T13:15:53.0531476Z Metadata: read
+2026-09-17T13:15:53.0532051Z ##[endgroup]
+2026-09-17T13:15:53.0534075Z Secret source: Actions
+2026-09-17T13:15:53.0535134Z Cache mode: write
+2026-09-17T13:15:53.0535804Z Prepare workflow directory
+2026-09-17T13:15:53.0873851Z Prepare all required actions
+2026-09-17T13:15:53.0923361Z Getting action download info
+2026-09-17T13:15:53.5075917Z Download action repository 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' (SHA:3d3c42e5aac5ba805825da76410c181273ba90b1)
+2026-09-17T13:15:53.6145840Z Download action repository 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' (SHA:043fb46d1a93c77aae656e7c1c64a875d1fc6a0a)
+2026-09-17T13:15:53.7899143Z Complete job name: Control / Planning
+2026-09-17T13:15:53.8822232Z ##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+2026-09-17T13:15:53.8823823Z with:
+2026-09-17T13:15:53.8824281Z   fetch-depth: 0
+2026-09-17T13:15:53.8824787Z   persist-credentials: false
+2026-09-17T13:15:53.8825329Z   repository: tailrocks/velnor
+2026-09-17T13:15:53.8829302Z   token: ***
+2026-09-17T13:15:53.8829752Z   ssh-strict: true
+2026-09-17T13:15:53.8830211Z   ssh-user: git
+2026-09-17T13:15:53.8830643Z   clean: true
+2026-09-17T13:15:53.8831098Z   sparse-checkout-cone-mode: true
+2026-09-17T13:15:53.8831635Z   fetch-tags: false
+2026-09-17T13:15:53.8832100Z   show-progress: true
+2026-09-17T13:15:53.8832558Z   lfs: false
+2026-09-17T13:15:53.8832971Z   submodules: false
+2026-09-17T13:15:53.8833428Z   set-safe-directory: true
+2026-09-17T13:15:53.8833947Z   allow-unsafe-pr-checkout: false
+2026-09-17T13:15:53.8834801Z ##[endgroup]
+2026-09-17T13:15:53.9844454Z Syncing repository: tailrocks/velnor
+2026-09-17T13:15:53.9847188Z ##[group]Getting Git version info
+2026-09-17T13:15:53.9848365Z Working directory is '/home/runner/work/velnor/velnor'
+2026-09-17T13:15:53.9849981Z [command]/usr/bin/git version
+2026-09-17T13:15:53.9968208Z git version 2.55.0
+2026-09-17T13:15:53.9999892Z ##[endgroup]
+2026-09-17T13:15:54.0012991Z Temporarily overriding HOME='/home/runner/work/_temp/ddcd0c6e-bbbc-4a46-a96c-961d602df6b2' before making global git config changes
+2026-09-17T13:15:54.0015285Z Adding repository directory to the temporary git global config as a safe directory
+2026-09-17T13:15:54.0020673Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor
+2026-09-17T13:15:54.0071942Z Deleting the contents of '/home/runner/work/velnor/velnor'
+2026-09-17T13:15:54.0075614Z ##[group]Determining repository object format
+2026-09-17T13:15:54.0077193Z ##[endgroup]
+2026-09-17T13:15:54.0078419Z ##[group]Initializing the repository
+2026-09-17T13:15:54.0082669Z [command]/usr/bin/git init /home/runner/work/velnor/velnor
+2026-09-17T13:15:54.0212233Z hint: Using 'master' as the name for the initial branch. This default branch name
+2026-09-17T13:15:54.0214106Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+2026-09-17T13:15:54.0215957Z hint: to use in all of your new repositories, which will suppress this warning,
+2026-09-17T13:15:54.0217842Z hint: call:
+2026-09-17T13:15:54.0219418Z hint:
+2026-09-17T13:15:54.0220366Z hint: 	git config --global init.defaultBranch <name>
+2026-09-17T13:15:54.0221565Z hint:
+2026-09-17T13:15:54.0222723Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2026-09-17T13:15:54.0224404Z hint: 'development'. The just-created branch can be renamed via this command:
+2026-09-17T13:15:54.0225723Z hint:
+2026-09-17T13:15:54.0226601Z hint: 	git branch -m <name>
+2026-09-17T13:15:54.0227866Z hint:
+2026-09-17T13:15:54.0229044Z hint: Disable this message with "git config set advice.defaultBranchName false"
+2026-09-17T13:15:54.0230913Z Initialized empty Git repository in /home/runner/work/velnor/velnor/.git/
+2026-09-17T13:15:54.0234097Z [command]/usr/bin/git remote add origin https://github.com/tailrocks/velnor
+2026-09-17T13:15:54.0292152Z ##[endgroup]
+2026-09-17T13:15:54.0293289Z ##[group]Disabling automatic garbage collection
+2026-09-17T13:15:54.0295927Z [command]/usr/bin/git config --local gc.auto 0
+2026-09-17T13:15:54.0331914Z ##[endgroup]
+2026-09-17T13:15:54.0332679Z ##[group]Setting up auth
+2026-09-17T13:15:54.0333707Z Removing SSH command configuration
+2026-09-17T13:15:54.0338401Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-09-17T13:15:54.0373526Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-09-17T13:15:54.0760727Z Removing HTTP extra header
+2026-09-17T13:15:54.0766578Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-09-17T13:15:54.0805014Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-09-17T13:15:54.1023154Z Removing includeIf entries pointing to credentials config files
+2026-09-17T13:15:54.1028840Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-09-17T13:15:54.1065167Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-09-17T13:15:54.1319623Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-3d8e2344-8109-4458-b234-203b7bcf4b3b.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-09-17T13:15:54.1366459Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/.git.path /home/runner/work/_temp/git-credentials-3d8e2344-8109-4458-b234-203b7bcf4b3b.config
+2026-09-17T13:15:54.1405075Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-3d8e2344-8109-4458-b234-203b7bcf4b3b.config
+2026-09-17T13:15:54.1447338Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-3d8e2344-8109-4458-b234-203b7bcf4b3b.config
+2026-09-17T13:15:54.1487652Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-3d8e2344-8109-4458-b234-203b7bcf4b3b.config
+2026-09-17T13:15:54.1522405Z ##[endgroup]
+2026-09-17T13:15:54.1523235Z ##[group]Fetching the repository
+2026-09-17T13:15:54.1531686Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules origin +refs/heads/*:refs/remotes/origin/* +refs/tags/*:refs/tags/*
+2026-09-17T13:15:58.6128549Z From https://github.com/tailrocks/velnor
+2026-09-17T13:15:58.6131156Z  * [new branch]        docs/bastion-final-plan -> origin/docs/bastion-final-plan
+2026-09-17T13:15:58.6139010Z  * [new branch]        feat/a2-consumer-negatives -> origin/feat/a2-consumer-negatives
+2026-09-17T13:15:58.6141136Z  * [new branch]        feat/a2-provision-promotion -> origin/feat/a2-provision-promotion
+2026-09-17T13:15:58.6142961Z  * [new branch]        feat/a2-signer-order    -> origin/feat/a2-signer-order
+2026-09-17T13:15:58.6144565Z  * [new branch]        feat/a2-source-identity -> origin/feat/a2-source-identity
+2026-09-17T13:15:58.6146269Z  * [new branch]        feat/b1-apt-primitives  -> origin/feat/b1-apt-primitives
+2026-09-17T13:15:58.6148331Z  * [new branch]        feat/c2-unbounded-global-n -> origin/feat/c2-unbounded-global-n
+2026-09-17T13:15:58.6150140Z  * [new branch]        feat/d1-daemon-wiring   -> origin/feat/d1-daemon-wiring
+2026-09-17T13:15:58.6152220Z  * [new branch]        feat/d1-processor-loop  -> origin/feat/d1-processor-loop
+2026-09-17T13:15:58.6154517Z  * [new branch]        feat/d1-scaleset-protocol -> origin/feat/d1-scaleset-protocol
+2026-09-17T13:15:58.6156567Z  * [new branch]        feat/d1-worker-lane     -> origin/feat/d1-worker-lane
+2026-09-17T13:15:58.6158697Z  * [new branch]        feat/d2-provider-schema -> origin/feat/d2-provider-schema
+2026-09-17T13:15:58.6160758Z  * [new branch]        feat/d2-provider-schema-rest -> origin/feat/d2-provider-schema-rest
+2026-09-17T13:15:58.6162796Z  * [new branch]        feat/r2m-flip           -> origin/feat/r2m-flip
+2026-09-17T13:15:58.6165193Z  * [new branch]        fix/opstore-rejection-cause -> origin/fix/opstore-rejection-cause
+2026-09-17T13:15:58.6166493Z  * [new branch]        fix/pin-fetch-in-tool   -> origin/fix/pin-fetch-in-tool
+2026-09-17T13:15:58.6169059Z  * [new branch]        fix/preview-guest-upload -> origin/fix/preview-guest-upload
+2026-09-17T13:15:58.6170241Z  * [new branch]        fix/publish-403         -> origin/fix/publish-403
+2026-09-17T13:15:58.6171406Z  * [new branch]        fix/security-audit-batch1 -> origin/fix/security-audit-batch1
+2026-09-17T13:15:58.6172762Z  * [new branch]        main                    -> origin/main
+2026-09-17T13:15:58.6173893Z  * [new branch]        perf/main-docker-gha-cache -> origin/perf/main-docker-gha-cache
+2026-09-17T13:15:58.6175477Z  * [new tag]           archive/velnor2-pre-rebuild-20260831-bc593406 -> archive/velnor2-pre-rebuild-20260831-bc593406
+2026-09-17T13:15:58.6177341Z  * [new tag]           dima/velnor6-archive-4d81a14 -> dima/velnor6-archive-4d81a14
+2026-09-17T13:15:58.6179016Z  * [new tag]           preview                 -> preview
+2026-09-17T13:15:58.6180382Z  * [new tag]           v0.1.10                 -> v0.1.10
+2026-09-17T13:15:58.6181270Z  * [new tag]           v0.1.100                -> v0.1.100
+2026-09-17T13:15:58.6182060Z  * [new tag]           v0.1.101                -> v0.1.101
+2026-09-17T13:15:58.6182839Z  * [new tag]           v0.1.102                -> v0.1.102
+2026-09-17T13:15:58.6183710Z  * [new tag]           v0.1.103                -> v0.1.103
+2026-09-17T13:15:58.6184639Z  * [new tag]           v0.1.104                -> v0.1.104
+2026-09-17T13:15:58.6185405Z  * [new tag]           v0.1.105                -> v0.1.105
+2026-09-17T13:15:58.6186148Z  * [new tag]           v0.1.106                -> v0.1.106
+2026-09-17T13:15:58.6187190Z  * [new tag]           v0.1.107                -> v0.1.107
+2026-09-17T13:15:58.6187967Z  * [new tag]           v0.1.108                -> v0.1.108
+2026-09-17T13:15:58.6188709Z  * [new tag]           v0.1.109                -> v0.1.109
+2026-09-17T13:15:58.6189452Z  * [new tag]           v0.1.11                 -> v0.1.11
+2026-09-17T13:15:58.6190197Z  * [new tag]           v0.1.110                -> v0.1.110
+2026-09-17T13:15:58.6190942Z  * [new tag]           v0.1.111                -> v0.1.111
+2026-09-17T13:15:58.6191690Z  * [new tag]           v0.1.112                -> v0.1.112
+2026-09-17T13:15:58.6192437Z  * [new tag]           v0.1.113                -> v0.1.113
+2026-09-17T13:15:58.6193176Z  * [new tag]           v0.1.114                -> v0.1.114
+2026-09-17T13:15:58.6194151Z  * [new tag]           v0.1.115                -> v0.1.115
+2026-09-17T13:15:58.6194888Z  * [new tag]           v0.1.116                -> v0.1.116
+2026-09-17T13:15:58.6195630Z  * [new tag]           v0.1.117                -> v0.1.117
+2026-09-17T13:15:58.6196372Z  * [new tag]           v0.1.118                -> v0.1.118
+2026-09-17T13:15:58.6197477Z  * [new tag]           v0.1.119                -> v0.1.119
+2026-09-17T13:15:58.6198256Z  * [new tag]           v0.1.12                 -> v0.1.12
+2026-09-17T13:15:58.6199003Z  * [new tag]           v0.1.120                -> v0.1.120
+2026-09-17T13:15:58.6199760Z  * [new tag]           v0.1.121                -> v0.1.121
+2026-09-17T13:15:58.6200504Z  * [new tag]           v0.1.122                -> v0.1.122
+2026-09-17T13:15:58.6201239Z  * [new tag]           v0.1.123                -> v0.1.123
+2026-09-17T13:15:58.6201977Z  * [new tag]           v0.1.124                -> v0.1.124
+2026-09-17T13:15:58.6202720Z  * [new tag]           v0.1.125                -> v0.1.125
+2026-09-17T13:15:58.6203471Z  * [new tag]           v0.1.126                -> v0.1.126
+2026-09-17T13:15:58.6204204Z  * [new tag]           v0.1.127                -> v0.1.127
+2026-09-17T13:15:58.6204940Z  * [new tag]           v0.1.128                -> v0.1.128
+2026-09-17T13:15:58.6205670Z  * [new tag]           v0.1.129                -> v0.1.129
+2026-09-17T13:15:58.6206445Z  * [new tag]           v0.1.13                 -> v0.1.13
+2026-09-17T13:15:58.6207471Z  * [new tag]           v0.1.130                -> v0.1.130
+2026-09-17T13:15:58.6208221Z  * [new tag]           v0.1.131                -> v0.1.131
+2026-09-17T13:15:58.6208958Z  * [new tag]           v0.1.132                -> v0.1.132
+2026-09-17T13:15:58.6209708Z  * [new tag]           v0.1.133                -> v0.1.133
+2026-09-17T13:15:58.6210452Z  * [new tag]           v0.1.134                -> v0.1.134
+2026-09-17T13:15:58.6211199Z  * [new tag]           v0.1.135                -> v0.1.135
+2026-09-17T13:15:58.6212142Z  * [new tag]           v0.1.136                -> v0.1.136
+2026-09-17T13:15:58.6212898Z  * [new tag]           v0.1.137                -> v0.1.137
+2026-09-17T13:15:58.6213641Z  * [new tag]           v0.1.138                -> v0.1.138
+2026-09-17T13:15:58.6214377Z  * [new tag]           v0.1.139                -> v0.1.139
+2026-09-17T13:15:58.6215119Z  * [new tag]           v0.1.14                 -> v0.1.14
+2026-09-17T13:15:58.6215857Z  * [new tag]           v0.1.140                -> v0.1.140
+2026-09-17T13:15:58.6216608Z  * [new tag]           v0.1.141                -> v0.1.141
+2026-09-17T13:15:58.6217644Z  * [new tag]           v0.1.142                -> v0.1.142
+2026-09-17T13:15:58.6218393Z  * [new tag]           v0.1.143                -> v0.1.143
+2026-09-17T13:15:58.6219127Z  * [new tag]           v0.1.144                -> v0.1.144
+2026-09-17T13:15:58.6219860Z  * [new tag]           v0.1.145                -> v0.1.145
+2026-09-17T13:15:58.6220606Z  * [new tag]           v0.1.146                -> v0.1.146
+2026-09-17T13:15:58.6221429Z  * [new tag]           v0.1.147                -> v0.1.147
+2026-09-17T13:15:58.6222169Z  * [new tag]           v0.1.148                -> v0.1.148
+2026-09-17T13:15:58.6222907Z  * [new tag]           v0.1.149                -> v0.1.149
+2026-09-17T13:15:58.6223700Z  * [new tag]           v0.1.15                 -> v0.1.15
+2026-09-17T13:15:58.6224478Z  * [new tag]           v0.1.150                -> v0.1.150
+2026-09-17T13:15:58.6225228Z  * [new tag]           v0.1.151                -> v0.1.151
+2026-09-17T13:15:58.6225959Z  * [new tag]           v0.1.152                -> v0.1.152
+2026-09-17T13:15:58.6226679Z  * [new tag]           v0.1.153                -> v0.1.153
+2026-09-17T13:15:58.6227649Z  * [new tag]           v0.1.154                -> v0.1.154
+2026-09-17T13:15:58.6228384Z  * [new tag]           v0.1.155                -> v0.1.155
+2026-09-17T13:15:58.6229103Z  * [new tag]           v0.1.156                -> v0.1.156
+2026-09-17T13:15:58.6229875Z  * [new tag]           v0.1.157                -> v0.1.157
+2026-09-17T13:15:58.6230817Z  * [new tag]           v0.1.158                -> v0.1.158
+2026-09-17T13:15:58.6231530Z  * [new tag]           v0.1.159                -> v0.1.159
+2026-09-17T13:15:58.6232250Z  * [new tag]           v0.1.16                 -> v0.1.16
+2026-09-17T13:15:58.6232990Z  * [new tag]           v0.1.160                -> v0.1.160
+2026-09-17T13:15:58.6233713Z  * [new tag]           v0.1.161                -> v0.1.161
+2026-09-17T13:15:58.6234448Z  * [new tag]           v0.1.162                -> v0.1.162
+2026-09-17T13:15:58.6235166Z  * [new tag]           v0.1.163                -> v0.1.163
+2026-09-17T13:15:58.6235883Z  * [new tag]           v0.1.164                -> v0.1.164
+2026-09-17T13:15:58.6237162Z  * [new tag]           v0.1.165                -> v0.1.165
+2026-09-17T13:15:58.6238507Z  * [new tag]           v0.1.166                -> v0.1.166
+2026-09-17T13:15:58.6239678Z  * [new tag]           v0.1.167                -> v0.1.167
+2026-09-17T13:15:58.6240879Z  * [new tag]           v0.1.168                -> v0.1.168
+2026-09-17T13:15:58.6242118Z  * [new tag]           v0.1.17                 -> v0.1.17
+2026-09-17T13:15:58.6243188Z  * [new tag]           v0.1.170                -> v0.1.170
+2026-09-17T13:15:58.6244304Z  * [new tag]           v0.1.171                -> v0.1.171
+2026-09-17T13:15:58.6245640Z  * [new tag]           v0.1.172                -> v0.1.172
+2026-09-17T13:15:58.6247231Z  * [new tag]           v0.1.173                -> v0.1.173
+2026-09-17T13:15:58.6248502Z  * [new tag]           v0.1.174                -> v0.1.174
+2026-09-17T13:15:58.6250006Z  * [new tag]           v0.1.175                -> v0.1.175
+2026-09-17T13:15:58.6251382Z  * [new tag]           v0.1.176                -> v0.1.176
+2026-09-17T13:15:58.6252720Z  * [new tag]           v0.1.177                -> v0.1.177
+2026-09-17T13:15:58.6253987Z  * [new tag]           v0.1.178                -> v0.1.178
+2026-09-17T13:15:58.6255265Z  * [new tag]           v0.1.179                -> v0.1.179
+2026-09-17T13:15:58.6257149Z  * [new tag]           v0.1.18                 -> v0.1.18
+2026-09-17T13:15:58.6258549Z  * [new tag]           v0.1.180                -> v0.1.180
+2026-09-17T13:15:58.6259360Z  * [new tag]           v0.1.181                -> v0.1.181
+2026-09-17T13:15:58.6260120Z  * [new tag]           v0.1.182                -> v0.1.182
+2026-09-17T13:15:58.6260861Z  * [new tag]           v0.1.183                -> v0.1.183
+2026-09-17T13:15:58.6261602Z  * [new tag]           v0.1.184                -> v0.1.184
+2026-09-17T13:15:58.6262343Z  * [new tag]           v0.1.185                -> v0.1.185
+2026-09-17T13:15:58.6263090Z  * [new tag]           v0.1.186                -> v0.1.186
+2026-09-17T13:15:58.6263820Z  * [new tag]           v0.1.187                -> v0.1.187
+2026-09-17T13:15:58.6264561Z  * [new tag]           v0.1.188                -> v0.1.188
+2026-09-17T13:15:58.6265447Z  * [new tag]           v0.1.189                -> v0.1.189
+2026-09-17T13:15:58.6266247Z  * [new tag]           v0.1.19                 -> v0.1.19
+2026-09-17T13:15:58.6267281Z  * [new tag]           v0.1.190                -> v0.1.190
+2026-09-17T13:15:58.6268048Z  * [new tag]           v0.1.191                -> v0.1.191
+2026-09-17T13:15:58.6268793Z  * [new tag]           v0.1.192                -> v0.1.192
+2026-09-17T13:15:58.6269517Z  * [new tag]           v0.1.193                -> v0.1.193
+2026-09-17T13:15:58.6270263Z  * [new tag]           v0.1.194                -> v0.1.194
+2026-09-17T13:15:58.6270998Z  * [new tag]           v0.1.195                -> v0.1.195
+2026-09-17T13:15:58.6271725Z  * [new tag]           v0.1.196                -> v0.1.196
+2026-09-17T13:15:58.6272447Z  * [new tag]           v0.1.197                -> v0.1.197
+2026-09-17T13:15:58.6273174Z  * [new tag]           v0.1.198                -> v0.1.198
+2026-09-17T13:15:58.6273901Z  * [new tag]           v0.1.199                -> v0.1.199
+2026-09-17T13:15:58.6274623Z  * [new tag]           v0.1.2                  -> v0.1.2
+2026-09-17T13:15:58.6275778Z  * [new tag]           v0.1.20                 -> v0.1.20
+2026-09-17T13:15:58.6276507Z  * [new tag]           v0.1.200                -> v0.1.200
+2026-09-17T13:15:58.6277678Z  * [new tag]           v0.1.201                -> v0.1.201
+2026-09-17T13:15:58.6278465Z  * [new tag]           v0.1.202                -> v0.1.202
+2026-09-17T13:15:58.6279216Z  * [new tag]           v0.1.203                -> v0.1.203
+2026-09-17T13:15:58.6279954Z  * [new tag]           v0.1.204                -> v0.1.204
+2026-09-17T13:15:58.6280688Z  * [new tag]           v0.1.205                -> v0.1.205
+2026-09-17T13:15:58.6281429Z  * [new tag]           v0.1.206                -> v0.1.206
+2026-09-17T13:15:58.6282157Z  * [new tag]           v0.1.207                -> v0.1.207
+2026-09-17T13:15:58.6282881Z  * [new tag]           v0.1.208                -> v0.1.208
+2026-09-17T13:15:58.6283608Z  * [new tag]           v0.1.209                -> v0.1.209
+2026-09-17T13:15:58.6284331Z  * [new tag]           v0.1.21                 -> v0.1.21
+2026-09-17T13:15:58.6360795Z  * [new tag]           v0.1.210                -> v0.1.210
+2026-09-17T13:15:58.6362410Z  * [new tag]           v0.1.211                -> v0.1.211
+2026-09-17T13:15:58.6363331Z  * [new tag]           v0.1.212                -> v0.1.212
+2026-09-17T13:15:58.6364114Z  * [new tag]           v0.1.213                -> v0.1.213
+2026-09-17T13:15:58.6364887Z  * [new tag]           v0.1.214                -> v0.1.214
+2026-09-17T13:15:58.6365659Z  * [new tag]           v0.1.215                -> v0.1.215
+2026-09-17T13:15:58.6366714Z  * [new tag]           v0.1.217                -> v0.1.217
+2026-09-17T13:15:58.6368342Z  * [new tag]           v0.1.218                -> v0.1.218
+2026-09-17T13:15:58.6369587Z  * [new tag]           v0.1.219                -> v0.1.219
+2026-09-17T13:15:58.6370768Z  * [new tag]           v0.1.22                 -> v0.1.22
+2026-09-17T13:15:58.6371967Z  * [new tag]           v0.1.220                -> v0.1.220
+2026-09-17T13:15:58.6373393Z  * [new tag]           v0.1.221                -> v0.1.221
+2026-09-17T13:15:58.6374670Z  * [new tag]           v0.1.222                -> v0.1.222
+2026-09-17T13:15:58.6375919Z  * [new tag]           v0.1.223                -> v0.1.223
+2026-09-17T13:15:58.6377925Z  * [new tag]           v0.1.224                -> v0.1.224
+2026-09-17T13:15:58.6379393Z  * [new tag]           v0.1.225                -> v0.1.225
+2026-09-17T13:15:58.6380778Z  * [new tag]           v0.1.226                -> v0.1.226
+2026-09-17T13:15:58.6382191Z  * [new tag]           v0.1.227                -> v0.1.227
+2026-09-17T13:15:58.6383473Z  * [new tag]           v0.1.228                -> v0.1.228
+2026-09-17T13:15:58.6384745Z  * [new tag]           v0.1.229                -> v0.1.229
+2026-09-17T13:15:58.6386072Z  * [new tag]           v0.1.23                 -> v0.1.23
+2026-09-17T13:15:58.6387646Z  * [new tag]           v0.1.230                -> v0.1.230
+2026-09-17T13:15:58.6388980Z  * [new tag]           v0.1.231                -> v0.1.231
+2026-09-17T13:15:58.6390309Z  * [new tag]           v0.1.232                -> v0.1.232
+2026-09-17T13:15:58.6391639Z  * [new tag]           v0.1.233                -> v0.1.233
+2026-09-17T13:15:58.6393004Z  * [new tag]           v0.1.234                -> v0.1.234
+2026-09-17T13:15:58.6394290Z  * [new tag]           v0.1.235                -> v0.1.235
+2026-09-17T13:15:58.6395582Z  * [new tag]           v0.1.236                -> v0.1.236
+2026-09-17T13:15:58.6396441Z  * [new tag]           v0.1.237                -> v0.1.237
+2026-09-17T13:15:58.6397625Z  * [new tag]           v0.1.238                -> v0.1.238
+2026-09-17T13:15:58.6398678Z  * [new tag]           v0.1.239                -> v0.1.239
+2026-09-17T13:15:58.6399625Z  * [new tag]           v0.1.24                 -> v0.1.24
+2026-09-17T13:15:58.6400507Z  * [new tag]           v0.1.240                -> v0.1.240
+2026-09-17T13:15:58.6401432Z  * [new tag]           v0.1.241                -> v0.1.241
+2026-09-17T13:15:58.6402309Z  * [new tag]           v0.1.242                -> v0.1.242
+2026-09-17T13:15:58.6403530Z  * [new tag]           v0.1.243                -> v0.1.243
+2026-09-17T13:15:58.6404612Z  * [new tag]           v0.1.244                -> v0.1.244
+2026-09-17T13:15:58.6405517Z  * [new tag]           v0.1.245                -> v0.1.245
+2026-09-17T13:15:58.6406394Z  * [new tag]           v0.1.246                -> v0.1.246
+2026-09-17T13:15:58.6407531Z  * [new tag]           v0.1.247                -> v0.1.247
+2026-09-17T13:15:58.6408353Z  * [new tag]           v0.1.248                -> v0.1.248
+2026-09-17T13:15:58.6409135Z  * [new tag]           v0.1.249                -> v0.1.249
+2026-09-17T13:15:58.6409911Z  * [new tag]           v0.1.25                 -> v0.1.25
+2026-09-17T13:15:58.6410711Z  * [new tag]           v0.1.250                -> v0.1.250
+2026-09-17T13:15:58.6411515Z  * [new tag]           v0.1.251                -> v0.1.251
+2026-09-17T13:15:58.6412354Z  * [new tag]           v0.1.252                -> v0.1.252
+2026-09-17T13:15:58.6413390Z  * [new tag]           v0.1.253                -> v0.1.253
+2026-09-17T13:15:58.6414183Z  * [new tag]           v0.1.254                -> v0.1.254
+2026-09-17T13:15:58.6414950Z  * [new tag]           v0.1.255                -> v0.1.255
+2026-09-17T13:15:58.6415740Z  * [new tag]           v0.1.256                -> v0.1.256
+2026-09-17T13:15:58.6416554Z  * [new tag]           v0.1.257                -> v0.1.257
+2026-09-17T13:15:58.6417584Z  * [new tag]           v0.1.258                -> v0.1.258
+2026-09-17T13:15:58.6418341Z  * [new tag]           v0.1.259                -> v0.1.259
+2026-09-17T13:15:58.6419103Z  * [new tag]           v0.1.26                 -> v0.1.26
+2026-09-17T13:15:58.6419869Z  * [new tag]           v0.1.260                -> v0.1.260
+2026-09-17T13:15:58.6420643Z  * [new tag]           v0.1.261                -> v0.1.261
+2026-09-17T13:15:58.6421400Z  * [new tag]           v0.1.262                -> v0.1.262
+2026-09-17T13:15:58.6422159Z  * [new tag]           v0.1.263                -> v0.1.263
+2026-09-17T13:15:58.6423198Z  * [new tag]           v0.1.264                -> v0.1.264
+2026-09-17T13:15:58.6424090Z  * [new tag]           v0.1.265                -> v0.1.265
+2026-09-17T13:15:58.6424871Z  * [new tag]           v0.1.266                -> v0.1.266
+2026-09-17T13:15:58.6425657Z  * [new tag]           v0.1.267                -> v0.1.267
+2026-09-17T13:15:58.6426438Z  * [new tag]           v0.1.268                -> v0.1.268
+2026-09-17T13:15:58.6427526Z  * [new tag]           v0.1.269                -> v0.1.269
+2026-09-17T13:15:58.6428319Z  * [new tag]           v0.1.27                 -> v0.1.27
+2026-09-17T13:15:58.6429099Z  * [new tag]           v0.1.270                -> v0.1.270
+2026-09-17T13:15:58.6429877Z  * [new tag]           v0.1.271                -> v0.1.271
+2026-09-17T13:15:58.6430659Z  * [new tag]           v0.1.272                -> v0.1.272
+2026-09-17T13:15:58.6431445Z  * [new tag]           v0.1.273                -> v0.1.273
+2026-09-17T13:15:58.6432225Z  * [new tag]           v0.1.274                -> v0.1.274
+2026-09-17T13:15:58.6433023Z  * [new tag]           v0.1.28                 -> v0.1.28
+2026-09-17T13:15:58.6433798Z  * [new tag]           v0.1.29                 -> v0.1.29
+2026-09-17T13:15:58.6434572Z  * [new tag]           v0.1.3                  -> v0.1.3
+2026-09-17T13:15:58.6435358Z  * [new tag]           v0.1.30                 -> v0.1.30
+2026-09-17T13:15:58.6436140Z  * [new tag]           v0.1.31                 -> v0.1.31
+2026-09-17T13:15:58.6437168Z  * [new tag]           v0.1.32                 -> v0.1.32
+2026-09-17T13:15:58.6438108Z  * [new tag]           v0.1.33                 -> v0.1.33
+2026-09-17T13:15:58.6438905Z  * [new tag]           v0.1.34                 -> v0.1.34
+2026-09-17T13:15:58.6439691Z  * [new tag]           v0.1.35                 -> v0.1.35
+2026-09-17T13:15:58.6440477Z  * [new tag]           v0.1.36                 -> v0.1.36
+2026-09-17T13:15:58.6441265Z  * [new tag]           v0.1.37                 -> v0.1.37
+2026-09-17T13:15:58.6442051Z  * [new tag]           v0.1.38                 -> v0.1.38
+2026-09-17T13:15:58.6443017Z  * [new tag]           v0.1.39                 -> v0.1.39
+2026-09-17T13:15:58.6443812Z  * [new tag]           v0.1.4                  -> v0.1.4
+2026-09-17T13:15:58.6444596Z  * [new tag]           v0.1.40                 -> v0.1.40
+2026-09-17T13:15:58.6445378Z  * [new tag]           v0.1.41                 -> v0.1.41
+2026-09-17T13:15:58.6446155Z  * [new tag]           v0.1.42                 -> v0.1.42
+2026-09-17T13:15:58.6447231Z  * [new tag]           v0.1.43                 -> v0.1.43
+2026-09-17T13:15:58.6448206Z  * [new tag]           v0.1.44                 -> v0.1.44
+2026-09-17T13:15:58.6449010Z  * [new tag]           v0.1.45                 -> v0.1.45
+2026-09-17T13:15:58.6449791Z  * [new tag]           v0.1.46                 -> v0.1.46
+2026-09-17T13:15:58.6450581Z  * [new tag]           v0.1.47                 -> v0.1.47
+2026-09-17T13:15:58.6451378Z  * [new tag]           v0.1.48                 -> v0.1.48
+2026-09-17T13:15:58.6452185Z  * [new tag]           v0.1.49                 -> v0.1.49
+2026-09-17T13:15:58.6452972Z  * [new tag]           v0.1.5                  -> v0.1.5
+2026-09-17T13:15:58.6453758Z  * [new tag]           v0.1.50                 -> v0.1.50
+2026-09-17T13:15:58.6454547Z  * [new tag]           v0.1.51                 -> v0.1.51
+2026-09-17T13:15:58.6455348Z  * [new tag]           v0.1.52                 -> v0.1.52
+2026-09-17T13:15:58.6456132Z  * [new tag]           v0.1.53                 -> v0.1.53
+2026-09-17T13:15:58.6457240Z  * [new tag]           v0.1.54                 -> v0.1.54
+2026-09-17T13:15:58.6458163Z  * [new tag]           v0.1.55                 -> v0.1.55
+2026-09-17T13:15:58.6458963Z  * [new tag]           v0.1.56                 -> v0.1.56
+2026-09-17T13:15:58.6459753Z  * [new tag]           v0.1.57                 -> v0.1.57
+2026-09-17T13:15:58.6460544Z  * [new tag]           v0.1.58                 -> v0.1.58
+2026-09-17T13:15:58.6461335Z  * [new tag]           v0.1.59                 -> v0.1.59
+2026-09-17T13:15:58.6462298Z  * [new tag]           v0.1.6                  -> v0.1.6
+2026-09-17T13:15:58.6463102Z  * [new tag]           v0.1.60                 -> v0.1.60
+2026-09-17T13:15:58.6463886Z  * [new tag]           v0.1.61                 -> v0.1.61
+2026-09-17T13:15:58.6464668Z  * [new tag]           v0.1.62                 -> v0.1.62
+2026-09-17T13:15:58.6465458Z  * [new tag]           v0.1.63                 -> v0.1.63
+2026-09-17T13:15:58.6466241Z  * [new tag]           v0.1.64                 -> v0.1.64
+2026-09-17T13:15:58.6467202Z  * [new tag]           v0.1.65                 -> v0.1.65
+2026-09-17T13:15:58.6467997Z  * [new tag]           v0.1.66                 -> v0.1.66
+2026-09-17T13:15:58.6468777Z  * [new tag]           v0.1.67                 -> v0.1.67
+2026-09-17T13:15:58.6469561Z  * [new tag]           v0.1.68                 -> v0.1.68
+2026-09-17T13:15:58.6470350Z  * [new tag]           v0.1.69                 -> v0.1.69
+2026-09-17T13:15:58.6471143Z  * [new tag]           v0.1.7                  -> v0.1.7
+2026-09-17T13:15:58.6471940Z  * [new tag]           v0.1.70                 -> v0.1.70
+2026-09-17T13:15:58.6472739Z  * [new tag]           v0.1.71                 -> v0.1.71
+2026-09-17T13:15:58.6473531Z  * [new tag]           v0.1.72                 -> v0.1.72
+2026-09-17T13:15:58.6474323Z  * [new tag]           v0.1.73                 -> v0.1.73
+2026-09-17T13:15:58.6475122Z  * [new tag]           v0.1.74                 -> v0.1.74
+2026-09-17T13:15:58.6475922Z  * [new tag]           v0.1.75                 -> v0.1.75
+2026-09-17T13:15:58.6476712Z  * [new tag]           v0.1.76                 -> v0.1.76
+2026-09-17T13:15:58.6477689Z  * [new tag]           v0.1.77                 -> v0.1.77
+2026-09-17T13:15:58.6478488Z  * [new tag]           v0.1.78                 -> v0.1.78
+2026-09-17T13:15:58.6479277Z  * [new tag]           v0.1.79                 -> v0.1.79
+2026-09-17T13:15:58.6480073Z  * [new tag]           v0.1.8                  -> v0.1.8
+2026-09-17T13:15:58.6480865Z  * [new tag]           v0.1.80                 -> v0.1.80
+2026-09-17T13:15:58.6481821Z  * [new tag]           v0.1.81                 -> v0.1.81
+2026-09-17T13:15:58.6482616Z  * [new tag]           v0.1.82                 -> v0.1.82
+2026-09-17T13:15:58.6483406Z  * [new tag]           v0.1.83                 -> v0.1.83
+2026-09-17T13:15:58.6484199Z  * [new tag]           v0.1.84                 -> v0.1.84
+2026-09-17T13:15:58.6484993Z  * [new tag]           v0.1.85                 -> v0.1.85
+2026-09-17T13:15:58.6485783Z  * [new tag]           v0.1.86                 -> v0.1.86
+2026-09-17T13:15:58.6486579Z  * [new tag]           v0.1.87                 -> v0.1.87
+2026-09-17T13:15:58.6487648Z  * [new tag]           v0.1.88                 -> v0.1.88
+2026-09-17T13:15:58.6488440Z  * [new tag]           v0.1.89                 -> v0.1.89
+2026-09-17T13:15:58.6489223Z  * [new tag]           v0.1.9                  -> v0.1.9
+2026-09-17T13:15:58.6490005Z  * [new tag]           v0.1.90                 -> v0.1.90
+2026-09-17T13:15:58.6490787Z  * [new tag]           v0.1.91                 -> v0.1.91
+2026-09-17T13:15:58.6491576Z  * [new tag]           v0.1.92                 -> v0.1.92
+2026-09-17T13:15:58.6492354Z  * [new tag]           v0.1.93                 -> v0.1.93
+2026-09-17T13:15:58.6493125Z  * [new tag]           v0.1.94                 -> v0.1.94
+2026-09-17T13:15:58.6493910Z  * [new tag]           v0.1.95                 -> v0.1.95
+2026-09-17T13:15:58.6494692Z  * [new tag]           v0.1.96                 -> v0.1.96
+2026-09-17T13:15:58.6495486Z  * [new tag]           v0.1.97                 -> v0.1.97
+2026-09-17T13:15:58.6496271Z  * [new tag]           v0.1.98                 -> v0.1.98
+2026-09-17T13:15:58.6497405Z  * [new tag]           v0.1.99                 -> v0.1.99
+2026-09-17T13:15:58.6498739Z  * [new tag]           velnor-workflow-runtime-v1-0a69e008ff8703af -> velnor-workflow-runtime-v1-0a69e008ff8703af
+2026-09-17T13:15:58.6500545Z  * [new tag]           velnor-workflow-runtime-v1-1b7e82ab726aa53b -> velnor-workflow-runtime-v1-1b7e82ab726aa53b
+2026-09-17T13:15:58.6502550Z  * [new tag]           velnor-workflow-runtime-v1-1ff514a2852c82d3 -> velnor-workflow-runtime-v1-1ff514a2852c82d3
+2026-09-17T13:15:58.6504354Z  * [new tag]           velnor-workflow-runtime-v1-203eb9b79141e5a2 -> velnor-workflow-runtime-v1-203eb9b79141e5a2
+2026-09-17T13:15:58.6506151Z  * [new tag]           velnor-workflow-runtime-v1-2bd48976b59bf084 -> velnor-workflow-runtime-v1-2bd48976b59bf084
+2026-09-17T13:15:58.6508219Z  * [new tag]           velnor-workflow-runtime-v1-304405643c571048 -> velnor-workflow-runtime-v1-304405643c571048
+2026-09-17T13:15:58.6509958Z  * [new tag]           velnor-workflow-runtime-v1-3b8d2b29eca331f4 -> velnor-workflow-runtime-v1-3b8d2b29eca331f4
+2026-09-17T13:15:58.6511694Z  * [new tag]           velnor-workflow-runtime-v1-49d0a3970c57d4d6 -> velnor-workflow-runtime-v1-49d0a3970c57d4d6
+2026-09-17T13:15:58.6513419Z  * [new tag]           velnor-workflow-runtime-v1-4ef63457fa892a18 -> velnor-workflow-runtime-v1-4ef63457fa892a18
+2026-09-17T13:15:58.6515196Z  * [new tag]           velnor-workflow-runtime-v1-561387508ee5fcc6 -> velnor-workflow-runtime-v1-561387508ee5fcc6
+2026-09-17T13:15:58.6517115Z  * [new tag]           velnor-workflow-runtime-v1-6945ed5e15305462 -> velnor-workflow-runtime-v1-6945ed5e15305462
+2026-09-17T13:15:58.6518856Z  * [new tag]           velnor-workflow-runtime-v1-69a010b248a76d58 -> velnor-workflow-runtime-v1-69a010b248a76d58
+2026-09-17T13:15:58.6520600Z  * [new tag]           velnor-workflow-runtime-v1-6ae4ca31ef453567 -> velnor-workflow-runtime-v1-6ae4ca31ef453567
+2026-09-17T13:15:58.6522333Z  * [new tag]           velnor-workflow-runtime-v1-716a0b98ec7d1b4d -> velnor-workflow-runtime-v1-716a0b98ec7d1b4d
+2026-09-17T13:15:58.6524081Z  * [new tag]           velnor-workflow-runtime-v1-71e623219d2db42c -> velnor-workflow-runtime-v1-71e623219d2db42c
+2026-09-17T13:15:58.6525821Z  * [new tag]           velnor-workflow-runtime-v1-78673ee16c42581e -> velnor-workflow-runtime-v1-78673ee16c42581e
+2026-09-17T13:15:58.6527853Z  * [new tag]           velnor-workflow-runtime-v1-81a6d4d42427c1f8 -> velnor-workflow-runtime-v1-81a6d4d42427c1f8
+2026-09-17T13:15:58.6529809Z  * [new tag]           velnor-workflow-runtime-v1-93c8a35808d1210b -> velnor-workflow-runtime-v1-93c8a35808d1210b
+2026-09-17T13:15:58.6531534Z  * [new tag]           velnor-workflow-runtime-v1-956c48e84c4f858e -> velnor-workflow-runtime-v1-956c48e84c4f858e
+2026-09-17T13:15:58.6533249Z  * [new tag]           velnor-workflow-runtime-v1-9f236b40635970a4 -> velnor-workflow-runtime-v1-9f236b40635970a4
+2026-09-17T13:15:58.6534954Z  * [new tag]           velnor-workflow-runtime-v1-a3dc1e44d51b3cb2 -> velnor-workflow-runtime-v1-a3dc1e44d51b3cb2
+2026-09-17T13:15:58.6536658Z  * [new tag]           velnor-workflow-runtime-v1-a8356a89d2859dd3 -> velnor-workflow-runtime-v1-a8356a89d2859dd3
+2026-09-17T13:15:58.6538780Z  * [new tag]           velnor-workflow-runtime-v1-ace4fa94864c59e5 -> velnor-workflow-runtime-v1-ace4fa94864c59e5
+2026-09-17T13:15:58.6540507Z  * [new tag]           velnor-workflow-runtime-v1-ad493401f003a130 -> velnor-workflow-runtime-v1-ad493401f003a130
+2026-09-17T13:15:58.6542214Z  * [new tag]           velnor-workflow-runtime-v1-c0ce56f09b27859c -> velnor-workflow-runtime-v1-c0ce56f09b27859c
+2026-09-17T13:15:58.6543920Z  * [new tag]           velnor-workflow-runtime-v1-d39cbf21e351b410 -> velnor-workflow-runtime-v1-d39cbf21e351b410
+2026-09-17T13:15:58.6545625Z  * [new tag]           velnor-workflow-runtime-v1-e5ad6f4f923cd154 -> velnor-workflow-runtime-v1-e5ad6f4f923cd154
+2026-09-17T13:15:58.6547513Z  * [new tag]           velnor-workflow-runtime-v1-eee20d4ac15650f0 -> velnor-workflow-runtime-v1-eee20d4ac15650f0
+2026-09-17T13:15:58.6549232Z  * [new tag]           velnor-workflow-runtime-v1-f1f88c200e5b3b82 -> velnor-workflow-runtime-v1-f1f88c200e5b3b82
+2026-09-17T13:15:58.6550954Z  * [new tag]           velnor-workflow-runtime-v1-fd45efac853b6570 -> velnor-workflow-runtime-v1-fd45efac853b6570
+2026-09-17T13:15:58.6552908Z  * [new tag]           velnor-workflow-runtime-v1-ff27a1c010cb4faf -> velnor-workflow-runtime-v1-ff27a1c010cb4faf
+2026-09-17T13:15:58.6555127Z [command]/usr/bin/git branch --list --remote origin/main
+2026-09-17T13:15:58.6555996Z   origin/main
+2026-09-17T13:15:58.6557378Z [command]/usr/bin/git rev-parse refs/remotes/origin/main
+2026-09-17T13:15:58.6558158Z 40206d9fe60a8e0693046d1695762c62883a0578
+2026-09-17T13:15:58.6559693Z ##[endgroup]
+2026-09-17T13:15:58.6560452Z ##[group]Determining the checkout info
+2026-09-17T13:15:58.6561343Z ##[endgroup]
+2026-09-17T13:15:58.6561844Z [command]/usr/bin/git sparse-checkout disable
+2026-09-17T13:15:58.6563374Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+2026-09-17T13:15:58.6565145Z ##[group]Checking out the ref
+2026-09-17T13:15:58.6566054Z [command]/usr/bin/git checkout --progress --force -B main refs/remotes/origin/main
+2026-09-17T13:15:58.7441171Z Switched to a new branch 'main'
+2026-09-17T13:15:58.7448411Z branch 'main' set up to track 'origin/main'.
+2026-09-17T13:15:58.7466517Z ##[endgroup]
+2026-09-17T13:15:58.7517196Z [command]/usr/bin/git log -1 --format=%H
+2026-09-17T13:15:58.7547334Z 40206d9fe60a8e0693046d1695762c62883a0578
+2026-09-17T13:15:58.7569836Z ##[group]Removing auth
+2026-09-17T13:15:58.7570742Z Removing SSH command configuration
+2026-09-17T13:15:58.7572202Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-09-17T13:15:58.7610180Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-09-17T13:15:58.7834868Z Removing HTTP extra header
+2026-09-17T13:15:58.7839402Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-09-17T13:15:58.7873859Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-09-17T13:15:58.8097321Z Removing includeIf entries pointing to credentials config files
+2026-09-17T13:15:58.8100475Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-09-17T13:15:58.8131430Z includeif.gitdir:/home/runner/work/velnor/velnor/.git.path
+2026-09-17T13:15:58.8132647Z includeif.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path
+2026-09-17T13:15:58.8133607Z includeif.gitdir:/github/workspace/.git.path
+2026-09-17T13:15:58.8134869Z includeif.gitdir:/github/workspace/.git/worktrees/*.path
+2026-09-17T13:15:58.8140352Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/.git.path
+2026-09-17T13:15:58.8165966Z /home/runner/work/_temp/git-credentials-3d8e2344-8109-4458-b234-203b7bcf4b3b.config
+2026-09-17T13:15:58.8177103Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/.git.path \/home\/runner\/work\/_temp\/git\-credentials\-3d8e2344\-8109\-4458\-b234\-203b7bcf4b3b\.config
+2026-09-17T13:15:58.8239616Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path
+2026-09-17T13:15:58.8265499Z /home/runner/work/_temp/git-credentials-3d8e2344-8109-4458-b234-203b7bcf4b3b.config
+2026-09-17T13:15:58.8275390Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path \/home\/runner\/work\/_temp\/git\-credentials\-3d8e2344\-8109\-4458\-b234\-203b7bcf4b3b\.config
+2026-09-17T13:15:58.8318766Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git.path
+2026-09-17T13:15:58.8350598Z /github/runner_temp/git-credentials-3d8e2344-8109-4458-b234-203b7bcf4b3b.config
+2026-09-17T13:15:58.8359761Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git.path \/github\/runner_temp\/git\-credentials\-3d8e2344\-8109\-4458\-b234\-203b7bcf4b3b\.config
+2026-09-17T13:15:58.8394211Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git/worktrees/*.path
+2026-09-17T13:15:58.8419376Z /github/runner_temp/git-credentials-3d8e2344-8109-4458-b234-203b7bcf4b3b.config
+2026-09-17T13:15:58.8427925Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git/worktrees/*.path \/github\/runner_temp\/git\-credentials\-3d8e2344\-8109\-4458\-b234\-203b7bcf4b3b\.config
+2026-09-17T13:15:58.8469230Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-09-17T13:15:58.8722222Z Removing credentials config '/home/runner/work/_temp/git-credentials-3d8e2344-8109-4458-b234-203b7bcf4b3b.config'
+2026-09-17T13:15:58.8730199Z ##[endgroup]
+2026-09-17T13:15:58.9273976Z Prepare all required actions
+2026-09-17T13:15:58.9275030Z Getting action download info
+2026-09-17T13:15:59.0838119Z Download action repository 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9' (SHA:55cc8345863c7cc4c66a329aec7e433d2d1c52a9)
+2026-09-17T13:15:59.3305558Z ##[group]Run ./.github/actions/setup-velnor-workflow
+2026-09-17T13:15:59.3306816Z with:
+2026-09-17T13:15:59.3307906Z   rev: a6fa8d4a5096e6df37250b59a8105abfebdb9013
+2026-09-17T13:15:59.3309192Z   checkout-path: /home/runner/work/velnor/velnor
+2026-09-17T13:15:59.3310349Z   cache: true
+2026-09-17T13:15:59.3311227Z   cache-key-prefix: velnor-workflow-v3
+2026-09-17T13:15:59.3320633Z   github-token: ***
+2026-09-17T13:15:59.3321497Z ##[endgroup]
+2026-09-17T13:15:59.3398623Z ##[start-action display=Resolve source closure;id=runtime.closure]
+2026-09-17T13:15:59.3455269Z ##[group]Run set -euo pipefail
+2026-09-17T13:15:59.3456404Z [36;1mset -euo pipefail[0m
+2026-09-17T13:15:59.3457596Z [36;1msha256_digest() {[0m
+2026-09-17T13:15:59.3458757Z [36;1m  if command -v sha256sum >/dev/null 2>&1; then[0m
+2026-09-17T13:15:59.3460044Z [36;1m    sha256sum | awk '{print $1}'[0m
+2026-09-17T13:15:59.3461307Z [36;1m  elif command -v shasum >/dev/null 2>&1; then[0m
+2026-09-17T13:15:59.3462584Z [36;1m    shasum -a 256 | awk '{print $1}'[0m
+2026-09-17T13:15:59.3463875Z [36;1m  else[0m
+2026-09-17T13:15:59.3465152Z [36;1m    echo "::error::no SHA-256 checksum tool available (sha256sum or shasum)" >&2[0m
+2026-09-17T13:15:59.3466666Z [36;1m    return 1[0m
+2026-09-17T13:15:59.3467924Z [36;1m  fi[0m
+2026-09-17T13:15:59.3468680Z [36;1m}[0m
+2026-09-17T13:15:59.3469951Z [36;1mtest "$INSTALL_REV" != '' || { echo "::error::runtime revision is empty" >&2; exit 1; }[0m
+2026-09-17T13:15:59.3472483Z [36;1m[[ "$INSTALL_REV" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::runtime revision must be a full commit SHA, got $INSTALL_REV" >&2; exit 1; }[0m
+2026-09-17T13:15:59.3474482Z [36;1mlisting=""[0m
+2026-09-17T13:15:59.3475837Z [36;1mif git -C "$CHECKOUT_PATH" cat-file -e "$INSTALL_REV^{commit}" 2>/dev/null; then[0m
+2026-09-17T13:15:59.3478904Z [36;1m  listing="$(git -C "$CHECKOUT_PATH" ls-tree -r "$INSTALL_REV" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)"[0m
+2026-09-17T13:15:59.3481326Z [36;1melse[0m
+2026-09-17T13:15:59.3483439Z [36;1m  tree="$(gh api "repos/$PRODUCT_REPOSITORY/git/trees/$INSTALL_REV?recursive=1")" || { echo "::error::unknown generator revision $INSTALL_REV" >&2; exit 1; }[0m
+2026-09-17T13:15:59.3487079Z [36;1m  [[ "$(jq -r '.truncated // false' <<<"$tree")" != "true" ]] || { echo "::error::tree API response is truncated; the closure cannot be proven" >&2; exit 1; }[0m
+2026-09-17T13:15:59.3492276Z [36;1m  listing="$(jq -r '[.tree[] | select(.type != "tree") | select(.path == "Cargo.toml" or .path == "Cargo.lock" or .path == "rust-toolchain.toml" or .path == "rust-toolchain" or (.path | startswith("crates/velnor-workflow/")) or (.path | startswith(".cargo/"))) | "\(.mode) \(.type) \(.sha)\t\(.path)"] | sort | join("\n")' <<<"$tree")"[0m
+2026-09-17T13:15:59.3496281Z [36;1mfi[0m
+2026-09-17T13:15:59.3497843Z [36;1mtest "$listing" != '' || { echo "::error::revision $INSTALL_REV has no closure inputs" >&2; exit 1; }[0m
+2026-09-17T13:15:59.3500564Z [36;1mclosure="$(printf '%s\nclosure-version:1\nfeatures:\nprofile:release\n' "$(LC_ALL=C sort <<<"$listing")" | sha256_digest)"[0m
+2026-09-17T13:15:59.3503114Z [36;1m[[ "$closure" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::closure resolution failed" >&2; exit 1; }[0m
+2026-09-17T13:15:59.3504813Z [36;1mecho "value=$closure" >> "$GITHUB_OUTPUT"[0m
+2026-09-17T13:15:59.3548288Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-09-17T13:15:59.3549554Z env:
+2026-09-17T13:15:59.3558574Z   GH_TOKEN: ***
+2026-09-17T13:15:59.3559569Z   INSTALL_REV: a6fa8d4a5096e6df37250b59a8105abfebdb9013
+2026-09-17T13:15:59.3560904Z   CHECKOUT_PATH: /home/runner/work/velnor/velnor
+2026-09-17T13:15:59.3562371Z   PRODUCT_REPOSITORY: tailrocks/velnor
+2026-09-17T13:15:59.3563404Z ##[endgroup]
+2026-09-17T13:15:59.3785591Z ##[end-action id=runtime.closure;outcome=success;conclusion=success;duration_ms=38]
+2026-09-17T13:15:59.3794168Z ##[start-action display=Restore runtime cache;id=runtime.cache]
+2026-09-17T13:15:59.3934808Z ##[group]Run actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+2026-09-17T13:15:59.3936260Z with:
+2026-09-17T13:15:59.3937324Z   path: ~/.cache/velnor/workflow-runtime
+2026-09-17T13:15:59.3939307Z   key: velnor-workflow-v3-Linux-X64-ace4fa94864c59e57fdc08feea26e851dc5912e2cd9e68fd7c505ec87d596cdd
+2026-09-17T13:15:59.3941315Z   enableCrossOsArchive: false
+2026-09-17T13:15:59.3942310Z   fail-on-cache-miss: false
+2026-09-17T13:15:59.3943245Z   lookup-only: false
+2026-09-17T13:15:59.3944112Z ##[endgroup]
+2026-09-17T13:15:59.7657419Z Cache hit for: velnor-workflow-v3-Linux-X64-ace4fa94864c59e57fdc08feea26e851dc5912e2cd9e68fd7c505ec87d596cdd
+2026-09-17T13:16:01.0649157Z Received 0 of 2621624 (0.0%), 0.0 MBs/sec
+2026-09-17T13:16:01.2113454Z Received 2621624 of 2621624 (100.0%), 2.2 MBs/sec
+2026-09-17T13:16:01.2114459Z Cache Size: ~3 MB (2621624 B)
+2026-09-17T13:16:01.2148576Z [command]/usr/bin/tar -xf /home/runner/work/_temp/0d41183c-bf94-4281-a2f6-c563f0d7a5ec/cache.tzst -P -C /home/runner/work/velnor/velnor --use-compress-program unzstd
+2026-09-17T13:16:01.2337345Z Cache restored successfully
+2026-09-17T13:16:01.2415500Z Cache restored from key: velnor-workflow-v3-Linux-X64-ace4fa94864c59e57fdc08feea26e851dc5912e2cd9e68fd7c505ec87d596cdd
+2026-09-17T13:16:01.2488490Z ##[end-action id=runtime.cache;outcome=success;conclusion=success;duration_ms=1869]
+2026-09-17T13:16:01.2496328Z ##[start-action display=Download runtime product;id=runtime.__run]
+2026-09-17T13:16:01.2508384Z ##[end-action id=runtime.__run;outcome=skipped;conclusion=skipped;duration_ms=0]
+2026-09-17T13:16:01.2511817Z ##[start-action display=Verify runtime product;id=runtime.__run_2]
+2026-09-17T13:16:01.2534626Z ##[group]Run set -euo pipefail
+2026-09-17T13:16:01.2534957Z [36;1mset -euo pipefail[0m
+2026-09-17T13:16:01.2535298Z [36;1mruntime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"[0m
+2026-09-17T13:16:01.2535653Z [36;1mjq -e \[0m
+2026-09-17T13:16:01.2535893Z [36;1m  --arg closure "$CLOSURE" \[0m
+2026-09-17T13:16:01.2536232Z [36;1m  --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \[0m
+2026-09-17T13:16:01.2537197Z [36;1m  '.closure == $closure and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$"))' \[0m
+2026-09-17T13:16:01.2537831Z [36;1m  "$runtime/manifest.json" >/dev/null[0m
+2026-09-17T13:16:01.2538197Z [36;1mif command -v sha256sum >/dev/null 2>&1; then[0m
+2026-09-17T13:16:01.2538645Z [36;1m  actual="$(sha256sum "$runtime/bin/velnor-workflow" | awk '{print $1}')"[0m
+2026-09-17T13:16:01.2539042Z [36;1melse[0m
+2026-09-17T13:16:01.2539375Z [36;1m  actual="$(shasum -a 256 "$runtime/bin/velnor-workflow" | awk '{print $1}')"[0m
+2026-09-17T13:16:01.2539773Z [36;1mfi[0m
+2026-09-17T13:16:01.2540272Z [36;1mexpected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "$runtime/manifest.json")"[0m
+2026-09-17T13:16:01.2540991Z [36;1m[[ "$actual" == "$expected" ]] || { echo "::error::cached runtime digest mismatch" >&2; exit 1; }[0m
+2026-09-17T13:16:01.2579355Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-09-17T13:16:01.2579712Z env:
+2026-09-17T13:16:01.2580053Z   CLOSURE: ace4fa94864c59e57fdc08feea26e851dc5912e2cd9e68fd7c505ec87d596cdd
+2026-09-17T13:16:01.2580488Z ##[endgroup]
+2026-09-17T13:16:01.2773185Z ##[end-action id=runtime.__run_2;outcome=success;conclusion=success;duration_ms=26]
+2026-09-17T13:16:01.2777322Z ##[start-action display=Add runtime to PATH;id=runtime.__run_3]
+2026-09-17T13:16:01.2798759Z ##[group]Run set -euo pipefail
+2026-09-17T13:16:01.2799129Z [36;1mset -euo pipefail[0m
+2026-09-17T13:16:01.2799469Z [36;1mruntime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"[0m
+2026-09-17T13:16:01.2800040Z [36;1mtest -x "$runtime/bin/velnor-workflow"[0m
+2026-09-17T13:16:01.2800377Z [36;1mtest -s "$runtime/manifest.json"[0m
+2026-09-17T13:16:01.2800750Z [36;1mreported="$("$runtime/bin/velnor-workflow" --closure)"[0m
+2026-09-17T13:16:01.2801413Z [36;1m[[ "$reported" == "$CLOSURE" ]] || { echo "::error::runtime at $runtime reports closure $reported, expected $CLOSURE" >&2; exit 1; }[0m
+2026-09-17T13:16:01.2802033Z [36;1mecho "$runtime/bin" >> "$GITHUB_PATH"[0m
+2026-09-17T13:16:01.2837155Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-09-17T13:16:01.2837548Z env:
+2026-09-17T13:16:01.2837895Z   CLOSURE: ace4fa94864c59e57fdc08feea26e851dc5912e2cd9e68fd7c505ec87d596cdd
+2026-09-17T13:16:01.2838312Z ##[endgroup]
+2026-09-17T13:16:01.2913421Z ##[end-action id=runtime.__run_3;outcome=success;conclusion=success;duration_ms=13]
+2026-09-17T13:16:01.2915475Z ##[start-action display=Save runtime cache;id=runtime.__actions_cache]
+2026-09-17T13:16:01.2930741Z ##[end-action id=runtime.__actions_cache;outcome=skipped;conclusion=skipped;duration_ms=0]
+2026-09-17T13:16:01.2987514Z ##[group]Run echo "VELNOR_WORKFLOW_POLICY_REVISION=a6fa8d4a5096e6df37250b59a8105abfebdb9013" >> "$GITHUB_ENV"
+2026-09-17T13:16:01.2988354Z [36;1mecho "VELNOR_WORKFLOW_POLICY_REVISION=a6fa8d4a5096e6df37250b59a8105abfebdb9013" >> "$GITHUB_ENV"[0m
+2026-09-17T13:16:01.3025593Z shell: /usr/bin/bash -e {0}
+2026-09-17T13:16:01.3025876Z ##[endgroup]
+2026-09-17T13:16:01.3122599Z ##[group]Run set -euo pipefail
+2026-09-17T13:16:01.3122939Z [36;1mset -euo pipefail[0m
+2026-09-17T13:16:01.3123312Z [36;1mif [[ -z "${CI_SCOPE_OVERRIDE:-}" ]]; then unset CI_SCOPE_OVERRIDE; fi[0m
+2026-09-17T13:16:01.3123793Z [36;1mvelnor-workflow plan --config .github/ci/project.toml[0m
+2026-09-17T13:16:01.3160046Z shell: /usr/bin/bash -e {0}
+2026-09-17T13:16:01.3160305Z env:
+2026-09-17T13:16:01.3160642Z   VELNOR_WORKFLOW_POLICY_REVISION: a6fa8d4a5096e6df37250b59a8105abfebdb9013
+2026-09-17T13:16:01.3161048Z   EVENT_NAME: push
+2026-09-17T13:16:01.3161266Z   CI_SCOPE_OVERRIDE: 
+2026-09-17T13:16:01.3161536Z   BASE_SHA: 52739e176c1cba3ddeeff1ca21eda2edadb52b17
+2026-09-17T13:16:01.3161882Z   HEAD_SHA: 40206d9fe60a8e0693046d1695762c62883a0578
+2026-09-17T13:16:01.3162177Z   VELNOR_LANES: both
+2026-09-17T13:16:01.3162383Z ##[endgroup]
+2026-09-17T13:16:01.3235849Z scope=full
+2026-09-17T13:16:01.3238604Z units=bun-velnor,docker,docs,opentofu,rust-policy,rust-unit-collector,rust-velnor-model,rust-velnor-render,rust-velnor-workflow-contract,rust-production-topology,rust-velnor-client,rust-velnor-control,rust-velnor-runner,rust-velnor-tools,rust-velnor-workflow,rust-velnorctl,rust-velnor-bench
+2026-09-17T13:16:01.3243727Z full_units=bun-velnor,docker,docs,opentofu,rust-policy,rust-production-topology,rust-unit-collector,rust-velnor-bench,rust-velnor-client,rust-velnor-control,rust-velnor-model,rust-velnor-render,rust-velnor-runner,rust-velnor-tools,rust-velnor-workflow,rust-velnor-workflow-contract,rust-velnorctl
+2026-09-17T13:16:01.3278098Z ##[group]Run set -euo pipefail
+2026-09-17T13:16:01.3278470Z [36;1mset -euo pipefail[0m
+2026-09-17T13:16:01.3278806Z [36;1mstage="$RUNNER_TEMP/velnor-workflow-runtime"[0m
+2026-09-17T13:16:01.3279135Z [36;1mrm -rf "$stage"[0m
+2026-09-17T13:16:01.3279374Z [36;1mmkdir -p "$stage"[0m
+2026-09-17T13:16:01.3279644Z [36;1msrc="$(command -v velnor-workflow)"[0m
+2026-09-17T13:16:01.3280001Z [36;1minstall -m 0755 "$src" "$stage/velnor-workflow"[0m
+2026-09-17T13:16:01.3280431Z [36;1mdigest="$(sha256sum "$stage/velnor-workflow" | awk '{print $1}')"[0m
+2026-09-17T13:16:01.3280889Z [36;1mpolicy_src="${VELNOR_WORKFLOW_PINNED_BINARY:-$src}"[0m
+2026-09-17T13:16:01.3281328Z [36;1minstall -m 0755 "$policy_src" "$stage/velnor-workflow-policy"[0m
+2026-09-17T13:16:01.3281808Z [36;1mpolicy_revision="$("$stage/velnor-workflow-policy" --revision)"[0m
+2026-09-17T13:16:01.3282275Z [36;1mpolicy_closure="$("$stage/velnor-workflow-policy" --closure)"[0m
+2026-09-17T13:16:01.3283413Z [36;1m[[ "$policy_closure" == "ace4fa94864c59e57fdc08feea26e851dc5912e2cd9e68fd7c505ec87d596cdd" ]] || { echo "::error::policy runtime reports closure $policy_closure, expected ace4fa94864c59e57fdc08feea26e851dc5912e2cd9e68fd7c505ec87d596cdd" >&2; exit 1; }[0m
+2026-09-17T13:16:01.3284601Z [36;1mpolicy_digest="$(sha256sum "$stage/velnor-workflow-policy" | awk '{print $1}')"[0m
+2026-09-17T13:16:01.3287668Z [36;1mjq -n --arg repository "$GITHUB_REPOSITORY" --arg revision "$EXPECTED_REVISION" --arg closure "ace4fa94864c59e57fdc08feea26e851dc5912e2cd9e68fd7c505ec87d596cdd" --arg head_branch "main" --arg platform "Linux-X64" --arg run_id "$GITHUB_RUN_ID" --arg job_id "plan" --arg binary_sha256 "$digest" --arg policy_revision "$policy_revision" --arg policy_closure "$policy_closure" --arg policy_binary_sha256 "$policy_digest" '{repository: $repository, revision: $revision, closure: $closure, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256, policy_revision: $policy_revision, policy_closure: $policy_closure, policy_binary_sha256: $policy_binary_sha256}' > "$stage/manifest.json"[0m
+2026-09-17T13:16:01.3326072Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-09-17T13:16:01.3326425Z env:
+2026-09-17T13:16:01.3326756Z   VELNOR_WORKFLOW_POLICY_REVISION: a6fa8d4a5096e6df37250b59a8105abfebdb9013
+2026-09-17T13:16:01.3327557Z   EXPECTED_REVISION: a6fa8d4a5096e6df37250b59a8105abfebdb9013
+2026-09-17T13:16:01.3328078Z ##[endgroup]
+2026-09-17T13:16:01.3745489Z ##[group]Run actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+2026-09-17T13:16:01.3745935Z with:
+2026-09-17T13:16:01.3746319Z   name: velnor-workflow-runtime-a6fa8d4a5096e6df37250b59a8105abfebdb9013-Linux-X64
+2026-09-17T13:16:01.3746833Z   path: /home/runner/work/_temp/velnor-workflow-runtime
+2026-09-17T13:16:01.3747636Z   if-no-files-found: error
+2026-09-17T13:16:01.3747888Z   retention-days: 7
+2026-09-17T13:16:01.3748105Z   compression-level: 6
+2026-09-17T13:16:01.3748341Z   overwrite: false
+2026-09-17T13:16:01.3748565Z   include-hidden-files: false
+2026-09-17T13:16:01.3748812Z   archive: true
+2026-09-17T13:16:01.3749010Z env:
+2026-09-17T13:16:01.3749345Z   VELNOR_WORKFLOW_POLICY_REVISION: a6fa8d4a5096e6df37250b59a8105abfebdb9013
+2026-09-17T13:16:01.3749740Z ##[endgroup]
+2026-09-17T13:16:01.5176470Z With the provided path, there will be 3 files uploaded
+2026-09-17T13:16:01.5182766Z Artifact name is valid!
+2026-09-17T13:16:01.5183629Z Root directory input is valid!
+2026-09-17T13:16:01.8953555Z Uploading artifact: velnor-workflow-runtime-a6fa8d4a5096e6df37250b59a8105abfebdb9013-Linux-X64.zip
+2026-09-17T13:16:01.9003708Z Beginning upload of artifact content to blob storage
+2026-09-17T13:16:03.2515892Z Uploaded bytes 5519716
+2026-09-17T13:16:03.3220833Z Finished uploading artifact content to blob storage!
+2026-09-17T13:16:03.3222104Z SHA256 digest of uploaded artifact is 41040d4c094753665e7f121613f155110ba55ee647c3f125a6414b85af16ca48
+2026-09-17T13:16:03.3223137Z Finalizing artifact upload
+2026-09-17T13:16:03.7219286Z Artifact velnor-workflow-runtime-a6fa8d4a5096e6df37250b59a8105abfebdb9013-Linux-X64 successfully finalized. Artifact ID 10498189114
+2026-09-17T13:16:03.7221765Z Artifact velnor-workflow-runtime-a6fa8d4a5096e6df37250b59a8105abfebdb9013-Linux-X64 has been successfully uploaded! Final size is 5519716 bytes. Artifact ID is 10498189114
+2026-09-17T13:16:03.7223778Z Artifact download URL: https://github.com/tailrocks/velnor/actions/runs/35225971311/artifacts/10498189114
+2026-09-17T13:16:03.7407291Z Post job cleanup.
+2026-09-17T13:16:03.8251347Z [command]/usr/bin/git version
+2026-09-17T13:16:03.8294071Z git version 2.55.0
+2026-09-17T13:16:03.8370820Z Temporarily overriding HOME='/home/runner/work/_temp/f4b9e2ec-931a-4d18-95fa-a4ecd7a81e86' before making global git config changes
+2026-09-17T13:16:03.8372396Z Adding repository directory to the temporary git global config as a safe directory
+2026-09-17T13:16:03.8375664Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor
+2026-09-17T13:16:03.8408010Z Removing SSH command configuration
+2026-09-17T13:16:03.8414408Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-09-17T13:16:03.8450866Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-09-17T13:16:03.8687429Z Removing HTTP extra header
+2026-09-17T13:16:03.8693554Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-09-17T13:16:03.8732431Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-09-17T13:16:03.8982234Z Removing includeIf entries pointing to credentials config files
+2026-09-17T13:16:03.8989411Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-09-17T13:16:03.9027716Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-09-17T13:16:03.9418400Z Evaluate and set job outputs
+2026-09-17T13:16:03.9426265Z Set output 'scope'
+2026-09-17T13:16:03.9428812Z Set output 'base_sha'
+2026-09-17T13:16:03.9429764Z Set output 'head_sha'
+2026-09-17T13:16:03.9431977Z Set output 'units'
+2026-09-17T13:16:03.9433995Z Set output 'full_units'
+2026-09-17T13:16:03.9434566Z Set output 'bun_matrix'
+2026-09-17T13:16:03.9435116Z Set output 'docker_matrix'
+2026-09-17T13:16:03.9435649Z Set output 'docs_matrix'
+2026-09-17T13:16:03.9436220Z Set output 'opentofu_matrix'
+2026-09-17T13:16:03.9439752Z Set output 'rust_matrix'
+2026-09-17T13:16:03.9440828Z Cleaning up orphan processes

@@ -1,0 +1,15 @@
+
+[1m[jackin][0m debug mode — invocation id:
+    6dc47104-e74f-4ecf-93c2-2c2f5ec9e9bb
+[jackin] OTLP export: disabled
+[jackin] press Enter to continue... 
+[1m[31m[fail][39m[0m docker_daemon — Cannot connect to Docker daemon: failed to connect to Docker daemon: connect to Docker host unix:///var/run/docker.sock: Socket not found: /var/run/docker.sock
+       [2mStart Docker Desktop / OrbStack / run `colima start` / check `DOCKER_HOST`[0m
+telemetry: invocation 6dc47104-e74f-4ecf-93c2-2c2f5ec9e9bb - OpenTelemetry export disabled
+[1m[31merror:[39m[0m [E001] Docker daemon not reachable
+  [33m→ what to try:[39m
+    Start Docker Desktop, OrbStack, or run `colima start`. Check `DOCKER_HOST` if using a remote daemon.
+  [2m→ more detail:[0m
+    [2mRun `jackin doctor` to see all pre-flight check results.[0m
+
+  [2mdetail:[0m Docker daemon not reachable: pre-flight checks failed: docker_daemon. Run `jackin doctor` for details.

@@ -1,0 +1,25 @@
+   Compiling velnor-workflow-contract v0.1.0 (/private/tmp/pr927/crates/velnor-workflow-contract)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.33s
+     Running tests/cache_keys.rs (/tmp/pr927-target-contract/debug/deps/cache_keys-571400f77d0c468b)
+
+running 2 tests
+test parameterized_callees_resolve_to_the_pre_parameterization_cache_keys ... FAILED
+test kind_reusables_hold_no_per_unit_step_blocks ... ok
+
+failures:
+
+---- parameterized_callees_resolve_to_the_pre_parameterization_cache_keys stdout ----
+
+thread 'parameterized_callees_resolve_to_the_pre_parameterization_cache_keys' (114890801) panicked at tests/cache_keys.rs:258:13:
+assertion `left == right` failed: github-docker → ci-unit-docker.yml#verify-github [docker_seed]: primary key changed
+  left: "velnor-docker-seed-v3-8a4ee3c72d39-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'deny.toml') }}"
+ right: "velnor-docker-seed-v3-9c97194a807b-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'deny.toml') }}"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    parameterized_callees_resolve_to_the_pre_parameterization_cache_keys
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `--test cache_keys`

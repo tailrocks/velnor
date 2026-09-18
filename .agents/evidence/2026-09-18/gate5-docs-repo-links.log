@@ -1,0 +1,19 @@
+error: repository file references must be verifiable links (17 problem(s)):
+  docs/content/(public)/(role-authoring)/developing/construct-image.mdx:136: RepoFile path does not exist in the repository: .github/workflows/construct.yml
+  docs/content/research/engineering/ci/performance/ci-speed-roadmap.mdx:172: RepoFile path does not exist in the repository: .github/workflows/docs.yml
+  docs/content/research/engineering/ci/performance/ci-speed-roadmap.mdx:173: RepoFile path does not exist in the repository: .github/workflows/construct.yml
+  docs/content/research/engineering/ci/performance/ci-speed-roadmap.mdx:174: RepoFile path does not exist in the repository: .github/workflows/preview.yml
+  docs/content/research/engineering/ci/performance/ci-speed-roadmap.mdx:176: RepoFile path does not exist in the repository: .github/workflows/jackin-dev.yml
+  docs/content/research/engineering/ci/performance/ci-speed-roadmap.mdx:61: RepoFile path does not exist in the repository: .github/workflows/construct.yml
+  docs/content/research/engineering/ci/performance/ci-speed-roadmap.mdx:61: RepoFile path does not exist in the repository: .github/workflows/docs.yml
+  docs/content/research/engineering/ci/performance/ci-speed-roadmap.mdx:61: RepoFile path does not exist in the repository: .github/workflows/preview.yml
+  docs/content/research/engineering/ci/rust-tooling/index.mdx:132: RepoFile path does not exist in the repository: .github/workflows/docs.yml
+  docs/content/research/engineering/ci/rust-tooling/index.mdx:197: RepoFile path does not exist in the repository: .github/workflows/docs.yml
+  docs/content/research/engineering/desktop-verification/commands.mdx:29: RepoFile path does not exist in the repository: .github/workflows/desktop-cadence.yml
+  docs/content/roadmap/(documentation-tooling)/docs-markdown-linting.mdx:11: RepoFile path does not exist in the repository: .github/workflows/docs.yml
+  docs/content/roadmap/(documentation-tooling)/docs-markdown-linting.mdx:17: RepoFile path does not exist in the repository: .github/workflows/docs.yml
+  docs/content/roadmap/(documentation-tooling)/docs-markdown-linting.mdx:26: RepoFile path does not exist in the repository: .github/workflows/docs.yml
+  docs/content/roadmap/(isolation-security)/security-threat-model-and-signed-releases.mdx:22: RepoFile path does not exist in the repository: .github/workflows/preview.yml
+  docs/content/roadmap/(isolation-security)/security-threat-model-and-signed-releases.mdx:64: RepoFile path does not exist in the repository: .github/workflows/preview.yml
+  docs/content/roadmap/(operator-surface)/pr-verification.mdx:13: RepoFile path does not exist in the repository: .github/workflows/jackin-dev.yml
+mbx[savings]: 16h 30m refunded over 5792 builds. no receipt necessary.

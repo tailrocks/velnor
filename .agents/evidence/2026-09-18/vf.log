@@ -1,0 +1,2924 @@
+      ┌─────────┐  mr boxington
+     ╱ ═══════ ╱│
+    ╱─────────╱ │
+    │ •    (◉)│≡│
+    │  ◟▄▄▄◞  │ ╱
+    │   ◀◆▶   │╱
+    └─────────┘
+   Compiling velnor-workflow v0.1.0 (/Users/donbeave/Projects/tailrocks/velnor-project/velnor3/.muse/worktrees/subagent-v2-01a0ac95-7322-7412-8f86-f69a41ff2453-01a0ad16-9c49-7d13-bfde-6b275b5dbb17/crates/velnor-workflow)
+warning: function `scan_repository` is never used
+    --> crates/velnor-workflow/src/lib.rs:1089:15
+     |
+1089 | pub(crate) fn scan_repository(
+     |               ^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scan_repository_with_default_branch` is never used
+    --> crates/velnor-workflow/src/lib.rs:1096:4
+     |
+1096 | fn scan_repository_with_default_branch(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `control_plane_trusted_gate` is never used
+    --> crates/velnor-workflow/src/lib.rs:4106:15
+     |
+4106 | pub(crate) fn control_plane_trusted_gate(default_branch: &str) -> String {
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `ResultIdentity` is never constructed
+   --> crates/velnor-workflow/src/provider.rs:481:19
+    |
+481 | pub(crate) struct ResultIdentity {
+    |                   ^^^^^^^^^^^^^^
+
+warning: struct `ObservedResult` is never constructed
+   --> crates/velnor-workflow/src/provider.rs:495:19
+    |
+495 | pub(crate) struct ObservedResult {
+    |                   ^^^^^^^^^^^^^^
+
+warning: enum `ObservedOutcome` is never used
+   --> crates/velnor-workflow/src/provider.rs:502:17
+    |
+502 | pub(crate) enum ObservedOutcome {
+    |                 ^^^^^^^^^^^^^^^
+
+warning: enum `VerdictFailure` is never used
+   --> crates/velnor-workflow/src/provider.rs:512:17
+    |
+512 | pub(crate) enum VerdictFailure {
+    |                 ^^^^^^^^^^^^^^
+
+warning: method `class` is never used
+   --> crates/velnor-workflow/src/provider.rs:556:19
+    |
+554 | impl VerdictFailure {
+    | ------------------- method in this implementation
+555 |     #[must_use]
+556 |     pub(crate) fn class(&self) -> &'static str {
+    |                   ^^^^^
+
+warning: function `evaluate_verdict` is never used
+   --> crates/velnor-workflow/src/provider.rs:579:15
+    |
+579 | pub(crate) fn evaluate_verdict(
+    |               ^^^^^^^^^^^^^^^^
+
+warning: struct `RunIdentity` is never constructed
+   --> crates/velnor-workflow/src/provider.rs:703:19
+    |
+703 | pub(crate) struct RunIdentity {
+    |                   ^^^^^^^^^^^
+
+warning: method `command_digest_for` is never used
+   --> crates/velnor-workflow/src/provider.rs:713:8
+    |
+712 | impl RunIdentity {
+    | ---------------- method in this implementation
+713 |     fn command_digest_for(&self, unit_id: &str) -> String {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `cache_key` is never used
+   --> crates/velnor-workflow/src/provider.rs:737:15
+    |
+737 | pub(crate) fn cache_key(
+    |               ^^^^^^^^^
+
+warning: function `artifact_name` is never used
+   --> crates/velnor-workflow/src/provider.rs:758:15
+    |
+758 | pub(crate) fn artifact_name(
+    |               ^^^^^^^^^^^^^
+
+warning: `velnor-workflow` (lib) generated 13 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.80s
+     Running tests/velnor_first_ci.rs (target/debug/deps/velnor_first_ci-cafe32b99acee150)
+
+running 33 tests
+test adopt_is_rejected ... ok
+test dual_lane_automatic_velnor_units_pass_policy ... FAILED
+test declared_mise_tools_propagate_to_non_rust_kind_reusables ... FAILED
+test github_only_runners_limit_dispatch_runner_options ... FAILED
+test dispatch_runner_default_is_configurable ... FAILED
+test pull_request_on_velnor_accepts_labels_only_approved_contract ... FAILED
+test omitted_cli_runners_defaults_to_both ... FAILED
+test pull_request_on_velnor_rejects_a_github_only_runner_mode ... FAILED
+test pull_request_on_velnor_rejects_an_arbitrary_runner_contract ... FAILED
+test pull_request_on_velnor_opt_in_admits_automatic_pr ... FAILED
+test static_workflow_templates_path_is_rejected ... ok
+test command_arrays_in_generation_config_are_rejected ... ok
+test kind_reusable_preserves_declared_contract_per_unit ... FAILED
+test kind_reusable_consumes_caller_plan_shas ... FAILED
+test dispatch_defaults_to_github_and_omitted_runner_selects_github ... FAILED
+test kind_reusable_renders_each_unit_root_in_its_own_job ... FAILED
+test pull_request_publish_required ... FAILED
+test automatic_pr_schedules_github_hosted_unit_jobs ... FAILED
+test kind_reusable_materializes_selection_from_inputs_without_artifact ... ok
+test regen_gate_unit_provisions_the_pinned_policy_runtime_on_the_velnor_lane_only ... FAILED
+test velnor_only_runners_limit_dispatch_runner_options ... FAILED
+test unit_run_consumes_the_selection_artifact_not_a_hardcoded_id ... ok
+test trust_gated_unit_without_a_label_fails_generation ... FAILED
+test trust_gated_unit_appends_trusted_label_on_velnor_lane_only ... FAILED
+test kind_reusable_jobs_are_linear_in_units_not_a_matrix_product ... FAILED
+test kind_reusable_caller_is_one_call_per_kind ... FAILED
+test unique_reusable_calls_stay_under_github_limit ... FAILED
+test velnor_lane_installs_declared_mise_tools ... FAILED
+test delete_generated_outputs_and_regenerate_from_evidence ... ok
+test check_without_a_provisioned_pin_fails_closed_without_invoking_cargo ... ok
+test pin_build_honors_cargo_net_offline ... ok
+test generate_twice_is_byte_identical_and_check_passes ... ok
+test candidate_manifest_env_fallback_binds_the_env_slot_candidate ... ok
+
+failures:
+
+---- dual_lane_automatic_velnor_units_pass_policy stdout ----
+
+thread 'dual_lane_automatic_velnor_units_pass_policy' (107334530) panicked at crates/velnor-workflow/tests/velnor_first_ci.rs:427:5:
+in-place generation failed:
+error: invalid generation config /private/var/folders/8p/h376l_nn3375kyj72czdq2x80000gn/T/github-default-ci-dual-lane-both-policy-68081-8/.github-gen/velnor-workflow.toml: TOML parse error at line 8, column 1
+  |
+8 | automatic = "both"
+  | ^^^^^^^^^
+unknown field `automatic`, expected one of `providers`, `automatic_providers`, `default_dispatch_providers`, `selectors`, `profile`, `verified`, `files`, `templates`, `version_bump_units`, `package_update_channels`, `default_branch`, `rust_needs`, `concurrency_group`, `serial_stack_groups`
+
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- declared_mise_tools_propagate_to_non_rust_kind_reusables stdout ----
+
+thread 'declared_mise_tools_propagate_to_non_rust_kind_reusables' (107334526) panicked at crates/velnor-workflow/tests/velnor_first_ci.rs:144:5:
+generation failed:
+error: invalid generation config /private/var/folders/8p/h376l_nn3375kyj72czdq2x80000gn/T/github-default-ci-mise-non-rust-kind-68081-4/.github-gen/velnor-workflow.toml: TOML parse error at line 8, column 1
+  |
+8 | automatic = "github"
+  | ^^^^^^^^^
+unknown field `automatic`, expected one of `providers`, `automatic_providers`, `default_dispatch_providers`, `selectors`, `profile`, `verified`, `files`, `templates`, `version_bump_units`, `package_update_channels`, `default_branch`, `rust_needs`, `concurrency_group`, `serial_stack_groups`
+
+
+
+---- github_only_runners_limit_dispatch_runner_options stdout ----
+
+thread 'github_only_runners_limit_dispatch_runner_options' (107334532) panicked at crates/velnor-workflow/tests/velnor_first_ci.rs:144:5:
+generation failed:
+error: invalid generation config /private/var/folders/8p/h376l_nn3375kyj72czdq2x80000gn/T/github-default-ci-dispatch-github-only-68081-11/.github-gen/velnor-workflow.toml: TOML parse error at line 8, column 1
+  |
+8 | github_runner = "ubuntu-24.04"
+  | ^^^^^^^^^^^^^
+unknown field `github_runner`, expected one of `providers`, `automatic_providers`, `default_dispatch_providers`, `selectors`, `profile`, `verified`, `files`, `templates`, `version_bump_units`, `package_update_channels`, `default_branch`, `rust_needs`, `concurrency_group`, `serial_stack_groups`
+
+
+
+---- dispatch_runner_default_is_configurable stdout ----
+
+thread 'dispatch_runner_default_is_configurable' (107334529) panicked at crates/velnor-workflow/tests/velnor_first_ci.rs:144:5:
+generation failed:
+error: invalid generation config /private/var/folders/8p/h376l_nn3375kyj72czdq2x80000gn/T/github-default-ci-dispatch-default-68081-5/.github-gen/velnor-workflow.toml: TOML parse error at line 10, column 1
+   |
+10 | default_dispatch_runner = "velnor"
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+unknown field `default_dispatch_runner`, expected one of `providers`, `automatic_providers`, `default_dispatch_providers`, `selectors`, `profile`, `verified`, `files`, `templates`, `version_bump_units`, `package_update_channels`, `default_branch`, `rust_needs`, `concurrency_group`, `serial_stack_groups`
+
+
+
+---- pull_request_on_velnor_accepts_labels_only_approved_contract stdout ----
+
+thread 'pull_request_on_velnor_accepts_labels_only_approved_contract' (107334870) panicked at crates/velnor-workflow/tests/velnor_first_ci.rs:841:10:
+approved config must declare velnor_labels
+
+---- omitted_cli_runners_defaults_to_both stdout ----
+
+thread 'omitted_cli_runners_defaults_to_both' (107334858) panicked at crates/velnor-workflow/tests/velnor_first_ci.rs:198:5:
+CLI help must default runners to both: Scan a repository and generate safe, unified GitHub Actions CI
+
+Usage: velnor-workflow [OPTIONS] [TARGET] [TARGET]
+
+Arguments:
+  [TARGET]  Local path, GitHub URL, or owner/repository. Prefix with `generate` for the explicit `generate TARGET` form
+  [TARGET]  Repository target when the explicit `generate` prefix is used
+
+Options:
+      --output <PATH>            Root directory for generated files
+      --default-branch <BRANCH>  Default branch used for generated branch gates. If omitted, resolve it from the repository's static Git remote metadata
+      --providers <PROVIDERS>    Provider universe override: a comma-separated list of strict provider IDs (`github-hosted`, `github-self-hosted`, `velnor`). Absent keeps the `[workflow] providers` config value
+      --dry-run                  Inspect changes without writing files
+      --check                    Fail if generated files would change
+      --force                    Replace recorded unmodified generator-owned files, and replace unowned workflow files with generated output. Never imports foreign bodies
+      --plain                    Use the line-oriented CLI report instead of the default interactive TUI
+      --pin-build                Allow `--check`'s D19 guard to compile the declared generator pin from source when no pinned renderer is provisioned. Local development only; never emitted into generated CI. Accepted alongside `--check` (its only consumer); accepted-and-ignored otherwise
+      --revision                 Print the source commit this binary was built from and exit
+      --closure                  Print the source-closure digest this binary was built from and exit
+  -h, --help                     Print help
+  -V, --version                  Print version
+
+
+---- pull_request_on_velnor_rejects_a_github_only_runner_mode stdout ----
+
+thread 'pull_request_on_velnor_rejects_a_github_only_runner_mode' (107334971) panicked at crates/velnor-workflow/tests/velnor_first_ci.rs:876:5:
+assertion failed: String::from_utf8_lossy(&outcome.stderr).contains("Velnor runner lane")
+
+---- pull_request_on_velnor_rejects_an_arbitrary_runner_contract stdout ----
+
+thread 'pull_request_on_velnor_rejects_an_arbitrary_runner_contract' (107335035) panicked at crates/velnor-workflow/tests/velnor_first_ci.rs:828:5:
+assertion failed: String::from_utf8_lossy(&outcome.stderr).contains("approved Velnor runner contract")
+
+---- pull_request_on_velnor_opt_in_admits_automatic_pr stdout ----
+
+thread 'pull_request_on_velnor_opt_in_admits_automatic_pr' (107334956) panicked at crates/velnor-workflow/tests/velnor_first_ci.rs:144:5:
+generation failed:
+error: invalid generation config /private/var/folders/8p/h376l_nn3375kyj72czdq2x80000gn/T/github-default-ci-pr-on-velnor-68081-20/.github-gen/velnor-workflow.toml: TOML parse error at line 8, column 1
+  |
+8 | automatic = "both"
+  | ^^^^^^^^^
+unknown field `automatic`, expected one of `providers`, `automatic_providers`, `default_dispatch_providers`, `selectors`, `profile`, `verified`, `files`, `templates`, `version_bump_units`, `package_update_channels`, `default_branch`, `rust_needs`, `concurrency_group`, `serial_stack_groups`
+
+
+
+---- kind_reusable_preserves_declared_contract_per_unit stdout ----
+
+thread 'kind_reusable_preserves_declared_contract_per_unit' (107334537) panicked at crates/velnor-workflow/tests/velnor_first_ci.rs:144:5:
+generation failed:
+error: `rust-crate-pipeline` job `github` is not supported by the provider universe; supported jobs: github-hosted, github-self-hosted, velnor
+
+
+---- kind_reusable_consumes_caller_plan_shas stdout ----
+
+thread 'kind_reusable_consumes_caller_plan_shas' (107334534) panicked at crates/velnor-workflow/tests/velnor_first_ci.rs:1167:5:
+assertion failed: unit.contains("lane:\n        required: true")
+
+---- dispatch_defaults_to_github_and_omitted_runner_selects_github stdout ----
+
+thread 'dispatch_defaults_to_github_and_omitted_runner_selects_github' (107334528) panicked at crates/velnor-workflow/tests/velnor_first_ci.rs:278:9:
+ci-pr.yml
+
+---- kind_reusable_renders_each_unit_root_in_its_own_job stdout ----
+
+thread 'kind_reusable_renders_each_unit_root_in_its_own_job' (107334538) panicked at crates/velnor-workflow/tests/velnor_first_ci.rs:1039:5:
+assertion failed: workflow.contains("  verify-github:")
+
+---- pull_request_publish_required stdout ----
+
+thread 'pull_request_publish_required' (107335085) panicked at crates/velnor-workflow/tests/velnor_first_ci.rs:233:5:
+# Generated by velnor-workflow. Regenerate; do not hand-edit.
+name: CI / PR
+run-name: CI / PR · ${{ github.event_name }} · ${{ github.ref_name }}
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      providers:
+        description: Comma-separated provider subset of [github-hosted, github-self-hosted, velnor]
+        required: false
+        default: github-hosted,github-self-hosted,velnor
+        type: string
+      scope:
+        description: Verification scope
+        required: true
+        default: affected
+        type: choice
+        options:
+          - affected
+          - full
+      base_sha:
+        description: Git ref or SHA used as the affected-selection base
+        required: false
+        default: refs/heads/main
+        type: string
+
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  plan:
+    name: "Control / Planning"
+    runs-on: ubuntu-24.04
+    outputs:
+      scope: ${{ steps.plan.outputs.scope }}
+      base_sha: ${{ steps.plan.outputs.base_sha }}
+      head_sha: ${{ steps.plan.outputs.head_sha }}
+      units: ${{ steps.plan.outputs.units }}
+      full_units: ${{ steps.plan.outputs.full_units }}
+      plan_digest: ${{ steps.plan.outputs.plan_digest }}
+      excluded: ${{ steps.plan.outputs.excluded }}
+      rust_matrix: ${{ steps.plan.outputs.rust_matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Velnor workflow runtime
+        id: runtime
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d
+        with:
+          rev: bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d
+      - name: Set trusted workflow policy revision
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d" >> "$GITHUB_ENV"
+      - name: Select affected units
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          CI_SCOPE_OVERRIDE: ${{ github.event.inputs.scope || '' }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_PROVIDERS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.providers || 'github-hosted,github-self-hosted,velnor' }}
+          VELNOR_EVENT_TRUSTED: ${{ (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))) && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CI_SCOPE_OVERRIDE:-}" ]]; then unset CI_SCOPE_OVERRIDE; fi
+          velnor-workflow plan --config .github/ci/project.toml
+
+      - name: Prepare Velnor workflow runtime
+        shell: bash
+        env:
+          EXPECTED_REVISION: bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/velnor-workflow-runtime"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          src="$(command -v velnor-workflow)"
+          install -m 0755 "$src" "$stage/velnor-workflow"
+          digest="$(sha256sum "$stage/velnor-workflow" | awk '{print $1}')"
+          policy_src="${VELNOR_WORKFLOW_PINNED_BINARY:-$src}"
+          install -m 0755 "$policy_src" "$stage/velnor-workflow-policy"
+          policy_revision="$("$stage/velnor-workflow-policy" --revision)"
+          policy_closure="$("$stage/velnor-workflow-policy" --closure)"
+          [[ "$policy_closure" == "${{ steps.runtime.outputs.closure }}" ]] || { echo "::error::policy runtime reports closure $policy_closure, expected ${{ steps.runtime.outputs.closure }}" >&2; exit 1; }
+          policy_digest="$(sha256sum "$stage/velnor-workflow-policy" | awk '{print $1}')"
+          jq -n --arg repository "$GITHUB_REPOSITORY" --arg revision "$EXPECTED_REVISION" --arg closure "${{ steps.runtime.outputs.closure }}" --arg head_branch "${{ github.ref_name }}" --arg platform "${{ runner.os }}-${{ runner.arch }}" --arg run_id "$GITHUB_RUN_ID" --arg job_id "${{ github.job }}" --arg binary_sha256 "$digest" --arg policy_revision "$policy_revision" --arg policy_closure "$policy_closure" --arg policy_binary_sha256 "$policy_digest" '{repository: $repository, revision: $revision, closure: $closure, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256, policy_revision: $policy_revision, policy_closure: $policy_closure, policy_binary_sha256: $policy_binary_sha256}' > "$stage/manifest.json"
+      - name: Publish Velnor workflow runtime
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: velnor-workflow-runtime-bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/velnor-workflow-runtime
+          if-no-files-found: error
+          retention-days: 7
+  prepare-cargo:
+    name: "Control / Prepare Cargo"
+    if: ${{ always() && needs.plan.result == 'success' && (contains(needs.plan.outputs.units, '\"unit_id\":\"rust-crate00\"') || contains(needs.plan.outputs.units, '\"unit_id\":\"rust-crate01\"')) && ((((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-self-hosted,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) || (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))))) }}
+    needs: [plan]
+    uses: ./.github/workflows/ci-unit-rust.yml
+    with:
+      unit: rust-crate00
+      provider: control
+      selected_units: ${{ needs.plan.outputs.units }}
+      scope: ${{ needs.plan.outputs.scope }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      plan_digest: ${{ needs.plan.outputs.plan_digest }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
+  github-hosted-rust-crate00:
+    name: "Rust · crate00 · github-hosted — rust-crate00"
+    if: ${{ always() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '\"unit_id\":\"rust-crate00\"') && ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) }}
+    needs: [plan]
+    uses: ./.github/workflows/ci-unit-rust.yml
+    with:
+      unit: rust-crate00
+      provider: github-hosted
+      selected_units: ${{ needs.plan.outputs.units }}
+      scope: ${{ needs.plan.outputs.scope }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      plan_digest: ${{ needs.plan.outputs.plan_digest }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
+      mbx_compat: e5fa4f03ebbc
+      mbx_dependency_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain
+        rust-toolchain.toml
+      mbx_freshness_files: |
+        crates/crate00/**/*.rs
+        crates/crate00/benches/**
+        crates/crate00/examples/**
+        crates/crate00/src/**
+        crates/crate00/tests/**
+        mise.lock
+      cache_paths: |
+        ~/.cargo/registry
+        ~/.cargo/git
+      cache_key_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain.toml
+        rust-toolchain
+      cargo_root: "crates/crate00"
+      cargo_net_offline: true
+      unit_platform: linux-x64
+      unit_trust: untrusted-ok
+  github-self-hosted-rust-crate00:
+    name: "Rust · crate00 · github-self-hosted — rust-crate00"
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(needs.plan.outputs.units, '\"unit_id\":\"rust-crate00\"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-self-hosted,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    needs: [plan, prepare-cargo]
+    uses: ./.github/workflows/ci-unit-rust.yml
+    with:
+      unit: rust-crate00
+      provider: github-self-hosted
+      selected_units: ${{ needs.plan.outputs.units }}
+      scope: ${{ needs.plan.outputs.scope }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      plan_digest: ${{ needs.plan.outputs.plan_digest }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
+      cargo_net_offline: true
+      host_warm_layers: "rustup,mold,mbx,cargo"
+      unit_platform: linux-x64
+      unit_trust: untrusted-ok
+  velnor-rust-crate00:
+    name: "Rust · crate00 · velnor — rust-crate00"
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(needs.plan.outputs.units, '\"unit_id\":\"rust-crate00\"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    needs: [plan, prepare-cargo]
+    uses: ./.github/workflows/ci-unit-rust.yml
+    with:
+      unit: rust-crate00
+      provider: velnor
+      selected_units: ${{ needs.plan.outputs.units }}
+      scope: ${{ needs.plan.outputs.scope }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      plan_digest: ${{ needs.plan.outputs.plan_digest }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
+      cargo_net_offline: true
+      host_warm_layers: "rustup,mold,mbx,cargo"
+      unit_platform: linux-x64
+      unit_trust: untrusted-ok
+  github-hosted-rust-crate01:
+    name: "Rust · crate01 · github-hosted — rust-crate01"
+    if: ${{ always() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '\"unit_id\":\"rust-crate01\"') && ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) }}
+    needs: [plan]
+    uses: ./.github/workflows/ci-unit-rust.yml
+    with:
+      unit: rust-crate01
+      provider: github-hosted
+      selected_units: ${{ needs.plan.outputs.units }}
+      scope: ${{ needs.plan.outputs.scope }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      plan_digest: ${{ needs.plan.outputs.plan_digest }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
+      mbx_compat: "4b1d072ba821"
+      mbx_dependency_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain
+        rust-toolchain.toml
+      mbx_freshness_files: |
+        crates/crate01/**/*.rs
+        crates/crate01/benches/**
+        crates/crate01/examples/**
+        crates/crate01/src/**
+        crates/crate01/tests/**
+        mise.lock
+      cache_paths: |
+        ~/.cargo/registry
+        ~/.cargo/git
+      cache_key_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain.toml
+        rust-toolchain
+      cargo_root: "crates/crate01"
+      cargo_net_offline: true
+      unit_platform: linux-x64
+      unit_trust: untrusted-ok
+  github-self-hosted-rust-crate01:
+    name: "Rust · crate01 · github-self-hosted — rust-crate01"
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(needs.plan.outputs.units, '\"unit_id\":\"rust-crate01\"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-self-hosted,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    needs: [plan, prepare-cargo]
+    uses: ./.github/workflows/ci-unit-rust.yml
+    with:
+      unit: rust-crate01
+      provider: github-self-hosted
+      selected_units: ${{ needs.plan.outputs.units }}
+      scope: ${{ needs.plan.outputs.scope }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      plan_digest: ${{ needs.plan.outputs.plan_digest }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
+      cargo_net_offline: true
+      host_warm_layers: "rustup,mold,mbx,cargo"
+      unit_platform: linux-x64
+      unit_trust: untrusted-ok
+  velnor-rust-crate01:
+    name: "Rust · crate01 · velnor — rust-crate01"
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(needs.plan.outputs.units, '\"unit_id\":\"rust-crate01\"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    needs: [plan, prepare-cargo]
+    uses: ./.github/workflows/ci-unit-rust.yml
+    with:
+      unit: rust-crate01
+      provider: velnor
+      selected_units: ${{ needs.plan.outputs.units }}
+      scope: ${{ needs.plan.outputs.scope }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      plan_digest: ${{ needs.plan.outputs.plan_digest }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
+      cargo_net_offline: true
+      host_warm_layers: "rustup,mold,mbx,cargo"
+      unit_platform: linux-x64
+      unit_trust: untrusted-ok
+  ci-required:
+    name: ci-required
+    if: ${{ always() }}
+    needs: [plan, prepare-cargo, github-hosted-rust-crate00, github-self-hosted-rust-crate00, velnor-rust-crate00, github-hosted-rust-crate01, github-self-hosted-rust-crate01, velnor-rust-crate01]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Validate generated stack results
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          SELECTED_UNITS: ${{ needs.plan.outputs.units }}
+          PLAN_DIGEST: ${{ needs.plan.outputs.plan_digest }}
+          EXCLUDED: ${{ needs.plan.outputs.excluded }}
+          PROVIDER_ADMITTED_GITHUB_HOSTED: ${{ (github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch') }}
+          PROVIDER_ADMITTED_GITHUB_SELF_HOSTED_TRUSTED: ${{ ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-self-hosted,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))) }}
+          PROVIDER_ADMITTED_VELNOR_TRUSTED: ${{ ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))) }}
+          PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED: ${{ (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-self-hosted,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) || (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$PLAN_DIGEST" ]]; then
+            echo "plan did not freeze a plan digest: the expected set has no identity" >&2
+            exit 1
+          fi
+          echo "verdict binds plan digest $PLAN_DIGEST"
+          result_for_job() {
+            jq -r --arg job "$1" '.[$job].result // empty' <<<"$NEEDS_JSON"
+          }
+          plan_expects() {
+            [[ "$(jq -r --arg unit "$1" --arg provider "$2" '[.[] | select(.unit_id == $unit) | .providers[] | select(. == $provider)] | length' <<<"$SELECTED_UNITS")" -gt 0 ]]
+          }
+          plan_expects_local() {
+            [[ "$(jq -r --arg unit "$1" '[.[] | select(.unit_id == $unit) | .providers[] | select(. == "github-self-hosted" or . == "velnor")] | length' <<<"$SELECTED_UNITS")" -gt 0 ]]
+          }
+          result="$(result_for_job plan)"
+          if [[ "$result" != success ]]; then
+            echo "required CI prerequisite plan did not pass: $result" >&2
+            exit 1
+          fi
+          if plan_expects_local "rust-crate00" || plan_expects_local "rust-crate01"; then
+            result="$(result_for_job prepare-cargo)"
+            if [[ "$PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED" == true ]]; then
+              case "$result" in
+                success) ;;
+                skipped) echo "expected CI prerequisite prepare-cargo was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;
+                cancelled) echo "expected CI prerequisite prepare-cargo was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;
+                *) echo "expected CI prerequisite prepare-cargo did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI prerequisite prepare-cargo ran outside its provider admission (PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED=$PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED): $result" >&2; exit 1 ;;
+              esac
+            fi
+          else
+            result="$(result_for_job prepare-cargo)"
+            case "$result" in
+              skipped) ;;
+              success) echo "unexpected CI prerequisite prepare-cargo succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;
+              *) echo "unexpected CI prerequisite prepare-cargo ran outside the expected set: $result" >&2; exit 1 ;;
+            esac
+          fi
+          if plan_expects "rust-crate00" "github-hosted"; then
+            result="$(result_for_job github-hosted-rust-crate00)"
+            if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then
+              case "$result" in
+                success) ;;
+                skipped) echo "expected CI job github-hosted-rust-crate00 was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;
+                cancelled) echo "expected CI job github-hosted-rust-crate00 was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;
+                *) echo "expected CI job github-hosted-rust-crate00 did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-hosted-rust-crate00 ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;
+              esac
+            fi
+          else
+            result="$(result_for_job github-hosted-rust-crate00)"
+            case "$result" in
+              skipped) ;;
+              success) echo "unexpected CI job github-hosted-rust-crate00 succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;
+              *) echo "unexpected CI job github-hosted-rust-crate00 ran outside the expected set: $result" >&2; exit 1 ;;
+            esac
+          fi
+          if plan_expects "rust-crate00" "github-self-hosted"; then
+            result="$(result_for_job github-self-hosted-rust-crate00)"
+            if [[ "$PROVIDER_ADMITTED_GITHUB_SELF_HOSTED_TRUSTED" == true ]]; then
+              case "$result" in
+                success) ;;
+                skipped) echo "expected CI job github-self-hosted-rust-crate00 was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;
+                cancelled) echo "expected CI job github-self-hosted-rust-crate00 was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;
+                *) echo "expected CI job github-self-hosted-rust-crate00 did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-self-hosted-rust-crate00 ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_SELF_HOSTED_TRUSTED=$PROVIDER_ADMITTED_GITHUB_SELF_HOSTED_TRUSTED): $result" >&2; exit 1 ;;
+              esac
+            fi
+          else
+            result="$(result_for_job github-self-hosted-rust-crate00)"
+            case "$result" in
+              skipped) ;;
+              success) echo "unexpected CI job github-self-hosted-rust-crate00 succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;
+              *) echo "unexpected CI job github-self-hosted-rust-crate00 ran outside the expected set: $result" >&2; exit 1 ;;
+            esac
+          fi
+          if plan_expects "rust-crate00" "velnor"; then
+            result="$(result_for_job velnor-rust-crate00)"
+            if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then
+              case "$result" in
+                success) ;;
+                skipped) echo "expected CI job velnor-rust-crate00 was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;
+                cancelled) echo "expected CI job velnor-rust-crate00 was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;
+                *) echo "expected CI job velnor-rust-crate00 did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job velnor-rust-crate00 ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;
+              esac
+            fi
+          else
+            result="$(result_for_job velnor-rust-crate00)"
+            case "$result" in
+              skipped) ;;
+              success) echo "unexpected CI job velnor-rust-crate00 succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;
+              *) echo "unexpected CI job velnor-rust-crate00 ran outside the expected set: $result" >&2; exit 1 ;;
+            esac
+          fi
+          if plan_expects "rust-crate01" "github-hosted"; then
+            result="$(result_for_job github-hosted-rust-crate01)"
+            if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then
+              case "$result" in
+                success) ;;
+                skipped) echo "expected CI job github-hosted-rust-crate01 was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;
+                cancelled) echo "expected CI job github-hosted-rust-crate01 was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;
+                *) echo "expected CI job github-hosted-rust-crate01 did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-hosted-rust-crate01 ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;
+              esac
+            fi
+          else
+            result="$(result_for_job github-hosted-rust-crate01)"
+            case "$result" in
+              skipped) ;;
+              success) echo "unexpected CI job github-hosted-rust-crate01 succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;
+              *) echo "unexpected CI job github-hosted-rust-crate01 ran outside the expected set: $result" >&2; exit 1 ;;
+            esac
+          fi
+          if plan_expects "rust-crate01" "github-self-hosted"; then
+            result="$(result_for_job github-self-hosted-rust-crate01)"
+            if [[ "$PROVIDER_ADMITTED_GITHUB_SELF_HOSTED_TRUSTED" == true ]]; then
+              case "$result" in
+                success) ;;
+                skipped) echo "expected CI job github-self-hosted-rust-crate01 was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;
+                cancelled) echo "expected CI job github-self-hosted-rust-crate01 was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;
+                *) echo "expected CI job github-self-hosted-rust-crate01 did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-self-hosted-rust-crate01 ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_SELF_HOSTED_TRUSTED=$PROVIDER_ADMITTED_GITHUB_SELF_HOSTED_TRUSTED): $result" >&2; exit 1 ;;
+              esac
+            fi
+          else
+            result="$(result_for_job github-self-hosted-rust-crate01)"
+            case "$result" in
+              skipped) ;;
+              success) echo "unexpected CI job github-self-hosted-rust-crate01 succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;
+              *) echo "unexpected CI job github-self-hosted-rust-crate01 ran outside the expected set: $result" >&2; exit 1 ;;
+            esac
+          fi
+          if plan_expects "rust-crate01" "velnor"; then
+            result="$(result_for_job velnor-rust-crate01)"
+            if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then
+              case "$result" in
+                success) ;;
+                skipped) echo "expected CI job velnor-rust-crate01 was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;
+                cancelled) echo "expected CI job velnor-rust-crate01 was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;
+                *) echo "expected CI job velnor-rust-crate01 did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job velnor-rust-crate01 ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;
+              esac
+            fi
+          else
+            result="$(result_for_job velnor-rust-crate01)"
+            case "$result" in
+              skipped) ;;
+              success) echo "unexpected CI job velnor-rust-crate01 succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;
+              *) echo "unexpected CI job velnor-rust-crate01 ran outside the expected set: $result" >&2; exit 1 ;;
+            esac
+          fi
+  required:
+    name: "Control / Required"
+    if: ${{ always() }}
+    needs: [ci-required]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Mirror CI / Required
+        if: ${{ needs.ci-required.result != 'success' }}
+        run: exit 1
+
+
+---- automatic_pr_schedules_github_hosted_unit_jobs stdout ----
+
+thread 'automatic_pr_schedules_github_hosted_unit_jobs' (107334522) panicked at crates/velnor-workflow/tests/velnor_first_ci.rs:248:5:
+Velnor jobs must stay dispatch-selectable: # Generated by velnor-workflow. Regenerate; do not hand-edit.
+name: Rust
+on:
+  workflow_call:
+    inputs:
+      unit:
+        required: true
+        type: string
+      selected_units:
+        required: true
+        type: string
+      scope:
+        required: true
+        type: string
+      full_units:
+        required: true
+        type: string
+      base_sha:
+        required: true
+        type: string
+      head_sha:
+        required: true
+        type: string
+      plan_digest:
+        required: true
+        type: string
+      provider:
+        required: true
+        type: string
+      mise_tools:
+        required: false
+        type: string
+        default: ""
+      mise_runner:
+        required: false
+        type: boolean
+        default: false
+      mbx_compat:
+        required: false
+        type: string
+        default: ""
+      mbx_dependency_files:
+        required: false
+        type: string
+        default: ""
+      mbx_freshness_files:
+        required: false
+        type: string
+        default: ""
+      cargo_bin_tools:
+        required: false
+        type: string
+        default: ""
+      tool_version:
+        required: false
+        type: string
+        default: ""
+      node_cache_dependency_path:
+        required: false
+        type: string
+        default: ""
+      cache_paths:
+        required: false
+        type: string
+        default: ""
+      cache_key_files:
+        required: false
+        type: string
+        default: ""
+      seed_compat:
+        required: false
+        type: string
+        default: ""
+      seed_dependency_files:
+        required: false
+        type: string
+        default: ""
+      seed_freshness_files:
+        required: false
+        type: string
+        default: ""
+      cargo_root:
+        required: false
+        type: string
+        default: ""
+      cargo_fetch_skip_when_warm:
+        required: false
+        type: boolean
+        default: false
+      cargo_net_offline:
+        required: false
+        type: boolean
+        default: false
+      host_warm_layers:
+        required: false
+        type: string
+        default: ""
+      policy_runtime:
+        required: false
+        type: boolean
+        default: false
+      candidate_publish:
+        required: false
+        type: boolean
+        default: false
+      unit_platform:
+        required: false
+        type: string
+        default: ""
+      unit_trust:
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  github-self-hosted-prepare-cargo-sources:
+    name: prepare-cargo
+    if: ${{ inputs.provider == 'control' && (contains(inputs.selected_units, '"unit_id":"rust-crate00"') || contains(inputs.selected_units, '"unit_id":"rust-crate01"')) && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-self-hosted,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    runs-on: example-scale-set
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.head_sha }}
+      - name: Materialize Velnor CI selection
+        shell: bash
+        env:
+          SELECTION_BASE_SHA: ${{ inputs.base_sha }}
+          SELECTION_HEAD_SHA: ${{ inputs.head_sha }}
+          SELECTION_SCOPE: ${{ inputs.scope }}
+          SELECTION_UNITS: ${{ inputs.selected_units }}
+          SELECTION_FULL_UNITS: ${{ inputs.full_units }}
+          SELECTION_PLAN_DIGEST: ${{ inputs.plan_digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          {
+            printf 'version=2\n'
+            printf 'base_sha=%s\n' "$SELECTION_BASE_SHA"
+            printf 'head_sha=%s\n' "$SELECTION_HEAD_SHA"
+            printf 'scope=%s\n' "$SELECTION_SCOPE"
+            printf 'units=%s\n' "$SELECTION_UNITS"
+            printf 'full_units=%s\n' "$SELECTION_FULL_UNITS"
+            printf 'plan_digest=%s\n' "$SELECTION_PLAN_DIGEST"
+          } > .velnor-ci-selection/velnor-ci-selection
+      - name: Prepare Cargo sources
+        env:
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -euo pipefail
+          if cargo metadata --locked --offline --all-features --format-version 1 >/dev/null 2>&1; then
+            echo "Cargo sources warm; skipping fetch"
+          else
+            cargo fetch --locked
+          fi
+  velnor-prepare-cargo-sources:
+    name: prepare-cargo
+    if: ${{ inputs.provider == 'control' && (contains(inputs.selected_units, '"unit_id":"rust-crate00"') || contains(inputs.selected_units, '"unit_id":"rust-crate01"')) && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    runs-on: [self-hosted, example-runner]
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.head_sha }}
+      - name: Materialize Velnor CI selection
+        shell: bash
+        env:
+          SELECTION_BASE_SHA: ${{ inputs.base_sha }}
+          SELECTION_HEAD_SHA: ${{ inputs.head_sha }}
+          SELECTION_SCOPE: ${{ inputs.scope }}
+          SELECTION_UNITS: ${{ inputs.selected_units }}
+          SELECTION_FULL_UNITS: ${{ inputs.full_units }}
+          SELECTION_PLAN_DIGEST: ${{ inputs.plan_digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          {
+            printf 'version=2\n'
+            printf 'base_sha=%s\n' "$SELECTION_BASE_SHA"
+            printf 'head_sha=%s\n' "$SELECTION_HEAD_SHA"
+            printf 'scope=%s\n' "$SELECTION_SCOPE"
+            printf 'units=%s\n' "$SELECTION_UNITS"
+            printf 'full_units=%s\n' "$SELECTION_FULL_UNITS"
+            printf 'plan_digest=%s\n' "$SELECTION_PLAN_DIGEST"
+          } > .velnor-ci-selection/velnor-ci-selection
+      - name: Prepare Cargo sources
+        env:
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -euo pipefail
+          if cargo metadata --locked --offline --all-features --format-version 1 >/dev/null 2>&1; then
+            echo "Cargo sources warm; skipping fetch"
+          else
+            cargo fetch --locked
+          fi
+  verify-github-hosted:
+    name: "GitHub · hosted"
+    if: ${{ inputs.provider == 'github-hosted' && contains(inputs.selected_units, format('"unit_id":"{0}"', inputs.unit)) && ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Mark CI job start
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/JOB_STARTED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.head_sha }}
+      - name: Download Velnor workflow runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: velnor-workflow-runtime-bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d-${{ runner.os }}-${{ runner.arch }}
+          path: .velnor-workflow-runtime
+      - name: Verify Velnor workflow runtime
+        shell: bash
+        env:
+          EXPECTED_REVISION: bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d
+        run: |
+          set -euo pipefail
+          manifest=.velnor-workflow-runtime/manifest.json
+          jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$")) and (.policy_binary_sha256 | test("^[0-9a-f]{64}$")) and (.closure | test("^[0-9a-f]{64}$")) and (.policy_closure | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null
+          expected="$(jq -er '.binary_sha256' "$manifest")"
+          actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
+          expected="$(jq -er '.policy_binary_sha256' "$manifest")"
+          actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow-policy | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || { echo "::error::policy runtime digest mismatch" >&2; exit 1; }
+      - name: Add Velnor workflow runtime to PATH
+        shell: bash
+        env:
+          EXPECTED_REVISION: bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d
+        run: |
+          set -euo pipefail
+          home="$RUNNER_TEMP/velnor-workflow-runtime-artifact"
+          install -Dm0755 .velnor-workflow-runtime/velnor-workflow "$home/bin/velnor-workflow"
+          install -Dm0755 .velnor-workflow-runtime/velnor-workflow-policy "$home/bin/velnor-workflow-policy"
+          expected_closure="$(jq -er '.policy_closure' .velnor-workflow-runtime/manifest.json)"
+          reported="$("$home/bin/velnor-workflow-policy" --closure)"
+          [[ "$reported" == "$expected_closure" ]] || { echo "::error::policy runtime reports closure $reported, expected $expected_closure" >&2; exit 1; }
+          echo "$home/bin" >> "$GITHUB_PATH"
+          echo "VELNOR_WORKFLOW_PINNED_BINARY=$home/bin/velnor-workflow-policy" >> "$GITHUB_ENV"
+      - name: Mark runner setup end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/RUNNER_SETUP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Materialize Velnor CI selection
+        shell: bash
+        env:
+          SELECTION_BASE_SHA: ${{ inputs.base_sha }}
+          SELECTION_HEAD_SHA: ${{ inputs.head_sha }}
+          SELECTION_SCOPE: ${{ inputs.scope }}
+          SELECTION_UNITS: ${{ inputs.selected_units }}
+          SELECTION_FULL_UNITS: ${{ inputs.full_units }}
+          SELECTION_PLAN_DIGEST: ${{ inputs.plan_digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          {
+            printf 'version=2\n'
+            printf 'base_sha=%s\n' "$SELECTION_BASE_SHA"
+            printf 'head_sha=%s\n' "$SELECTION_HEAD_SHA"
+            printf 'scope=%s\n' "$SELECTION_SCOPE"
+            printf 'units=%s\n' "$SELECTION_UNITS"
+            printf 'full_units=%s\n' "$SELECTION_FULL_UNITS"
+            printf 'plan_digest=%s\n' "$SELECTION_PLAN_DIGEST"
+          } > .velnor-ci-selection/velnor-ci-selection
+      - name: Mark selection transport end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/SELECTION_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Restore Rust toolchain
+        id: rustup-toolchain
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup
+          key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Provision Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install
+      - name: Save Rust toolchain
+        if: ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rustup-toolchain.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup
+          key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Bound the Mr. Boxington store
+        shell: bash
+        run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
+      - name: Set up Mr. Boxington
+        id: mbx-cache
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          github-cache-mode: objects
+          version: 1.11.1
+          cache-key: velnor-mbx-v3-${{ inputs.mbx_compat }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.provider }}-${{ inputs.unit_platform }}-${{ inputs.unit_trust }}-${{ inputs.unit }}-${{ hashFiles(inputs.mbx_dependency_files) }}-${{ hashFiles(inputs.mbx_freshness_files) }}
+          restore-keys: |
+            velnor-mbx-v3-${{ inputs.mbx_compat }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.provider }}-${{ inputs.unit_platform }}-${{ inputs.unit_trust }}-${{ inputs.unit }}-${{ hashFiles(inputs.mbx_dependency_files) }}-
+            velnor-mbx-v3-${{ inputs.mbx_compat }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.provider }}-${{ inputs.unit_platform }}-${{ inputs.unit_trust }}-${{ inputs.unit }}-
+          save-on-workflow-dispatch: true
+      - name: Restore mold 2.42.0 cache
+        id: mold-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/velnor/mold/2.42.0
+          key: velnor-mold-2.42.0-${{ runner.os }}-${{ runner.arch }}
+      - name: Set up mold 2.42.0
+        shell: bash
+        env:
+          MOLD_VERSION: 2.42.0
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) mold_arch=x86_64; expected='f5ed2f6e31d1ada4f07fe766fe0de7a73104d1c5cdc59086fcecc16a43720b6d' ;;
+            aarch64) mold_arch=aarch64; expected='3c9a0a3624aac8a2007569ae50c33b3129a0f0ae8bcc974aeee2f8939d295190' ;;
+            *) echo "unsupported mold architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          cache_dir="$HOME/.cache/velnor/mold/$MOLD_VERSION"
+          archive="$cache_dir/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz"
+          mkdir -p "$cache_dir"
+          if [[ ! -s "$archive" ]]; then
+            temporary="$archive.download"
+            trap 'rm -f "$temporary"' EXIT
+            curl --fail --silent --show-error --location --retry 3 --retry-delay 2 \
+              --output "$temporary" \
+              "https://github.com/rui314/mold/releases/download/v$MOLD_VERSION/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz"
+            printf '%s  %s\n' "$expected" "$temporary" | sha256sum --check --strict
+            mv "$temporary" "$archive"
+            trap - EXIT
+          fi
+          printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict
+          if [[ "$(id -u)" -eq 0 ]]; then
+            tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+          else
+            sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+          fi
+          command -v mold >/dev/null
+          mold --version | grep -F "$MOLD_VERSION"
+      - name: Save mold 2.42.0 cache
+        if: ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.mold-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/velnor/mold/2.42.0
+          key: velnor-mold-2.42.0-${{ runner.os }}-${{ runner.arch }}
+      - name: Mark tool bootstrap end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/TOOL_BOOTSTRAP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Restore unit cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ inputs.cache_paths }}
+          key: ci-${{ runner.os }}-${{ runner.arch }}-${{ inputs.provider }}-${{ inputs.unit_platform }}-${{ inputs.unit_trust }}-rust-${{ hashFiles(inputs.cache_key_files) }}
+          restore-keys: |
+            ci-${{ runner.os }}-${{ runner.arch }}-${{ inputs.provider }}-${{ inputs.unit_platform }}-${{ inputs.unit_trust }}-rust-
+      - name: Mark cache prep end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CACHE_PREP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Prepare Cargo sources
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        env:
+          CARGO_FETCH_ROOT: ${{ inputs.cargo_root }}
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -euo pipefail
+          root="$CARGO_FETCH_ROOT"
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
+      - name: Mark cargo fetch end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CARGO_FETCH_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Run unit checks
+        env:
+          CI_SCOPE: ${{ inputs.scope }}
+          CI_UNIT_ID: ${{ inputs.unit }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -o pipefail
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CHECKS_STARTED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+          rc=0
+          velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CHECKS_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+          exit $rc
+      - name: Save unit cache
+        if: always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ inputs.cache_paths }}
+          key: ci-${{ runner.os }}-${{ runner.arch }}-${{ inputs.provider }}-${{ inputs.unit_platform }}-${{ inputs.unit_trust }}-rust-${{ hashFiles(inputs.cache_key_files) }}
+      - name: Mark cleanup end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CLEANUP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Report phase timings and cache outcomes
+        if: always()
+        uses: tailrocks/velnor/.github/actions/report-velnor-ci-outcomes@bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d
+        with:
+          job_label: ${{ inputs.unit }}
+          ci_provider: github-hosted
+          cache_rustup_primary: ${{ steps.rustup-toolchain.outputs.cache-primary-key }}
+          cache_rustup_matched: ${{ steps.rustup-toolchain.outputs.cache-matched-key }}
+          cache_mold_primary: ${{ steps.mold-cache.outputs.cache-primary-key }}
+          cache_mold_matched: ${{ steps.mold-cache.outputs.cache-matched-key }}
+          cache_mbx_hit: ${{ steps.mbx-cache.outputs.cache-hit }}
+          cache_mbx_primary: ${{ steps.mbx-cache.outputs.cache-primary-key }}
+          cache_cargo_primary: ${{ steps.cache.outputs.cache-primary-key }}
+          cache_cargo_matched: ${{ steps.cache.outputs.cache-matched-key }}
+
+  verify-github-self-hosted:
+    name: github-self-hosted
+    if: ${{ inputs.provider == 'github-self-hosted' && contains(inputs.selected_units, format('"unit_id":"{0}"', inputs.unit)) && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-self-hosted,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    runs-on: example-scale-set
+    timeout-minutes: 45
+    steps:
+      - name: Mark CI job start
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/JOB_STARTED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.head_sha }}
+      - name: Mark runner setup end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/RUNNER_SETUP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Materialize Velnor CI selection
+        shell: bash
+        env:
+          SELECTION_BASE_SHA: ${{ inputs.base_sha }}
+          SELECTION_HEAD_SHA: ${{ inputs.head_sha }}
+          SELECTION_SCOPE: ${{ inputs.scope }}
+          SELECTION_UNITS: ${{ inputs.selected_units }}
+          SELECTION_FULL_UNITS: ${{ inputs.full_units }}
+          SELECTION_PLAN_DIGEST: ${{ inputs.plan_digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          {
+            printf 'version=2\n'
+            printf 'base_sha=%s\n' "$SELECTION_BASE_SHA"
+            printf 'head_sha=%s\n' "$SELECTION_HEAD_SHA"
+            printf 'scope=%s\n' "$SELECTION_SCOPE"
+            printf 'units=%s\n' "$SELECTION_UNITS"
+            printf 'full_units=%s\n' "$SELECTION_FULL_UNITS"
+            printf 'plan_digest=%s\n' "$SELECTION_PLAN_DIGEST"
+          } > .velnor-ci-selection/velnor-ci-selection
+      - name: Mark selection transport end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/SELECTION_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Set up Mr. Boxington
+        id: mbx-cache
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: local
+      - name: Mark tool bootstrap end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/TOOL_BOOTSTRAP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Mark cache prep end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CACHE_PREP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Run unit checks
+        env:
+          CI_SCOPE: ${{ inputs.scope }}
+          CI_UNIT_ID: ${{ inputs.unit }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -o pipefail
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CHECKS_STARTED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+          rc=0
+          velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CHECKS_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+          exit $rc
+      - name: Mark cleanup end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CLEANUP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Report phase timings and cache outcomes
+        if: always()
+        uses: tailrocks/velnor/.github/actions/report-velnor-ci-outcomes@bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d
+        with:
+          job_label: ${{ inputs.unit }}
+          ci_provider: github-self-hosted
+
+  verify-velnor:
+    name: velnor
+    if: ${{ inputs.provider == 'velnor' && contains(inputs.selected_units, format('"unit_id":"{0}"', inputs.unit)) && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    runs-on: [self-hosted, example-runner]
+    timeout-minutes: 45
+    steps:
+      - name: Mark CI job start
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/JOB_STARTED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.head_sha }}
+      - name: Mark runner setup end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/RUNNER_SETUP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Materialize Velnor CI selection
+        shell: bash
+        env:
+          SELECTION_BASE_SHA: ${{ inputs.base_sha }}
+          SELECTION_HEAD_SHA: ${{ inputs.head_sha }}
+          SELECTION_SCOPE: ${{ inputs.scope }}
+          SELECTION_UNITS: ${{ inputs.selected_units }}
+          SELECTION_FULL_UNITS: ${{ inputs.full_units }}
+          SELECTION_PLAN_DIGEST: ${{ inputs.plan_digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          {
+            printf 'version=2\n'
+            printf 'base_sha=%s\n' "$SELECTION_BASE_SHA"
+            printf 'head_sha=%s\n' "$SELECTION_HEAD_SHA"
+            printf 'scope=%s\n' "$SELECTION_SCOPE"
+            printf 'units=%s\n' "$SELECTION_UNITS"
+            printf 'full_units=%s\n' "$SELECTION_FULL_UNITS"
+            printf 'plan_digest=%s\n' "$SELECTION_PLAN_DIGEST"
+          } > .velnor-ci-selection/velnor-ci-selection
+      - name: Mark selection transport end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/SELECTION_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Set up Mr. Boxington
+        id: mbx-cache
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: local
+      - name: Mark tool bootstrap end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/TOOL_BOOTSTRAP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Mark cache prep end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CACHE_PREP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Run unit checks
+        env:
+          CI_SCOPE: ${{ inputs.scope }}
+          CI_UNIT_ID: ${{ inputs.unit }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -o pipefail
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CHECKS_STARTED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+          rc=0
+          velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CHECKS_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+          exit $rc
+      - name: Mark cleanup end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CLEANUP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Report phase timings and cache outcomes
+        if: always()
+        uses: tailrocks/velnor/.github/actions/report-velnor-ci-outcomes@bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d
+        with:
+          job_label: ${{ inputs.unit }}
+          ci_provider: velnor
+          host_warm_layers: rustup,mold,mbx,cargo
+
+
+
+---- regen_gate_unit_provisions_the_pinned_policy_runtime_on_the_velnor_lane_only stdout ----
+
+thread 'regen_gate_unit_provisions_the_pinned_policy_runtime_on_the_velnor_lane_only' (107335089) panicked at crates/velnor-workflow/tests/velnor_first_ci.rs:976:5:
+assertion `left == right` failed: the Velnor lane job provisions the pinned policy binary behind the input gate exactly once: # Generated by velnor-workflow. Regenerate; do not hand-edit.
+name: Rust
+on:
+  workflow_call:
+    inputs:
+      unit:
+        required: true
+        type: string
+      selected_units:
+        required: true
+        type: string
+      scope:
+        required: true
+        type: string
+      full_units:
+        required: true
+        type: string
+      base_sha:
+        required: true
+        type: string
+      head_sha:
+        required: true
+        type: string
+      plan_digest:
+        required: true
+        type: string
+      provider:
+        required: true
+        type: string
+      mise_tools:
+        required: false
+        type: string
+        default: ""
+      mise_runner:
+        required: false
+        type: boolean
+        default: false
+      mbx_compat:
+        required: false
+        type: string
+        default: ""
+      mbx_dependency_files:
+        required: false
+        type: string
+        default: ""
+      mbx_freshness_files:
+        required: false
+        type: string
+        default: ""
+      cargo_bin_tools:
+        required: false
+        type: string
+        default: ""
+      tool_version:
+        required: false
+        type: string
+        default: ""
+      node_cache_dependency_path:
+        required: false
+        type: string
+        default: ""
+      cache_paths:
+        required: false
+        type: string
+        default: ""
+      cache_key_files:
+        required: false
+        type: string
+        default: ""
+      seed_compat:
+        required: false
+        type: string
+        default: ""
+      seed_dependency_files:
+        required: false
+        type: string
+        default: ""
+      seed_freshness_files:
+        required: false
+        type: string
+        default: ""
+      cargo_root:
+        required: false
+        type: string
+        default: ""
+      cargo_fetch_skip_when_warm:
+        required: false
+        type: boolean
+        default: false
+      cargo_net_offline:
+        required: false
+        type: boolean
+        default: false
+      host_warm_layers:
+        required: false
+        type: string
+        default: ""
+      policy_runtime:
+        required: false
+        type: boolean
+        default: false
+      candidate_publish:
+        required: false
+        type: boolean
+        default: false
+      unit_platform:
+        required: false
+        type: string
+        default: ""
+      unit_trust:
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  github-self-hosted-prepare-cargo-sources:
+    name: prepare-cargo
+    if: ${{ inputs.provider == 'control' && (contains(inputs.selected_units, '"unit_id":"rust-crate00"') || contains(inputs.selected_units, '"unit_id":"rust-crate01"')) && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-self-hosted,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    runs-on: example-scale-set
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.head_sha }}
+      - name: Materialize Velnor CI selection
+        shell: bash
+        env:
+          SELECTION_BASE_SHA: ${{ inputs.base_sha }}
+          SELECTION_HEAD_SHA: ${{ inputs.head_sha }}
+          SELECTION_SCOPE: ${{ inputs.scope }}
+          SELECTION_UNITS: ${{ inputs.selected_units }}
+          SELECTION_FULL_UNITS: ${{ inputs.full_units }}
+          SELECTION_PLAN_DIGEST: ${{ inputs.plan_digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          {
+            printf 'version=2\n'
+            printf 'base_sha=%s\n' "$SELECTION_BASE_SHA"
+            printf 'head_sha=%s\n' "$SELECTION_HEAD_SHA"
+            printf 'scope=%s\n' "$SELECTION_SCOPE"
+            printf 'units=%s\n' "$SELECTION_UNITS"
+            printf 'full_units=%s\n' "$SELECTION_FULL_UNITS"
+            printf 'plan_digest=%s\n' "$SELECTION_PLAN_DIGEST"
+          } > .velnor-ci-selection/velnor-ci-selection
+      - name: Prepare Cargo sources
+        env:
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -euo pipefail
+          if cargo metadata --locked --offline --all-features --format-version 1 >/dev/null 2>&1; then
+            echo "Cargo sources warm; skipping fetch"
+          else
+            cargo fetch --locked
+          fi
+  velnor-prepare-cargo-sources:
+    name: prepare-cargo
+    if: ${{ inputs.provider == 'control' && (contains(inputs.selected_units, '"unit_id":"rust-crate00"') || contains(inputs.selected_units, '"unit_id":"rust-crate01"')) && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    runs-on: [self-hosted, example-runner]
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.head_sha }}
+      - name: Materialize Velnor CI selection
+        shell: bash
+        env:
+          SELECTION_BASE_SHA: ${{ inputs.base_sha }}
+          SELECTION_HEAD_SHA: ${{ inputs.head_sha }}
+          SELECTION_SCOPE: ${{ inputs.scope }}
+          SELECTION_UNITS: ${{ inputs.selected_units }}
+          SELECTION_FULL_UNITS: ${{ inputs.full_units }}
+          SELECTION_PLAN_DIGEST: ${{ inputs.plan_digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          {
+            printf 'version=2\n'
+            printf 'base_sha=%s\n' "$SELECTION_BASE_SHA"
+            printf 'head_sha=%s\n' "$SELECTION_HEAD_SHA"
+            printf 'scope=%s\n' "$SELECTION_SCOPE"
+            printf 'units=%s\n' "$SELECTION_UNITS"
+            printf 'full_units=%s\n' "$SELECTION_FULL_UNITS"
+            printf 'plan_digest=%s\n' "$SELECTION_PLAN_DIGEST"
+          } > .velnor-ci-selection/velnor-ci-selection
+      - name: Prepare Cargo sources
+        env:
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -euo pipefail
+          if cargo metadata --locked --offline --all-features --format-version 1 >/dev/null 2>&1; then
+            echo "Cargo sources warm; skipping fetch"
+          else
+            cargo fetch --locked
+          fi
+  verify-github-hosted:
+    name: "GitHub · hosted"
+    if: ${{ inputs.provider == 'github-hosted' && contains(inputs.selected_units, format('"unit_id":"{0}"', inputs.unit)) && ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Mark CI job start
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/JOB_STARTED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.head_sha }}
+      - name: Download Velnor workflow runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: velnor-workflow-runtime-bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d-${{ runner.os }}-${{ runner.arch }}
+          path: .velnor-workflow-runtime
+      - name: Verify Velnor workflow runtime
+        shell: bash
+        env:
+          EXPECTED_REVISION: bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d
+        run: |
+          set -euo pipefail
+          manifest=.velnor-workflow-runtime/manifest.json
+          jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$")) and (.policy_binary_sha256 | test("^[0-9a-f]{64}$")) and (.closure | test("^[0-9a-f]{64}$")) and (.policy_closure | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null
+          expected="$(jq -er '.binary_sha256' "$manifest")"
+          actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
+          expected="$(jq -er '.policy_binary_sha256' "$manifest")"
+          actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow-policy | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || { echo "::error::policy runtime digest mismatch" >&2; exit 1; }
+      - name: Add Velnor workflow runtime to PATH
+        shell: bash
+        env:
+          EXPECTED_REVISION: bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d
+        run: |
+          set -euo pipefail
+          home="$RUNNER_TEMP/velnor-workflow-runtime-artifact"
+          install -Dm0755 .velnor-workflow-runtime/velnor-workflow "$home/bin/velnor-workflow"
+          install -Dm0755 .velnor-workflow-runtime/velnor-workflow-policy "$home/bin/velnor-workflow-policy"
+          expected_closure="$(jq -er '.policy_closure' .velnor-workflow-runtime/manifest.json)"
+          reported="$("$home/bin/velnor-workflow-policy" --closure)"
+          [[ "$reported" == "$expected_closure" ]] || { echo "::error::policy runtime reports closure $reported, expected $expected_closure" >&2; exit 1; }
+          echo "$home/bin" >> "$GITHUB_PATH"
+          echo "VELNOR_WORKFLOW_PINNED_BINARY=$home/bin/velnor-workflow-policy" >> "$GITHUB_ENV"
+      - name: Mark runner setup end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/RUNNER_SETUP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Materialize Velnor CI selection
+        shell: bash
+        env:
+          SELECTION_BASE_SHA: ${{ inputs.base_sha }}
+          SELECTION_HEAD_SHA: ${{ inputs.head_sha }}
+          SELECTION_SCOPE: ${{ inputs.scope }}
+          SELECTION_UNITS: ${{ inputs.selected_units }}
+          SELECTION_FULL_UNITS: ${{ inputs.full_units }}
+          SELECTION_PLAN_DIGEST: ${{ inputs.plan_digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          {
+            printf 'version=2\n'
+            printf 'base_sha=%s\n' "$SELECTION_BASE_SHA"
+            printf 'head_sha=%s\n' "$SELECTION_HEAD_SHA"
+            printf 'scope=%s\n' "$SELECTION_SCOPE"
+            printf 'units=%s\n' "$SELECTION_UNITS"
+            printf 'full_units=%s\n' "$SELECTION_FULL_UNITS"
+            printf 'plan_digest=%s\n' "$SELECTION_PLAN_DIGEST"
+          } > .velnor-ci-selection/velnor-ci-selection
+      - name: Mark selection transport end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/SELECTION_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Restore Rust toolchain
+        id: rustup-toolchain
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup
+          key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Provision Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install
+      - name: Save Rust toolchain
+        if: ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.rustup-toolchain.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup
+          key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Bound the Mr. Boxington store
+        shell: bash
+        run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
+      - name: Set up Mr. Boxington
+        id: mbx-cache
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: github
+          github-cache-mode: objects
+          version: 1.11.1
+          cache-key: velnor-mbx-v3-${{ inputs.mbx_compat }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.provider }}-${{ inputs.unit_platform }}-${{ inputs.unit_trust }}-${{ inputs.unit }}-${{ hashFiles(inputs.mbx_dependency_files) }}-${{ hashFiles(inputs.mbx_freshness_files) }}
+          restore-keys: |
+            velnor-mbx-v3-${{ inputs.mbx_compat }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.provider }}-${{ inputs.unit_platform }}-${{ inputs.unit_trust }}-${{ inputs.unit }}-${{ hashFiles(inputs.mbx_dependency_files) }}-
+            velnor-mbx-v3-${{ inputs.mbx_compat }}-${{ runner.os }}-${{ runner.arch }}-${{ inputs.provider }}-${{ inputs.unit_platform }}-${{ inputs.unit_trust }}-${{ inputs.unit }}-
+          save-on-workflow-dispatch: true
+      - name: Restore mold 2.42.0 cache
+        id: mold-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/velnor/mold/2.42.0
+          key: velnor-mold-2.42.0-${{ runner.os }}-${{ runner.arch }}
+      - name: Set up mold 2.42.0
+        shell: bash
+        env:
+          MOLD_VERSION: 2.42.0
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) mold_arch=x86_64; expected='f5ed2f6e31d1ada4f07fe766fe0de7a73104d1c5cdc59086fcecc16a43720b6d' ;;
+            aarch64) mold_arch=aarch64; expected='3c9a0a3624aac8a2007569ae50c33b3129a0f0ae8bcc974aeee2f8939d295190' ;;
+            *) echo "unsupported mold architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          cache_dir="$HOME/.cache/velnor/mold/$MOLD_VERSION"
+          archive="$cache_dir/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz"
+          mkdir -p "$cache_dir"
+          if [[ ! -s "$archive" ]]; then
+            temporary="$archive.download"
+            trap 'rm -f "$temporary"' EXIT
+            curl --fail --silent --show-error --location --retry 3 --retry-delay 2 \
+              --output "$temporary" \
+              "https://github.com/rui314/mold/releases/download/v$MOLD_VERSION/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz"
+            printf '%s  %s\n' "$expected" "$temporary" | sha256sum --check --strict
+            mv "$temporary" "$archive"
+            trap - EXIT
+          fi
+          printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict
+          if [[ "$(id -u)" -eq 0 ]]; then
+            tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+          else
+            sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+          fi
+          command -v mold >/dev/null
+          mold --version | grep -F "$MOLD_VERSION"
+      - name: Save mold 2.42.0 cache
+        if: ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.mold-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/velnor/mold/2.42.0
+          key: velnor-mold-2.42.0-${{ runner.os }}-${{ runner.arch }}
+      - name: Mark tool bootstrap end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/TOOL_BOOTSTRAP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Restore unit cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ inputs.cache_paths }}
+          key: ci-${{ runner.os }}-${{ runner.arch }}-${{ inputs.provider }}-${{ inputs.unit_platform }}-${{ inputs.unit_trust }}-rust-${{ hashFiles(inputs.cache_key_files) }}
+          restore-keys: |
+            ci-${{ runner.os }}-${{ runner.arch }}-${{ inputs.provider }}-${{ inputs.unit_platform }}-${{ inputs.unit_trust }}-rust-
+      - name: Mark cache prep end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CACHE_PREP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Prepare Cargo sources
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        env:
+          CARGO_FETCH_ROOT: ${{ inputs.cargo_root }}
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -euo pipefail
+          root="$CARGO_FETCH_ROOT"
+          if [[ "$root" != "." ]]; then
+            cd -- "$root"
+          fi
+          cargo fetch --locked
+      - name: Mark cargo fetch end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CARGO_FETCH_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Run unit checks
+        env:
+          CI_SCOPE: ${{ inputs.scope }}
+          CI_UNIT_ID: ${{ inputs.unit }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -o pipefail
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CHECKS_STARTED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+          rc=0
+          velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CHECKS_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+          exit $rc
+      - name: Save unit cache
+        if: always() && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ inputs.cache_paths }}
+          key: ci-${{ runner.os }}-${{ runner.arch }}-${{ inputs.provider }}-${{ inputs.unit_platform }}-${{ inputs.unit_trust }}-rust-${{ hashFiles(inputs.cache_key_files) }}
+      - name: Mark cleanup end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CLEANUP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Report phase timings and cache outcomes
+        if: always()
+        uses: tailrocks/velnor/.github/actions/report-velnor-ci-outcomes@bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d
+        with:
+          job_label: ${{ inputs.unit }}
+          ci_provider: github-hosted
+          cache_rustup_primary: ${{ steps.rustup-toolchain.outputs.cache-primary-key }}
+          cache_rustup_matched: ${{ steps.rustup-toolchain.outputs.cache-matched-key }}
+          cache_mold_primary: ${{ steps.mold-cache.outputs.cache-primary-key }}
+          cache_mold_matched: ${{ steps.mold-cache.outputs.cache-matched-key }}
+          cache_mbx_hit: ${{ steps.mbx-cache.outputs.cache-hit }}
+          cache_mbx_primary: ${{ steps.mbx-cache.outputs.cache-primary-key }}
+          cache_cargo_primary: ${{ steps.cache.outputs.cache-primary-key }}
+          cache_cargo_matched: ${{ steps.cache.outputs.cache-matched-key }}
+
+  verify-github-self-hosted:
+    name: github-self-hosted
+    if: ${{ inputs.provider == 'github-self-hosted' && contains(inputs.selected_units, format('"unit_id":"{0}"', inputs.unit)) && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-self-hosted,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    runs-on: example-scale-set
+    timeout-minutes: 45
+    steps:
+      - name: Mark CI job start
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/JOB_STARTED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.head_sha }}
+      - name: Mark runner setup end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/RUNNER_SETUP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Materialize Velnor CI selection
+        shell: bash
+        env:
+          SELECTION_BASE_SHA: ${{ inputs.base_sha }}
+          SELECTION_HEAD_SHA: ${{ inputs.head_sha }}
+          SELECTION_SCOPE: ${{ inputs.scope }}
+          SELECTION_UNITS: ${{ inputs.selected_units }}
+          SELECTION_FULL_UNITS: ${{ inputs.full_units }}
+          SELECTION_PLAN_DIGEST: ${{ inputs.plan_digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          {
+            printf 'version=2\n'
+            printf 'base_sha=%s\n' "$SELECTION_BASE_SHA"
+            printf 'head_sha=%s\n' "$SELECTION_HEAD_SHA"
+            printf 'scope=%s\n' "$SELECTION_SCOPE"
+            printf 'units=%s\n' "$SELECTION_UNITS"
+            printf 'full_units=%s\n' "$SELECTION_FULL_UNITS"
+            printf 'plan_digest=%s\n' "$SELECTION_PLAN_DIGEST"
+          } > .velnor-ci-selection/velnor-ci-selection
+      - name: Mark selection transport end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/SELECTION_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Provision pinned Velnor workflow policy runtime
+        if: ${{ inputs.policy_runtime }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECKOUT_PATH: ${{ github.workspace }}
+          PRODUCT_REPOSITORY: tailrocks/velnor
+        run: |
+          set -euo pipefail
+          PINNED_REVISION="$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' "$CHECKOUT_PATH/.github-gen/velnor-workflow.toml" | head -n 1)"
+          test "$PINNED_REVISION" != '' || { echo "::error::D19 pin missing from .github-gen/velnor-workflow.toml" >&2; exit 1; }
+          listing=""
+          if git -C "$CHECKOUT_PATH" cat-file -e "$PINNED_REVISION^{commit}" 2>/dev/null; then
+            listing="$(git -C "$CHECKOUT_PATH" ls-tree -r "$PINNED_REVISION" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)"
+          else
+            tree="$(gh api "repos/$PRODUCT_REPOSITORY/git/trees/$PINNED_REVISION?recursive=1")" || { echo "::error::unknown generator revision $PINNED_REVISION" >&2; exit 1; }
+            [[ "$(jq -r '.truncated // false' <<<"$tree")" != "true" ]] || { echo "::error::tree API response is truncated; the closure cannot be proven" >&2; exit 1; }
+            listing="$(jq -r '[.tree[] | select(.type != "tree") | select(.path == "Cargo.toml" or .path == "Cargo.lock" or .path == "rust-toolchain.toml" or .path == "rust-toolchain" or (.path | startswith("crates/velnor-workflow/")) or (.path | startswith(".cargo/"))) | "\(.mode) \(.type) \(.sha)\t\(.path)"] | sort | join("\n")' <<<"$tree")"
+          fi
+          test "$listing" != '' || { echo "::error::revision $PINNED_REVISION has no closure inputs" >&2; exit 1; }
+          if command -v sha256sum >/dev/null 2>&1; then
+            closure="$(printf '%s\nclosure-version:1\nfeatures:\nprofile:release\n' "$(LC_ALL=C sort <<<"$listing")" | sha256sum | awk '{print $1}')"
+          else
+            closure="$(printf '%s\nclosure-version:1\nfeatures:\nprofile:release\n' "$(LC_ALL=C sort <<<"$listing")" | shasum -a 256 | awk '{print $1}')"
+          fi
+          binary="${CARGO_HOME:-$HOME/.cargo}/bin/velnor-workflow-policy"
+          tag="velnor-workflow-runtime-v1-${closure:0:16}"
+          asset="velnor-workflow-${RUNNER_OS}-${RUNNER_ARCH}"
+          temporary="$(mktemp -d)"
+          trap 'rm -rf "$temporary"' EXIT
+          if ! gh release download "$tag" --repo tailrocks/velnor --pattern manifest.json --dir "$temporary"; then
+            echo "::error::no policy runtime product for revision $PINNED_REVISION (closure ${closure:0:16}); the mainline runtime-product publisher builds it after merge" >&2
+            exit 1
+          fi
+          gh attestation verify "$temporary/manifest.json" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref refs/heads/main
+          jq -e --arg closure "$closure" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg asset "$asset" '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' "$temporary/manifest.json" >/dev/null
+          expected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "$temporary/manifest.json")"
+          existing=""
+          if [[ -x "$binary" ]]; then
+            if command -v sha256sum >/dev/null 2>&1; then
+              existing="$(sha256sum "$binary" | awk '{print $1}')"
+            else
+              existing="$(shasum -a 256 "$binary" | awk '{print $1}')"
+            fi
+          fi
+          if [[ "$existing" != "$expected" ]]; then
+            gh release download "$tag" --repo tailrocks/velnor --pattern "$asset" --dir "$temporary"
+            gh attestation verify "$temporary/$asset" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref refs/heads/main
+            if command -v sha256sum >/dev/null 2>&1; then
+              actual="$(sha256sum "$temporary/$asset" | awk '{print $1}')"
+            else
+              actual="$(shasum -a 256 "$temporary/$asset" | awk '{print $1}')"
+            fi
+            [[ "$actual" == "$expected" ]] || { echo "::error::policy runtime digest mismatch" >&2; exit 1; }
+            install -Dm0755 "$temporary/$asset" "$binary"
+          fi
+          reported="$("$binary" --closure)"
+          [[ "$reported" == "$closure" ]] || { echo "::error::pinned workflow policy runtime reports closure $reported, expected $closure" >&2; exit 1; }
+          manifest_revision="$(jq -er '.revision' "$temporary/manifest.json")"
+          reported_revision="$("$binary" --revision)"
+          [[ "$reported_revision" == "$manifest_revision" ]] || { echo "::error::pinned workflow policy runtime reports revision $reported_revision, expected $manifest_revision" >&2; exit 1; }
+          echo "VELNOR_WORKFLOW_PINNED_BINARY=$binary" >> "$GITHUB_ENV"
+      - name: Set up Mr. Boxington
+        id: mbx-cache
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: local
+      - name: Mark tool bootstrap end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/TOOL_BOOTSTRAP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Mark cache prep end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CACHE_PREP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Run unit checks
+        env:
+          CI_SCOPE: ${{ inputs.scope }}
+          CI_UNIT_ID: ${{ inputs.unit }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -o pipefail
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CHECKS_STARTED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+          rc=0
+          velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CHECKS_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+          exit $rc
+      - name: Mark cleanup end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CLEANUP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Report phase timings and cache outcomes
+        if: always()
+        uses: tailrocks/velnor/.github/actions/report-velnor-ci-outcomes@bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d
+        with:
+          job_label: ${{ inputs.unit }}
+          ci_provider: github-self-hosted
+
+  verify-velnor:
+    name: velnor
+    if: ${{ inputs.provider == 'velnor' && contains(inputs.selected_units, format('"unit_id":"{0}"', inputs.unit)) && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    runs-on: [self-hosted, example-runner]
+    timeout-minutes: 45
+    steps:
+      - name: Mark CI job start
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/JOB_STARTED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.head_sha }}
+      - name: Mark runner setup end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/RUNNER_SETUP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Materialize Velnor CI selection
+        shell: bash
+        env:
+          SELECTION_BASE_SHA: ${{ inputs.base_sha }}
+          SELECTION_HEAD_SHA: ${{ inputs.head_sha }}
+          SELECTION_SCOPE: ${{ inputs.scope }}
+          SELECTION_UNITS: ${{ inputs.selected_units }}
+          SELECTION_FULL_UNITS: ${{ inputs.full_units }}
+          SELECTION_PLAN_DIGEST: ${{ inputs.plan_digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          {
+            printf 'version=2\n'
+            printf 'base_sha=%s\n' "$SELECTION_BASE_SHA"
+            printf 'head_sha=%s\n' "$SELECTION_HEAD_SHA"
+            printf 'scope=%s\n' "$SELECTION_SCOPE"
+            printf 'units=%s\n' "$SELECTION_UNITS"
+            printf 'full_units=%s\n' "$SELECTION_FULL_UNITS"
+            printf 'plan_digest=%s\n' "$SELECTION_PLAN_DIGEST"
+          } > .velnor-ci-selection/velnor-ci-selection
+      - name: Mark selection transport end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/SELECTION_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Provision pinned Velnor workflow policy runtime
+        if: ${{ inputs.policy_runtime }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECKOUT_PATH: ${{ github.workspace }}
+          PRODUCT_REPOSITORY: tailrocks/velnor
+        run: |
+          set -euo pipefail
+          PINNED_REVISION="$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' "$CHECKOUT_PATH/.github-gen/velnor-workflow.toml" | head -n 1)"
+          test "$PINNED_REVISION" != '' || { echo "::error::D19 pin missing from .github-gen/velnor-workflow.toml" >&2; exit 1; }
+          listing=""
+          if git -C "$CHECKOUT_PATH" cat-file -e "$PINNED_REVISION^{commit}" 2>/dev/null; then
+            listing="$(git -C "$CHECKOUT_PATH" ls-tree -r "$PINNED_REVISION" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)"
+          else
+            tree="$(gh api "repos/$PRODUCT_REPOSITORY/git/trees/$PINNED_REVISION?recursive=1")" || { echo "::error::unknown generator revision $PINNED_REVISION" >&2; exit 1; }
+            [[ "$(jq -r '.truncated // false' <<<"$tree")" != "true" ]] || { echo "::error::tree API response is truncated; the closure cannot be proven" >&2; exit 1; }
+            listing="$(jq -r '[.tree[] | select(.type != "tree") | select(.path == "Cargo.toml" or .path == "Cargo.lock" or .path == "rust-toolchain.toml" or .path == "rust-toolchain" or (.path | startswith("crates/velnor-workflow/")) or (.path | startswith(".cargo/"))) | "\(.mode) \(.type) \(.sha)\t\(.path)"] | sort | join("\n")' <<<"$tree")"
+          fi
+          test "$listing" != '' || { echo "::error::revision $PINNED_REVISION has no closure inputs" >&2; exit 1; }
+          if command -v sha256sum >/dev/null 2>&1; then
+            closure="$(printf '%s\nclosure-version:1\nfeatures:\nprofile:release\n' "$(LC_ALL=C sort <<<"$listing")" | sha256sum | awk '{print $1}')"
+          else
+            closure="$(printf '%s\nclosure-version:1\nfeatures:\nprofile:release\n' "$(LC_ALL=C sort <<<"$listing")" | shasum -a 256 | awk '{print $1}')"
+          fi
+          binary="${CARGO_HOME:-$HOME/.cargo}/bin/velnor-workflow-policy"
+          tag="velnor-workflow-runtime-v1-${closure:0:16}"
+          asset="velnor-workflow-${RUNNER_OS}-${RUNNER_ARCH}"
+          temporary="$(mktemp -d)"
+          trap 'rm -rf "$temporary"' EXIT
+          if ! gh release download "$tag" --repo tailrocks/velnor --pattern manifest.json --dir "$temporary"; then
+            echo "::error::no policy runtime product for revision $PINNED_REVISION (closure ${closure:0:16}); the mainline runtime-product publisher builds it after merge" >&2
+            exit 1
+          fi
+          gh attestation verify "$temporary/manifest.json" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref refs/heads/main
+          jq -e --arg closure "$closure" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg asset "$asset" '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' "$temporary/manifest.json" >/dev/null
+          expected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "$temporary/manifest.json")"
+          existing=""
+          if [[ -x "$binary" ]]; then
+            if command -v sha256sum >/dev/null 2>&1; then
+              existing="$(sha256sum "$binary" | awk '{print $1}')"
+            else
+              existing="$(shasum -a 256 "$binary" | awk '{print $1}')"
+            fi
+          fi
+          if [[ "$existing" != "$expected" ]]; then
+            gh release download "$tag" --repo tailrocks/velnor --pattern "$asset" --dir "$temporary"
+            gh attestation verify "$temporary/$asset" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref refs/heads/main
+            if command -v sha256sum >/dev/null 2>&1; then
+              actual="$(sha256sum "$temporary/$asset" | awk '{print $1}')"
+            else
+              actual="$(shasum -a 256 "$temporary/$asset" | awk '{print $1}')"
+            fi
+            [[ "$actual" == "$expected" ]] || { echo "::error::policy runtime digest mismatch" >&2; exit 1; }
+            install -Dm0755 "$temporary/$asset" "$binary"
+          fi
+          reported="$("$binary" --closure)"
+          [[ "$reported" == "$closure" ]] || { echo "::error::pinned workflow policy runtime reports closure $reported, expected $closure" >&2; exit 1; }
+          manifest_revision="$(jq -er '.revision' "$temporary/manifest.json")"
+          reported_revision="$("$binary" --revision)"
+          [[ "$reported_revision" == "$manifest_revision" ]] || { echo "::error::pinned workflow policy runtime reports revision $reported_revision, expected $manifest_revision" >&2; exit 1; }
+          echo "VELNOR_WORKFLOW_PINNED_BINARY=$binary" >> "$GITHUB_ENV"
+      - name: Set up Mr. Boxington
+        id: mbx-cache
+        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        with:
+          backend: local
+      - name: Mark tool bootstrap end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/TOOL_BOOTSTRAP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Mark cache prep end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CACHE_PREP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Run unit checks
+        env:
+          CI_SCOPE: ${{ inputs.scope }}
+          CI_UNIT_ID: ${{ inputs.unit }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+          CARGO_NET_OFFLINE: "true"
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -o pipefail
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CHECKS_STARTED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+          rc=0
+          velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CHECKS_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+          exit $rc
+      - name: Mark cleanup end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CLEANUP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Report phase timings and cache outcomes
+        if: always()
+        uses: tailrocks/velnor/.github/actions/report-velnor-ci-outcomes@bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d
+        with:
+          job_label: ${{ inputs.unit }}
+          ci_provider: velnor
+          host_warm_layers: rustup,mold,mbx,cargo
+
+
+  left: 2
+ right: 1
+
+---- velnor_only_runners_limit_dispatch_runner_options stdout ----
+
+thread 'velnor_only_runners_limit_dispatch_runner_options' (107336329) panicked at crates/velnor-workflow/tests/velnor_first_ci.rs:144:5:
+generation failed:
+error: invalid generation config /private/var/folders/8p/h376l_nn3375kyj72czdq2x80000gn/T/github-default-ci-dispatch-velnor-only-68081-31/.github-gen/velnor-workflow.toml: TOML parse error at line 10, column 1
+   |
+10 | default_dispatch_runner = "velnor"
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+unknown field `default_dispatch_runner`, expected one of `providers`, `automatic_providers`, `default_dispatch_providers`, `selectors`, `profile`, `verified`, `files`, `templates`, `version_bump_units`, `package_update_channels`, `default_branch`, `rust_needs`, `concurrency_group`, `serial_stack_groups`
+
+
+
+---- trust_gated_unit_without_a_label_fails_generation stdout ----
+
+thread 'trust_gated_unit_without_a_label_fails_generation' (107335118) panicked at crates/velnor-workflow/tests/velnor_first_ci.rs:1318:5:
+unexpected error: error: invalid generation config /private/var/folders/8p/h376l_nn3375kyj72czdq2x80000gn/T/github-default-ci-trust-gated-unlabeled-68081-27/.github-gen/velnor-workflow.toml: TOML parse error at line 21, column 1
+   |
+21 | requires_trusted = true
+   | ^^^^^^^^^^^^^^^^
+unknown field `requires_trusted`, expected one of `id`, `label`, `kind`, `root`, `watch`, `pr_commands`, `full_commands`, `depends_on`, `cache`, `pinned_lockfile`, `tool_version`, `workspace_check`, `ci_tasks`, `mise_tools`, `trust`, `platform`
+
+
+
+---- trust_gated_unit_appends_trusted_label_on_velnor_lane_only stdout ----
+
+thread 'trust_gated_unit_appends_trusted_label_on_velnor_lane_only' (107335091) panicked at crates/velnor-workflow/tests/velnor_first_ci.rs:144:5:
+generation failed:
+error: invalid generation config /private/var/folders/8p/h376l_nn3375kyj72czdq2x80000gn/T/github-default-ci-trust-gated-unit-68081-26/.github-gen/velnor-workflow.toml: TOML parse error at line 23, column 1
+   |
+23 | requires_trusted = true
+   | ^^^^^^^^^^^^^^^^
+unknown field `requires_trusted`, expected one of `id`, `label`, `kind`, `root`, `watch`, `pr_commands`, `full_commands`, `depends_on`, `cache`, `pinned_lockfile`, `tool_version`, `workspace_check`, `ci_tasks`, `mise_tools`, `trust`, `platform`
+
+
+
+---- kind_reusable_jobs_are_linear_in_units_not_a_matrix_product stdout ----
+
+thread 'kind_reusable_jobs_are_linear_in_units_not_a_matrix_product' (107334535) panicked at crates/velnor-workflow/tests/velnor_first_ci.rs:1133:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+---- kind_reusable_caller_is_one_call_per_kind stdout ----
+
+thread 'kind_reusable_caller_is_one_call_per_kind' (107334533) panicked at crates/velnor-workflow/tests/velnor_first_ci.rs:1094:5:
+assertion failed: pr.contains("  github-rust-crate00:\n    name: \"Rust · crate00\"")
+
+---- unique_reusable_calls_stay_under_github_limit stdout ----
+
+thread 'unique_reusable_calls_stay_under_github_limit' (107336088) panicked at crates/velnor-workflow/tests/velnor_first_ci.rs:1238:5:
+assertion failed: pr.contains("contains(format(',{0},', needs.plan.outputs.units), ',rust-crate")
+
+---- velnor_lane_installs_declared_mise_tools stdout ----
+
+thread 'velnor_lane_installs_declared_mise_tools' (107336311) panicked at crates/velnor-workflow/tests/velnor_first_ci.rs:917:5:
+the Velnor caller passes the unit's lockfile tools: # Generated by velnor-workflow. Regenerate; do not hand-edit.
+name: CI / PR
+run-name: CI / PR · ${{ github.event_name }} · ${{ github.ref_name }}
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      providers:
+        description: Comma-separated provider subset of [github-hosted, github-self-hosted, velnor]
+        required: false
+        default: github-hosted,github-self-hosted,velnor
+        type: string
+      scope:
+        description: Verification scope
+        required: true
+        default: affected
+        type: choice
+        options:
+          - affected
+          - full
+      base_sha:
+        description: Git ref or SHA used as the affected-selection base
+        required: false
+        default: refs/heads/main
+        type: string
+
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  plan:
+    name: "Control / Planning"
+    runs-on: ubuntu-24.04
+    outputs:
+      scope: ${{ steps.plan.outputs.scope }}
+      base_sha: ${{ steps.plan.outputs.base_sha }}
+      head_sha: ${{ steps.plan.outputs.head_sha }}
+      units: ${{ steps.plan.outputs.units }}
+      full_units: ${{ steps.plan.outputs.full_units }}
+      plan_digest: ${{ steps.plan.outputs.plan_digest }}
+      excluded: ${{ steps.plan.outputs.excluded }}
+      rust_matrix: ${{ steps.plan.outputs.rust_matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Velnor workflow runtime
+        id: runtime
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d
+        with:
+          rev: bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d
+      - name: Set trusted workflow policy revision
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d" >> "$GITHUB_ENV"
+      - name: Select affected units
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          CI_SCOPE_OVERRIDE: ${{ github.event.inputs.scope || '' }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_PROVIDERS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.providers || 'github-hosted,github-self-hosted,velnor' }}
+          VELNOR_EVENT_TRUSTED: ${{ (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))) && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CI_SCOPE_OVERRIDE:-}" ]]; then unset CI_SCOPE_OVERRIDE; fi
+          velnor-workflow plan --config .github/ci/project.toml
+
+      - name: Prepare Velnor workflow runtime
+        shell: bash
+        env:
+          EXPECTED_REVISION: bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/velnor-workflow-runtime"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          src="$(command -v velnor-workflow)"
+          install -m 0755 "$src" "$stage/velnor-workflow"
+          digest="$(sha256sum "$stage/velnor-workflow" | awk '{print $1}')"
+          policy_src="${VELNOR_WORKFLOW_PINNED_BINARY:-$src}"
+          install -m 0755 "$policy_src" "$stage/velnor-workflow-policy"
+          policy_revision="$("$stage/velnor-workflow-policy" --revision)"
+          policy_closure="$("$stage/velnor-workflow-policy" --closure)"
+          [[ "$policy_closure" == "${{ steps.runtime.outputs.closure }}" ]] || { echo "::error::policy runtime reports closure $policy_closure, expected ${{ steps.runtime.outputs.closure }}" >&2; exit 1; }
+          policy_digest="$(sha256sum "$stage/velnor-workflow-policy" | awk '{print $1}')"
+          jq -n --arg repository "$GITHUB_REPOSITORY" --arg revision "$EXPECTED_REVISION" --arg closure "${{ steps.runtime.outputs.closure }}" --arg head_branch "${{ github.ref_name }}" --arg platform "${{ runner.os }}-${{ runner.arch }}" --arg run_id "$GITHUB_RUN_ID" --arg job_id "${{ github.job }}" --arg binary_sha256 "$digest" --arg policy_revision "$policy_revision" --arg policy_closure "$policy_closure" --arg policy_binary_sha256 "$policy_digest" '{repository: $repository, revision: $revision, closure: $closure, head_branch: $head_branch, platform: $platform, run_id: $run_id, job_id: $job_id, binary_sha256: $binary_sha256, policy_revision: $policy_revision, policy_closure: $policy_closure, policy_binary_sha256: $policy_binary_sha256}' > "$stage/manifest.json"
+      - name: Publish Velnor workflow runtime
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: velnor-workflow-runtime-bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/velnor-workflow-runtime
+          if-no-files-found: error
+          retention-days: 7
+  prepare-cargo:
+    name: "Control / Prepare Cargo"
+    if: ${{ always() && needs.plan.result == 'success' && (contains(needs.plan.outputs.units, '\"unit_id\":\"rust-crate00\"')) && ((((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-self-hosted,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) || (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))))) }}
+    needs: [plan]
+    uses: ./.github/workflows/ci-unit-rust.yml
+    with:
+      unit: rust-crate00
+      provider: control
+      selected_units: ${{ needs.plan.outputs.units }}
+      scope: ${{ needs.plan.outputs.scope }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      plan_digest: ${{ needs.plan.outputs.plan_digest }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
+  github-hosted-rust-crate00:
+    name: "Rust · crate00 · github-hosted — rust-crate00"
+    if: ${{ always() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '\"unit_id\":\"rust-crate00\"') && ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) }}
+    needs: [plan]
+    uses: ./.github/workflows/ci-unit-rust.yml
+    with:
+      unit: rust-crate00
+      provider: github-hosted
+      selected_units: ${{ needs.plan.outputs.units }}
+      scope: ${{ needs.plan.outputs.scope }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      plan_digest: ${{ needs.plan.outputs.plan_digest }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_compat: "768034557aaf"
+      mbx_dependency_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain
+        rust-toolchain.toml
+      mbx_freshness_files: |
+        crates/crate00/**/*.rs
+        crates/crate00/benches/**
+        crates/crate00/examples/**
+        crates/crate00/src/**
+        crates/crate00/tests/**
+        mise.lock
+      cache_paths: |
+        ~/.cargo/registry
+        ~/.cargo/git
+      cache_key_files: |
+        .cargo/**
+        Cargo.lock
+        rust-toolchain.toml
+        rust-toolchain
+      cargo_root: "crates/crate00"
+      cargo_net_offline: true
+      unit_platform: linux-x64
+      unit_trust: untrusted-ok
+  github-self-hosted-rust-crate00:
+    name: "Rust · crate00 · github-self-hosted — rust-crate00"
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(needs.plan.outputs.units, '\"unit_id\":\"rust-crate00\"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-self-hosted,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    needs: [plan, prepare-cargo]
+    uses: ./.github/workflows/ci-unit-rust.yml
+    with:
+      unit: rust-crate00
+      provider: github-self-hosted
+      selected_units: ${{ needs.plan.outputs.units }}
+      scope: ${{ needs.plan.outputs.scope }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      plan_digest: ${{ needs.plan.outputs.plan_digest }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      cargo_net_offline: true
+      host_warm_layers: "rustup,mold,mbx,cargo"
+      unit_platform: linux-x64
+      unit_trust: untrusted-ok
+  velnor-rust-crate00:
+    name: "Rust · crate00 · velnor — rust-crate00"
+    if: ${{ always() && needs.plan.result == 'success' && (needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped') && contains(needs.plan.outputs.units, '\"unit_id\":\"rust-crate00\"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    needs: [plan, prepare-cargo]
+    uses: ./.github/workflows/ci-unit-rust.yml
+    with:
+      unit: rust-crate00
+      provider: velnor
+      selected_units: ${{ needs.plan.outputs.units }}
+      scope: ${{ needs.plan.outputs.scope }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      plan_digest: ${{ needs.plan.outputs.plan_digest }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      cargo_net_offline: true
+      host_warm_layers: "rustup,mold,mbx,cargo"
+      unit_platform: linux-x64
+      unit_trust: untrusted-ok
+  ci-required:
+    name: ci-required
+    if: ${{ always() }}
+    needs: [plan, prepare-cargo, github-hosted-rust-crate00, github-self-hosted-rust-crate00, velnor-rust-crate00]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Validate generated stack results
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          SELECTED_UNITS: ${{ needs.plan.outputs.units }}
+          PLAN_DIGEST: ${{ needs.plan.outputs.plan_digest }}
+          EXCLUDED: ${{ needs.plan.outputs.excluded }}
+          PROVIDER_ADMITTED_GITHUB_HOSTED: ${{ (github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch') }}
+          PROVIDER_ADMITTED_GITHUB_SELF_HOSTED_TRUSTED: ${{ ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-self-hosted,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))) }}
+          PROVIDER_ADMITTED_VELNOR_TRUSTED: ${{ ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))) }}
+          PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED: ${{ (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-self-hosted,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) || (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$PLAN_DIGEST" ]]; then
+            echo "plan did not freeze a plan digest: the expected set has no identity" >&2
+            exit 1
+          fi
+          echo "verdict binds plan digest $PLAN_DIGEST"
+          result_for_job() {
+            jq -r --arg job "$1" '.[$job].result // empty' <<<"$NEEDS_JSON"
+          }
+          plan_expects() {
+            [[ "$(jq -r --arg unit "$1" --arg provider "$2" '[.[] | select(.unit_id == $unit) | .providers[] | select(. == $provider)] | length' <<<"$SELECTED_UNITS")" -gt 0 ]]
+          }
+          plan_expects_local() {
+            [[ "$(jq -r --arg unit "$1" '[.[] | select(.unit_id == $unit) | .providers[] | select(. == "github-self-hosted" or . == "velnor")] | length' <<<"$SELECTED_UNITS")" -gt 0 ]]
+          }
+          result="$(result_for_job plan)"
+          if [[ "$result" != success ]]; then
+            echo "required CI prerequisite plan did not pass: $result" >&2
+            exit 1
+          fi
+          if plan_expects_local "rust-crate00"; then
+            result="$(result_for_job prepare-cargo)"
+            if [[ "$PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED" == true ]]; then
+              case "$result" in
+                success) ;;
+                skipped) echo "expected CI prerequisite prepare-cargo was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;
+                cancelled) echo "expected CI prerequisite prepare-cargo was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;
+                *) echo "expected CI prerequisite prepare-cargo did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI prerequisite prepare-cargo ran outside its provider admission (PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED=$PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED): $result" >&2; exit 1 ;;
+              esac
+            fi
+          else
+            result="$(result_for_job prepare-cargo)"
+            case "$result" in
+              skipped) ;;
+              success) echo "unexpected CI prerequisite prepare-cargo succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;
+              *) echo "unexpected CI prerequisite prepare-cargo ran outside the expected set: $result" >&2; exit 1 ;;
+            esac
+          fi
+          if plan_expects "rust-crate00" "github-hosted"; then
+            result="$(result_for_job github-hosted-rust-crate00)"
+            if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then
+              case "$result" in
+                success) ;;
+                skipped) echo "expected CI job github-hosted-rust-crate00 was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;
+                cancelled) echo "expected CI job github-hosted-rust-crate00 was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;
+                *) echo "expected CI job github-hosted-rust-crate00 did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-hosted-rust-crate00 ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;
+              esac
+            fi
+          else
+            result="$(result_for_job github-hosted-rust-crate00)"
+            case "$result" in
+              skipped) ;;
+              success) echo "unexpected CI job github-hosted-rust-crate00 succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;
+              *) echo "unexpected CI job github-hosted-rust-crate00 ran outside the expected set: $result" >&2; exit 1 ;;
+            esac
+          fi
+          if plan_expects "rust-crate00" "github-self-hosted"; then
+            result="$(result_for_job github-self-hosted-rust-crate00)"
+            if [[ "$PROVIDER_ADMITTED_GITHUB_SELF_HOSTED_TRUSTED" == true ]]; then
+              case "$result" in
+                success) ;;
+                skipped) echo "expected CI job github-self-hosted-rust-crate00 was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;
+                cancelled) echo "expected CI job github-self-hosted-rust-crate00 was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;
+                *) echo "expected CI job github-self-hosted-rust-crate00 did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-self-hosted-rust-crate00 ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_SELF_HOSTED_TRUSTED=$PROVIDER_ADMITTED_GITHUB_SELF_HOSTED_TRUSTED): $result" >&2; exit 1 ;;
+              esac
+            fi
+          else
+            result="$(result_for_job github-self-hosted-rust-crate00)"
+            case "$result" in
+              skipped) ;;
+              success) echo "unexpected CI job github-self-hosted-rust-crate00 succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;
+              *) echo "unexpected CI job github-self-hosted-rust-crate00 ran outside the expected set: $result" >&2; exit 1 ;;
+            esac
+          fi
+          if plan_expects "rust-crate00" "velnor"; then
+            result="$(result_for_job velnor-rust-crate00)"
+            if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then
+              case "$result" in
+                success) ;;
+                skipped) echo "expected CI job velnor-rust-crate00 was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;
+                cancelled) echo "expected CI job velnor-rust-crate00 was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;
+                *) echo "expected CI job velnor-rust-crate00 did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job velnor-rust-crate00 ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;
+              esac
+            fi
+          else
+            result="$(result_for_job velnor-rust-crate00)"
+            case "$result" in
+              skipped) ;;
+              success) echo "unexpected CI job velnor-rust-crate00 succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;
+              *) echo "unexpected CI job velnor-rust-crate00 ran outside the expected set: $result" >&2; exit 1 ;;
+            esac
+          fi
+  required:
+    name: "Control / Required"
+    if: ${{ always() }}
+    needs: [ci-required]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Mirror CI / Required
+        if: ${{ needs.ci-required.result != 'success' }}
+        run: exit 1
+
+
+
+failures:
+    automatic_pr_schedules_github_hosted_unit_jobs
+    declared_mise_tools_propagate_to_non_rust_kind_reusables
+    dispatch_defaults_to_github_and_omitted_runner_selects_github
+    dispatch_runner_default_is_configurable
+    dual_lane_automatic_velnor_units_pass_policy
+    github_only_runners_limit_dispatch_runner_options
+    kind_reusable_caller_is_one_call_per_kind
+    kind_reusable_consumes_caller_plan_shas
+    kind_reusable_jobs_are_linear_in_units_not_a_matrix_product
+    kind_reusable_preserves_declared_contract_per_unit
+    kind_reusable_renders_each_unit_root_in_its_own_job
+    omitted_cli_runners_defaults_to_both
+    pull_request_on_velnor_accepts_labels_only_approved_contract
+    pull_request_on_velnor_opt_in_admits_automatic_pr
+    pull_request_on_velnor_rejects_a_github_only_runner_mode
+    pull_request_on_velnor_rejects_an_arbitrary_runner_contract
+    pull_request_publish_required
+    regen_gate_unit_provisions_the_pinned_policy_runtime_on_the_velnor_lane_only
+    trust_gated_unit_appends_trusted_label_on_velnor_lane_only
+    trust_gated_unit_without_a_label_fails_generation
+    unique_reusable_calls_stay_under_github_limit
+    velnor_lane_installs_declared_mise_tools
+    velnor_only_runners_limit_dispatch_runner_options
+
+test result: FAILED. 10 passed; 23 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.73s
+
+error: test failed, to rerun pass `-p velnor-workflow --test velnor_first_ci`
+mbx[cache]: 2 hits, 1 misses, 1 bypassed; 0 B downloaded, 0 B uploaded, 1.9 MiB stored locally
+mbx[savings]: 155.5 GiB of outputs exist once and appear everywhere. do not tell the checkouts.

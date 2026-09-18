@@ -1,0 +1,26 @@
+# Recursive listing of /private/tmp/jackin-render-fixed (evidence stub; only evidence-type files copied under jackin-render-fixed/)
+# Generated: 2026-09-18T09:58:41Z
+# du: 524K	/private/tmp/jackin-render-fixed
+drwxr-xr-x@ 3 donbeave  wheel  96 Sep 17 15:16 /private/tmp/jackin-render-fixed/config
+drwxr-xr-x@ 3 donbeave  wheel  96 Sep 17 15:16 /private/tmp/jackin-render-fixed/config/fleet
+-rw-r--r--@ 1 donbeave  wheel  518 Sep 17 15:16 /private/tmp/jackin-render-fixed/config/fleet/velnor-host.env
+drwxr-xr-x@ 5 donbeave  wheel  160 Sep 17 15:16 /private/tmp/jackin-render-fixed/.github
+drwxr-xr-x@ 4 donbeave  wheel  128 Sep 17 15:16 /private/tmp/jackin-render-fixed/.github/ci
+-rw-r--r--@ 1 donbeave  wheel  84911 Sep 17 15:16 /private/tmp/jackin-render-fixed/.github/ci/project.toml
+-rw-r--r--@ 1 donbeave  wheel  988 Sep 17 15:16 /private/tmp/jackin-render-fixed/.github/ci/.github-actions-generator-state
+drwxr-xr-x@ 16 donbeave  wheel  512 Sep 17 15:16 /private/tmp/jackin-render-fixed/.github/workflows
+-rw-r--r--@ 1 donbeave  wheel  3230 Sep 17 15:16 /private/tmp/jackin-render-fixed/.github/workflows/renovate.yml
+-rw-r--r--@ 1 donbeave  wheel  154702 Sep 17 15:16 /private/tmp/jackin-render-fixed/.github/workflows/ci-pr.yml
+-rw-r--r--@ 1 donbeave  wheel  5974 Sep 17 15:16 /private/tmp/jackin-render-fixed/.github/workflows/ci-policy.yml
+-rw-r--r--@ 1 donbeave  wheel  3770 Sep 17 15:16 /private/tmp/jackin-render-fixed/.github/workflows/nightly.yml
+-rw-r--r--@ 1 donbeave  wheel  959 Sep 17 15:16 /private/tmp/jackin-render-fixed/.github/workflows/renovate-upstream-sources.yml
+-rw-r--r--@ 1 donbeave  wheel  162267 Sep 17 15:16 /private/tmp/jackin-render-fixed/.github/workflows/ci-main.yml
+-rw-r--r--@ 1 donbeave  wheel  1489 Sep 17 15:16 /private/tmp/jackin-render-fixed/.github/workflows/desktop-merge.yml
+-rw-r--r--@ 1 donbeave  wheel  12886 Sep 17 15:16 /private/tmp/jackin-render-fixed/.github/workflows/ci-unit-docker.yml
+-rw-r--r--@ 1 donbeave  wheel  12153 Sep 17 15:16 /private/tmp/jackin-render-fixed/.github/workflows/ci-unit-swift.yml
+-rw-r--r--@ 1 donbeave  wheel  1222 Sep 17 15:16 /private/tmp/jackin-render-fixed/.github/workflows/renovate-validate.yml
+-rw-r--r--@ 1 donbeave  wheel  13796 Sep 17 15:16 /private/tmp/jackin-render-fixed/.github/workflows/ci-unit-bun.yml
+-rw-r--r--@ 1 donbeave  wheel  16150 Sep 17 15:16 /private/tmp/jackin-render-fixed/.github/workflows/maintenance.yml
+-rw-r--r--@ 1 donbeave  wheel  1535 Sep 17 15:16 /private/tmp/jackin-render-fixed/.github/workflows/desktop-scheduled.yml
+-rw-r--r--@ 1 donbeave  wheel  22140 Sep 17 15:16 /private/tmp/jackin-render-fixed/.github/workflows/ci-unit-rust.yml
+-rw-r--r--@ 1 donbeave  wheel  321 Sep 17 15:16 /private/tmp/jackin-render-fixed/.github/actionlint.yaml

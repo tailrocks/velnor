@@ -1,0 +1,8 @@
+==> Pre-arm preflight (does not arm /goal)
+campaign-preflight: OK: visual-baseline tag unmoved @ 4a79c0a2d40f
+campaign-preflight: OK: branch refactor/holla-parity @ c9eef7bd8a5f
+campaign-preflight: OK: worktree /Users/donbeave/Projects/terminal-components-claude/.worktrees/campaign on refactor/holla-parity
+Traceback (most recent call last):
+  File "<stdin>", line 11, in <module>
+AssertionError: no current accepted verifier receipt exists
+campaign-preflight: FAIL: ledger invalid

@@ -1,0 +1,162 @@
+==> actionlint .github/workflows/ci-main.yml .github/workflows/ci-policy.yml .github/workflows/ci-pr.yml .github/workflows/ci-unit-bun.yml .github/workflows/ci-unit-docker.yml .github/workflows/ci-unit-rust.yml .github/workflows/ci-unit-swift.yml .github/workflows/desktop-merge.yml .github/workflows/desktop-scheduled.yml .github/workflows/maintenance.yml .github/workflows/nightly.yml .github/workflows/release.yml .github/workflows/renovate-upstream-sources.yml .github/workflows/renovate-validate.yml .github/workflows/renovate.yml
+==> cargo fmt --check
+==> cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+mbx[warning]: incremental state was not reused: compiler environment input changed: CLIPPY_ARGS
+==> cargo xtask lint --strict
+==> cargo check --workspace --all-targets --locked
+==> cargo nextest run --workspace --all-features --locked
+==> cargo test --doc --workspace --locked
+==> cargo audit
+==> cargo deny check advisories bans licenses sources
+==> cargo xtask schema-check --base origin/main
+==> cargo shear --deny-warnings
+==> cargo hack check --workspace --feature-powerset --all-targets --locked
+==> cargo xtask roadmap audit
+==> cargo xtask docs repo-links
+==> cargo xtask research check
+==> cargo nextest run -p jackin-capsule -p jackin-console --locked
+==> docker info
+==> cargo run --bin build-jackin-capsule -- --export
+==> cargo nextest run -p jackin --features e2e --profile docker-e2e --locked --offline
+error: 1 ci step(s) failed:
+  docker e2e [e2e]: step docker e2e: cargo nextest run -p jackin --features e2e --profile docker-e2e --locked --offline failed with code Some(100)
+Compiling jackin-config v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-config)
+   Compiling jackin-manifest v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-manifest)
+   Compiling jackin-env v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-env)
+   Compiling jackin-usage v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-usage)
+   Compiling jackin-isolation v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-isolation)
+   Compiling jackin-instance v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-instance)
+   Compiling jackin-image v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-image)
+   Compiling jackin-test-support v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-test-support)
+   Compiling jackin-console v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-console)
+   Compiling jackin-runtime v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-runtime)
+   Compiling jackin v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.44s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID 92c2b053-4cb1-48cc-8d0e-cbaee6c88a65 with nextest profile: docker-e2e
+    Starting 23 tests across 4 binaries (27 binaries skipped via profile.docker-e2e.default-filter)
+        SLOW [> 60.000s] (─────) jackin::dind_e2e chaos_drop_control_socket
+        SLOW [>120.000s] (─────) jackin::dind_e2e chaos_drop_control_socket
+        SLOW [>180.000s] (─────) jackin::dind_e2e chaos_drop_control_socket
+        SLOW [>240.000s] (─────) jackin::dind_e2e chaos_drop_control_socket
+        SLOW [>300.000s] (─────) jackin::dind_e2e chaos_drop_control_socket
+        SLOW [>360.000s] (─────) jackin::dind_e2e chaos_drop_control_socket
+  TRY 1 FAIL [ 360.547s] (─────) jackin::dind_e2e chaos_drop_control_socket
+  stdout ───
+
+    running 1 test
+    test chaos_drop_control_socket has been running for over 60 seconds
+    test chaos_drop_control_socket ... FAILED
+
+    failures:
+
+    failures:
+        chaos_drop_control_socket
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 360.54s
+
+  stderr ───
+    JACKIN_CHAOS_SEED=52781473517
+
+    thread 'chaos_drop_control_socket' (135363227) panicked at crates/jackin/tests/dind_e2e.rs:639:9:
+    chaos_drop_socket: no container appeared
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+   DELAY 2/3 by   1.000s (─────) jackin::dind_e2e chaos_drop_control_socket
+  TRY 2 SLOW [> 60.000s] (─────) jackin::dind_e2e chaos_drop_control_socket
+  TRY 2 SLOW [>120.000s] (─────) jackin::dind_e2e chaos_drop_control_socket
+  TRY 2 SLOW [>180.000s] (─────) jackin::dind_e2e chaos_drop_control_socket
+  TRY 2 SLOW [>240.000s] (─────) jackin::dind_e2e chaos_drop_control_socket
+  TRY 2 SLOW [>300.000s] (─────) jackin::dind_e2e chaos_drop_control_socket
+  TRY 2 SLOW [>360.000s] (─────) jackin::dind_e2e chaos_drop_control_socket
+  TRY 2 FAIL [ 360.673s] (─────) jackin::dind_e2e chaos_drop_control_socket
+  stdout ───
+
+    running 1 test
+    test chaos_drop_control_socket has been running for over 60 seconds
+    test chaos_drop_control_socket ... FAILED
+
+    failures:
+
+    failures:
+        chaos_drop_control_socket
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 360.66s
+
+  stderr ───
+    JACKIN_CHAOS_SEED=52781473517
+
+    thread 'chaos_drop_control_socket' (135645006) panicked at crates/jackin/tests/dind_e2e.rs:639:9:
+    chaos_drop_socket: no container appeared
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+    thread '<unnamed>' (135645377) panicked at crates/jackin/tests/dind_e2e/pty_runner.rs:182:5:
+    timed out waiting for sentinel file /var/folders/8p/h376l_nn3375kyj72czdq2x80000gn/T/.tmpQC9Jbo/workspace/jackin-e2e-report.txt
+    diagnostics:
+    captured process output is the diagnostic source; legacy artifact directory exists=false (/var/folders/8p/h376l_nn3375kyj72czdq2x80000gn/T/.tmpQC9Jbo/home/.jackin/data/diagnostics/runs)
+    stdout tail:
+            cleaned up orphaned resources for jk-f408na04-agentsmith
+     jackin❯  · Loading agent-smith in /workspace━━━━━━───────────────────────────identityrolecredentialsconstload █████████▆░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   9%                                               Ctrl-C abort   Ctrl-Q quit                                                Resolving role identity…                                                                                               4Pqidentiy  role  credntials  constru Resolving role identity…                                                                                               identiy  role  credntials  construct Resolving role identity…                                                                                               L]*46Pk88<identity role credentials construct  Resolving role identity…                                                                                               Lo]*h4v6v<k6M8z8<cz{identity role credentials construct  Resolving role identity…                                                                                               Loaidentity role credentials construct  Resolving role identity…                                                                                               LoadA SBH*Nmbg63<k0UR6M8z8N<>Ac~]{w#H━━━━━━━━━━━━rolecredentials    construct  agent binaries derived ima██████████████████████████████▂36 Preparing runtime binaries…                                                                                   ykdb2hn6 LoadiBH*Emb268<kLDR6C98BRp#<GPd&c~]I{&NwL#HW7vole   credentials   construct   agent binaries   derived image  Preparing runtime binaries…                                                                                   ykdb2hn6 Loadine  credntials  construct  agent binaries  derived image   Preparing runtime binaries…                                                                                   ykdb2hn6 LoadingoIH*pEm6b208<kLDlnqw6C938B]Rp6<HGPdz&c0~]|{o>XNwL#EHI7WF7vXC2 credntials  construct  agent binaries  derived image  w Preparing runtime binaries…                                                                                   ykdb2hn6 Loading ovHj%Emvnb208<kY%LDRnlM6C9@8S\Rp6<uQPdz*cq~]|{o>X]1w&L#EHe[I7WF7gvw\XYV2yVmcredntials  construct  agent binaries  der
+    ... transcript truncated; final output follows ...
+    [0m
+    stderr tail:
+
+
+   DELAY 3/3 by   1.000s (─────) jackin::dind_e2e chaos_drop_control_socket
+  TRY 3 SLOW [> 60.000s] (─────) jackin::dind_e2e chaos_drop_control_socket
+  TRY 3 SLOW [>120.000s] (─────) jackin::dind_e2e chaos_drop_control_socket
+  TRY 3 SLOW [>180.000s] (─────) jackin::dind_e2e chaos_drop_control_socket
+  TRY 3 SLOW [>240.000s] (─────) jackin::dind_e2e chaos_drop_control_socket
+  TRY 3 SLOW [>300.000s] (─────) jackin::dind_e2e chaos_drop_control_socket
+  TRY 3 SLOW [>360.000s] (─────) jackin::dind_e2e chaos_drop_control_socket
+  TRY 3 FAIL [ 360.218s] ( 1/23) jackin::dind_e2e chaos_drop_control_socket
+  stdout ───
+
+    running 1 test
+    test chaos_drop_control_socket has been running for over 60 seconds
+    test chaos_drop_control_socket ... FAILED
+
+    failures:
+
+    failures:
+        chaos_drop_control_socket
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 360.20s
+
+  stderr ───
+    JACKIN_CHAOS_SEED=52781473517
+
+    thread 'chaos_drop_control_socket' (135994966) panicked at crates/jackin/tests/dind_e2e.rs:639:9:
+    chaos_drop_socket: no container appeared
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 
+────────────
+     Summary [1083.448s] 1/23 tests run: 0 passed, 1 failed, 0 skipped
+  TRY 3 FAIL [ 360.218s] ( 1/23) jackin::dind_e2e chaos_drop_control_socket
+  stdout ───
+
+    running 1 test
+    test chaos_drop_control_socket has been running for over 60 seconds
+    test chaos_drop_control_socket ... FAILED
+
+    failures:
+
+    failures:
+        chaos_drop_control_socket
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 360.20s
+
+  stderr ───
+    JACKIN_CHAOS_SEED=52781473517
+
+    thread 'chaos_drop_control_socket' (135994966) panicked at crates/jackin/tests/dind_e2e.rs:639:9:
+    chaos_drop_socket: no container appeared
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+warning: 22/23 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed
+mbx[cache]: 92 hits, 21 misses, 34 bypassed; 0 B downloaded, 0 B uploaded, 0 B stored locally
+mbx[savings]: has quietly disposed of 824.3 GiB logical of build leftovers. nobody saw anything.

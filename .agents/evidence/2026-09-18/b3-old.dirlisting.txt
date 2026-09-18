@@ -1,0 +1,6 @@
+# Recursive listing of /private/tmp/b3-old (evidence stub; only evidence-type files copied under b3-old/)
+# Generated: 2026-09-18T09:59:30Z
+# du: 196K	/private/tmp/b3-old
+-rw-r--r--@ 1 donbeave  wheel  94011 Sep 18 09:21 /private/tmp/b3-old/wf-runtime.rs
+-rw-r--r--@ 1 donbeave  wheel  32209 Sep 18 09:21 /private/tmp/b3-old/project.toml
+-rw-r--r--@ 1 donbeave  wheel  73614 Sep 18 08:49 /private/tmp/b3-old/ops.rs

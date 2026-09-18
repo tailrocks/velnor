@@ -1,0 +1,118 @@
+Command line invocation:
+    /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -project native/JackinDesktop.xcodeproj -scheme JackinDesktop -destination platform=macOS -parallel-testing-enabled NO "-only-testing:JackinDesktopUITests/JackinDesktopUITests/testOverviewPassesAccessibilityAudit" -derivedDataPath native/DerivedData -resultBundlePath /tmp/fix2.xcresult
+
+Writing result bundle at path:
+	/tmp/fix2.xcresult
+
+ComputePackagePrebuildTargetDependencyGraph
+
+Prepare packages
+
+CreateBuildRequest
+
+SendProjectDescription
+
+CreateBuildOperation
+
+ComputeTargetDependencyGraph
+note: Building targets in dependency order
+note: Target dependency graph (6 targets)
+    Target 'JackinDesktopUITests' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinDesktop' in project 'JackinDesktop'
+    Target 'JackinDesktopTests' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinDesktopUI' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBridge' in project 'JackinDesktop'
+    Target 'JackinDesktop' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinDesktopUI' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBridge' in project 'JackinDesktop'
+    Target 'JackinDesktopUI' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBridge' in project 'JackinDesktop'
+    Target 'JackinUsageBridge' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+    Target 'JackinUsageBindings' in project 'JackinDesktop' (no dependencies)
+
+GatherProvisioningInputs
+
+CreateBuildDescription
+
+ClangStatCache /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang-stat-cache /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKStatCaches.noindex/macosx27.0-26A425-7231f6df4def33e022ae2eb8f782df1a.sdkstatcache
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/JackinDesktop.xcodeproj
+    /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang-stat-cache /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk -o /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKStatCaches.noindex/macosx27.0-26A425-7231f6df4def33e022ae2eb8f782df1a.sdkstatcache
+
+PruneExplicitPrecompiledModules /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/SwiftExplicitPrecompiledModules
+
+PruneExplicitPrecompiledModules /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKExplicitPrecompiledModules
+
+PruneExplicitPrecompiledModules /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/ExplicitPrecompiledModules
+
+2026-09-18 04:58:55.891517+0700 JackinDesktopUITests-Runner[52073:131715769] [Default] Running tests...
+Test Suite 'Selected tests' started at 2026-09-18 04:58:55.920.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 04:58:55.921.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 04:58:55.921.
+Test Case '-[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit]' started.
+    t =     0.00s Start Test at 2026-09-18 04:58:55.921
+    t =     0.16s Set Up
+    t =     0.16s Open com.jackin-project.desktop
+    t =     0.18s     Launch com.jackin-project.desktop
+2026-09-18 04:58:56.133 xcodebuild[52061:131715590] [MT] IDELaunchParametersSnapshot: debugger version lookup failed for path '<nil>': noURL
+2026-09-18 04:58:56.133 xcodebuild[52061:131715590] [MT] IDELaunchParametersSnapshot: no debugger version
+    t =     0.42s         Wait for accessibility to load
+    t =     0.46s         Setting up automation session
+    t =     0.47s         Wait for com.jackin-project.desktop to idle
+    t =     0.75s Open com.jackin-project.desktop
+    t =     0.75s     Activate com.jackin-project.desktop
+    t =     0.76s         Wait for com.jackin-project.desktop to idle
+    t =     0.76s Waiting 8.0s for "usage-window" Window to exist
+    t =     1.80s     Checking `Expect predicate `existsNoRetry == 1` for object "usage-window" Window`
+    t =     1.80s         Checking existence of `"usage-window" Window`
+    t =     1.93s Open com.jackin-project.desktop
+    t =     1.93s     Activate com.jackin-project.desktop
+    t =     1.94s         Wait for com.jackin-project.desktop to idle
+    t =     1.94s Waiting 5.0s for "usage.overview.table" Any to exist
+    t =     2.97s     Checking `Expect predicate `existsNoRetry == 1` for object "usage.overview.table" Any`
+    t =     2.97s         Checking existence of `"usage.overview.table" Any`
+    t =     3.07s Find the "usage.overview.table" Any
+    t =     3.15s Find the "usage.sidebar" Any
+    t =     3.22s Get number of matches for: Descendants matching type OutlineRow
+    t =     3.29s Get number of matches for: Elements matching predicate 'identifier BEGINSWITH "usage.overview.account."'
+    t =     3.35s Find the OutlineRow (First Match)
+    t =     3.36s Find the "usage.overview.table" Outline
+    t =     3.74s Get number of matches for: Descendants matching type OutlineRow
+    t =     3.81s Get number of matches for: Elements matching predicate 'identifier BEGINSWITH "usage.overview.account."'
+    t =     3.87s Find the OutlineRow (First Match)
+    t =     3.88s Find the "usage.overview.table" Outline
+    t =     4.25s Get number of matches for: Descendants matching type OutlineRow
+    t =     4.27s Get number of matches for: Elements matching predicate 'identifier BEGINSWITH "usage.overview.account."'
+    t =     4.29s Find the OutlineRow (First Match)
+    t =     5.31s     Find the OutlineRow (First Match) (retry 1)
+    t =     6.35s     Find the OutlineRow (First Match) (retry 2)
+    t =     6.39s     Collecting debug information to assist test failure triage
+    t =     6.39s         Requesting snapshot of accessibility hierarchy for app with pid 52078
+    t =     6.43s     Requesting snapshot of accessibility hierarchy for app with pid 52078
+    t =     6.44s Using snapshot previously cached by application
+    t =     6.44s     Requesting snapshot of accessibility hierarchy for app with pid 52078
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:933: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Failed to get matching snapshot: No matches found for first query match sequence: `Descendants matching type Outline` -> `Elements matching predicate '"usage.overview.table" IN identifiers'` -> `Descendants matching type OutlineRow`, given input App element pid: 52078
+    t =     6.51s Tear Down
+Test Case '-[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit]' failed (6.766 seconds).
+Test Suite 'JackinDesktopUITests' failed at 2026-09-18 04:59:02.688.
+	 Executed 1 test, with 1 failure (0 unexpected) in 6.766 (6.767) seconds
+Test Suite 'JackinDesktopUITests.xctest' failed at 2026-09-18 04:59:02.689.
+	 Executed 1 test, with 1 failure (0 unexpected) in 6.766 (6.768) seconds
+Test Suite 'Selected tests' failed at 2026-09-18 04:59:02.689.
+	 Executed 1 test, with 1 failure (0 unexpected) in 6.766 (6.769) seconds
+2026-09-18 04:59:07.002 xcodebuild[52061:131715590] [MT] IDETestOperationsObserverDebug: 11.365 elapsed -- Testing started completed.
+2026-09-18 04:59:07.002 xcodebuild[52061:131715590] [MT] IDETestOperationsObserverDebug: 0.000 sec, +0.000 sec -- start
+2026-09-18 04:59:07.002 xcodebuild[52061:131715590] [MT] IDETestOperationsObserverDebug: 11.365 sec, +11.365 sec -- end
+
+Test session results, code coverage, and logs:
+	/tmp/fix2.xcresult
+
+Failing tests:
+	JackinDesktopUITests.testOverviewPassesAccessibilityAudit()
+
+** TEST FAILED **
+
+Testing started

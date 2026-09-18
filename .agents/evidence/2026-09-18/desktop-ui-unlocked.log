@@ -1,0 +1,67 @@
+[desktop-test-ui] $ native/Scripts/run-ui-tests.sh
+
+----- xcbeautify -----
+Version: 3.2.1
+----------------------
+
+Test Suite 'Selected tests' started at 2026-09-18 14:10:31.733.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 14:10:31.734.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 14:10:31.734.
+    [32m✔[0m testEmptyUsageStateIsDistinct ([31m4.303[0m seconds)
+Executed 1 test, with 0 failures (0 unexpected) in 4.303 (4.304) seconds
+Test Suite 'JackinDesktopUITests.xctest' passed at 2026-09-18 14:10:36.039.
+Executed 1 test, with 0 failures (0 unexpected) in 4.303 (4.306) seconds
+Executed 1 test, with 0 failures (0 unexpected) in 4.303 (4.307) seconds
+[1mTest session results:[0m /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/UITests-20260918T071026Z-60303/testEmptyUsageStateIsDistinct.xcresult
+[32;1mTest Succeeded[0m
+[36;1mTesting started[0m
+
+----- xcbeautify -----
+Version: 3.2.1
+----------------------
+
+Test Suite 'Selected tests' started at 2026-09-18 14:10:37.977.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 14:10:37.977.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 14:10:37.977.
+    [32m✔[0m testFocusedPopoverPassesAccessibilityAudit ([31m13.624[0m seconds)
+Executed 1 test, with 0 failures (0 unexpected) in 13.624 (13.624) seconds
+Test Suite 'JackinDesktopUITests.xctest' passed at 2026-09-18 14:10:51.602.
+Executed 1 test, with 0 failures (0 unexpected) in 13.624 (13.625) seconds
+Executed 1 test, with 0 failures (0 unexpected) in 13.624 (13.626) seconds
+[1mTest session results:[0m /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/UITests-20260918T071026Z-60303/testFocusedPopoverPassesAccessibilityAudit.xcresult
+[32;1mTest Succeeded[0m
+[36;1mTesting started[0m
+
+----- xcbeautify -----
+Version: 3.2.1
+----------------------
+
+Test Suite 'Selected tests' started at 2026-09-18 14:10:53.348.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 14:10:53.349.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 14:10:53.349.
+    [32m✔[0m testFocusedPopoverUsesRealHost ([31m3.249[0m seconds)
+Executed 1 test, with 0 failures (0 unexpected) in 3.249 (3.250) seconds
+Test Suite 'JackinDesktopUITests.xctest' passed at 2026-09-18 14:10:56.599.
+Executed 1 test, with 0 failures (0 unexpected) in 3.249 (3.251) seconds
+Executed 1 test, with 0 failures (0 unexpected) in 3.249 (3.251) seconds
+[1mTest session results:[0m /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/UITests-20260918T071026Z-60303/testFocusedPopoverUsesRealHost.xcresult
+[32;1mTest Succeeded[0m
+[36;1mTesting started[0m
+
+----- xcbeautify -----
+Version: 3.2.1
+----------------------
+
+Test Suite 'Selected tests' started at 2026-09-18 14:10:58.389.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 14:10:58.390.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 14:10:58.390.
+    [31m✖[0m testGlobalErrorUsageStateIsDistinct, XCTAssertTrue failed
+Executed 1 test, with 1 failure (0 unexpected) in 8.117 (8.118) seconds
+Test Suite 'JackinDesktopUITests.xctest' failed at 2026-09-18 14:11:06.508.
+Executed 1 test, with 1 failure (0 unexpected) in 8.117 (8.118) seconds
+Executed 1 test, with 1 failure (0 unexpected) in 8.117 (8.119) seconds
+[1mTest session results:[0m /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/UITests-20260918T071026Z-60303/testGlobalErrorUsageStateIsDistinct.xcresult
+[36;1mTesting started[0m
+xcodebuild failed for testGlobalErrorUsageStateIsDistinct: status 65
+[desktop-test-ui] ERROR task failed
+UI3_EXIT=65

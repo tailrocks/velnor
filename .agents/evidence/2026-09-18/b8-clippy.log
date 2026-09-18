@@ -1,0 +1,14 @@
+      ┌─────────┐  mr boxington
+     ╱ ═══════ ╱│
+    ╱─────────╱ │
+    │ •    (◉)│≡│
+    │  ◟▄▄▄◞  │ ╱
+    │   ◀◆▶   │╱
+    └─────────┘
+   Compiling velnor-workflow v0.1.0 (/Users/donbeave/Projects/tailrocks/velnor-project/velnor3/crates/velnor-workflow)
+mbx[warning]: incremental state was not reused: compiler environment input changed: VELNOR_WORKFLOW_CLOSURE_DIGEST
+mbx[warning]: prediction was not restored: failed to read compiler input /Users/donbeave/Projects/tailrocks/velnor-project/velnor3/crates/velnor-workflow/src/platform.rs: No such file or directory (os error 2)
+mbx[warning]: a flight prediction was not restored: failed to read compiler input /Users/donbeave/Projects/tailrocks/velnor-project/velnor3/crates/velnor-workflow/src/platform.rs: No such file or directory (os error 2)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.89s
+mbx[cache]: 0 hits, 1 misses, 1 bypassed; 0 B downloaded, 0 B uploaded, 2.3 MiB stored locally
+mbx[savings]: 132.0 GiB of target/ is an elaborate illusion. the disk is in on it.

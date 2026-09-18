@@ -1,0 +1,28 @@
+- name: Update all packages to the latest version
+  hosts: all
+  become: yes
+  vars:
+    ansible_python_interpreter: auto_silent
+
+  tasks:
+    - name: Update apt package index
+      apt:
+        update_cache: yes
+
+    - name: Upgrade all packages
+      apt:
+        upgrade: dist
+        autoremove: yes
+
+    - name: Remove unused packages
+      apt:
+        autoremove: yes
+
+    - name: Upgrade all mise tools
+      command: mise upgrade
+      register: mise_upgrade
+      changed_when: "'upgraded' in mise_upgrade.stderr"
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes

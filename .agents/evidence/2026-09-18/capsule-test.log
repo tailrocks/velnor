@@ -1,0 +1,140 @@
+      ┌─────────┐  mr boxington
+     ╱ ═══════ ╱│
+    ╱─────────╱ │
+    │ •    (◉)│≡│
+    │  ◟▄▄▄◞  │ ╱
+    │   ◀◆▶   │╱
+    └─────────┘
+   Compiling jackin-usage v0.6.4 (/Users/donbeave/Projects/tailrocks/jackin-project/jackin/crates/jackin-usage)
+error[E0425]: cannot find value `spent` in this scope
+   --> crates/jackin-usage/src/usage/openrouter.rs:335:48
+    |
+335 |     let balance = ceiling_cents.saturating_sub(spent);
+    |                                                ^^^^^ not found in this scope
+
+error[E0277]: the trait bound `f64: std::convert::From<i64>` is not satisfied
+   --> crates/jackin-usage/src/usage/openrouter.rs:238:19
+    |
+238 |                 ((f64::from(remaining.min(cap)) / f64::from(cap)) * 100.0).round().clamp(0.0, 100.0)
+    |                   ^^^ the trait `std::convert::From<i64>` is not implemented for `f64`
+    |
+    = help: `f64` implements trait `std::convert::From<T>`:
+              std::convert::From<NonNan>
+              std::convert::From<bool>
+              std::convert::From<core::numeric::DoubleDouble>
+              std::convert::From<core::numeric::StrToF64>
+              std::convert::From<f16>
+              std::convert::From<f32>
+              std::convert::From<i16>
+              std::convert::From<i32>
+            and 9 others
+
+error[E0277]: the trait bound `f64: std::convert::From<i64>` is not satisfied
+   --> crates/jackin-usage/src/usage/openrouter.rs:238:51
+    |
+238 |                 ((f64::from(remaining.min(cap)) / f64::from(cap)) * 100.0).round().clamp(0.0, 100.0)
+    |                                                   ^^^ the trait `std::convert::From<i64>` is not implemented for `f64`
+    |
+    = help: `f64` implements trait `std::convert::From<T>`:
+              std::convert::From<NonNan>
+              std::convert::From<bool>
+              std::convert::From<core::numeric::DoubleDouble>
+              std::convert::From<core::numeric::StrToF64>
+              std::convert::From<f16>
+              std::convert::From<f32>
+              std::convert::From<i16>
+              std::convert::From<i32>
+            and 9 others
+
+error[E0277]: the trait bound `f64: std::convert::From<i64>` is not satisfied
+   --> crates/jackin-usage/src/usage/openrouter.rs:342:15
+    |
+342 |             ((f64::from(balance.max(0).min(ceiling_cents)) / f64::from(ceiling_cents)) * 100.0)
+    |               ^^^ the trait `std::convert::From<i64>` is not implemented for `f64`
+    |
+    = help: `f64` implements trait `std::convert::From<T>`:
+              std::convert::From<NonNan>
+              std::convert::From<bool>
+              std::convert::From<core::numeric::DoubleDouble>
+              std::convert::From<core::numeric::StrToF64>
+              std::convert::From<f16>
+              std::convert::From<f32>
+              std::convert::From<i16>
+              std::convert::From<i32>
+            and 9 others
+
+error[E0277]: the trait bound `f64: std::convert::From<i64>` is not satisfied
+   --> crates/jackin-usage/src/usage/openrouter.rs:342:62
+    |
+342 |             ((f64::from(balance.max(0).min(ceiling_cents)) / f64::from(ceiling_cents)) * 100.0)
+    |                                                              ^^^ the trait `std::convert::From<i64>` is not implemented for `f64`
+    |
+    = help: `f64` implements trait `std::convert::From<T>`:
+              std::convert::From<NonNan>
+              std::convert::From<bool>
+              std::convert::From<core::numeric::DoubleDouble>
+              std::convert::From<core::numeric::StrToF64>
+              std::convert::From<f16>
+              std::convert::From<f32>
+              std::convert::From<i16>
+              std::convert::From<i32>
+            and 9 others
+
+error[E0308]: mismatched types
+   --> crates/jackin-usage/src/usage/openrouter.rs:395:28
+    |
+395 |                 return Err(OpenRouterCreditsOutcome::from_http_status(status.as_u16()));
+    |                        --- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `String`, found `OpenRouterCreditsOutcome`
+    |                        |
+    |                        arguments to this enum variant are incorrect
+    |
+help: the type constructed contains `OpenRouterCreditsOutcome` due to the type of the argument passed
+   --> crates/jackin-usage/src/usage/openrouter.rs:395:24
+    |
+395 |                 return Err(OpenRouterCreditsOutcome::from_http_status(status.as_u16()));
+    |                        ^^^^-----------------------------------------------------------^
+    |                            |
+    |                            this argument influences the type of `Err`
+note: tuple variant defined here
+   --> /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/core/src/result.rs:566:4
+
+error[E0308]: mismatched types
+   --> crates/jackin-usage/src/usage/openrouter.rs:397:13
+    |
+397 | /             response
+398 | |                 .json::<serde_json::Value>()
+399 | |                 .map_err(|error| {
+400 | |                     OpenRouterCreditsOutcome::Unavailable(format!(
+401 | |                         "OpenRouter credits decode failed: {error}"
+402 | |                     ))
+403 | |                 })
+    | |__________________^ expected `Result<_, String>`, found `Result<Value, OpenRouterCreditsOutcome>`
+    |
+    = note: expected enum `Result<_, std::string::String>`
+               found enum `Result<serde_json::Value, OpenRouterCreditsOutcome>`
+note: return type inferred to be `Result<_, std::string::String>` here
+   --> crates/jackin-usage/src/usage/openrouter.rs:386:26
+    |
+386 |             let client = provider_http_client()?;
+    |                          ^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0308]: `match` arms have incompatible types
+   --> crates/jackin-usage/src/usage/openrouter.rs:408:25
+    |
+406 | /     match result {
+407 | |         Ok(value) => parse_openrouter_credits(value).unwrap_or_else(OpenRouterCreditsOutcome::Unavailable),
+    | |                      ------------------------------------------------------------------------------------- this is found to be of type `OpenRouterCreditsOutcome`
+408 | |         Err(outcome) => outcome,
+    | |                         ^^^^^^^ expected `OpenRouterCreditsOutcome`, found `String`
+409 | |     }
+    | |_____- `match` arms have incompatible types
+    |
+help: try wrapping the expression in `usage::openrouter::OpenRouterCreditsOutcome::Unavailable`
+    |
+408 |         Err(outcome) => usage::openrouter::OpenRouterCreditsOutcome::Unavailable(outcome),
+    |                         +++++++++++++++++++++++++++++++++++++++++++++++++++++++++       +
+
+Some errors have detailed explanations: E0277, E0308, E0425.
+For more information about an error, try `rustc --explain E0277`.
+error: could not compile `jackin-usage` (lib) due to 8 previous errors
+mbx[savings]: your deleted worktrees left 436.7 GiB logical behind. left. past tense.

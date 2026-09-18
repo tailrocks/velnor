@@ -1,0 +1,361 @@
+Command line invocation:
+    /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -project native/JackinDesktop.xcodeproj -scheme JackinDesktop -destination platform=macOS -parallel-testing-enabled NO "-only-testing:JackinDesktopUITests/JackinDesktopUITests/testOverviewPassesAccessibilityAudit" -derivedDataPath native/DerivedData -resultBundlePath /tmp/fix3.xcresult
+
+Writing result bundle at path:
+	/tmp/fix3.xcresult
+
+ComputePackagePrebuildTargetDependencyGraph
+
+Prepare packages
+
+CreateBuildRequest
+
+SendProjectDescription
+
+CreateBuildOperation
+
+ComputeTargetDependencyGraph
+note: Building targets in dependency order
+note: Target dependency graph (6 targets)
+    Target 'JackinDesktopUITests' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinDesktop' in project 'JackinDesktop'
+    Target 'JackinDesktopTests' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinDesktopUI' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBridge' in project 'JackinDesktop'
+    Target 'JackinDesktop' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinDesktopUI' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBridge' in project 'JackinDesktop'
+    Target 'JackinDesktopUI' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBridge' in project 'JackinDesktop'
+    Target 'JackinUsageBridge' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+    Target 'JackinUsageBindings' in project 'JackinDesktop' (no dependencies)
+
+GatherProvisioningInputs
+
+CreateBuildDescription
+
+ClangStatCache /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang-stat-cache /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKStatCaches.noindex/macosx27.0-26A425-7231f6df4def33e022ae2eb8f782df1a.sdkstatcache
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/JackinDesktop.xcodeproj
+    /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang-stat-cache /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk -o /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKStatCaches.noindex/macosx27.0-26A425-7231f6df4def33e022ae2eb8f782df1a.sdkstatcache
+
+PruneExplicitPrecompiledModules /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/SwiftExplicitPrecompiledModules
+
+PruneExplicitPrecompiledModules /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/ExplicitPrecompiledModules
+
+PruneExplicitPrecompiledModules /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKExplicitPrecompiledModules
+
+2026-09-18 04:59:10.415910+0700 JackinDesktopUITests-Runner[52213:131716963] [Default] Running tests...
+Test Suite 'Selected tests' started at 2026-09-18 04:59:10.445.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 04:59:10.445.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 04:59:10.445.
+Test Case '-[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit]' started.
+    t =     0.00s Start Test at 2026-09-18 04:59:10.446
+    t =     0.17s Set Up
+    t =     0.18s Open com.jackin-project.desktop
+    t =     0.18s     Launch com.jackin-project.desktop
+2026-09-18 04:59:10.657 xcodebuild[52201:131716797] [MT] IDELaunchParametersSnapshot: debugger version lookup failed for path '<nil>': noURL
+2026-09-18 04:59:10.657 xcodebuild[52201:131716797] [MT] IDELaunchParametersSnapshot: no debugger version
+    t =     0.43s         Wait for accessibility to load
+    t =     0.48s         Setting up automation session
+    t =     0.49s         Wait for com.jackin-project.desktop to idle
+    t =     0.71s Open com.jackin-project.desktop
+    t =     0.72s     Activate com.jackin-project.desktop
+    t =     0.73s         Wait for com.jackin-project.desktop to idle
+    t =     0.75s Waiting 8.0s for "usage-window" Window to exist
+    t =     1.79s     Checking `Expect predicate `existsNoRetry == 1` for object "usage-window" Window`
+    t =     1.79s         Checking existence of `"usage-window" Window`
+    t =     1.93s Open com.jackin-project.desktop
+    t =     1.93s     Activate com.jackin-project.desktop
+    t =     1.93s         Wait for com.jackin-project.desktop to idle
+    t =     1.94s Waiting 5.0s for "usage.overview.table" Any to exist
+    t =     2.97s     Checking `Expect predicate `existsNoRetry == 1` for object "usage.overview.table" Any`
+    t =     2.97s         Checking existence of `"usage.overview.table" Any`
+    t =     3.07s Find the "usage.overview.table" Any
+    t =     3.15s Find the "usage.sidebar" Any
+    t =     3.22s Get number of matches for: Descendants matching type OutlineRow
+    t =     3.29s Get number of matches for: Elements matching predicate 'identifier BEGINSWITH "usage.overview.account."'
+    t =     3.35s Find the OutlineRow (First Match)
+    t =     3.36s Find the "usage.overview.table" Outline
+    t =     3.72s Get number of matches for: Descendants matching type OutlineRow
+    t =     3.80s Get number of matches for: Elements matching predicate 'identifier BEGINSWITH "usage.overview.account."'
+    t =     3.86s Find the OutlineRow (First Match)
+    t =     3.88s Find the "usage.overview.table" Outline
+    t =     4.25s Get number of matches for: Descendants matching type OutlineRow
+    t =     4.33s Get number of matches for: Elements matching predicate 'identifier BEGINSWITH "usage.overview.account."'
+    t =     4.39s Find the OutlineRow (First Match)
+    t =     4.41s Find the "usage.overview.table" Outline
+    t =     4.77s Get number of matches for: Descendants matching type OutlineRow
+    t =     4.85s Get number of matches for: Elements matching predicate 'identifier BEGINSWITH "usage.overview.account."'
+    t =     4.91s Find the OutlineRow (First Match)
+    t =     4.93s Find the "usage.overview.table" Outline
+    t =     4.99s Get all elements bound by index for: Elements matching predicate 'identifier BEGINSWITH "usage.overview.provider."'
+    t =     5.05s Find the Any (Element at index 0)
+    t =     5.11s Find the "usage.overview.provider.codex" StaticText
+    t =     5.16s Find the Any (Element at index 1)
+    t =     5.21s Find the "usage.overview.provider.claude" StaticText
+    t =     5.27s Find the Any (Element at index 2)
+    t =     5.33s Find the "usage.overview.provider.amp" StaticText
+    t =     5.38s Find the Any (Element at index 3)
+    t =     5.45s Find the "usage.overview.provider.grok" StaticText
+    t =     5.50s Find the Any (Element at index 4)
+    t =     5.56s Find the "usage.overview.provider.zai" StaticText
+    t =     5.62s Find the Any (Element at index 5)
+    t =     5.68s Find the "usage.overview.provider.kimi" StaticText
+    t =     5.74s Find the Any (Element at index 6)
+    t =     5.80s Find the "usage.overview.provider.minimax" StaticText
+    t =     5.86s Get all elements bound by index for: Elements matching predicate 'identifier BEGINSWITH "usage.overview.account."'
+    t =     5.92s Find the Any (Element at index 0)
+    t =     5.97s Find the "usage.overview.account.codex.codex-personal" StaticText
+    t =     6.03s Find the Any (Element at index 1)
+    t =     6.08s Find the "usage.overview.account.codex.codex-plus" StaticText
+    t =     6.14s Find the Any (Element at index 2)
+    t =     6.19s Find the "usage.overview.account.claude.claude-personal" StaticText
+    t =     6.25s Find the Any (Element at index 3)
+    t =     6.30s Find the "usage.overview.account.claude.claude-work" StaticText
+    t =     6.36s Find the Any (Element at index 4)
+    t =     6.42s Find the "usage.overview.account.grok.grok-default" StaticText
+    t =     6.47s Find the Any (Element at index 5)
+    t =     6.53s Find the "usage.overview.account.zai.zai-default" StaticText
+    t =     6.58s Find the Any (Element at index 6)
+    t =     6.64s Find the "usage.overview.account.kimi.kimi-default" StaticText
+    t =     6.69s Find the Any (Element at index 7)
+    t =     6.75s Find the "usage.overview.account.minimax.minimax-default" StaticText
+    t =     6.81s Get all elements bound by index for: Elements matching predicate 'identifier BEGINSWITH "usage.sidebar.provider."'
+    t =     6.86s Find the Any (Element at index 0)
+    t =     6.92s Find the "usage.sidebar.provider.codex" StaticText
+    t =     6.97s Find the Any (Element at index 1)
+    t =     7.03s Find the "usage.sidebar.provider.claude" StaticText
+    t =     7.09s Find the Any (Element at index 2)
+    t =     7.14s Find the "usage.sidebar.provider.amp" StaticText
+    t =     7.20s Find the Any (Element at index 3)
+    t =     7.26s Find the "usage.sidebar.provider.grok" StaticText
+    t =     7.31s Find the Any (Element at index 4)
+    t =     7.37s Find the "usage.sidebar.provider.zai" StaticText
+    t =     7.42s Find the Any (Element at index 5)
+    t =     7.48s Find the "usage.sidebar.provider.kimi" StaticText
+    t =     7.53s Find the Any (Element at index 6)
+    t =     7.59s Find the "usage.sidebar.provider.minimax" StaticText
+    t =     7.65s Find the "usage.fixture-badge" Any
+    t =     7.72s Find the "usage.overview.table" Outline
+    t =     7.80s Checking existence of `"usage-window" Window`
+    t =     7.86s Checking existence of `"usage.overview.table" Outline`
+    t =     7.93s Find the "usage.overview.table" Outline
+    t =     8.01s Checking existence of `"usage.sidebar" Any`
+    t =     8.08s Checking existence of `"usage.refresh" Any`
+    t =     8.15s Find the "usage.refresh" Any
+    t =     8.67s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jcQAAAAAAAAA=)
+    t =     9.73s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jcQAAAAAAAAA=) (retry 1)
+    t =    10.77s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jcQAAAAAAAAA=) (retry 2)
+    t =    10.81s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jSAAAAAAAAAD+/////////1gAAAAAAAAAAAAAAAAAAAA=)
+    t =    11.83s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jSAAAAAAAAAD+/////////1gAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    12.86s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jSAAAAAAAAAD+/////////1gAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    12.91s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jQgAAAAAAAAA=)
+    t =    13.92s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jQgAAAAAAAAA=) (retry 1)
+    t =    14.95s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jQgAAAAAAAAA=) (retry 2)
+    t =    14.98s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD//////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    16.00s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD//////////1IAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    17.04s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD//////////1IAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    17.08s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD//////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    18.09s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD//////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    19.14s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD//////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    19.17s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD//////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    20.20s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD//////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    21.24s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD//////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    21.28s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD//////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    22.29s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD//////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    23.34s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD//////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    23.37s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD//////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    24.39s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD//////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    25.43s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD//////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    25.47s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD+/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    26.48s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD+/////////1IAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    27.52s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD+/////////1IAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    27.56s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD+/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    28.58s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD+/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    29.62s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD+/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    29.65s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD+/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    30.68s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD+/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    31.72s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD+/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    31.75s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD+/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    32.77s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD+/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    33.82s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD+/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    33.85s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD+/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    34.88s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD+/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    35.91s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD+/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    35.94s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD9/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    36.97s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD9/////////1IAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    38.00s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD9/////////1IAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    38.04s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD9/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    39.05s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD9/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    40.09s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD9/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    40.13s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD9/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    41.15s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD9/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    42.19s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD9/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    42.22s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD9/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    43.24s     Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD9/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    43.31s Find the Group
+    t =    43.36s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD9/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    43.41s Find the Group
+    t =    43.46s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD8/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    43.51s Find the Group
+    t =    43.56s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD8/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    43.61s Find the Group
+    t =    43.66s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD8/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    43.71s Find the Group
+    t =    43.76s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD8/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    43.82s Find the Group
+    t =    43.86s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD8/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    43.92s Find the Group
+    t =    43.96s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD7/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    44.01s Find the Group
+    t =    44.06s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD7/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    44.12s Find the Group
+    t =    44.16s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD7/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    44.22s Find the Group
+    t =    44.27s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD7/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    44.32s Find the Group
+    t =    44.37s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD7/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    44.42s Find the Group
+    t =    44.47s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD6/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    44.52s Find the Group
+    t =    44.57s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD6/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    44.62s Find the Group
+    t =    44.67s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD6/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    44.72s Find the Group
+    t =    44.77s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD6/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    44.83s Find the Group
+    t =    44.87s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD6/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    44.93s Find the Group
+    t =    44.98s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD5/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    45.03s Find the Group
+    t =    45.08s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD5/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    45.13s Find the Group
+    t =    45.18s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD5/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    45.23s Find the Group
+    t =    45.28s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD5/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    45.33s Find the Group
+    t =    45.38s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD5/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    45.43s Find the Group
+    t =    45.48s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD4/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    45.53s Find the Group
+    t =    45.58s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD4/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    45.63s Find the Group
+    t =    45.68s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD4/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    45.74s Find the Group
+    t =    45.79s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD4/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    45.84s Find the Group
+    t =    45.89s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD4/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    45.94s Find the Group
+    t =    45.99s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD3/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    46.05s Find the Group
+    t =    46.09s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD3/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    46.15s Find the Group
+    t =    46.20s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD3/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    46.25s Find the Group
+    t =    46.30s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD3/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    46.36s Find the Group
+    t =    46.41s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD3/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    46.46s Find the Group
+    t =    46.51s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD2/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    46.56s Find the Group
+    t =    46.61s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jZAAAAAAAAAA=)
+    t =    46.66s Find the "usage.overview.provider.zai" StaticText
+    t =    46.71s Find the "usage.overview.provider.zai" StaticText
+    t =    46.76s Find the "usage.overview.provider.zai" StaticText
+    t =    46.81s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD2/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    46.86s Find the Group
+    t =    46.91s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD2/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    46.96s Find the Group
+    t =    47.01s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD2/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    47.07s Find the Group
+    t =    47.11s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD2/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    47.16s Find the Group
+    t =    47.21s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD1/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    47.27s Find the Group
+    t =    47.31s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD1/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    47.37s Find the Group
+    t =    47.42s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD1/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    47.47s Find the Group
+    t =    47.51s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD1/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    47.57s Find the Group
+    t =    47.61s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD1/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    47.67s Find the Group
+    t =    47.71s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD0/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    47.77s Find the Group
+    t =    47.81s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD0/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    47.87s Find the Group
+    t =    47.92s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD0/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    47.97s Find the Group
+    t =    48.02s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD0/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    48.08s Find the Group
+    t =    48.13s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAAD0/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    48.18s Find the Group
+    t =    48.23s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAADz/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    48.28s Find the Group
+    t =    48.33s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAADz/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    48.39s Find the Group
+    t =    48.43s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAADz/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    48.49s Find the Group
+    t =    48.54s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAADz/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    48.59s Find the Group
+    t =    48.64s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAADz/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    48.69s Find the Group
+    t =    48.74s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAADy/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    48.80s Find the Group
+    t =    48.85s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAADy/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    48.90s Find the Group
+    t =    48.95s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAADy/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    49.01s Find the Group
+    t =    49.05s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAADy/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    49.11s Find the Group
+    t =    49.15s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAADy/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    49.21s Find the Group
+    t =    49.25s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAADx/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    49.31s Find the Group
+    t =    49.35s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAADx/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    49.41s Find the Group
+    t =    49.46s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAADx/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    49.51s Find the Group
+    t =    49.56s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAADx/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    49.61s Find the Group
+    t =    49.66s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jTgAAAAAAAADx/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    49.72s Find the Group
+    t =    49.76s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jRgAAAAAAAAA=)
+    t =    49.82s Find the Group
+    t =    49.87s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jOQAAAAAAAAA=)
+    t =    49.92s Find the Group
+    t =    49.97s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jPQAAAAAAAAA=)
+    t =    50.02s Find the Group
+    t =    50.07s Find the Group
+    t =    50.12s Get all elements bound by index for: Descendants matching type Button
+    t =    50.17s Find the Button (Element at index 0)
+    t =    50.22s Find the "_XCUI:CloseWindow" Button
+    t =    50.27s Find the Group
+    t =    50.32s Find the Button (Element at index 1)
+    t =    50.37s Find the "_XCUI:ZoomWindow" Button
+    t =    50.43s Find the Group at {{469.0, 284.0}, {14.0, 14.0}}
+    t =    50.48s Find the Any (Descendant with identity binding to AX element pid: 52218, token: +ssAAAAAAABvY29jLwAAAAAAAAA=)
+    t =    50.53s Find the TouchBar
+    t =    50.58s Terminate com.jackin-project.desktop:52218
+    t =    51.63s Tear Down
+Test Case '-[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit]' passed (51.818 seconds).
+Test Suite 'JackinDesktopUITests' passed at 2026-09-18 05:00:02.264.
+	 Executed 1 test, with 0 failures (0 unexpected) in 51.818 (51.819) seconds
+Test Suite 'JackinDesktopUITests.xctest' passed at 2026-09-18 05:00:02.264.
+	 Executed 1 test, with 0 failures (0 unexpected) in 51.818 (51.819) seconds
+Test Suite 'Selected tests' passed at 2026-09-18 05:00:02.264.
+	 Executed 1 test, with 0 failures (0 unexpected) in 51.818 (51.819) seconds
+2026-09-18 05:00:02.535 xcodebuild[52201:131716797] [MT] IDETestOperationsObserverDebug: 52.410 elapsed -- Testing started completed.
+2026-09-18 05:00:02.535 xcodebuild[52201:131716797] [MT] IDETestOperationsObserverDebug: 0.000 sec, +0.000 sec -- start
+2026-09-18 05:00:02.535 xcodebuild[52201:131716797] [MT] IDETestOperationsObserverDebug: 52.410 sec, +52.410 sec -- end
+
+Test session results, code coverage, and logs:
+	/tmp/fix3.xcresult
+
+** TEST SUCCEEDED **
+
+Testing started

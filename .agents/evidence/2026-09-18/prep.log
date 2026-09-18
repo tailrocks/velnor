@@ -1,0 +1,7 @@
+Control / Prepare Cargo / prepare-cargo	UNKNOWN STEP	2026-09-17T18:20:49.6271540Z ##[group]Velnor rejected job (operational_store)
+Control / Prepare Cargo / prepare-cargo	UNKNOWN STEP	2026-09-17T18:20:49.6271540Z ##[error]Velnor rejected this job before workflow execution.
+Control / Prepare Cargo / prepare-cargo	UNKNOWN STEP	2026-09-17T18:20:49.6271540Z phase: operational_store
+Control / Prepare Cargo / prepare-cargo	UNKNOWN STEP	2026-09-17T18:20:49.6271540Z reason: operational store rejected the sanitized admission row; job failed closed before execution
+Control / Prepare Cargo / prepare-cargo	UNKNOWN STEP	2026-09-17T18:20:49.6271540Z effect: no declared workflow command was executed
+Control / Prepare Cargo / prepare-cargo	UNKNOWN STEP	2026-09-17T18:20:49.6271540Z remediation: correct the rejected workflow field/action/ref or add the exact reviewed capability to Velnor, publish and deploy that Velnor release, then rerun
+Control / Prepare Cargo / prepare-cargo	UNKNOWN STEP	2026-09-17T18:20:49.6271540Z ##[endgroup]

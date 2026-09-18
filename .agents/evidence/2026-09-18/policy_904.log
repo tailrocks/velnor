@@ -1,0 +1,1139 @@
+Policy	Set up job	﻿2026-09-16T18:05:03.0007065Z Current runner version: '2.337.0'
+Policy	Set up job	2026-09-16T18:05:03.0033225Z ##[group]Runner Image Provisioner
+Policy	Set up job	2026-09-16T18:05:03.0034154Z Hosted Compute Agent
+Policy	Set up job	2026-09-16T18:05:03.0034865Z Version: 20260828.587
+Policy	Set up job	2026-09-16T18:05:03.0035520Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+Policy	Set up job	2026-09-16T18:05:03.0036312Z Build Date: 2026-08-28T16:44:25Z
+Policy	Set up job	2026-09-16T18:05:03.0037041Z Worker ID: {54874bcd-ec07-47c0-ae50-c31d7c39ce11}
+Policy	Set up job	2026-09-16T18:05:03.0038017Z Azure Region: westcentralus
+Policy	Set up job	2026-09-16T18:05:03.0038715Z ##[endgroup]
+Policy	Set up job	2026-09-16T18:05:03.0040121Z ##[group]Operating System
+Policy	Set up job	2026-09-16T18:05:03.0040888Z Ubuntu
+Policy	Set up job	2026-09-16T18:05:03.0041439Z 24.04.5
+Policy	Set up job	2026-09-16T18:05:03.0042016Z LTS
+Policy	Set up job	2026-09-16T18:05:03.0042607Z ##[endgroup]
+Policy	Set up job	2026-09-16T18:05:03.0043195Z ##[group]Runner Image
+Policy	Set up job	2026-09-16T18:05:03.0043809Z Image: ubuntu-24.04
+Policy	Set up job	2026-09-16T18:05:03.0044466Z Version: 20260907.300.1
+Policy	Set up job	2026-09-16T18:05:03.0046012Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260907.300/images/ubuntu/Ubuntu2404-Readme.md
+Policy	Set up job	2026-09-16T18:05:03.0048114Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260907.300
+Policy	Set up job	2026-09-16T18:05:03.0049112Z ##[endgroup]
+Policy	Set up job	2026-09-16T18:05:03.0050372Z ##[group]GITHUB_TOKEN Permissions
+Policy	Set up job	2026-09-16T18:05:03.0052228Z Contents: read
+Policy	Set up job	2026-09-16T18:05:03.0052962Z Metadata: read
+Policy	Set up job	2026-09-16T18:05:03.0053552Z ##[endgroup]
+Policy	Set up job	2026-09-16T18:05:03.0055669Z Secret source: Actions
+Policy	Set up job	2026-09-16T18:05:03.0056653Z Cache mode: read
+Policy	Set up job	2026-09-16T18:05:03.0057591Z Prepare workflow directory
+Policy	Set up job	2026-09-16T18:05:03.0391236Z Prepare all required actions
+Policy	Set up job	2026-09-16T18:05:03.0438592Z Getting action download info
+Policy	Set up job	2026-09-16T18:05:03.4251266Z Download action repository 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' (SHA:3d3c42e5aac5ba805825da76410c181273ba90b1)
+Policy	Set up job	2026-09-16T18:05:03.5300203Z Download action repository 'jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777' (SHA:7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777)
+Policy	Set up job	2026-09-16T18:05:04.0152187Z Download action repository 'jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c' (SHA:c2a87611a18de5b3828c5652fe268e992400cb5c)
+Policy	Set up job	2026-09-16T18:05:05.0605865Z Complete job name: Policy
+Policy	Checkout repository history	﻿2026-09-16T18:05:05.1536730Z ##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+Policy	Checkout repository history	2026-09-16T18:05:05.1538985Z with:
+Policy	Checkout repository history	2026-09-16T18:05:05.1539820Z   path: policy-checkout
+Policy	Checkout repository history	2026-09-16T18:05:05.1540720Z   fetch-depth: 0
+Policy	Checkout repository history	2026-09-16T18:05:05.1541582Z   persist-credentials: false
+Policy	Checkout repository history	2026-09-16T18:05:05.1542577Z   repository: tailrocks/velnor
+Policy	Checkout repository history	2026-09-16T18:05:05.1550775Z   token: ***
+Policy	Checkout repository history	2026-09-16T18:05:05.1551591Z   ssh-strict: true
+Policy	Checkout repository history	2026-09-16T18:05:05.1552428Z   ssh-user: git
+Policy	Checkout repository history	2026-09-16T18:05:05.1553230Z   clean: true
+Policy	Checkout repository history	2026-09-16T18:05:05.1554094Z   sparse-checkout-cone-mode: true
+Policy	Checkout repository history	2026-09-16T18:05:05.1555110Z   fetch-tags: false
+Policy	Checkout repository history	2026-09-16T18:05:05.1555972Z   show-progress: true
+Policy	Checkout repository history	2026-09-16T18:05:05.1556853Z   lfs: false
+Policy	Checkout repository history	2026-09-16T18:05:05.1557749Z   submodules: false
+Policy	Checkout repository history	2026-09-16T18:05:05.1558624Z   set-safe-directory: true
+Policy	Checkout repository history	2026-09-16T18:05:05.1559633Z   allow-unsafe-pr-checkout: false
+Policy	Checkout repository history	2026-09-16T18:05:05.1560891Z ##[endgroup]
+Policy	Checkout repository history	2026-09-16T18:05:05.2636415Z Syncing repository: tailrocks/velnor
+Policy	Checkout repository history	2026-09-16T18:05:05.2639680Z ##[group]Getting Git version info
+Policy	Checkout repository history	2026-09-16T18:05:05.2641605Z Working directory is '/home/runner/work/velnor/velnor/policy-checkout'
+Policy	Checkout repository history	2026-09-16T18:05:05.2644065Z [command]/usr/bin/git version
+Policy	Checkout repository history	2026-09-16T18:05:05.2685571Z git version 2.55.0
+Policy	Checkout repository history	2026-09-16T18:05:05.2709527Z ##[endgroup]
+Policy	Checkout repository history	2026-09-16T18:05:05.2731246Z Temporarily overriding HOME='/home/runner/work/_temp/31363024-3e2e-4b1a-b1c3-63660d47d959' before making global git config changes
+Policy	Checkout repository history	2026-09-16T18:05:05.2735672Z Adding repository directory to the temporary git global config as a safe directory
+Policy	Checkout repository history	2026-09-16T18:05:05.2741649Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor/policy-checkout
+Policy	Checkout repository history	2026-09-16T18:05:05.2793085Z ##[group]Determining repository object format
+Policy	Checkout repository history	2026-09-16T18:05:05.2795681Z ##[endgroup]
+Policy	Checkout repository history	2026-09-16T18:05:05.2797923Z ##[group]Initializing the repository
+Policy	Checkout repository history	2026-09-16T18:05:05.2800544Z [command]/usr/bin/git init /home/runner/work/velnor/velnor/policy-checkout
+Policy	Checkout repository history	2026-09-16T18:05:05.2885972Z hint: Using 'master' as the name for the initial branch. This default branch name
+Policy	Checkout repository history	2026-09-16T18:05:05.2890231Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+Policy	Checkout repository history	2026-09-16T18:05:05.2893389Z hint: to use in all of your new repositories, which will suppress this warning,
+Policy	Checkout repository history	2026-09-16T18:05:05.2895600Z hint: call:
+Policy	Checkout repository history	2026-09-16T18:05:05.2896721Z hint:
+Policy	Checkout repository history	2026-09-16T18:05:05.2898361Z hint: 	git config --global init.defaultBranch <name>
+Policy	Checkout repository history	2026-09-16T18:05:05.2900156Z hint:
+Policy	Checkout repository history	2026-09-16T18:05:05.2901814Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+Policy	Checkout repository history	2026-09-16T18:05:05.2904556Z hint: 'development'. The just-created branch can be renamed via this command:
+Policy	Checkout repository history	2026-09-16T18:05:05.2906813Z hint:
+Policy	Checkout repository history	2026-09-16T18:05:05.2908406Z hint: 	git branch -m <name>
+Policy	Checkout repository history	2026-09-16T18:05:05.2909737Z hint:
+Policy	Checkout repository history	2026-09-16T18:05:05.2911577Z hint: Disable this message with "git config set advice.defaultBranchName false"
+Policy	Checkout repository history	2026-09-16T18:05:05.2915091Z Initialized empty Git repository in /home/runner/work/velnor/velnor/policy-checkout/.git/
+Policy	Checkout repository history	2026-09-16T18:05:05.2920312Z [command]/usr/bin/git remote add origin https://github.com/tailrocks/velnor
+Policy	Checkout repository history	2026-09-16T18:05:05.2952435Z ##[endgroup]
+Policy	Checkout repository history	2026-09-16T18:05:05.2954700Z ##[group]Disabling automatic garbage collection
+Policy	Checkout repository history	2026-09-16T18:05:05.2956653Z [command]/usr/bin/git config --local gc.auto 0
+Policy	Checkout repository history	2026-09-16T18:05:05.2990006Z ##[endgroup]
+Policy	Checkout repository history	2026-09-16T18:05:05.2992018Z ##[group]Setting up auth
+Policy	Checkout repository history	2026-09-16T18:05:05.2994083Z Removing SSH command configuration
+Policy	Checkout repository history	2026-09-16T18:05:05.3002864Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Policy	Checkout repository history	2026-09-16T18:05:05.3041877Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Policy	Checkout repository history	2026-09-16T18:05:05.3365413Z Removing HTTP extra header
+Policy	Checkout repository history	2026-09-16T18:05:05.3371636Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Policy	Checkout repository history	2026-09-16T18:05:05.3428460Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Policy	Checkout repository history	2026-09-16T18:05:05.3674789Z Removing includeIf entries pointing to credentials config files
+Policy	Checkout repository history	2026-09-16T18:05:05.3680369Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Policy	Checkout repository history	2026-09-16T18:05:05.3721074Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Policy	Checkout repository history	2026-09-16T18:05:05.3968506Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-8c324e4a-dfbe-4689-a89e-2aca582e6923.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+Policy	Checkout repository history	2026-09-16T18:05:05.4012419Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git.path /home/runner/work/_temp/git-credentials-8c324e4a-dfbe-4689-a89e-2aca582e6923.config
+Policy	Checkout repository history	2026-09-16T18:05:05.4048740Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-8c324e4a-dfbe-4689-a89e-2aca582e6923.config
+Policy	Checkout repository history	2026-09-16T18:05:05.4086177Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/policy-checkout/.git.path /github/runner_temp/git-credentials-8c324e4a-dfbe-4689-a89e-2aca582e6923.config
+Policy	Checkout repository history	2026-09-16T18:05:05.4122735Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/policy-checkout/.git/worktrees/*.path /github/runner_temp/git-credentials-8c324e4a-dfbe-4689-a89e-2aca582e6923.config
+Policy	Checkout repository history	2026-09-16T18:05:05.4233699Z ##[endgroup]
+Policy	Checkout repository history	2026-09-16T18:05:05.4235916Z ##[group]Fetching the repository
+Policy	Checkout repository history	2026-09-16T18:05:05.4239945Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules origin +refs/heads/*:refs/remotes/origin/* +refs/tags/*:refs/tags/*
+Policy	Checkout repository history	2026-09-16T18:05:10.5113659Z From https://github.com/tailrocks/velnor
+Policy	Checkout repository history	2026-09-16T18:05:10.5114734Z  * [new branch]        feat/ci-immutable-runtime-products -> origin/feat/ci-immutable-runtime-products
+Policy	Checkout repository history	2026-09-16T18:05:10.5115852Z  * [new branch]        fix/dogfood-pin-ruleset-403-fallback -> origin/fix/dogfood-pin-ruleset-403-fallback
+Policy	Checkout repository history	2026-09-16T18:05:10.5116858Z  * [new branch]        fix/ruleset-403-fallback-pin -> origin/fix/ruleset-403-fallback-pin
+Policy	Checkout repository history	2026-09-16T18:05:10.5117841Z  * [new branch]        main       -> origin/main
+Policy	Checkout repository history	2026-09-16T18:05:10.5118725Z  * [new tag]           archive/velnor2-pre-rebuild-20260831-bc593406 -> archive/velnor2-pre-rebuild-20260831-bc593406
+Policy	Checkout repository history	2026-09-16T18:05:10.5119778Z  * [new tag]           dima/velnor6-archive-4d81a14 -> dima/velnor6-archive-4d81a14
+Policy	Checkout repository history	2026-09-16T18:05:10.5120465Z  * [new tag]           preview    -> preview
+Policy	Checkout repository history	2026-09-16T18:05:10.5120947Z  * [new tag]           v0.1.10    -> v0.1.10
+Policy	Checkout repository history	2026-09-16T18:05:10.5121534Z  * [new tag]           v0.1.100   -> v0.1.100
+Policy	Checkout repository history	2026-09-16T18:05:10.5122025Z  * [new tag]           v0.1.101   -> v0.1.101
+Policy	Checkout repository history	2026-09-16T18:05:10.5122501Z  * [new tag]           v0.1.102   -> v0.1.102
+Policy	Checkout repository history	2026-09-16T18:05:10.5122969Z  * [new tag]           v0.1.103   -> v0.1.103
+Policy	Checkout repository history	2026-09-16T18:05:10.5123426Z  * [new tag]           v0.1.104   -> v0.1.104
+Policy	Checkout repository history	2026-09-16T18:05:10.5123918Z  * [new tag]           v0.1.105   -> v0.1.105
+Policy	Checkout repository history	2026-09-16T18:05:10.5124442Z  * [new tag]           v0.1.106   -> v0.1.106
+Policy	Checkout repository history	2026-09-16T18:05:10.5124910Z  * [new tag]           v0.1.107   -> v0.1.107
+Policy	Checkout repository history	2026-09-16T18:05:10.5125384Z  * [new tag]           v0.1.108   -> v0.1.108
+Policy	Checkout repository history	2026-09-16T18:05:10.5126673Z  * [new tag]           v0.1.109   -> v0.1.109
+Policy	Checkout repository history	2026-09-16T18:05:10.5127170Z  * [new tag]           v0.1.11    -> v0.1.11
+Policy	Checkout repository history	2026-09-16T18:05:10.5128211Z  * [new tag]           v0.1.110   -> v0.1.110
+Policy	Checkout repository history	2026-09-16T18:05:10.5128696Z  * [new tag]           v0.1.111   -> v0.1.111
+Policy	Checkout repository history	2026-09-16T18:05:10.5129164Z  * [new tag]           v0.1.112   -> v0.1.112
+Policy	Checkout repository history	2026-09-16T18:05:10.5129645Z  * [new tag]           v0.1.113   -> v0.1.113
+Policy	Checkout repository history	2026-09-16T18:05:10.5130207Z  * [new tag]           v0.1.114   -> v0.1.114
+Policy	Checkout repository history	2026-09-16T18:05:10.5131092Z  * [new tag]           v0.1.115   -> v0.1.115
+Policy	Checkout repository history	2026-09-16T18:05:10.5131604Z  * [new tag]           v0.1.116   -> v0.1.116
+Policy	Checkout repository history	2026-09-16T18:05:10.5132073Z  * [new tag]           v0.1.117   -> v0.1.117
+Policy	Checkout repository history	2026-09-16T18:05:10.5138259Z  * [new tag]           v0.1.118   -> v0.1.118
+Policy	Checkout repository history	2026-09-16T18:05:10.5146438Z  * [new tag]           v0.1.119   -> v0.1.119
+Policy	Checkout repository history	2026-09-16T18:05:10.5147206Z  * [new tag]           v0.1.12    -> v0.1.12
+Policy	Checkout repository history	2026-09-16T18:05:10.5147874Z  * [new tag]           v0.1.120   -> v0.1.120
+Policy	Checkout repository history	2026-09-16T18:05:10.5148386Z  * [new tag]           v0.1.121   -> v0.1.121
+Policy	Checkout repository history	2026-09-16T18:05:10.5148842Z  * [new tag]           v0.1.122   -> v0.1.122
+Policy	Checkout repository history	2026-09-16T18:05:10.5149300Z  * [new tag]           v0.1.123   -> v0.1.123
+Policy	Checkout repository history	2026-09-16T18:05:10.5149784Z  * [new tag]           v0.1.124   -> v0.1.124
+Policy	Checkout repository history	2026-09-16T18:05:10.5150254Z  * [new tag]           v0.1.125   -> v0.1.125
+Policy	Checkout repository history	2026-09-16T18:05:10.5150705Z  * [new tag]           v0.1.126   -> v0.1.126
+Policy	Checkout repository history	2026-09-16T18:05:10.5151165Z  * [new tag]           v0.1.127   -> v0.1.127
+Policy	Checkout repository history	2026-09-16T18:05:10.5151643Z  * [new tag]           v0.1.128   -> v0.1.128
+Policy	Checkout repository history	2026-09-16T18:05:10.5152113Z  * [new tag]           v0.1.129   -> v0.1.129
+Policy	Checkout repository history	2026-09-16T18:05:10.5152587Z  * [new tag]           v0.1.13    -> v0.1.13
+Policy	Checkout repository history	2026-09-16T18:05:10.5153033Z  * [new tag]           v0.1.130   -> v0.1.130
+Policy	Checkout repository history	2026-09-16T18:05:10.5153484Z  * [new tag]           v0.1.131   -> v0.1.131
+Policy	Checkout repository history	2026-09-16T18:05:10.5153935Z  * [new tag]           v0.1.132   -> v0.1.132
+Policy	Checkout repository history	2026-09-16T18:05:10.5154464Z  * [new tag]           v0.1.133   -> v0.1.133
+Policy	Checkout repository history	2026-09-16T18:05:10.5154981Z  * [new tag]           v0.1.134   -> v0.1.134
+Policy	Checkout repository history	2026-09-16T18:05:10.5155409Z  * [new tag]           v0.1.135   -> v0.1.135
+Policy	Checkout repository history	2026-09-16T18:05:10.5155845Z  * [new tag]           v0.1.136   -> v0.1.136
+Policy	Checkout repository history	2026-09-16T18:05:10.5156285Z  * [new tag]           v0.1.137   -> v0.1.137
+Policy	Checkout repository history	2026-09-16T18:05:10.5156970Z  * [new tag]           v0.1.138   -> v0.1.138
+Policy	Checkout repository history	2026-09-16T18:05:10.5157576Z  * [new tag]           v0.1.139   -> v0.1.139
+Policy	Checkout repository history	2026-09-16T18:05:10.5158030Z  * [new tag]           v0.1.14    -> v0.1.14
+Policy	Checkout repository history	2026-09-16T18:05:10.5158482Z  * [new tag]           v0.1.140   -> v0.1.140
+Policy	Checkout repository history	2026-09-16T18:05:10.5158948Z  * [new tag]           v0.1.141   -> v0.1.141
+Policy	Checkout repository history	2026-09-16T18:05:10.5159375Z  * [new tag]           v0.1.142   -> v0.1.142
+Policy	Checkout repository history	2026-09-16T18:05:10.5159805Z  * [new tag]           v0.1.143   -> v0.1.143
+Policy	Checkout repository history	2026-09-16T18:05:10.5160242Z  * [new tag]           v0.1.144   -> v0.1.144
+Policy	Checkout repository history	2026-09-16T18:05:10.5160669Z  * [new tag]           v0.1.145   -> v0.1.145
+Policy	Checkout repository history	2026-09-16T18:05:10.5161102Z  * [new tag]           v0.1.146   -> v0.1.146
+Policy	Checkout repository history	2026-09-16T18:05:10.5161541Z  * [new tag]           v0.1.147   -> v0.1.147
+Policy	Checkout repository history	2026-09-16T18:05:10.5161972Z  * [new tag]           v0.1.148   -> v0.1.148
+Policy	Checkout repository history	2026-09-16T18:05:10.5162415Z  * [new tag]           v0.1.149   -> v0.1.149
+Policy	Checkout repository history	2026-09-16T18:05:10.5162924Z  * [new tag]           v0.1.15    -> v0.1.15
+Policy	Checkout repository history	2026-09-16T18:05:10.5163366Z  * [new tag]           v0.1.150   -> v0.1.150
+Policy	Checkout repository history	2026-09-16T18:05:10.5163809Z  * [new tag]           v0.1.151   -> v0.1.151
+Policy	Checkout repository history	2026-09-16T18:05:10.5164285Z  * [new tag]           v0.1.152   -> v0.1.152
+Policy	Checkout repository history	2026-09-16T18:05:10.5164711Z  * [new tag]           v0.1.153   -> v0.1.153
+Policy	Checkout repository history	2026-09-16T18:05:10.5165133Z  * [new tag]           v0.1.154   -> v0.1.154
+Policy	Checkout repository history	2026-09-16T18:05:10.5165559Z  * [new tag]           v0.1.155   -> v0.1.155
+Policy	Checkout repository history	2026-09-16T18:05:10.5166000Z  * [new tag]           v0.1.156   -> v0.1.156
+Policy	Checkout repository history	2026-09-16T18:05:10.5166439Z  * [new tag]           v0.1.157   -> v0.1.157
+Policy	Checkout repository history	2026-09-16T18:05:10.5166868Z  * [new tag]           v0.1.158   -> v0.1.158
+Policy	Checkout repository history	2026-09-16T18:05:10.5170188Z  * [new tag]           v0.1.159   -> v0.1.159
+Policy	Checkout repository history	2026-09-16T18:05:10.5170801Z  * [new tag]           v0.1.16    -> v0.1.16
+Policy	Checkout repository history	2026-09-16T18:05:10.5171285Z  * [new tag]           v0.1.160   -> v0.1.160
+Policy	Checkout repository history	2026-09-16T18:05:10.5171786Z  * [new tag]           v0.1.161   -> v0.1.161
+Policy	Checkout repository history	2026-09-16T18:05:10.5172275Z  * [new tag]           v0.1.162   -> v0.1.162
+Policy	Checkout repository history	2026-09-16T18:05:10.5172751Z  * [new tag]           v0.1.163   -> v0.1.163
+Policy	Checkout repository history	2026-09-16T18:05:10.5173194Z  * [new tag]           v0.1.164   -> v0.1.164
+Policy	Checkout repository history	2026-09-16T18:05:10.5173865Z  * [new tag]           v0.1.165   -> v0.1.165
+Policy	Checkout repository history	2026-09-16T18:05:10.5174295Z  * [new tag]           v0.1.166   -> v0.1.166
+Policy	Checkout repository history	2026-09-16T18:05:10.5174722Z  * [new tag]           v0.1.167   -> v0.1.167
+Policy	Checkout repository history	2026-09-16T18:05:10.5175155Z  * [new tag]           v0.1.168   -> v0.1.168
+Policy	Checkout repository history	2026-09-16T18:05:10.5175586Z  * [new tag]           v0.1.17    -> v0.1.17
+Policy	Checkout repository history	2026-09-16T18:05:10.5176018Z  * [new tag]           v0.1.170   -> v0.1.170
+Policy	Checkout repository history	2026-09-16T18:05:10.5176451Z  * [new tag]           v0.1.171   -> v0.1.171
+Policy	Checkout repository history	2026-09-16T18:05:10.5176879Z  * [new tag]           v0.1.172   -> v0.1.172
+Policy	Checkout repository history	2026-09-16T18:05:10.5177489Z  * [new tag]           v0.1.173   -> v0.1.173
+Policy	Checkout repository history	2026-09-16T18:05:10.5177946Z  * [new tag]           v0.1.174   -> v0.1.174
+Policy	Checkout repository history	2026-09-16T18:05:10.5178377Z  * [new tag]           v0.1.175   -> v0.1.175
+Policy	Checkout repository history	2026-09-16T18:05:10.5178814Z  * [new tag]           v0.1.176   -> v0.1.176
+Policy	Checkout repository history	2026-09-16T18:05:10.5179246Z  * [new tag]           v0.1.177   -> v0.1.177
+Policy	Checkout repository history	2026-09-16T18:05:10.5179692Z  * [new tag]           v0.1.178   -> v0.1.178
+Policy	Checkout repository history	2026-09-16T18:05:10.5180121Z  * [new tag]           v0.1.179   -> v0.1.179
+Policy	Checkout repository history	2026-09-16T18:05:10.5180552Z  * [new tag]           v0.1.18    -> v0.1.18
+Policy	Checkout repository history	2026-09-16T18:05:10.5180983Z  * [new tag]           v0.1.180   -> v0.1.180
+Policy	Checkout repository history	2026-09-16T18:05:10.5181415Z  * [new tag]           v0.1.181   -> v0.1.181
+Policy	Checkout repository history	2026-09-16T18:05:10.5181852Z  * [new tag]           v0.1.182   -> v0.1.182
+Policy	Checkout repository history	2026-09-16T18:05:10.5182279Z  * [new tag]           v0.1.183   -> v0.1.183
+Policy	Checkout repository history	2026-09-16T18:05:10.5182714Z  * [new tag]           v0.1.184   -> v0.1.184
+Policy	Checkout repository history	2026-09-16T18:05:10.5183145Z  * [new tag]           v0.1.185   -> v0.1.185
+Policy	Checkout repository history	2026-09-16T18:05:10.5183578Z  * [new tag]           v0.1.186   -> v0.1.186
+Policy	Checkout repository history	2026-09-16T18:05:10.5184012Z  * [new tag]           v0.1.187   -> v0.1.187
+Policy	Checkout repository history	2026-09-16T18:05:10.5184453Z  * [new tag]           v0.1.188   -> v0.1.188
+Policy	Checkout repository history	2026-09-16T18:05:10.5185056Z  * [new tag]           v0.1.189   -> v0.1.189
+Policy	Checkout repository history	2026-09-16T18:05:10.5185484Z  * [new tag]           v0.1.19    -> v0.1.19
+Policy	Checkout repository history	2026-09-16T18:05:10.5185933Z  * [new tag]           v0.1.190   -> v0.1.190
+Policy	Checkout repository history	2026-09-16T18:05:10.5186367Z  * [new tag]           v0.1.191   -> v0.1.191
+Policy	Checkout repository history	2026-09-16T18:05:10.5186803Z  * [new tag]           v0.1.192   -> v0.1.192
+Policy	Checkout repository history	2026-09-16T18:05:10.5187226Z  * [new tag]           v0.1.193   -> v0.1.193
+Policy	Checkout repository history	2026-09-16T18:05:10.5187808Z  * [new tag]           v0.1.194   -> v0.1.194
+Policy	Checkout repository history	2026-09-16T18:05:10.5188238Z  * [new tag]           v0.1.195   -> v0.1.195
+Policy	Checkout repository history	2026-09-16T18:05:10.5188663Z  * [new tag]           v0.1.196   -> v0.1.196
+Policy	Checkout repository history	2026-09-16T18:05:10.5189090Z  * [new tag]           v0.1.197   -> v0.1.197
+Policy	Checkout repository history	2026-09-16T18:05:10.5189527Z  * [new tag]           v0.1.198   -> v0.1.198
+Policy	Checkout repository history	2026-09-16T18:05:10.5189965Z  * [new tag]           v0.1.199   -> v0.1.199
+Policy	Checkout repository history	2026-09-16T18:05:10.5190505Z  * [new tag]           v0.1.2     -> v0.1.2
+Policy	Checkout repository history	2026-09-16T18:05:10.5190958Z  * [new tag]           v0.1.20    -> v0.1.20
+Policy	Checkout repository history	2026-09-16T18:05:10.5191404Z  * [new tag]           v0.1.200   -> v0.1.200
+Policy	Checkout repository history	2026-09-16T18:05:10.5191845Z  * [new tag]           v0.1.201   -> v0.1.201
+Policy	Checkout repository history	2026-09-16T18:05:10.5192286Z  * [new tag]           v0.1.202   -> v0.1.202
+Policy	Checkout repository history	2026-09-16T18:05:10.5192717Z  * [new tag]           v0.1.203   -> v0.1.203
+Policy	Checkout repository history	2026-09-16T18:05:10.5193147Z  * [new tag]           v0.1.204   -> v0.1.204
+Policy	Checkout repository history	2026-09-16T18:05:10.5193578Z  * [new tag]           v0.1.205   -> v0.1.205
+Policy	Checkout repository history	2026-09-16T18:05:10.5194005Z  * [new tag]           v0.1.206   -> v0.1.206
+Policy	Checkout repository history	2026-09-16T18:05:10.5194443Z  * [new tag]           v0.1.207   -> v0.1.207
+Policy	Checkout repository history	2026-09-16T18:05:10.5194869Z  * [new tag]           v0.1.208   -> v0.1.208
+Policy	Checkout repository history	2026-09-16T18:05:10.5195317Z  * [new tag]           v0.1.209   -> v0.1.209
+Policy	Checkout repository history	2026-09-16T18:05:10.5195753Z  * [new tag]           v0.1.21    -> v0.1.21
+Policy	Checkout repository history	2026-09-16T18:05:10.5196187Z  * [new tag]           v0.1.210   -> v0.1.210
+Policy	Checkout repository history	2026-09-16T18:05:10.5196633Z  * [new tag]           v0.1.211   -> v0.1.211
+Policy	Checkout repository history	2026-09-16T18:05:10.5197069Z  * [new tag]           v0.1.212   -> v0.1.212
+Policy	Checkout repository history	2026-09-16T18:05:10.5197735Z  * [new tag]           v0.1.213   -> v0.1.213
+Policy	Checkout repository history	2026-09-16T18:05:10.5198167Z  * [new tag]           v0.1.214   -> v0.1.214
+Policy	Checkout repository history	2026-09-16T18:05:10.5198773Z  * [new tag]           v0.1.215   -> v0.1.215
+Policy	Checkout repository history	2026-09-16T18:05:10.5199207Z  * [new tag]           v0.1.217   -> v0.1.217
+Policy	Checkout repository history	2026-09-16T18:05:10.5199642Z  * [new tag]           v0.1.218   -> v0.1.218
+Policy	Checkout repository history	2026-09-16T18:05:10.5200068Z  * [new tag]           v0.1.219   -> v0.1.219
+Policy	Checkout repository history	2026-09-16T18:05:10.5200501Z  * [new tag]           v0.1.22    -> v0.1.22
+Policy	Checkout repository history	2026-09-16T18:05:10.5200946Z  * [new tag]           v0.1.220   -> v0.1.220
+Policy	Checkout repository history	2026-09-16T18:05:10.5201382Z  * [new tag]           v0.1.221   -> v0.1.221
+Policy	Checkout repository history	2026-09-16T18:05:10.5201815Z  * [new tag]           v0.1.222   -> v0.1.222
+Policy	Checkout repository history	2026-09-16T18:05:10.5202241Z  * [new tag]           v0.1.223   -> v0.1.223
+Policy	Checkout repository history	2026-09-16T18:05:10.5202669Z  * [new tag]           v0.1.224   -> v0.1.224
+Policy	Checkout repository history	2026-09-16T18:05:10.5203110Z  * [new tag]           v0.1.225   -> v0.1.225
+Policy	Checkout repository history	2026-09-16T18:05:10.5203551Z  * [new tag]           v0.1.226   -> v0.1.226
+Policy	Checkout repository history	2026-09-16T18:05:10.5203991Z  * [new tag]           v0.1.227   -> v0.1.227
+Policy	Checkout repository history	2026-09-16T18:05:10.5204425Z  * [new tag]           v0.1.228   -> v0.1.228
+Policy	Checkout repository history	2026-09-16T18:05:10.5204864Z  * [new tag]           v0.1.229   -> v0.1.229
+Policy	Checkout repository history	2026-09-16T18:05:10.5205286Z  * [new tag]           v0.1.23    -> v0.1.23
+Policy	Checkout repository history	2026-09-16T18:05:10.5205714Z  * [new tag]           v0.1.230   -> v0.1.230
+Policy	Checkout repository history	2026-09-16T18:05:10.5206165Z  * [new tag]           v0.1.231   -> v0.1.231
+Policy	Checkout repository history	2026-09-16T18:05:10.5206613Z  * [new tag]           v0.1.232   -> v0.1.232
+Policy	Checkout repository history	2026-09-16T18:05:10.5207055Z  * [new tag]           v0.1.233   -> v0.1.233
+Policy	Checkout repository history	2026-09-16T18:05:10.5207718Z  * [new tag]           v0.1.234   -> v0.1.234
+Policy	Checkout repository history	2026-09-16T18:05:10.5208158Z  * [new tag]           v0.1.235   -> v0.1.235
+Policy	Checkout repository history	2026-09-16T18:05:10.5208589Z  * [new tag]           v0.1.236   -> v0.1.236
+Policy	Checkout repository history	2026-09-16T18:05:10.5208881Z  * [new tag]           v0.1.237   -> v0.1.237
+Policy	Checkout repository history	2026-09-16T18:05:10.5209341Z  * [new tag]           v0.1.238   -> v0.1.238
+Policy	Checkout repository history	2026-09-16T18:05:10.5209621Z  * [new tag]           v0.1.239   -> v0.1.239
+Policy	Checkout repository history	2026-09-16T18:05:10.5209895Z  * [new tag]           v0.1.24    -> v0.1.24
+Policy	Checkout repository history	2026-09-16T18:05:10.5210172Z  * [new tag]           v0.1.240   -> v0.1.240
+Policy	Checkout repository history	2026-09-16T18:05:10.5210440Z  * [new tag]           v0.1.241   -> v0.1.241
+Policy	Checkout repository history	2026-09-16T18:05:10.5210713Z  * [new tag]           v0.1.242   -> v0.1.242
+Policy	Checkout repository history	2026-09-16T18:05:10.5210987Z  * [new tag]           v0.1.243   -> v0.1.243
+Policy	Checkout repository history	2026-09-16T18:05:10.5211260Z  * [new tag]           v0.1.244   -> v0.1.244
+Policy	Checkout repository history	2026-09-16T18:05:10.5211534Z  * [new tag]           v0.1.245   -> v0.1.245
+Policy	Checkout repository history	2026-09-16T18:05:10.5211808Z  * [new tag]           v0.1.246   -> v0.1.246
+Policy	Checkout repository history	2026-09-16T18:05:10.5212077Z  * [new tag]           v0.1.247   -> v0.1.247
+Policy	Checkout repository history	2026-09-16T18:05:10.5212344Z  * [new tag]           v0.1.248   -> v0.1.248
+Policy	Checkout repository history	2026-09-16T18:05:10.5212611Z  * [new tag]           v0.1.249   -> v0.1.249
+Policy	Checkout repository history	2026-09-16T18:05:10.5212882Z  * [new tag]           v0.1.25    -> v0.1.25
+Policy	Checkout repository history	2026-09-16T18:05:10.5213163Z  * [new tag]           v0.1.250   -> v0.1.250
+Policy	Checkout repository history	2026-09-16T18:05:10.5213433Z  * [new tag]           v0.1.251   -> v0.1.251
+Policy	Checkout repository history	2026-09-16T18:05:10.5213700Z  * [new tag]           v0.1.252   -> v0.1.252
+Policy	Checkout repository history	2026-09-16T18:05:10.5213971Z  * [new tag]           v0.1.253   -> v0.1.253
+Policy	Checkout repository history	2026-09-16T18:05:10.5214238Z  * [new tag]           v0.1.254   -> v0.1.254
+Policy	Checkout repository history	2026-09-16T18:05:10.5214509Z  * [new tag]           v0.1.255   -> v0.1.255
+Policy	Checkout repository history	2026-09-16T18:05:10.5214775Z  * [new tag]           v0.1.256   -> v0.1.256
+Policy	Checkout repository history	2026-09-16T18:05:10.5215044Z  * [new tag]           v0.1.257   -> v0.1.257
+Policy	Checkout repository history	2026-09-16T18:05:10.5215342Z  * [new tag]           v0.1.258   -> v0.1.258
+Policy	Checkout repository history	2026-09-16T18:05:10.5215630Z  * [new tag]           v0.1.259   -> v0.1.259
+Policy	Checkout repository history	2026-09-16T18:05:10.5215978Z  * [new tag]           v0.1.26    -> v0.1.26
+Policy	Checkout repository history	2026-09-16T18:05:10.5216410Z  * [new tag]           v0.1.260   -> v0.1.260
+Policy	Checkout repository history	2026-09-16T18:05:10.5216712Z  * [new tag]           v0.1.261   -> v0.1.261
+Policy	Checkout repository history	2026-09-16T18:05:10.5216991Z  * [new tag]           v0.1.262   -> v0.1.262
+Policy	Checkout repository history	2026-09-16T18:05:10.5217494Z  * [new tag]           v0.1.263   -> v0.1.263
+Policy	Checkout repository history	2026-09-16T18:05:10.5217913Z  * [new tag]           v0.1.264   -> v0.1.264
+Policy	Checkout repository history	2026-09-16T18:05:10.5218415Z  * [new tag]           v0.1.265   -> v0.1.265
+Policy	Checkout repository history	2026-09-16T18:05:10.5218733Z  * [new tag]           v0.1.266   -> v0.1.266
+Policy	Checkout repository history	2026-09-16T18:05:10.5219087Z  * [new tag]           v0.1.267   -> v0.1.267
+Policy	Checkout repository history	2026-09-16T18:05:10.5219422Z  * [new tag]           v0.1.268   -> v0.1.268
+Policy	Checkout repository history	2026-09-16T18:05:10.5219754Z  * [new tag]           v0.1.269   -> v0.1.269
+Policy	Checkout repository history	2026-09-16T18:05:10.5220066Z  * [new tag]           v0.1.27    -> v0.1.27
+Policy	Checkout repository history	2026-09-16T18:05:10.5220376Z  * [new tag]           v0.1.270   -> v0.1.270
+Policy	Checkout repository history	2026-09-16T18:05:10.5220686Z  * [new tag]           v0.1.271   -> v0.1.271
+Policy	Checkout repository history	2026-09-16T18:05:10.5220963Z  * [new tag]           v0.1.272   -> v0.1.272
+Policy	Checkout repository history	2026-09-16T18:05:10.5221233Z  * [new tag]           v0.1.273   -> v0.1.273
+Policy	Checkout repository history	2026-09-16T18:05:10.5221514Z  * [new tag]           v0.1.274   -> v0.1.274
+Policy	Checkout repository history	2026-09-16T18:05:10.5221805Z  * [new tag]           v0.1.28    -> v0.1.28
+Policy	Checkout repository history	2026-09-16T18:05:10.5222077Z  * [new tag]           v0.1.29    -> v0.1.29
+Policy	Checkout repository history	2026-09-16T18:05:10.5222356Z  * [new tag]           v0.1.3     -> v0.1.3
+Policy	Checkout repository history	2026-09-16T18:05:10.5222648Z  * [new tag]           v0.1.30    -> v0.1.30
+Policy	Checkout repository history	2026-09-16T18:05:10.5222921Z  * [new tag]           v0.1.31    -> v0.1.31
+Policy	Checkout repository history	2026-09-16T18:05:10.5223187Z  * [new tag]           v0.1.32    -> v0.1.32
+Policy	Checkout repository history	2026-09-16T18:05:10.5223459Z  * [new tag]           v0.1.33    -> v0.1.33
+Policy	Checkout repository history	2026-09-16T18:05:10.5223730Z  * [new tag]           v0.1.34    -> v0.1.34
+Policy	Checkout repository history	2026-09-16T18:05:10.5223998Z  * [new tag]           v0.1.35    -> v0.1.35
+Policy	Checkout repository history	2026-09-16T18:05:10.5224269Z  * [new tag]           v0.1.36    -> v0.1.36
+Policy	Checkout repository history	2026-09-16T18:05:10.5224545Z  * [new tag]           v0.1.37    -> v0.1.37
+Policy	Checkout repository history	2026-09-16T18:05:10.5224831Z  * [new tag]           v0.1.38    -> v0.1.38
+Policy	Checkout repository history	2026-09-16T18:05:10.5225158Z  * [new tag]           v0.1.39    -> v0.1.39
+Policy	Checkout repository history	2026-09-16T18:05:10.5225440Z  * [new tag]           v0.1.4     -> v0.1.4
+Policy	Checkout repository history	2026-09-16T18:05:10.5225854Z  * [new tag]           v0.1.40    -> v0.1.40
+Policy	Checkout repository history	2026-09-16T18:05:10.5226125Z  * [new tag]           v0.1.41    -> v0.1.41
+Policy	Checkout repository history	2026-09-16T18:05:10.5226393Z  * [new tag]           v0.1.42    -> v0.1.42
+Policy	Checkout repository history	2026-09-16T18:05:10.5226668Z  * [new tag]           v0.1.43    -> v0.1.43
+Policy	Checkout repository history	2026-09-16T18:05:10.5226938Z  * [new tag]           v0.1.44    -> v0.1.44
+Policy	Checkout repository history	2026-09-16T18:05:10.5227219Z  * [new tag]           v0.1.45    -> v0.1.45
+Policy	Checkout repository history	2026-09-16T18:05:10.5227778Z  * [new tag]           v0.1.46    -> v0.1.46
+Policy	Checkout repository history	2026-09-16T18:05:10.5228195Z  * [new tag]           v0.1.47    -> v0.1.47
+Policy	Checkout repository history	2026-09-16T18:05:10.5228628Z  * [new tag]           v0.1.48    -> v0.1.48
+Policy	Checkout repository history	2026-09-16T18:05:10.5229132Z  * [new tag]           v0.1.49    -> v0.1.49
+Policy	Checkout repository history	2026-09-16T18:05:10.5229777Z  * [new tag]           v0.1.5     -> v0.1.5
+Policy	Checkout repository history	2026-09-16T18:05:10.5230256Z  * [new tag]           v0.1.50    -> v0.1.50
+Policy	Checkout repository history	2026-09-16T18:05:10.5230679Z  * [new tag]           v0.1.51    -> v0.1.51
+Policy	Checkout repository history	2026-09-16T18:05:10.5231085Z  * [new tag]           v0.1.52    -> v0.1.52
+Policy	Checkout repository history	2026-09-16T18:05:10.5231520Z  * [new tag]           v0.1.53    -> v0.1.53
+Policy	Checkout repository history	2026-09-16T18:05:10.5231958Z  * [new tag]           v0.1.54    -> v0.1.54
+Policy	Checkout repository history	2026-09-16T18:05:10.5232393Z  * [new tag]           v0.1.55    -> v0.1.55
+Policy	Checkout repository history	2026-09-16T18:05:10.5232831Z  * [new tag]           v0.1.56    -> v0.1.56
+Policy	Checkout repository history	2026-09-16T18:05:10.5233253Z  * [new tag]           v0.1.57    -> v0.1.57
+Policy	Checkout repository history	2026-09-16T18:05:10.5233681Z  * [new tag]           v0.1.58    -> v0.1.58
+Policy	Checkout repository history	2026-09-16T18:05:10.5234120Z  * [new tag]           v0.1.59    -> v0.1.59
+Policy	Checkout repository history	2026-09-16T18:05:10.5234553Z  * [new tag]           v0.1.6     -> v0.1.6
+Policy	Checkout repository history	2026-09-16T18:05:10.5234989Z  * [new tag]           v0.1.60    -> v0.1.60
+Policy	Checkout repository history	2026-09-16T18:05:10.5235414Z  * [new tag]           v0.1.61    -> v0.1.61
+Policy	Checkout repository history	2026-09-16T18:05:10.5235838Z  * [new tag]           v0.1.62    -> v0.1.62
+Policy	Checkout repository history	2026-09-16T18:05:10.5236271Z  * [new tag]           v0.1.63    -> v0.1.63
+Policy	Checkout repository history	2026-09-16T18:05:10.5236693Z  * [new tag]           v0.1.64    -> v0.1.64
+Policy	Checkout repository history	2026-09-16T18:05:10.5237130Z  * [new tag]           v0.1.65    -> v0.1.65
+Policy	Checkout repository history	2026-09-16T18:05:10.5237675Z  * [new tag]           v0.1.66    -> v0.1.66
+Policy	Checkout repository history	2026-09-16T18:05:10.5237995Z  * [new tag]           v0.1.67    -> v0.1.67
+Policy	Checkout repository history	2026-09-16T18:05:10.5238454Z  * [new tag]           v0.1.68    -> v0.1.68
+Policy	Checkout repository history	2026-09-16T18:05:10.5238725Z  * [new tag]           v0.1.69    -> v0.1.69
+Policy	Checkout repository history	2026-09-16T18:05:10.5238996Z  * [new tag]           v0.1.7     -> v0.1.7
+Policy	Checkout repository history	2026-09-16T18:05:10.5239269Z  * [new tag]           v0.1.70    -> v0.1.70
+Policy	Checkout repository history	2026-09-16T18:05:10.5239542Z  * [new tag]           v0.1.71    -> v0.1.71
+Policy	Checkout repository history	2026-09-16T18:05:10.5239810Z  * [new tag]           v0.1.72    -> v0.1.72
+Policy	Checkout repository history	2026-09-16T18:05:10.5240079Z  * [new tag]           v0.1.73    -> v0.1.73
+Policy	Checkout repository history	2026-09-16T18:05:10.5240353Z  * [new tag]           v0.1.74    -> v0.1.74
+Policy	Checkout repository history	2026-09-16T18:05:10.5240625Z  * [new tag]           v0.1.75    -> v0.1.75
+Policy	Checkout repository history	2026-09-16T18:05:10.5240898Z  * [new tag]           v0.1.76    -> v0.1.76
+Policy	Checkout repository history	2026-09-16T18:05:10.5241167Z  * [new tag]           v0.1.77    -> v0.1.77
+Policy	Checkout repository history	2026-09-16T18:05:10.5241438Z  * [new tag]           v0.1.78    -> v0.1.78
+Policy	Checkout repository history	2026-09-16T18:05:10.5241713Z  * [new tag]           v0.1.79    -> v0.1.79
+Policy	Checkout repository history	2026-09-16T18:05:10.5241984Z  * [new tag]           v0.1.8     -> v0.1.8
+Policy	Checkout repository history	2026-09-16T18:05:10.5242262Z  * [new tag]           v0.1.80    -> v0.1.80
+Policy	Checkout repository history	2026-09-16T18:05:10.5242530Z  * [new tag]           v0.1.81    -> v0.1.81
+Policy	Checkout repository history	2026-09-16T18:05:10.5242800Z  * [new tag]           v0.1.82    -> v0.1.82
+Policy	Checkout repository history	2026-09-16T18:05:10.5243071Z  * [new tag]           v0.1.83    -> v0.1.83
+Policy	Checkout repository history	2026-09-16T18:05:10.5243345Z  * [new tag]           v0.1.84    -> v0.1.84
+Policy	Checkout repository history	2026-09-16T18:05:10.5243640Z  * [new tag]           v0.1.85    -> v0.1.85
+Policy	Checkout repository history	2026-09-16T18:05:10.5243904Z  * [new tag]           v0.1.86    -> v0.1.86
+Policy	Checkout repository history	2026-09-16T18:05:10.5244182Z  * [new tag]           v0.1.87    -> v0.1.87
+Policy	Checkout repository history	2026-09-16T18:05:10.5244463Z  * [new tag]           v0.1.88    -> v0.1.88
+Policy	Checkout repository history	2026-09-16T18:05:10.5244756Z  * [new tag]           v0.1.89    -> v0.1.89
+Policy	Checkout repository history	2026-09-16T18:05:10.5245029Z  * [new tag]           v0.1.9     -> v0.1.9
+Policy	Checkout repository history	2026-09-16T18:05:10.5245306Z  * [new tag]           v0.1.90    -> v0.1.90
+Policy	Checkout repository history	2026-09-16T18:05:10.5245724Z  * [new tag]           v0.1.91    -> v0.1.91
+Policy	Checkout repository history	2026-09-16T18:05:10.5245996Z  * [new tag]           v0.1.92    -> v0.1.92
+Policy	Checkout repository history	2026-09-16T18:05:10.5246270Z  * [new tag]           v0.1.93    -> v0.1.93
+Policy	Checkout repository history	2026-09-16T18:05:10.5246537Z  * [new tag]           v0.1.94    -> v0.1.94
+Policy	Checkout repository history	2026-09-16T18:05:10.5246806Z  * [new tag]           v0.1.95    -> v0.1.95
+Policy	Checkout repository history	2026-09-16T18:05:10.5247074Z  * [new tag]           v0.1.96    -> v0.1.96
+Policy	Checkout repository history	2026-09-16T18:05:10.5247536Z  * [new tag]           v0.1.97    -> v0.1.97
+Policy	Checkout repository history	2026-09-16T18:05:10.5247821Z  * [new tag]           v0.1.98    -> v0.1.98
+Policy	Checkout repository history	2026-09-16T18:05:10.5248090Z  * [new tag]           v0.1.99    -> v0.1.99
+Policy	Checkout repository history	2026-09-16T18:05:10.5249191Z [command]/usr/bin/git branch --list --remote origin/main
+Policy	Checkout repository history	2026-09-16T18:05:10.5249558Z   origin/main
+Policy	Checkout repository history	2026-09-16T18:05:10.5250140Z [command]/usr/bin/git rev-parse refs/remotes/origin/main
+Policy	Checkout repository history	2026-09-16T18:05:10.5256190Z 3353310c7648fca22698b6c0f4a69ab245127786
+Policy	Checkout repository history	2026-09-16T18:05:10.5260966Z ##[endgroup]
+Policy	Checkout repository history	2026-09-16T18:05:10.5261679Z ##[group]Determining the checkout info
+Policy	Checkout repository history	2026-09-16T18:05:10.5262656Z ##[endgroup]
+Policy	Checkout repository history	2026-09-16T18:05:10.5267726Z [command]/usr/bin/git sparse-checkout disable
+Policy	Checkout repository history	2026-09-16T18:05:10.5322978Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+Policy	Checkout repository history	2026-09-16T18:05:10.5358403Z ##[group]Checking out the ref
+Policy	Checkout repository history	2026-09-16T18:05:10.5361826Z [command]/usr/bin/git checkout --progress --force -B main refs/remotes/origin/main
+Policy	Checkout repository history	2026-09-16T18:05:10.6225930Z Switched to a new branch 'main'
+Policy	Checkout repository history	2026-09-16T18:05:10.6229520Z branch 'main' set up to track 'origin/main'.
+Policy	Checkout repository history	2026-09-16T18:05:10.6247533Z ##[endgroup]
+Policy	Checkout repository history	2026-09-16T18:05:10.6296883Z [command]/usr/bin/git log -1 --format=%H
+Policy	Checkout repository history	2026-09-16T18:05:10.6328310Z 3353310c7648fca22698b6c0f4a69ab245127786
+Policy	Checkout repository history	2026-09-16T18:05:10.6338502Z ##[group]Removing auth
+Policy	Checkout repository history	2026-09-16T18:05:10.6339112Z Removing SSH command configuration
+Policy	Checkout repository history	2026-09-16T18:05:10.6342322Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Policy	Checkout repository history	2026-09-16T18:05:10.6384413Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Policy	Checkout repository history	2026-09-16T18:05:10.6625481Z Removing HTTP extra header
+Policy	Checkout repository history	2026-09-16T18:05:10.6629903Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Policy	Checkout repository history	2026-09-16T18:05:10.6668536Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Policy	Checkout repository history	2026-09-16T18:05:10.6904532Z Removing includeIf entries pointing to credentials config files
+Policy	Checkout repository history	2026-09-16T18:05:10.6907952Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Policy	Checkout repository history	2026-09-16T18:05:10.6941269Z includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git.path
+Policy	Checkout repository history	2026-09-16T18:05:10.6942132Z includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git/worktrees/*.path
+Policy	Checkout repository history	2026-09-16T18:05:10.6942718Z includeif.gitdir:/github/workspace/policy-checkout/.git.path
+Policy	Checkout repository history	2026-09-16T18:05:10.6943227Z includeif.gitdir:/github/workspace/policy-checkout/.git/worktrees/*.path
+Policy	Checkout repository history	2026-09-16T18:05:10.6951746Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git.path
+Policy	Checkout repository history	2026-09-16T18:05:10.6984672Z /home/runner/work/_temp/git-credentials-8c324e4a-dfbe-4689-a89e-2aca582e6923.config
+Policy	Checkout repository history	2026-09-16T18:05:10.6993915Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git.path \/home\/runner\/work\/_temp\/git\-credentials\-8c324e4a\-dfbe\-4689\-a89e\-2aca582e6923\.config
+Policy	Checkout repository history	2026-09-16T18:05:10.7032232Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git/worktrees/*.path
+Policy	Checkout repository history	2026-09-16T18:05:10.7060796Z /home/runner/work/_temp/git-credentials-8c324e4a-dfbe-4689-a89e-2aca582e6923.config
+Policy	Checkout repository history	2026-09-16T18:05:10.7068863Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git/worktrees/*.path \/home\/runner\/work\/_temp\/git\-credentials\-8c324e4a\-dfbe\-4689\-a89e\-2aca582e6923\.config
+Policy	Checkout repository history	2026-09-16T18:05:10.7114842Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/policy-checkout/.git.path
+Policy	Checkout repository history	2026-09-16T18:05:10.7143761Z /github/runner_temp/git-credentials-8c324e4a-dfbe-4689-a89e-2aca582e6923.config
+Policy	Checkout repository history	2026-09-16T18:05:10.7151557Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/policy-checkout/.git.path \/github\/runner_temp\/git\-credentials\-8c324e4a\-dfbe\-4689\-a89e\-2aca582e6923\.config
+Policy	Checkout repository history	2026-09-16T18:05:10.7188857Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/policy-checkout/.git/worktrees/*.path
+Policy	Checkout repository history	2026-09-16T18:05:10.7216516Z /github/runner_temp/git-credentials-8c324e4a-dfbe-4689-a89e-2aca582e6923.config
+Policy	Checkout repository history	2026-09-16T18:05:10.7224908Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/policy-checkout/.git/worktrees/*.path \/github\/runner_temp\/git\-credentials\-8c324e4a\-dfbe\-4689\-a89e\-2aca582e6923\.config
+Policy	Checkout repository history	2026-09-16T18:05:10.7262586Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Policy	Checkout repository history	2026-09-16T18:05:10.7496334Z Removing credentials config '/home/runner/work/_temp/git-credentials-8c324e4a-dfbe-4689-a89e-2aca582e6923.config'
+Policy	Checkout repository history	2026-09-16T18:05:10.7504475Z ##[endgroup]
+Policy	Check out audited head	﻿2026-09-16T18:05:10.7730703Z ##[group]Run set -euo pipefail
+Policy	Check out audited head	2026-09-16T18:05:10.7731095Z ^[[36;1mset -euo pipefail^[[0m
+Policy	Check out audited head	2026-09-16T18:05:10.7731454Z ^[[36;1mif ! git cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null; then^[[0m
+Policy	Check out audited head	2026-09-16T18:05:10.7731950Z ^[[36;1m  git fetch --no-tags "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$HEAD_SHA"^[[0m
+Policy	Check out audited head	2026-09-16T18:05:10.7732338Z ^[[36;1mfi^[[0m
+Policy	Check out audited head	2026-09-16T18:05:10.7732592Z ^[[36;1mgit checkout --quiet --detach "$HEAD_SHA"^[[0m
+Policy	Check out audited head	2026-09-16T18:05:10.7775182Z shell: /usr/bin/bash -e {0}
+Policy	Check out audited head	2026-09-16T18:05:10.7775480Z env:
+Policy	Check out audited head	2026-09-16T18:05:10.7775740Z   HEAD_SHA: 9041c9cb989ea2d458e6025257c11f67f7f8e2f6
+Policy	Check out audited head	2026-09-16T18:05:10.7776082Z   HEAD_REPOSITORY: tailrocks/velnor
+Policy	Check out audited head	2026-09-16T18:05:10.7776358Z ##[endgroup]
+Policy	Bound the Mr. Boxington store	﻿2026-09-16T18:05:10.8526284Z ##[group]Run echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
+Policy	Bound the Mr. Boxington store	2026-09-16T18:05:10.8526724Z ^[[36;1mecho "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"^[[0m
+Policy	Bound the Mr. Boxington store	2026-09-16T18:05:10.8567053Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Policy	Bound the Mr. Boxington store	2026-09-16T18:05:10.8567627Z ##[endgroup]
+Policy	Set up Mr. Boxington	﻿2026-09-16T18:05:10.8731726Z ##[group]Run jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777
+Policy	Set up Mr. Boxington	2026-09-16T18:05:10.8732156Z with:
+Policy	Set up Mr. Boxington	2026-09-16T18:05:10.8732366Z   backend: github
+Policy	Set up Mr. Boxington	2026-09-16T18:05:10.8732591Z   version: 1.11.1
+Policy	Set up Mr. Boxington	2026-09-16T18:05:10.8732981Z   cache-key: velnor-policy-mbx-1.11.1-Linux-X64-b9c3156cdb88e63c11b9e595a3e694b02238c09a
+Policy	Set up Mr. Boxington	2026-09-16T18:05:10.8733480Z   restore-keys: velnor-policy-mbx-1.11.1-Linux-X64-
+Policy	Set up Mr. Boxington	
+Policy	Set up Mr. Boxington	2026-09-16T18:05:10.8735925Z   github-token: ***
+Policy	Set up Mr. Boxington	2026-09-16T18:05:10.8736184Z   cache-generation: v1
+Policy	Set up Mr. Boxington	2026-09-16T18:05:10.8736435Z   github-cache-mode: target
+Policy	Set up Mr. Boxington	2026-09-16T18:05:10.8736723Z   save-on-workflow-dispatch: false
+Policy	Set up Mr. Boxington	2026-09-16T18:05:10.8736998Z   cache-links: auto
+Policy	Set up Mr. Boxington	2026-09-16T18:05:10.8737225Z   server-mode: read-write
+Policy	Set up Mr. Boxington	2026-09-16T18:05:10.8737780Z env:
+Policy	Set up Mr. Boxington	2026-09-16T18:05:10.8737992Z   MBX_GC_MAX_SIZE: 12GiB
+Policy	Set up Mr. Boxington	2026-09-16T18:05:10.8738228Z ##[endgroup]
+Policy	Set up Mr. Boxington	2026-09-16T18:05:12.2990084Z [command]/usr/bin/tar xz --warning=no-unknown-keyword --overwrite -C /home/runner/work/_temp/279edb04-46bc-4c93-af5d-46786318c7ee -f /home/runner/work/_temp/3eb57a1e-1d55-4d72-9ba8-83e61c31ae70
+Policy	Set up Mr. Boxington	2026-09-16T18:05:12.4346517Z Set up mbx 1.11.1
+Policy	Set up Mr. Boxington	2026-09-16T18:05:12.4349888Z No mbx cache found
+Policy	Install pinned Velnor workflow runtime	﻿2026-09-16T18:05:12.4507097Z ##[group]Run set -euo pipefail
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:12.4507715Z ^[[36;1mset -euo pipefail^[[0m
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:12.4507975Z ^[[36;1minstall -d -m 700 \^[[0m
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:12.4508219Z ^[[36;1m  "$CARGO_HOME" \^[[0m
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:12.4508460Z ^[[36;1m  "$CARGO_TARGET_DIR" \^[[0m
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:12.4508930Z ^[[36;1m  "$VELNOR_WORKFLOW_INSTALL_DIR"^[[0m
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:12.4509352Z ^[[36;1mcd "$VELNOR_WORKFLOW_INSTALL_DIR"^[[0m
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:12.4509970Z ^[[36;1menv -u RUSTC_WRAPPER -u SCCACHE_GHA_ENABLED -u CARGO_INCREMENTAL -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \^[[0m
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:12.4510599Z ^[[36;1m  cargo install \^[[0m
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:12.4510847Z ^[[36;1m  --locked \^[[0m
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:12.4511138Z ^[[36;1m  --git https://github.com/tailrocks/velnor \^[[0m
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:12.4511522Z ^[[36;1m  --rev b9c3156cdb88e63c11b9e595a3e694b02238c09a \^[[0m
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:12.4511858Z ^[[36;1m  --root "$VELNOR_WORKFLOW_ROOT" \^[[0m
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:12.4512145Z ^[[36;1m  velnor-workflow \^[[0m
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:12.4512396Z ^[[36;1m  --bin velnor-workflow^[[0m
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:12.4512744Z ^[[36;1mecho "$VELNOR_WORKFLOW_ROOT/bin" >> "$GITHUB_PATH"^[[0m
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:12.4553846Z shell: /usr/bin/bash -e {0}
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:12.4554117Z env:
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:12.4554338Z   MBX_GC_MAX_SIZE: 12GiB
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:12.4554593Z   MBX_CACHE_LINKS: 0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:12.4554817Z   MBX_REMOTE_URL: 
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:12.4555036Z   MBX_TARGET_VIEWS: 0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:12.4555355Z   CARGO_HOME: /home/runner/work/_temp/velnor-workflow-cargo-home
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:12.4555815Z   CARGO_TARGET_DIR: /home/runner/work/_temp/velnor-workflow-cargo-target
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:12.4556333Z   VELNOR_WORKFLOW_INSTALL_DIR: /home/runner/work/_temp/velnor-workflow-install
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:12.4556797Z   VELNOR_WORKFLOW_ROOT: /home/runner/work/_temp/velnor-workflow
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:12.4557131Z ##[endgroup]
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:12.5353685Z     Updating git repository `https://github.com/tailrocks/velnor`
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:18.8928445Z   Installing velnor-workflow v0.1.0 (https://github.com/tailrocks/velnor?rev=b9c3156cdb88e63c11b9e595a3e694b02238c09a#b9c3156c)
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:18.9111928Z     Updating crates.io index
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:18.9120410Z     Updating git repository `https://github.com/tailrocks/termrock.git`
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.6348997Z  Downloading crates ...
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.7245391Z   Downloaded anstream v1.0.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.7287887Z   Downloaded anstyle-parse v1.0.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.7306908Z   Downloaded anstyle v1.0.14
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.7478618Z   Downloaded allocator-api2 v0.2.21
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.7516533Z   Downloaded signal-hook-mio v0.2.5
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.7531560Z   Downloaded strum v0.28.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.7559933Z   Downloaded strum_macros v0.28.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.7589116Z   Downloaded serde_ignored v0.1.14
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.7691639Z   Downloaded clap_lex v1.1.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.7827899Z   Downloaded either v1.18.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.7858893Z   Downloaded convert_case v0.10.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.7879415Z   Downloaded document-features v0.2.12
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.7894286Z   Downloaded line-clipping v0.3.8
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.7914064Z   Downloaded thiserror v2.0.20
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.7993321Z   Downloaded hybrid-array v0.4.14
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8020901Z   Downloaded smallvec v1.15.2
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8039739Z   Downloaded anstyle-query v1.1.5
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8053239Z   Downloaded cfg-if v1.0.4
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8069424Z   Downloaded colorchoice v1.0.5
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8080100Z   Downloaded heck v0.5.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8095170Z   Downloaded equivalent v1.0.2
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8106741Z   Downloaded cpufeatures v0.3.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8123404Z   Downloaded approx v0.5.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8144040Z   Downloaded crypto-common v0.2.2
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8157607Z   Downloaded deranged v0.5.8
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8173841Z   Downloaded time-core v0.1.9
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8188911Z   Downloaded utf8parse v0.2.2
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8202104Z   Downloaded is_terminal_polyfill v1.70.2
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8214300Z   Downloaded itoa v1.0.18
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8231125Z   Downloaded castaway v0.2.4
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8248123Z   Downloaded powerfmt v0.2.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8261428Z   Downloaded by_address v1.2.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8271186Z   Downloaded serde_spanned v1.1.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8284663Z   Downloaded rustc-hash v2.1.3
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8299706Z   Downloaded instability v0.3.13
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8317231Z   Downloaded num-conv v0.2.2
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8327473Z   Downloaded block-buffer v0.12.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8342711Z   Downloaded scopeguard v1.2.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8360080Z   Downloaded serde v1.0.229
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8402563Z   Downloaded foldhash v0.2.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8416461Z   Downloaded ident_case v1.0.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8427056Z   Downloaded palette_math v0.7.7
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8443309Z   Downloaded thiserror-impl v2.0.20
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8460861Z   Downloaded toml_writer v1.1.2+spec-1.1.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8476703Z   Downloaded rustc_version v0.4.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8492573Z   Downloaded digest v0.11.3
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8523492Z   Downloaded strsim v0.11.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8543103Z   Downloaded web-time v1.1.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8564244Z   Downloaded toml_datetime v1.1.1+spec-1.1.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8579952Z   Downloaded lock_api v0.4.14
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8595256Z   Downloaded quote v1.0.47
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8627818Z   Downloaded signal-hook-registry v1.4.8
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8641764Z   Downloaded parking_lot_core v0.9.12
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8666333Z   Downloaded autocfg v1.5.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8693114Z   Downloaded unicode-truncate v2.0.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8716418Z   Downloaded darling_macro v0.24.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8725352Z   Downloaded ratatui-crossterm v0.1.2
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8739257Z   Downloaded globset v0.4.20
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8757473Z   Downloaded errno v0.3.14
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8775180Z   Downloaded indoc v2.0.7
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8811829Z   Downloaded lru v0.18.4
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8826143Z   Downloaded palette_derive v0.7.7
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8849872Z   Downloaded sha2 v0.11.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8912491Z   Downloaded toml_parser v1.1.3+spec-1.1.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8942842Z   Downloaded zmij v1.0.23
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.8964287Z   Downloaded aho-corasick v1.1.5
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.9031927Z   Downloaded num_threads v0.1.7
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.9050881Z   Downloaded parking_lot v0.12.5
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.9082545Z   Downloaded static_assertions v1.1.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.9099819Z   Downloaded unicode-ident v1.0.24
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.9131922Z   Downloaded clap_derive v4.6.4
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.9158327Z   Downloaded kasuari v0.4.12
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.9190172Z   Downloaded litrs v1.0.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.9229729Z   Downloaded toml v1.1.4+spec-1.1.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.9275772Z   Downloaded rustversion v1.0.23
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.9309085Z   Downloaded semver v1.0.28
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.9334897Z   Downloaded clap v4.6.6
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.9447773Z   Downloaded const-oid v0.10.2
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.9474225Z   Downloaded tui-scrollbar v0.2.7
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.9497576Z   Downloaded log v0.4.34
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.9525521Z   Downloaded num-traits v0.2.19
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.9554583Z   Downloaded serde_derive v1.0.229
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.9588932Z   Downloaded ryu v1.0.23
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.9625761Z   Downloaded bitflags v2.13.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.9678695Z   Downloaded darling v0.24.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.9758295Z   Downloaded serde_core v1.0.229
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.9788785Z   Downloaded signal-hook v0.3.18
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.9823159Z   Downloaded ratatui v0.30.2
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.9865341Z   Downloaded compact_str v0.9.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.9903925Z   Downloaded darling_core v0.24.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:30.9976083Z   Downloaded proc-macro2 v1.0.107
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.0020005Z   Downloaded base64 v0.23.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.0065347Z   Downloaded derive_more v2.1.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.0218158Z   Downloaded unicode-segmentation v1.13.3
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.0251200Z   Downloaded memchr v2.8.3
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.0314892Z   Downloaded indexmap v2.14.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.0364159Z   Downloaded derive_more-impl v2.1.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.0426722Z   Downloaded typenum v1.20.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.0466894Z   Downloaded mio v1.2.2
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.0538300Z   Downloaded hashbrown v0.16.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.0597206Z   Downloaded libm v0.2.16
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.0724524Z   Downloaded crossterm v0.29.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.0804382Z   Downloaded hashbrown v0.17.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.0864562Z   Downloaded itertools v0.14.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.0946978Z   Downloaded serde_json v1.0.151
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.1030688Z   Downloaded syn v2.0.119
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.1149976Z   Downloaded portable-atomic v1.15.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.1232165Z   Downloaded ratatui-core v0.1.2
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.1310122Z   Downloaded clap_builder v4.6.6
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.1384968Z   Downloaded winnow v1.0.4
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.1497491Z   Downloaded syn v3.0.4
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.1617853Z   Downloaded ratatui-widgets v0.3.2
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.1708925Z   Downloaded unicode-width v0.2.2
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.1768735Z   Downloaded time v0.3.55
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.1939153Z   Downloaded palette v0.7.7
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.2080652Z   Downloaded regex-syntax v0.8.11
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.2155005Z   Downloaded bstr v1.13.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.2242267Z   Downloaded rustix v1.1.4
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.2553262Z   Downloaded regex-automata v0.4.18
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.2709976Z   Downloaded noyalib v0.0.28
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.3330665Z   Downloaded libc v0.2.189
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.3828340Z   Downloaded linux-raw-sys v0.12.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.6176189Z    Compiling proc-macro2 v1.0.107
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.6177082Z    Compiling unicode-ident v1.0.24
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.6178005Z    Compiling quote v1.0.47
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:31.6178431Z    Compiling libc v0.2.189
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:34.5826873Z    Compiling equivalent v1.0.2
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:34.6661847Z    Compiling foldhash v0.2.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:35.2051569Z    Compiling allocator-api2 v0.2.21
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:35.5151912Z    Compiling cfg-if v1.0.4
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:35.5375160Z    Compiling serde_core v1.0.229
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:35.8474764Z    Compiling rustversion v1.0.23
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:35.8748491Z    Compiling heck v0.5.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:36.0174430Z    Compiling hashbrown v0.17.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:36.0613477Z    Compiling thiserror v2.0.20
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:36.2054034Z    Compiling itoa v1.0.18
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:36.4709093Z    Compiling bitflags v2.13.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:37.1289617Z    Compiling strsim v0.11.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:37.2349916Z    Compiling syn v3.0.4
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:37.2568481Z    Compiling syn v2.0.119
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:37.4166419Z    Compiling ryu v1.0.23
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:37.6848432Z    Compiling ident_case v1.0.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:37.7458952Z    Compiling either v1.18.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:37.9418404Z    Compiling itertools v0.14.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:39.2008982Z    Compiling castaway v0.2.4
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:39.2898822Z    Compiling errno v0.3.14
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:39.4128641Z    Compiling hashbrown v0.16.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:39.5018434Z    Compiling strum_macros v0.28.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:39.5956013Z    Compiling signal-hook v0.3.18
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:39.6878608Z    Compiling parking_lot_core v0.9.12
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:39.8048882Z    Compiling smallvec v1.15.2
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:40.0158489Z    Compiling darling_core v0.24.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:40.1388742Z    Compiling unicode-segmentation v1.13.3
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:40.7928907Z    Compiling unicode-width v0.2.2
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:41.3471286Z    Compiling static_assertions v1.1.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:41.3949163Z    Compiling log v0.4.34
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:41.4038402Z    Compiling strum v0.28.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:41.4708518Z    Compiling compact_str v0.9.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:41.5458648Z    Compiling convert_case v0.10.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:41.5565780Z    Compiling thiserror-impl v2.0.20
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:41.7529171Z    Compiling unicode-truncate v2.0.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:41.8838629Z    Compiling signal-hook-registry v1.4.8
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:42.2898980Z    Compiling lru v0.18.4
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:42.4358428Z    Compiling instability v0.3.13
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:42.5218682Z    Compiling scopeguard v1.2.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:42.5773977Z    Compiling memchr v2.8.3
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:42.6061458Z    Compiling kasuari v0.4.12
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:42.8468859Z    Compiling darling_macro v0.24.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:42.8798059Z    Compiling litrs v1.0.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:43.0218975Z    Compiling rustix v1.1.4
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:43.2858969Z    Compiling document-features v0.2.12
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:43.3334942Z    Compiling darling v0.24.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:43.3737537Z    Compiling ratatui-core v0.1.2
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:43.6548595Z    Compiling lock_api v0.4.14
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:44.2528836Z    Compiling derive_more-impl v2.1.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:44.2721908Z    Compiling mio v1.2.2
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:44.4228466Z    Compiling indoc v2.0.7
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:44.6789094Z    Compiling linux-raw-sys v0.12.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:44.8118616Z    Compiling utf8parse v0.2.2
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:44.8678890Z    Compiling typenum v1.20.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:44.9518743Z    Compiling anstyle-parse v1.0.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:45.1108493Z    Compiling derive_more v2.1.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:45.5689120Z    Compiling signal-hook-mio v0.2.5
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:45.6388246Z    Compiling parking_lot v0.12.5
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:45.7538888Z    Compiling hybrid-array v0.4.14
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:46.2028438Z    Compiling num_threads v0.1.7
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:46.3478506Z    Compiling time-core v0.1.9
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:46.3518082Z    Compiling deranged v0.5.8
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:46.5109008Z    Compiling powerfmt v0.2.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:46.5358719Z    Compiling num-conv v0.2.2
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:46.6456798Z    Compiling crossterm v0.29.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:46.7116554Z    Compiling line-clipping v0.3.8
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:47.0688427Z    Compiling zmij v1.0.23
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:47.2128438Z    Compiling colorchoice v1.0.5
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:47.2678553Z    Compiling libm v0.2.16
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:47.4228365Z    Compiling anstyle v1.0.14
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:47.5568635Z    Compiling time v0.3.55
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:47.6310709Z    Compiling anstyle-query v1.1.5
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:47.6858433Z    Compiling is_terminal_polyfill v1.70.2
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:47.7358454Z    Compiling anstream v1.0.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:48.2415393Z    Compiling ratatui-crossterm v0.1.2
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:48.4078558Z    Compiling ratatui-widgets v0.3.2
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:48.4458506Z    Compiling block-buffer v0.12.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:48.5658260Z    Compiling crypto-common v0.2.2
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:48.6199657Z    Compiling aho-corasick v1.1.5
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:49.1748611Z    Compiling winnow v1.0.4
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:49.5889153Z    Compiling serde_json v1.0.151
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:49.9300680Z    Compiling noyalib v0.0.28
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:50.0779161Z    Compiling clap_lex v1.1.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:50.3608747Z    Compiling serde v1.0.229
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:50.5062090Z    Compiling regex-syntax v0.8.11
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:50.5118797Z    Compiling const-oid v0.10.2
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:50.7528958Z    Compiling digest v0.11.3
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:50.9108279Z    Compiling clap_builder v4.6.6
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:54.1448932Z    Compiling regex-automata v0.4.18
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:55.3353484Z    Compiling toml_parser v1.1.3+spec-1.1.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:57.5738436Z    Compiling tui-scrollbar v0.2.7
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:57.8428829Z    Compiling bstr v1.13.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:58.5018308Z    Compiling serde_derive v1.0.229
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:05:59.4388927Z    Compiling clap_derive v4.6.4
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:06:01.0299074Z    Compiling toml_datetime v1.1.1+spec-1.1.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:06:01.2252041Z    Compiling serde_ignored v0.1.14
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:06:01.4049181Z    Compiling serde_spanned v1.1.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:06:01.4148305Z    Compiling indexmap v2.14.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:06:01.4979248Z    Compiling toml_writer v1.1.2+spec-1.1.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:06:01.7028147Z    Compiling cpufeatures v0.3.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:06:01.7863256Z    Compiling velnor-workflow v0.1.0 (/home/runner/work/_temp/velnor-workflow-cargo-home/git/checkouts/velnor-09f3d470aa1f0308/b9c3156/crates/velnor-workflow)
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:06:01.9398912Z    Compiling rustc-hash v2.1.3
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:06:02.0118427Z    Compiling web-time v1.1.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:06:02.0498678Z    Compiling base64 v0.23.1
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:06:02.7827123Z    Compiling termrock v0.11.0 (https://github.com/tailrocks/termrock.git?rev=5283c2acf9154d0cfcd37b1ffe821c00faf90ea2#5283c2ac)
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:06:03.4497583Z    Compiling sha2 v0.11.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:06:05.3475212Z    Compiling toml v1.1.4+spec-1.1.0
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:06:06.9358857Z    Compiling clap v4.6.6
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:06:06.9818616Z    Compiling globset v0.4.20
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:06:10.6138447Z    Compiling ratatui v0.30.2
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:07:01.4312265Z     Finished `release` profile [optimized] target(s) in 1m 48s
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:07:01.4467165Z   Installing /home/runner/work/_temp/velnor-workflow/bin/velnor-workflow
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:07:01.4476862Z    Installed package `velnor-workflow v0.1.0 (https://github.com/tailrocks/velnor?rev=b9c3156cdb88e63c11b9e595a3e694b02238c09a#b9c3156c)` (executable `velnor-workflow`)
+Policy	Install pinned Velnor workflow runtime	2026-09-16T18:07:01.4491366Z warning: be sure to add `/home/runner/work/_temp/velnor-workflow/bin` to your PATH to be able to run the installed binaries
+Policy	Resolve required status checks	﻿2026-09-16T18:07:01.4713799Z ##[group]Run set -euo pipefail
+Policy	Resolve required status checks	2026-09-16T18:07:01.4714154Z ^[[36;1mset -euo pipefail^[[0m
+Policy	Resolve required status checks	2026-09-16T18:07:01.4714407Z ^[[36;1mstderr="$(mktemp)"^[[0m
+Policy	Resolve required status checks	2026-09-16T18:07:01.4714664Z ^[[36;1mtrap 'rm -f "$stderr"' EXIT^[[0m
+Policy	Resolve required status checks	2026-09-16T18:07:01.4715142Z ^[[36;1mif contexts="$(gh api "repos/$GITHUB_REPOSITORY/rulesets?includes_parents=true" 2>"$stderr" \^[[0m
+Policy	Resolve required status checks	2026-09-16T18:07:01.4715766Z ^[[36;1m  | jq -r '.[] | select(.target == "branch" and .enforcement == "active") | .id' \^[[0m
+Policy	Resolve required status checks	2026-09-16T18:07:01.4716282Z ^[[36;1m  | while read -r id; do gh api "repos/$GITHUB_REPOSITORY/rulesets/$id"; done \^[[0m
+Policy	Resolve required status checks	2026-09-16T18:07:01.4717825Z ^[[36;1m  | jq -r --arg branch "refs/heads/$DEFAULT_BRANCH" 'select(.conditions.ref_name.include | any(. == "~DEFAULT_BRANCH" or . == "~ALL" or . == $branch)) | .rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context' \^[[0m
+Policy	Resolve required status checks	2026-09-16T18:07:01.4718736Z ^[[36;1m  | sort -u | paste -sd, -)"; then^[[0m
+Policy	Resolve required status checks	2026-09-16T18:07:01.4719021Z ^[[36;1m  :^[[0m
+Policy	Resolve required status checks	2026-09-16T18:07:01.4719375Z ^[[36;1melif grep -qE '(HTTP 403|Upgrade to GitHub Team)' "$stderr"; then^[[0m
+Policy	Resolve required status checks	2026-09-16T18:07:01.4719966Z ^[[36;1m  echo "::warning::rulesets API returned 403; falling back to declared contexts [$DECLARED_RULESET_CONTEXTS]"^[[0m
+Policy	Resolve required status checks	2026-09-16T18:07:01.4720524Z ^[[36;1m  contexts="$DECLARED_RULESET_CONTEXTS"^[[0m
+Policy	Resolve required status checks	2026-09-16T18:07:01.4720825Z ^[[36;1melse^[[0m
+Policy	Resolve required status checks	2026-09-16T18:07:01.4721042Z ^[[36;1m  cat "$stderr" >&2^[[0m
+Policy	Resolve required status checks	2026-09-16T18:07:01.4721298Z ^[[36;1m  exit 1^[[0m
+Policy	Resolve required status checks	2026-09-16T18:07:01.4721509Z ^[[36;1mfi^[[0m
+Policy	Resolve required status checks	2026-09-16T18:07:01.4721769Z ^[[36;1mecho "RULESET_CONTEXTS=$contexts" >> "$GITHUB_ENV"^[[0m
+Policy	Resolve required status checks	2026-09-16T18:07:01.4761489Z shell: /usr/bin/bash -e {0}
+Policy	Resolve required status checks	2026-09-16T18:07:01.4761755Z env:
+Policy	Resolve required status checks	2026-09-16T18:07:01.4761960Z   MBX_GC_MAX_SIZE: 12GiB
+Policy	Resolve required status checks	2026-09-16T18:07:01.4762195Z   MBX_CACHE_LINKS: 0
+Policy	Resolve required status checks	2026-09-16T18:07:01.4762408Z   MBX_REMOTE_URL: 
+Policy	Resolve required status checks	2026-09-16T18:07:01.4762617Z   MBX_TARGET_VIEWS: 0
+Policy	Resolve required status checks	2026-09-16T18:07:01.4765034Z   GH_TOKEN: ***
+Policy	Resolve required status checks	2026-09-16T18:07:01.4765271Z   DEFAULT_BRANCH: main
+Policy	Resolve required status checks	2026-09-16T18:07:01.4765560Z   DECLARED_RULESET_CONTEXTS: DCO,Policy,ci-required
+Policy	Resolve required status checks	2026-09-16T18:07:01.4765877Z ##[endgroup]
+Policy	Enforce workflow policy	﻿2026-09-16T18:07:02.4329201Z ##[group]Run set -euo pipefail
+Policy	Enforce workflow policy	2026-09-16T18:07:02.4329521Z ^[[36;1mset -euo pipefail^[[0m
+Policy	Enforce workflow policy	2026-09-16T18:07:02.4329786Z ^[[36;1mvelnor-workflow policy \^[[0m
+Policy	Enforce workflow policy	2026-09-16T18:07:02.4330109Z ^[[36;1m  --workflow-root "$WORKFLOW_ROOT" \^[[0m
+Policy	Enforce workflow policy	2026-09-16T18:07:02.4330445Z ^[[36;1m  --head-sha "$HEAD_SHA" \^[[0m
+Policy	Enforce workflow policy	2026-09-16T18:07:02.4330723Z ^[[36;1m  --base-sha "$BASE_SHA" \^[[0m
+Policy	Enforce workflow policy	2026-09-16T18:07:02.4331014Z ^[[36;1m  --ruleset-contexts "$RULESET_CONTEXTS"^[[0m
+Policy	Enforce workflow policy	2026-09-16T18:07:02.4370467Z shell: /usr/bin/bash -e {0}
+Policy	Enforce workflow policy	2026-09-16T18:07:02.4370729Z env:
+Policy	Enforce workflow policy	2026-09-16T18:07:02.4370934Z   MBX_GC_MAX_SIZE: 12GiB
+Policy	Enforce workflow policy	2026-09-16T18:07:02.4371172Z   MBX_CACHE_LINKS: 0
+Policy	Enforce workflow policy	2026-09-16T18:07:02.4371393Z   MBX_REMOTE_URL: 
+Policy	Enforce workflow policy	2026-09-16T18:07:02.4371606Z   MBX_TARGET_VIEWS: 0
+Policy	Enforce workflow policy	2026-09-16T18:07:02.4371856Z   RULESET_CONTEXTS: DCO,Policy,ci-required
+Policy	Enforce workflow policy	2026-09-16T18:07:02.4372231Z   WORKFLOW_ROOT: /home/runner/work/velnor/velnor/policy-checkout
+Policy	Enforce workflow policy	2026-09-16T18:07:02.4372613Z   HEAD_SHA: 9041c9cb989ea2d458e6025257c11f67f7f8e2f6
+Policy	Enforce workflow policy	2026-09-16T18:07:02.4372938Z   BASE_SHA: 3353310c7648fca22698b6c0f4a69ab245127786
+Policy	Enforce workflow policy	2026-09-16T18:07:02.4373382Z   VELNOR_WORKFLOW_POLICY_REVISION: b9c3156cdb88e63c11b9e595a3e694b02238c09a
+Policy	Enforce workflow policy	2026-09-16T18:07:02.4373959Z ##[endgroup]
+Policy	Enforce workflow policy	2026-09-16T18:07:02.6043033Z   Installing velnor-workflow v0.1.0 (/home/runner/work/_temp/velnor-workflow-policy-de6b927d08688dc1e9d9bc644e69898e7fcb68b0/source/crates/velnor-workflow)
+Policy	Enforce workflow policy	2026-09-16T18:07:02.6210177Z     Updating crates.io index
+Policy	Enforce workflow policy	2026-09-16T18:07:02.6217841Z     Updating git repository `https://github.com/tailrocks/termrock.git`
+Policy	Enforce workflow policy	2026-09-16T18:07:14.5348048Z  Downloading crates ...
+Policy	Enforce workflow policy	2026-09-16T18:07:14.7667247Z   Downloaded anstyle v1.0.14
+Policy	Enforce workflow policy	2026-09-16T18:07:14.7856847Z   Downloaded allocator-api2 v0.2.21
+Policy	Enforce workflow policy	2026-09-16T18:07:14.7993675Z   Downloaded anstyle-query v1.1.5
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8018746Z   Downloaded cfg-if v1.0.4
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8084095Z   Downloaded approx v0.5.1
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8107627Z   Downloaded thiserror-impl v2.0.20
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8152912Z   Downloaded anstyle-parse v1.0.0
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8172662Z   Downloaded by_address v1.2.1
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8181936Z   Downloaded castaway v0.2.4
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8200734Z   Downloaded darling_macro v0.24.1
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8208503Z   Downloaded scopeguard v1.2.0
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8246609Z   Downloaded crypto-common v0.2.2
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8328546Z   Downloaded powerfmt v0.2.0
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8373132Z   Downloaded rustc-hash v2.1.3
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8457653Z   Downloaded strum v0.28.0
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8497464Z   Downloaded num-conv v0.2.2
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8513130Z   Downloaded anstream v1.0.0
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8544934Z   Downloaded equivalent v1.0.2
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8557229Z   Downloaded ident_case v1.0.1
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8568521Z   Downloaded cpufeatures v0.3.1
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8586581Z   Downloaded document-features v0.2.12
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8601291Z   Downloaded time-core v0.1.9
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8613612Z   Downloaded colorchoice v1.0.5
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8686816Z   Downloaded num_threads v0.1.7
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8697983Z   Downloaded errno v0.3.14
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8713578Z   Downloaded is_terminal_polyfill v1.70.2
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8723554Z   Downloaded strsim v0.11.1
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8737051Z   Downloaded foldhash v0.2.0
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8751832Z   Downloaded either v1.18.0
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8772955Z   Downloaded toml v1.1.4+spec-1.1.0
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8855141Z   Downloaded indoc v2.0.7
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8897226Z   Downloaded palette_math v0.7.7
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8917084Z   Downloaded rustc_version v0.4.1
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8934403Z   Downloaded itoa v1.0.18
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8954211Z   Downloaded serde_spanned v1.1.1
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8968560Z   Downloaded clap_derive v4.6.4
+Policy	Enforce workflow policy	2026-09-16T18:07:14.8993481Z   Downloaded signal-hook-mio v0.2.5
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9006573Z   Downloaded strum_macros v0.28.0
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9031623Z   Downloaded clap_lex v1.1.0
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9043117Z   Downloaded instability v0.3.13
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9059025Z   Downloaded utf8parse v0.2.2
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9069572Z   Downloaded time v0.3.55
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9261096Z   Downloaded toml_datetime v1.1.1+spec-1.1.0
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9276000Z   Downloaded toml_writer v1.1.2+spec-1.1.0
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9291645Z   Downloaded unicode-truncate v2.0.1
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9310521Z   Downloaded zmij v1.0.23
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9329718Z   Downloaded line-clipping v0.3.8
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9346494Z   Downloaded palette_derive v0.7.7
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9365041Z   Downloaded deranged v0.5.8
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9379541Z   Downloaded kasuari v0.4.12
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9405284Z   Downloaded quote v1.0.47
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9437431Z   Downloaded block-buffer v0.12.1
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9452724Z   Downloaded globset v0.4.20
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9469261Z   Downloaded lock_api v0.4.14
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9482553Z   Downloaded parking_lot v0.12.5
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9509572Z   Downloaded convert_case v0.10.0
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9527001Z   Downloaded hybrid-array v0.4.14
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9552330Z   Downloaded smallvec v1.15.2
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9569205Z   Downloaded signal-hook-registry v1.4.8
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9580424Z   Downloaded thiserror v2.0.20
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9647964Z   Downloaded lru v0.18.4
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9660146Z   Downloaded autocfg v1.5.1
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9679509Z   Downloaded toml_parser v1.1.3+spec-1.1.0
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9704563Z   Downloaded web-time v1.1.0
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9721564Z   Downloaded rustversion v1.0.23
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9750875Z   Downloaded serde_ignored v0.1.14
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9768099Z   Downloaded heck v0.5.0
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9779849Z   Downloaded static_assertions v1.1.0
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9794104Z   Downloaded unicode-ident v1.0.24
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9822526Z   Downloaded tui-scrollbar v0.2.7
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9844014Z   Downloaded digest v0.11.3
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9868936Z   Downloaded litrs v1.0.0
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9899360Z   Downloaded log v0.4.34
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9924671Z   Downloaded serde_core v1.0.229
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9952854Z   Downloaded parking_lot_core v0.9.12
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9974760Z   Downloaded ratatui-crossterm v0.1.2
+Policy	Enforce workflow policy	2026-09-16T18:07:14.9985358Z   Downloaded sha2 v0.11.0
+Policy	Enforce workflow policy	2026-09-16T18:07:15.0024025Z   Downloaded semver v1.0.28
+Policy	Enforce workflow policy	2026-09-16T18:07:15.0047836Z   Downloaded const-oid v0.10.2
+Policy	Enforce workflow policy	2026-09-16T18:07:15.0071942Z   Downloaded proc-macro2 v1.0.107
+Policy	Enforce workflow policy	2026-09-16T18:07:15.0102140Z   Downloaded ryu v1.0.23
+Policy	Enforce workflow policy	2026-09-16T18:07:15.0135680Z   Downloaded ratatui v0.30.2
+Policy	Enforce workflow policy	2026-09-16T18:07:15.0173723Z   Downloaded signal-hook v0.3.18
+Policy	Enforce workflow policy	2026-09-16T18:07:15.0204388Z   Downloaded clap v4.6.6
+Policy	Enforce workflow policy	2026-09-16T18:07:15.0305827Z   Downloaded num-traits v0.2.19
+Policy	Enforce workflow policy	2026-09-16T18:07:15.0332616Z   Downloaded base64 v0.23.1
+Policy	Enforce workflow policy	2026-09-16T18:07:15.0373422Z   Downloaded bitflags v2.13.1
+Policy	Enforce workflow policy	2026-09-16T18:07:15.0420731Z   Downloaded darling v0.24.1
+Policy	Enforce workflow policy	2026-09-16T18:07:15.0492844Z   Downloaded typenum v1.20.1
+Policy	Enforce workflow policy	2026-09-16T18:07:15.0529157Z   Downloaded unicode-segmentation v1.13.3
+Policy	Enforce workflow policy	2026-09-16T18:07:15.0558982Z   Downloaded compact_str v0.9.1
+Policy	Enforce workflow policy	2026-09-16T18:07:15.0595216Z   Downloaded serde v1.0.229
+Policy	Enforce workflow policy	2026-09-16T18:07:15.0631306Z   Downloaded darling_core v0.24.1
+Policy	Enforce workflow policy	2026-09-16T18:07:15.0694958Z   Downloaded serde_derive v1.0.229
+Policy	Enforce workflow policy	2026-09-16T18:07:15.0727197Z   Downloaded mio v1.2.2
+Policy	Enforce workflow policy	2026-09-16T18:07:15.0792009Z   Downloaded derive_more-impl v2.1.1
+Policy	Enforce workflow policy	2026-09-16T18:07:15.0847672Z   Downloaded derive_more v2.1.1
+Policy	Enforce workflow policy	2026-09-16T18:07:15.0985244Z   Downloaded indexmap v2.14.1
+Policy	Enforce workflow policy	2026-09-16T18:07:15.1030306Z   Downloaded memchr v2.8.3
+Policy	Enforce workflow policy	2026-09-16T18:07:15.1088182Z   Downloaded winnow v1.0.4
+Policy	Enforce workflow policy	2026-09-16T18:07:15.1188254Z   Downloaded crossterm v0.29.0
+Policy	Enforce workflow policy	2026-09-16T18:07:15.1260654Z   Downloaded itertools v0.14.0
+Policy	Enforce workflow policy	2026-09-16T18:07:15.1333987Z   Downloaded unicode-width v0.2.2
+Policy	Enforce workflow policy	2026-09-16T18:07:15.1392224Z   Downloaded syn v2.0.119
+Policy	Enforce workflow policy	2026-09-16T18:07:15.1504079Z   Downloaded aho-corasick v1.1.5
+Policy	Enforce workflow policy	2026-09-16T18:07:15.1558562Z   Downloaded clap_builder v4.6.6
+Policy	Enforce workflow policy	2026-09-16T18:07:15.1625852Z   Downloaded hashbrown v0.16.1
+Policy	Enforce workflow policy	2026-09-16T18:07:15.1679728Z   Downloaded hashbrown v0.17.1
+Policy	Enforce workflow policy	2026-09-16T18:07:15.1734870Z   Downloaded serde_json v1.0.151
+Policy	Enforce workflow policy	2026-09-16T18:07:15.1812622Z   Downloaded ratatui-core v0.1.2
+Policy	Enforce workflow policy	2026-09-16T18:07:15.1884559Z   Downloaded libm v0.2.16
+Policy	Enforce workflow policy	2026-09-16T18:07:15.2002402Z   Downloaded portable-atomic v1.15.0
+Policy	Enforce workflow policy	2026-09-16T18:07:15.2080354Z   Downloaded ratatui-widgets v0.3.2
+Policy	Enforce workflow policy	2026-09-16T18:07:15.2164980Z   Downloaded palette v0.7.7
+Policy	Enforce workflow policy	2026-09-16T18:07:15.2293444Z   Downloaded bstr v1.13.1
+Policy	Enforce workflow policy	2026-09-16T18:07:15.2376944Z   Downloaded regex-syntax v0.8.11
+Policy	Enforce workflow policy	2026-09-16T18:07:15.2448771Z   Downloaded syn v3.0.4
+Policy	Enforce workflow policy	2026-09-16T18:07:15.2559527Z   Downloaded rustix v1.1.4
+Policy	Enforce workflow policy	2026-09-16T18:07:15.2847073Z   Downloaded regex-automata v0.4.18
+Policy	Enforce workflow policy	2026-09-16T18:07:15.2996788Z   Downloaded libc v0.2.189
+Policy	Enforce workflow policy	2026-09-16T18:07:15.3458413Z   Downloaded noyalib v0.0.28
+Policy	Enforce workflow policy	2026-09-16T18:07:15.4031664Z   Downloaded linux-raw-sys v0.12.1
+Policy	Enforce workflow policy	2026-09-16T18:07:15.5105701Z    Compiling proc-macro2 v1.0.107
+Policy	Enforce workflow policy	2026-09-16T18:07:15.5106263Z    Compiling quote v1.0.47
+Policy	Enforce workflow policy	2026-09-16T18:07:15.5106669Z    Compiling unicode-ident v1.0.24
+Policy	Enforce workflow policy	2026-09-16T18:07:15.5107081Z    Compiling libc v0.2.189
+Policy	Enforce workflow policy	2026-09-16T18:07:15.5738838Z    Compiling allocator-api2 v0.2.21
+Policy	Enforce workflow policy	2026-09-16T18:07:15.6579512Z    Compiling foldhash v0.2.0
+Policy	Enforce workflow policy	2026-09-16T18:07:15.8178417Z    Compiling equivalent v1.0.2
+Policy	Enforce workflow policy	2026-09-16T18:07:15.8548282Z    Compiling cfg-if v1.0.4
+Policy	Enforce workflow policy	2026-09-16T18:07:15.8878300Z    Compiling rustversion v1.0.23
+Policy	Enforce workflow policy	2026-09-16T18:07:15.9249156Z    Compiling serde_core v1.0.229
+Policy	Enforce workflow policy	2026-09-16T18:07:16.0608501Z    Compiling heck v0.5.0
+Policy	Enforce workflow policy	2026-09-16T18:07:16.1412227Z    Compiling hashbrown v0.17.1
+Policy	Enforce workflow policy	2026-09-16T18:07:16.3510210Z    Compiling bitflags v2.13.1
+Policy	Enforce workflow policy	2026-09-16T18:07:16.4148489Z    Compiling syn v3.0.4
+Policy	Enforce workflow policy	2026-09-16T18:07:16.7130301Z    Compiling syn v2.0.119
+Policy	Enforce workflow policy	2026-09-16T18:07:16.7368497Z    Compiling itoa v1.0.18
+Policy	Enforce workflow policy	2026-09-16T18:07:16.8888441Z    Compiling thiserror v2.0.20
+Policy	Enforce workflow policy	2026-09-16T18:07:17.3488523Z    Compiling strsim v0.11.1
+Policy	Enforce workflow policy	2026-09-16T18:07:17.5928457Z    Compiling ident_case v1.0.1
+Policy	Enforce workflow policy	2026-09-16T18:07:17.6528499Z    Compiling ryu v1.0.23
+Policy	Enforce workflow policy	2026-09-16T18:07:17.9648637Z    Compiling either v1.18.0
+Policy	Enforce workflow policy	2026-09-16T18:07:18.1571316Z    Compiling itertools v0.14.0
+Policy	Enforce workflow policy	2026-09-16T18:07:19.0215215Z    Compiling strum_macros v0.28.0
+Policy	Enforce workflow policy	2026-09-16T18:07:19.5798843Z    Compiling darling_core v0.24.1
+Policy	Enforce workflow policy	2026-09-16T18:07:19.8802152Z    Compiling castaway v0.2.4
+Policy	Enforce workflow policy	2026-09-16T18:07:19.9461386Z    Compiling errno v0.3.14
+Policy	Enforce workflow policy	2026-09-16T18:07:20.0678709Z    Compiling hashbrown v0.16.1
+Policy	Enforce workflow policy	2026-09-16T18:07:20.7981113Z    Compiling thiserror-impl v2.0.20
+Policy	Enforce workflow policy	2026-09-16T18:07:20.8218984Z    Compiling typenum v1.20.1
+Policy	Enforce workflow policy	2026-09-16T18:07:20.8738982Z    Compiling signal-hook v0.3.18
+Policy	Enforce workflow policy	2026-09-16T18:07:20.9558491Z    Compiling log v0.4.34
+Policy	Enforce workflow policy	2026-09-16T18:07:21.1218452Z    Compiling unicode-segmentation v1.13.3
+Policy	Enforce workflow policy	2026-09-16T18:07:21.4729028Z    Compiling static_assertions v1.1.0
+Policy	Enforce workflow policy	2026-09-16T18:07:21.5168930Z    Compiling unicode-width v0.2.2
+Policy	Enforce workflow policy	2026-09-16T18:07:21.7328454Z    Compiling parking_lot_core v0.9.12
+Policy	Enforce workflow policy	2026-09-16T18:07:21.8575218Z    Compiling smallvec v1.15.2
+Policy	Enforce workflow policy	2026-09-16T18:07:21.9026584Z    Compiling kasuari v0.4.12
+Policy	Enforce workflow policy	2026-09-16T18:07:22.0648572Z    Compiling unicode-truncate v2.0.1
+Policy	Enforce workflow policy	2026-09-16T18:07:22.1868496Z    Compiling hybrid-array v0.4.14
+Policy	Enforce workflow policy	2026-09-16T18:07:22.2608412Z    Compiling compact_str v0.9.1
+Policy	Enforce workflow policy	2026-09-16T18:07:22.5640109Z    Compiling darling_macro v0.24.1
+Policy	Enforce workflow policy	2026-09-16T18:07:22.7048533Z    Compiling convert_case v0.10.0
+Policy	Enforce workflow policy	2026-09-16T18:07:22.7773885Z    Compiling strum v0.28.0
+Policy	Enforce workflow policy	2026-09-16T18:07:22.8386154Z    Compiling signal-hook-registry v1.4.8
+Policy	Enforce workflow policy	2026-09-16T18:07:22.9168537Z    Compiling lru v0.18.4
+Policy	Enforce workflow policy	2026-09-16T18:07:23.0668585Z    Compiling scopeguard v1.2.0
+Policy	Enforce workflow policy	2026-09-16T18:07:23.1104087Z    Compiling litrs v1.0.0
+Policy	Enforce workflow policy	2026-09-16T18:07:23.2289000Z    Compiling rustix v1.1.4
+Policy	Enforce workflow policy	2026-09-16T18:07:23.3990823Z    Compiling instability v0.3.13
+Policy	Enforce workflow policy	2026-09-16T18:07:23.4459001Z    Compiling memchr v2.8.3
+Policy	Enforce workflow policy	2026-09-16T18:07:23.5512190Z    Compiling document-features v0.2.12
+Policy	Enforce workflow policy	2026-09-16T18:07:23.5658734Z    Compiling lock_api v0.4.14
+Policy	Enforce workflow policy	2026-09-16T18:07:23.6358757Z    Compiling ratatui-core v0.1.2
+Policy	Enforce workflow policy	2026-09-16T18:07:23.9342478Z    Compiling derive_more-impl v2.1.1
+Policy	Enforce workflow policy	2026-09-16T18:07:24.1748584Z    Compiling darling v0.24.1
+Policy	Enforce workflow policy	2026-09-16T18:07:24.4658465Z    Compiling mio v1.2.2
+Policy	Enforce workflow policy	2026-09-16T18:07:24.5208469Z    Compiling linux-raw-sys v0.12.1
+Policy	Enforce workflow policy	2026-09-16T18:07:24.8659109Z    Compiling indoc v2.0.7
+Policy	Enforce workflow policy	2026-09-16T18:07:25.1098063Z    Compiling utf8parse v0.2.2
+Policy	Enforce workflow policy	2026-09-16T18:07:25.1628445Z    Compiling anstyle-parse v1.0.0
+Policy	Enforce workflow policy	2026-09-16T18:07:25.5497900Z    Compiling signal-hook-mio v0.2.5
+Policy	Enforce workflow policy	2026-09-16T18:07:25.6191296Z    Compiling derive_more v2.1.1
+Policy	Enforce workflow policy	2026-09-16T18:07:25.6639148Z    Compiling parking_lot v0.12.5
+Policy	Enforce workflow policy	2026-09-16T18:07:26.1478489Z    Compiling block-buffer v0.12.1
+Policy	Enforce workflow policy	2026-09-16T18:07:26.2448904Z    Compiling crypto-common v0.2.2
+Policy	Enforce workflow policy	2026-09-16T18:07:26.5528495Z    Compiling num_threads v0.1.7
+Policy	Enforce workflow policy	2026-09-16T18:07:26.6440251Z    Compiling time-core v0.1.9
+Policy	Enforce workflow policy	2026-09-16T18:07:26.7128245Z    Compiling deranged v0.5.8
+Policy	Enforce workflow policy	2026-09-16T18:07:26.8038524Z    Compiling num-conv v0.2.2
+Policy	Enforce workflow policy	2026-09-16T18:07:26.9198960Z    Compiling powerfmt v0.2.0
+Policy	Enforce workflow policy	2026-09-16T18:07:27.1248368Z    Compiling const-oid v0.10.2
+Policy	Enforce workflow policy	2026-09-16T18:07:27.1958466Z    Compiling crossterm v0.29.0
+Policy	Enforce workflow policy	2026-09-16T18:07:27.2583073Z    Compiling digest v0.11.3
+Policy	Enforce workflow policy	2026-09-16T18:07:27.3718366Z    Compiling line-clipping v0.3.8
+Policy	Enforce workflow policy	2026-09-16T18:07:27.7178919Z    Compiling colorchoice v1.0.5
+Policy	Enforce workflow policy	2026-09-16T18:07:27.7768476Z    Compiling libm v0.2.16
+Policy	Enforce workflow policy	2026-09-16T18:07:27.9418572Z    Compiling time v0.3.55
+Policy	Enforce workflow policy	2026-09-16T18:07:27.9638980Z    Compiling zmij v1.0.23
+Policy	Enforce workflow policy	2026-09-16T18:07:28.1158924Z    Compiling anstyle-query v1.1.5
+Policy	Enforce workflow policy	2026-09-16T18:07:28.1708470Z    Compiling anstyle v1.0.14
+Policy	Enforce workflow policy	2026-09-16T18:07:28.3908497Z    Compiling cpufeatures v0.3.1
+Policy	Enforce workflow policy	2026-09-16T18:07:28.4708456Z    Compiling is_terminal_polyfill v1.70.2
+Policy	Enforce workflow policy	2026-09-16T18:07:28.5140589Z    Compiling anstream v1.0.0
+Policy	Enforce workflow policy	2026-09-16T18:07:28.7619659Z    Compiling ratatui-widgets v0.3.2
+Policy	Enforce workflow policy	2026-09-16T18:07:28.8688362Z    Compiling sha2 v0.11.0
+Policy	Enforce workflow policy	2026-09-16T18:07:29.0284688Z    Compiling ratatui-crossterm v0.1.2
+Policy	Enforce workflow policy	2026-09-16T18:07:29.7635872Z    Compiling aho-corasick v1.1.5
+Policy	Enforce workflow policy	2026-09-16T18:07:29.7894282Z    Compiling serde_json v1.0.151
+Policy	Enforce workflow policy	2026-09-16T18:07:30.1466888Z    Compiling noyalib v0.0.28
+Policy	Enforce workflow policy	2026-09-16T18:07:30.3008903Z    Compiling regex-syntax v0.8.11
+Policy	Enforce workflow policy	2026-09-16T18:07:30.6452706Z    Compiling clap_lex v1.1.0
+Policy	Enforce workflow policy	2026-09-16T18:07:30.9459093Z    Compiling serde v1.0.229
+Policy	Enforce workflow policy	2026-09-16T18:07:31.9599024Z    Compiling winnow v1.0.4
+Policy	Enforce workflow policy	2026-09-16T18:07:32.3778727Z    Compiling toml_parser v1.1.3+spec-1.1.0
+Policy	Enforce workflow policy	2026-09-16T18:07:33.8988643Z    Compiling regex-automata v0.4.18
+Policy	Enforce workflow policy	2026-09-16T18:07:34.7838582Z    Compiling clap_builder v4.6.6
+Policy	Enforce workflow policy	2026-09-16T18:07:36.7669850Z    Compiling velnor-workflow v0.1.0 (/home/runner/work/_temp/velnor-workflow-policy-de6b927d08688dc1e9d9bc644e69898e7fcb68b0/source/crates/velnor-workflow)
+Policy	Enforce workflow policy	2026-09-16T18:07:37.8988562Z    Compiling tui-scrollbar v0.2.7
+Policy	Enforce workflow policy	2026-09-16T18:07:38.1798888Z    Compiling bstr v1.13.1
+Policy	Enforce workflow policy	2026-09-16T18:07:38.8948484Z    Compiling serde_derive v1.0.229
+Policy	Enforce workflow policy	2026-09-16T18:07:39.1158500Z    Compiling clap_derive v4.6.4
+Policy	Enforce workflow policy	2026-09-16T18:07:40.6788488Z    Compiling toml_datetime v1.1.1+spec-1.1.0
+Policy	Enforce workflow policy	2026-09-16T18:07:41.0718785Z    Compiling serde_ignored v0.1.14
+Policy	Enforce workflow policy	2026-09-16T18:07:41.2408542Z    Compiling indexmap v2.14.1
+Policy	Enforce workflow policy	2026-09-16T18:07:41.6919170Z    Compiling serde_spanned v1.1.1
+Policy	Enforce workflow policy	2026-09-16T18:07:41.7768514Z    Compiling rustc-hash v2.1.3
+Policy	Enforce workflow policy	2026-09-16T18:07:41.8518533Z    Compiling web-time v1.1.0
+Policy	Enforce workflow policy	2026-09-16T18:07:41.9018862Z    Compiling toml_writer v1.1.2+spec-1.1.0
+Policy	Enforce workflow policy	2026-09-16T18:07:42.1065055Z    Compiling base64 v0.23.1
+Policy	Enforce workflow policy	2026-09-16T18:07:42.8599494Z    Compiling termrock v0.11.0 (https://github.com/tailrocks/termrock.git?rev=5283c2acf9154d0cfcd37b1ffe821c00faf90ea2#5283c2ac)
+Policy	Enforce workflow policy	2026-09-16T18:07:46.5108518Z    Compiling toml v1.1.4+spec-1.1.0
+Policy	Enforce workflow policy	2026-09-16T18:07:48.1518317Z    Compiling clap v4.6.6
+Policy	Enforce workflow policy	2026-09-16T18:07:48.1968414Z    Compiling globset v0.4.20
+Policy	Enforce workflow policy	2026-09-16T18:07:51.8168547Z    Compiling ratatui v0.30.2
+Policy	Enforce workflow policy	2026-09-16T18:08:43.1917891Z     Finished `release` profile [optimized] target(s) in 1m 40s
+Policy	Enforce workflow policy	2026-09-16T18:08:43.2051912Z   Installing /home/runner/work/_temp/velnor-workflow-policy-de6b927d08688dc1e9d9bc644e69898e7fcb68b0/bin/velnor-workflow
+Policy	Enforce workflow policy	2026-09-16T18:08:43.2060637Z    Installed package `velnor-workflow v0.1.0 (/home/runner/work/_temp/velnor-workflow-policy-de6b927d08688dc1e9d9bc644e69898e7fcb68b0/source/crates/velnor-workflow)` (executable `velnor-workflow`)
+Policy	Enforce workflow policy	2026-09-16T18:08:43.2073730Z warning: be sure to add `/home/runner/work/_temp/velnor-workflow-policy-de6b927d08688dc1e9d9bc644e69898e7fcb68b0/bin` to your PATH to be able to run the installed binaries
+Policy	Enforce workflow policy	2026-09-16T18:08:43.3616943Z PASS pin-declared           .github-gen/velnor-workflow.toml [generator] revision = de6b927d08688dc1e9d9bc644e69898e7fcb68b0
+Policy	Enforce workflow policy	2026-09-16T18:08:43.3619185Z PASS pin-reachable          de6b927d08688dc1e9d9bc644e69898e7fcb68b0 is an ancestor of head 9041c9cb989ea2d458e6025257c11f67f7f8e2f6 (introduced by this change)
+Policy	Enforce workflow policy	2026-09-16T18:08:43.3620455Z PASS pin-monotonic          the declared pin descends from the base validator b9c3156cdb88e63c11b9e595a3e694b02238c09a
+Policy	Enforce workflow policy	2026-09-16T18:08:43.3621371Z PASS entrypoint-pin         .github/workflows/ci-policy.yml installs and exports the declared pin (1 literal)
+Policy	Enforce workflow policy	2026-09-16T18:08:43.3622716Z PASS generated-tree         every generated file is byte-identical to the render of velnor-workflow at de6b927d08688dc1e9d9bc644e69898e7fcb68b0
+Policy	Enforce workflow policy	2026-09-16T18:08:43.3625690Z PASS pull-request-target    only .github/workflows/ci-policy.yml runs on pull_request_target, with the reviewed trigger set
+Policy	Enforce workflow policy	2026-09-16T18:08:43.3626959Z PASS entrypoint-privileges  .github/workflows/ci-policy.yml holds contents: read only, references no secrets, and persists no credentials
+Policy	Enforce workflow policy	2026-09-16T18:08:43.3628285Z PASS trusted-runners        every self-hosted job is gated on a trusted event and an approved runner
+Policy	Enforce workflow policy	2026-09-16T18:08:43.3629190Z PASS action-pins            every action reference is a full-SHA pin or a reviewed local path
+Policy	Enforce workflow policy	2026-09-16T18:08:43.3629957Z PASS workflow-structure     every workflow parses as GitHub would run it
+Policy	Enforce workflow policy	2026-09-16T18:08:43.3630835Z PASS required-checks        .github/workflows/ci-pr.yml emits [ci-required]; live ruleset requires [DCO, Policy, ci-required]
+Policy	Enforce workflow policy	2026-09-16T18:08:43.3631381Z policy: 11 rules, 0 failed
+Policy	Set up actionlint	﻿2026-09-16T18:08:43.3765713Z ##[group]Run jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c
+Policy	Set up actionlint	2026-09-16T18:08:43.3766116Z with:
+Policy	Set up actionlint	2026-09-16T18:08:43.3766335Z   install_args: actionlint@1.7.12
+Policy	Set up actionlint	2026-09-16T18:08:43.3766588Z   cache: false
+Policy	Set up actionlint	2026-09-16T18:08:43.3766794Z   install: true
+Policy	Set up actionlint	2026-09-16T18:08:43.3767002Z   bootstrap: false
+Policy	Set up actionlint	2026-09-16T18:08:43.3767210Z   cache_save: true
+Policy	Set up actionlint	2026-09-16T18:08:43.3767705Z   cache_key_prefix: mise-v1
+Policy	Set up actionlint	2026-09-16T18:08:43.3767947Z   experimental: false
+Policy	Set up actionlint	2026-09-16T18:08:43.3768163Z   log_level: info
+Policy	Set up actionlint	2026-09-16T18:08:43.3768364Z   reshim: false
+Policy	Set up actionlint	2026-09-16T18:08:43.3768569Z   add_shims_to_path: true
+Policy	Set up actionlint	2026-09-16T18:08:43.3770902Z   github_token: ***
+Policy	Set up actionlint	2026-09-16T18:08:43.3771124Z   fetch_from_github: true
+Policy	Set up actionlint	2026-09-16T18:08:43.3771352Z   env: true
+Policy	Set up actionlint	2026-09-16T18:08:43.3771554Z   export_path: true
+Policy	Set up actionlint	2026-09-16T18:08:43.3771768Z   wings_enabled: false
+Policy	Set up actionlint	2026-09-16T18:08:43.3771984Z env:
+Policy	Set up actionlint	2026-09-16T18:08:43.3772205Z   MBX_GC_MAX_SIZE: 12GiB
+Policy	Set up actionlint	2026-09-16T18:08:43.3772436Z   MBX_CACHE_LINKS: 0
+Policy	Set up actionlint	2026-09-16T18:08:43.3772647Z   MBX_REMOTE_URL: 
+Policy	Set up actionlint	2026-09-16T18:08:43.3772935Z   MBX_TARGET_VIEWS: 0
+Policy	Set up actionlint	2026-09-16T18:08:43.3773186Z   RULESET_CONTEXTS: DCO,Policy,ci-required
+Policy	Set up actionlint	2026-09-16T18:08:43.3773468Z ##[endgroup]
+Policy	Set up actionlint	2026-09-16T18:08:43.5172724Z Using curl to download mise
+Policy	Set up actionlint	2026-09-16T18:08:43.6540301Z ##[group]Setup mise
+Policy	Set up actionlint	2026-09-16T18:08:43.6556264Z [command]/usr/local/bin/zstd --version
+Policy	Set up actionlint	2026-09-16T18:08:43.6588387Z *** Zstandard CLI (64-bit) v1.5.7, by Yann Collet ***
+Policy	Set up actionlint	2026-09-16T18:08:43.6605329Z [command]/usr/bin/tar --zstd --version
+Policy	Set up actionlint	2026-09-16T18:08:43.6639295Z tar (GNU tar) 1.35
+Policy	Set up actionlint	2026-09-16T18:08:43.6639702Z Copyright (C) 2023 Free Software Foundation, Inc.
+Policy	Set up actionlint	2026-09-16T18:08:43.6640462Z License GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.
+Policy	Set up actionlint	2026-09-16T18:08:43.6641376Z This is free software: you are free to change and redistribute it.
+Policy	Set up actionlint	2026-09-16T18:08:43.6642151Z There is NO WARRANTY, to the extent permitted by law.
+Policy	Set up actionlint	2026-09-16T18:08:43.6642507Z 
+Policy	Set up actionlint	2026-09-16T18:08:43.6643715Z Written by John Gilmore and Jay Fenlason.
+Policy	Set up actionlint	2026-09-16T18:08:43.6661028Z [command]/usr/bin/ldd --version
+Policy	Set up actionlint	2026-09-16T18:08:43.6699558Z ldd (Ubuntu GLIBC 2.39-0ubuntu8.8) 2.39
+Policy	Set up actionlint	2026-09-16T18:08:43.6700155Z Copyright (C) 2024 Free Software Foundation, Inc.
+Policy	Set up actionlint	2026-09-16T18:08:43.6702541Z This is free software; see the source for copying conditions.  There is NO
+Policy	Set up actionlint	2026-09-16T18:08:43.6703145Z warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+Policy	Set up actionlint	2026-09-16T18:08:43.6703597Z Written by Roland McGrath and Ulrich Drepper.
+Policy	Set up actionlint	2026-09-16T18:08:43.6724520Z [command]/usr/bin/curl -fsSL https://github.com/jdx/mise/releases/download/v2026.9.10/mise-v2026.9.10-linux-x64.tar.zst --output /tmp/mise-action-7Md35X/mise-v2026.9.10-linux-x64.tar.zst
+Policy	Set up actionlint	2026-09-16T18:08:44.7395724Z Verified mise-v2026.9.10-linux-x64.tar.zst against signed checksums
+Policy	Set up actionlint	2026-09-16T18:08:44.7409452Z [command]/usr/bin/tar --zstd -xf /tmp/mise-action-7Md35X/mise-v2026.9.10-linux-x64.tar.zst -C /tmp/mise-action-7Md35X
+Policy	Set up actionlint	2026-09-16T18:08:44.9678217Z [command]/usr/bin/mv /tmp/mise-action-7Md35X/mise/bin/mise /home/runner/.local/share/mise/bin/mise
+Policy	Set up actionlint	2026-09-16T18:08:44.9787922Z ##[group]Setting env vars
+Policy	Set up actionlint	2026-09-16T18:08:44.9788687Z Setting MISE_LOG_LEVEL=info
+Policy	Set up actionlint	2026-09-16T18:08:44.9793148Z Setting MISE_GITHUB_TOKEN=***
+Policy	Set up actionlint	2026-09-16T18:08:44.9793837Z Setting MISE_TRUSTED_CONFIG_PATHS=/home/runner/work/velnor/velnor
+Policy	Set up actionlint	2026-09-16T18:08:44.9794628Z Setting MISE_YES=1
+Policy	Set up actionlint	2026-09-16T18:08:44.9795213Z Adding /home/runner/.local/share/mise/shims to PATH
+Policy	Set up actionlint	2026-09-16T18:08:44.9796327Z ##[group]Running mise --version
+Policy	Set up actionlint	2026-09-16T18:08:44.9812319Z [command]/home/runner/.local/share/mise/bin/mise --version
+Policy	Set up actionlint	2026-09-16T18:08:44.9900223Z 2026.9.10 linux-x64 (2026-09-16)
+Policy	Set up actionlint	2026-09-16T18:08:44.9948334Z ##[endgroup]
+Policy	Set up actionlint	2026-09-16T18:08:45.0086974Z ##[group]Running mise install actionlint@1.7.12
+Policy	Set up actionlint	2026-09-16T18:08:45.0102531Z [command]/home/runner/.local/share/mise/bin/mise install actionlint@1.7.12
+Policy	Set up actionlint	2026-09-16T18:08:45.0217062Z ^[[2mmise^[[0m ^[[2mby @jdx^[[0m – installing 1 tool
+Policy	Set up actionlint	2026-09-16T18:08:47.0193490Z ^[[2mmise^[[0m ^[[38;5;10m✓^[[0m ^[[34mactionlint^[[0m@1.7.12  2.0s  ^[[2mactionlint_1.7.12_linux_amd64.tar.gz^[[0m
+Policy	Set up actionlint	2026-09-16T18:08:47.0194638Z ^[[2mmise^[[0m ^[[36m████████████████^[[0m^[[31m^[[0m^[[2m^[[0m 1/1 · installed 1 tool in 2.0s
+Policy	Set up actionlint	2026-09-16T18:08:47.0268457Z ^[[33mmise^[[0m ^[[33mWARN^[[0m  actionlint installed but not activated — it is not in any config file.
+Policy	Set up actionlint	2026-09-16T18:08:47.0269165Z To install and activate, run:
+Policy	Set up actionlint	2026-09-16T18:08:47.0269465Z   mise use actionlint
+Policy	Set up actionlint	2026-09-16T18:08:47.0313125Z ##[endgroup]
+Policy	Set up actionlint	2026-09-16T18:08:47.0313833Z ##[group]Running mise ls
+Policy	Set up actionlint	2026-09-16T18:08:47.0331611Z [command]/home/runner/.local/share/mise/bin/mise ls
+Policy	Set up actionlint	2026-09-16T18:08:47.0453355Z actionlint  1.7.12
+Policy	Set up actionlint	2026-09-16T18:08:47.0469358Z ##[endgroup]
+Policy	Set up actionlint	2026-09-16T18:08:47.0471799Z ##[group]Exporting mise environment variables
+Policy	Set up actionlint	2026-09-16T18:08:47.0624570Z [command]/home/runner/.local/share/mise/bin/mise env --json
+Policy	Set up actionlint	2026-09-16T18:08:47.0735027Z {
+Policy	Set up actionlint	2026-09-16T18:08:47.0737260Z   "PATH": "/home/runner/.local/share/mise/shims:/home/runner/.local/share/mise/bin:/home/runner/work/_temp/velnor-workflow/bin:/home/runner/work/_temp/mbx-target-tool:/opt/hostedtoolcache/mbx-3075b697c4475ee8ddc24c97a58342252f166f293d57c7546d274021b29af14f/1.11.1/x64:/snap/bin:/home/runner/.local/bin:/opt/pipx_bin:/home/runner/.cargo/bin:/home/runner/.config/composer/vendor/bin:/usr/local/.ghcup/bin:/home/runner/.dotnet/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games"
+Policy	Set up actionlint	2026-09-16T18:08:47.0739826Z }
+Policy	Set up actionlint	2026-09-16T18:08:47.0758746Z ##[endgroup]
+Policy	Lint caller workflows	﻿2026-09-16T18:08:47.0885042Z ##[group]Run mise exec actionlint@1.7.12 -- actionlint
+Policy	Lint caller workflows	2026-09-16T18:08:47.0885457Z ^[[36;1mmise exec actionlint@1.7.12 -- actionlint^[[0m
+Policy	Lint caller workflows	2026-09-16T18:08:47.0926025Z shell: /usr/bin/bash -e {0}
+Policy	Lint caller workflows	2026-09-16T18:08:47.0926293Z env:
+Policy	Lint caller workflows	2026-09-16T18:08:47.0926507Z   MBX_GC_MAX_SIZE: 12GiB
+Policy	Lint caller workflows	2026-09-16T18:08:47.0926757Z   MBX_CACHE_LINKS: 0
+Policy	Lint caller workflows	2026-09-16T18:08:47.0926972Z   MBX_REMOTE_URL: 
+Policy	Lint caller workflows	2026-09-16T18:08:47.0927183Z   MBX_TARGET_VIEWS: 0
+Policy	Lint caller workflows	2026-09-16T18:08:47.0927623Z   RULESET_CONTEXTS: DCO,Policy,ci-required
+Policy	Lint caller workflows	2026-09-16T18:08:47.0927912Z   MISE_LOG_LEVEL: info
+Policy	Lint caller workflows	2026-09-16T18:08:47.0930325Z   MISE_GITHUB_TOKEN: ***
+Policy	Lint caller workflows	2026-09-16T18:08:47.0930658Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor/velnor
+Policy	Lint caller workflows	2026-09-16T18:08:47.0930991Z   MISE_YES: 1
+Policy	Lint caller workflows	2026-09-16T18:08:47.0931198Z ##[endgroup]
+Policy	Post Set up Mr. Boxington	﻿2026-09-16T18:08:50.1020715Z Post job cleanup.
+Policy	Post Checkout repository history	﻿2026-09-16T18:08:50.2474411Z Post job cleanup.
+Policy	Post Checkout repository history	2026-09-16T18:08:50.3371187Z [command]/usr/bin/git version
+Policy	Post Checkout repository history	2026-09-16T18:08:50.3415830Z git version 2.55.0
+Policy	Post Checkout repository history	2026-09-16T18:08:50.3451238Z Temporarily overriding HOME='/home/runner/work/_temp/93ff27dd-8414-4af5-b2e5-61874b4b30f2' before making global git config changes
+Policy	Post Checkout repository history	2026-09-16T18:08:50.3452549Z Adding repository directory to the temporary git global config as a safe directory
+Policy	Post Checkout repository history	2026-09-16T18:08:50.3456654Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor/policy-checkout
+Policy	Post Checkout repository history	2026-09-16T18:08:50.3492068Z Removing SSH command configuration
+Policy	Post Checkout repository history	2026-09-16T18:08:50.3499235Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Policy	Post Checkout repository history	2026-09-16T18:08:50.3536564Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Policy	Post Checkout repository history	2026-09-16T18:08:50.3801054Z Removing HTTP extra header
+Policy	Post Checkout repository history	2026-09-16T18:08:50.3807584Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Policy	Post Checkout repository history	2026-09-16T18:08:50.3850780Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Policy	Post Checkout repository history	2026-09-16T18:08:50.4119072Z Removing includeIf entries pointing to credentials config files
+Policy	Post Checkout repository history	2026-09-16T18:08:50.4130102Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Policy	Post Checkout repository history	2026-09-16T18:08:50.4191141Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Policy	Complete job	﻿2026-09-16T18:08:50.4675975Z Cleaning up orphan processes

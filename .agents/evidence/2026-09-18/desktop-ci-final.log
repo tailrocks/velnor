@@ -1,0 +1,248 @@
+[desktop-ci] $ mise run desktop-bindings-check
+[desktop-bindings-check] $ cargo xtask desktop bindings-check
+==> generating Swift bindings into /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/.build/bindings-check/Sources/JackinUsageBindings
+mbx[warning]: cc cache bypassed: compiler invocation names no output file
+==> generated bindings under /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/.build/bindings-check/Sources/JackinUsageBindings
+==> bindings-check: committed bindings match regeneration
+mbx[cache]: 401 hits, 0 misses, 20 bypassed; 0 B downloaded, 0 B uploaded, 0 B stored locally
+mbx[savings]: lent the same 323.4 GiB to every checkout at once. none of them has checked.
+[desktop-generate] $ xcodegen generate --spec native/project.yml
+⚙️  Generating plists...
+⚙️  Generating project...
+⚙️  Writing project...
+Created project at /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/JackinDesktop.xcodeproj
+[desktop-format-check] $ cd native && find Sources Tests UITests Tools Scripts …
+[desktop-lint] $ cd native && swiftlint lint --strict
+Linting Swift files in current working directory
+Linting 'StatusPopoverFocus.swift' (1/8)
+Linting 'UsageWindowModel.swift' (2/8)
+Linting 'PresentationStore.swift' (3/8)
+Linting 'RefreshScheduler.swift' (4/8)
+Linting 'PresentationHelpers.swift' (5/8)
+Linting 'OverviewInventory.swift' (6/8)
+Linting 'BrandColors.swift' (7/8)
+Linting 'StatusItemMenuModel.swift' (8/8)
+Linting 'VisualQAFixtures.swift' (1/15)
+Linting 'SettingsView.swift' (2/15)
+Linting 'ProviderMarks.swift' (3/15)
+Linting 'PopoverRoot.swift' (4/15)
+Linting 'JackinBrandIdentity.swift' (5/15)
+Linting 'AppMainMenu.swift' (6/15)
+Linting 'UsageWindowController.swift' (7/15)
+Linting 'DesktopAppDelegate.swift' (8/15)
+Linting 'StatusItemLabel.swift' (9/15)
+Linting 'UsageWindowSplitController.swift' (10/15)
+Linting 'OverviewListView.swift' (11/15)
+Linting 'VisualQALaunchOptions.swift' (12/15)
+Linting 'ProviderDetailView.swift' (13/15)
+Linting 'StatusItemMenu.swift' (14/15)
+Linting 'UsageWindowRoot.swift' (15/15)
+Linting 'JackinDesktopUITests.swift' (1/1)
+Linting 'OverviewInventoryTests.swift' (2/13)
+Linting 'UsageSidebarToggleAuthorityTests.swift' (1/13)
+Linting 'LintPolicyTests.swift' (3/13)
+Linting 'PopoverPresentationTests.swift' (4/13)
+Linting 'BridgeBoundaryTests.swift' (6/13)
+Linting 'ArchitectureTests.swift' (7/13)
+Linting 'UsageWindowModelTests.swift' (5/13)
+Linting 'VendorProvenanceTests.swift' (8/13)
+Linting 'PresentationStoreTests.swift' (9/13)
+Linting 'StatusPopoverFocusTests.swift' (10/13)
+Linting 'ProjectBaselineTests.swift' (11/13)
+Linting 'PlatformLaneTests.swift' (12/13)
+Linting 'VisualQAFixturesTests.swift' (13/13)
+Linting 'JackinDesktopApp.swift' (1/1)
+Linting 'status-item-drive.swift' (1/5)
+Linting 'notification-drive.swift' (2/5)
+Linting 'ax-drive.swift' (3/5)
+Linting 'window-id.swift' (4/5)
+Linting 'focus-drive.swift' (5/5)
+Done linting! Found 0 violations, 0 serious in 43 files.
+[desktop-test] $ cargo xtask desktop test
+==> jackin-usage + jackin-usage-ffi nextest
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.37s
+────────────
+ Nextest run ID 16447a19-1cc4-4c89-b978-6ffc5ca7fab9 with nextest profile: default
+    Starting 454 tests across 2 binaries
+        PASS [   0.015s] (  1/454) jackin-usage coordinator::policy::tests::broker_policy_freezes_cadence_matrix
+        PASS [   0.016s] (  2/454) jackin-usage coordinator::tests::cadence_tiers_select_spec_intervals_with_bounded_jitter
+        PASS [   0.018s] (  3/454) jackin-usage coordinator::policy::tests::broker_policy_retry_jitter_is_stable_bounded_and_provider_wins
+        PASS [   0.020s] (  4/454) jackin-usage coordinator::tests::coordinator_capsule_surface_rejects_ambiguous_accounts
+        PASS [   0.024s] (  5/454) jackin-usage coordinator::tests::coordinator_ambient_tick_honors_success_cooldown
+        PASS [   0.023s] (  6/454) jackin-usage coordinator::tests::cadence_two_clients_single_flight_exactly_one_provider_call
+        PASS [   0.024s] (  7/454) jackin-usage coordinator::tests::cadence_poll_due_fires_once_per_interval_and_honors_success_cooldown
+        PASS [   0.024s] (  8/454) jackin-usage coordinator::tests::cadence_shared_retry_after_wins_over_periodic_due
+        PASS [   0.024s] (  9/454) jackin-usage coordinator::tests::coordinator_distinct_accounts_refresh_within_concurrency_bound
+        PASS [   0.024s] ( 10/454) jackin-usage coordinator::tests::coordinator_empty_result_is_failure_and_preserves_last_good
+        PASS [   0.024s] ( 11/454) jackin-usage coordinator::tests::cadence_wake_recalculates_without_missed_poll_burst
+        PASS [   0.027s] ( 12/454) jackin-usage coordinator::tests::coordinator_capsule_capability_rejects_non_forwarded_account
+        PASS [   0.014s] ( 13/454) jackin-usage coordinator::tests::coordinator_failure_shares_retry_deadline_and_last_good
+        PASS [   0.013s] ( 14/454) jackin-usage coordinator::tests::coordinator_post_terminal_manual_refresh_starts_later_generation
+        PASS [   0.011s] ( 15/454) jackin-usage coordinator::tests::coordinator_rate_limit_without_provider_deadline_uses_shared_backoff
+        PASS [   0.008s] ( 16/454) jackin-usage coordinator::tests::coordinator_recovers_persisted_owner_loss_once_without_a_herd
+        PASS [   0.040s] ( 17/454) jackin-usage coordinator::state::tests::atomic_state_symlink_directory_is_rejected_without_touching_target
+        PASS [   0.042s] ( 18/454) jackin-usage coordinator::state::tests::atomic_state_sanitizes_control_characters_and_clamps_display_fields
+        PASS [   0.043s] ( 19/454) jackin-usage coordinator::state::tests::atomic_state_symlink_file_is_not_followed
+        PASS [   0.046s] ( 20/454) jackin-usage coordinator::state::tests::projection_state_is_one_atomic_envelope_and_quarantines_corruption
+        PASS [   0.046s] ( 21/454) jackin-usage coordinator::state::tests::atomic_state_corrupt_schema_and_future_epoch_fail_closed
+        PASS [   0.046s] ( 22/454) jackin-usage coordinator::state::tests::atomic_state_round_trip_uses_private_permissions_and_old_or_new_envelopes
+        PASS [   0.012s] ( 23/454) jackin-usage coordinator::tests::coordinator_refresh_all_deduplicates_canonical_accounts
+        PASS [   0.013s] ( 24/454) jackin-usage coordinator::tests::coordinator_unavailable_or_corrupt_state_makes_zero_provider_calls
+        PASS [   0.013s] ( 25/454) jackin-usage coordinator::tests::coordinator_winner_joiner_and_force_join_share_one_generation
+        PASS [   0.013s] ( 26/454) jackin-usage coordinator::tests::coordinator_unknown_bootstrap_serializes_per_provider
+        PASS [   0.014s] ( 27/454) jackin-usage host::broker::tests::discovery_provider_rate_limit_preserves_retry_after
+        PASS [   0.016s] ( 28/454) jackin-usage host::broker::tests::forwarded_scope_selects_only_accounts_backed_by_forwarded_sources
+        PASS [   0.016s] ( 29/454) jackin-usage host::broker::tests::probe_budget_propagates_worker_panic_to_coordinator_classification
+        PASS [   0.010s] ( 30/454) jackin-usage host::credential_resolver::tests::disc_source_cache_skips_duplicate_protected_resolution
+        PASS [   0.035s] ( 31/454) jackin-usage coordinator::tests::coordinator_timeout_wait_keeps_owner_until_worker_terminates
+        PASS [   0.036s] ( 32/454) jackin-usage host::broker::tests::probe_budget_returns_fast_and_expires_without_waiting
+        PASS [   0.056s] ( 33/454) jackin-usage host::broker::tests::broker_lease_uses_expiry_and_build_identity_not_pid_reuse
+        PASS [   0.038s] ( 34/454) jackin-usage host::discovery::tests::disc_dedup_legacy_shared_snapshot_never_creates_active_row
+        PASS [   0.062s] ( 35/454) jackin-usage host::broker::tests::stalled_response_reader_does_not_hold_worker_shutdown
+        PASS [   0.084s] ( 36/454) jackin-usage host::broker::tests::broker_client_scoped_operation_requires_relay_and_never_probes
+        PASS [   0.009s] ( 37/454) jackin-usage host::discovery::tests::disc_scope_capsule_uses_only_forwarded_capabilities
+        PASS [   0.060s] ( 38/454) jackin-usage host::discovery::tests::disc_registry_api_sources_are_isolated_from_ambient_env_declarations
+        PASS [   0.100s] ( 39/454) jackin-usage host::discovery::tests::disc_amp_composite_profile_reads_selected_data_root
+        PASS [   0.011s] ( 40/454) jackin-usage host::projection::tests::account_projects_window_spend_and_plan_groups
+        PASS [   0.136s] ( 41/454) jackin-usage host::broker::tests::usage_broker_rejects_symlinked_run_tree_without_mutating_target
+        PASS [   0.142s] ( 42/454) jackin-usage host::broker::tests::usage_broker_handshake_mismatch_fails_before_provider_dispatch
+        PASS [   0.142s] ( 43/454) jackin-usage host::broker::tests::usage_broker_recovers_stale_guard_with_private_permissions
+        PASS [   0.012s] ( 44/454) jackin-usage host::projection::tests::canonical_projection_icu_collation_goldens_are_pinned
+        PASS [   0.009s] ( 45/454) jackin-usage host::projection::tests::credential_expiry_stays_unset_without_provider_signal
+        PASS [   0.009s] ( 46/454) jackin-usage host::projection::tests::quota_state_keeps_permission_unknown_and_exhausted_distinct
+        PASS [   0.009s] ( 47/454) jackin-usage host::projection::tests::group_timestamps_track_view_usability
+        PASS [   0.008s] ( 48/454) jackin-usage host::projection::tests::spend_group_states_cover_ratio_edges
+        PASS [   0.071s] ( 49/454) jackin-usage host::discovery::tests::disc_source_kimi_profile_requires_credentials_in_selected_root
+        PASS [   0.009s] ( 50/454) jackin-usage host::projection::tests::window_projection_keeps_checked_math_without_wrap_or_fabrication
+        PASS [   0.009s] ( 51/454) jackin-usage host::projection::tests::window_projection_preserves_raw_overage_from_money_ratio
+        PASS [   0.009s] ( 52/454) jackin-usage host::tests::canon_alias_table_never_uses_probe_routing_as_ownership
+        PASS [   0.109s] ( 53/454) jackin-usage host::discovery::tests::disc_registry_enumerates_registered_sources_without_ambient_fallback
+        PASS [   0.138s] ( 54/454) jackin-usage host::discovery::tests::disc_kimi_missing_selected_credentials_never_uses_other_home_profile
+        PASS [   0.076s] ( 55/454) jackin-usage host::discovery::tests::disc_source_valid_profiles_resolve_without_network_or_fake_presence
+        PASS [   0.183s] ( 56/454) jackin-usage host::discovery::tests::disc_dedup_repeated_roots_read_once_and_same_identity_merges
+        PASS [   0.034s] ( 57/454) jackin-usage host::tests::canon_presence_only_state_is_not_an_account
+        PASS [   0.047s] ( 58/454) jackin-usage host::tests::canon_open_rejects_unknown_surface_and_resets_changed_profile
+        PASS [   0.060s] ( 59/454) jackin-usage host::tests::canon_openai_account_never_appears_under_routed_providers
+        PASS [   0.247s] ( 60/454) jackin-usage host::broker::tests::client_clone_forks_subscription_set
+        PASS [   0.051s] ( 61/454) jackin-usage host::tests::canon_projection_ignores_removed_legacy_shared_snapshot
+        PASS [   0.064s] ( 62/454) jackin-usage host::tests::canon_desktop_inventory_is_grouped_and_complete
+        PASS [   0.009s] ( 63/454) jackin-usage host::tests::canonical_projection_alias_transition_is_atomic_idempotent_and_fail_closed
+        PASS [   0.011s] ( 64/454) jackin-usage host::tests::canonical_identity_domain_separates_evidence_and_normalizes_stable_handles
+        PASS [   0.163s] ( 65/454) jackin-usage host::discovery::tests::disc_source_missing_and_malformed_profiles_are_isolated_diagnostics
+        PASS [   0.009s] ( 66/454) jackin-usage host::tests::canonical_projection_provider_order_is_settled_and_not_agent_named
+        PASS [   0.038s] ( 67/454) jackin-usage host::tests::canon_sel_rejects_unknown_and_cross_surface_keys
+        PASS [   0.051s] ( 68/454) jackin-usage host::tests::canon_same_account_label_on_two_providers_remains_two_accounts
+        PASS [   0.017s] ( 69/454) jackin-usage host::tests::canonical_projection_keeps_unresolved_capability_out_of_account_rows
+        PASS [   0.018s] ( 70/454) jackin-usage host::tests::compact_status_bar_label_for_pinned_known_and_disabled
+        PASS [   0.023s] ( 71/454) jackin-usage host::tests::canonical_projection_uses_current_membership_provider_names_and_rust_ranks
+        PASS [   0.023s] ( 72/454) jackin-usage host::tests::compact_depleted_with_and_without_resets_at
+        PASS [   0.023s] ( 73/454) jackin-usage host::tests::compact_status_bar_label_tie_keeps_all_order
+        PASS [   0.027s] ( 74/454) jackin-usage host::tests::compact_status_bar_label_empty_when_unavailable_or_disabled
+        PASS [   0.052s] ( 75/454) jackin-usage host::tests::canon_sel_stale_persisted_key_is_reconciled_to_visible_current_account
+        PASS [   0.024s] ( 76/454) jackin-usage host::tests::compact_status_bar_label_picks_lowest_remaining_percent
+        PASS [   0.272s] ( 77/454) jackin-usage host::broker::tests::usage_broker_twenty_clients_join_one_generation_and_probe
+        PASS [   0.127s] ( 78/454) jackin-usage host::tests::canon_amp_presence_does_not_promote_durable_history
+        PASS [   0.024s] ( 79/454) jackin-usage host::tests::compact_status_bar_strip_all_eight_host_surfaces
+        PASS [   0.017s] ( 80/454) jackin-usage host::tests::compact_status_bar_strip_soonest_reset_beats_higher_remaining
+        PASS [   0.009s] ( 81/454) jackin-usage host::tests::credential_matrix_lists_all_host_surfaces
+        PASS [   0.016s] ( 82/454) jackin-usage host::tests::compact_status_bar_strip_soonest_then_remaining_cap_and_separator
+        PASS [   0.021s] ( 83/454) jackin-usage host::tests::compact_status_bar_strip_hard_cap_three_and_hides_zero
+        PASS [   0.119s] ( 84/454) jackin-usage host::tests::canon_each_account_retains_its_own_status_limit_and_error
+        PASS [   0.009s] ( 85/454) jackin-usage host::tests::estimate_caption_variants
+        PASS [   0.009s] ( 86/454) jackin-usage host::tests::host_paths_under_data_dir
+        PASS [   0.009s] ( 87/454) jackin-usage host::tests::host_surfaces_cover_agent_all_plus_routed_providers
+        PASS [   0.016s] ( 88/454) jackin-usage host::tests::disabled_probe_policy_skips_dispatch_and_is_never_due
+        PASS [   0.020s] ( 89/454) jackin-usage host::tests::events_cursor_advances_and_bounds
+        PASS [   0.021s] ( 90/454) jackin-usage host::tests::disable_surface_removes_from_list_and_blocks_snapshot
+        PASS [   0.021s] ( 91/454) jackin-usage host::tests::dual_bucket_snapshot_exposes_session_and_weekly_remainings
+        PASS [   0.079s] ( 92/454) jackin-usage host::tests::canon_sel_valid_historical_choice_survives_reopen
+        PASS [   0.018s] ( 93/454) jackin-usage host::tests::next_events_resync_flag_not_error
+        PASS [   0.009s] ( 94/454) jackin-usage host::tests::provider_display_label_cases
+        PASS [   0.024s] ( 95/454) jackin-usage host::tests::money_bucket_preserved_in_host_snapshot
+        PASS [   0.021s] ( 96/454) jackin-usage host::tests::next_refresh_label_due_and_countdown
+        PASS [   0.031s] ( 97/454) jackin-usage host::tests::provider_glance_rows_empty_without_credentials
+        PASS [   0.051s] ( 98/454) jackin-usage host::tests::fixture_snapshot_matches_capsule_view_fields
+        PASS [   0.354s] ( 99/454) jackin-usage host::broker::tests::unsubscribe_releases_local_interest_without_cancelling_shared_work
+        PASS [   0.065s] (100/454) jackin-usage host::tests::merged_bar_skips_disabled_surfaces
+        PASS [   0.049s] (101/454) jackin-usage host::tests::provider_glance_rows_never_include_opencode
+        PASS [   0.069s] (102/454) jackin-usage host::tests::overview_rows_numeric_and_status_word
+        PASS [   0.374s] (103/454) jackin-usage host::broker::tests::saturated_join_waiters_do_not_block_refresh_or_current
+        PASS [   0.069s] (104/454) jackin-usage host::tests::provider_glance_rows_accept_affirmative_origin_when_unsupported
+        PASS [   0.069s] (105/454) jackin-usage host::tests::provider_glance_rows_icon_keys_match_closed_desktop_domain
+        PASS [   0.069s] (106/454) jackin-usage host::tests::provider_glance_rows_do_not_fallback_to_unrelated_slots
+        PASS [   0.009s] (107/454) jackin-usage host::tests::request_usage_batch_never_aborts_on_per_account_errors
+        PASS [   0.073s] (108/454) jackin-usage host::tests::provider_glance_rows_preserve_dimmed_last_known
+        PASS [   0.026s] (109/454) jackin-usage host::tests::refresh_floor_tracks_completed_broker_refresh
+        PASS [   0.078s] (110/454) jackin-usage host::tests::provider_glance_rows_redetect_new_credentials
+        PASS [   0.035s] (111/454) jackin-usage host::tests::provider_glance_rows_use_exact_seven_provider_order
+        PASS [   0.012s] (112/454) jackin-usage telemetry::tests::daemon_failure_has_exactly_one_owner_across_readiness
+        PASS [   0.113s] (113/454) jackin-usage host::tests::provider_glance_rows_marks_canonical_placeholder_refreshing
+        PASS [   0.081s] (114/454) jackin-usage host::tests::provider_glance_rows_reject_negative_credential_placeholders
+        PASS [   0.072s] (115/454) jackin-usage host::tests::provider_glance_rows_show_dash_before_first_success
+        PASS [   0.078s] (116/454) jackin-usage host::tests::provider_glance_rows_show_dash_for_paid_only_amp
+        PASS [   0.066s] (117/454) jackin-usage host::tests::provider_glance_rows_show_three_weekly_labels
+        PASS [   0.046s] (118/454) jackin-usage host::tests::status_bar_provider_glance_rows_sb3_sb17_sb19
+        PASS [   0.088s] (119/454) jackin-usage host::tests::provider_glance_rows_select_amp_daily
+        PASS [   0.010s] (120/454) jackin-usage telemetry::tests::inactive_failed_startup_releases_ambient_session
+        PASS [   0.010s] (121/454) jackin-usage telemetry::tests::listener_readiness_completes_bounded_startup_once
+        PASS [   0.009s] (122/454) jackin-usage tests::contract_baseline_projection_fixture_is_well_formed
+        PASS [   0.009s] (123/454) jackin-usage tests::contract_baseline_projection_rejects_invalid_fixtures
+        PASS [   0.009s] (124/454) jackin-usage token_monitor::amp::tests::amp_token_reader_handles_messages_wrapper
+        PASS [   0.009s] (125/454) jackin-usage token_monitor::amp::tests::amp_token_reader_parses_thread_messages
+        PASS [   0.055s] (126/454) jackin-usage host::tests::unavailable_and_refreshing_never_invent_percent
+        PASS [   0.009s] (127/454) jackin-usage token_monitor::amp::tests::amp_changed_flag_includes_cache_tokens
+        PASS [   0.010s] (128/454) jackin-usage tests::contract_baseline_surface_matrix_names_every_state_family
+        PASS [   0.009s] (129/454) jackin-usage token_monitor::claude::tests::claude_token_reader_parses_jsonl_fields
+        PASS [   0.009s] (130/454) jackin-usage token_monitor::amp::tests::amp_token_reader_skips_zero_usage
+        PASS [   0.010s] (131/454) jackin-usage token_monitor::codex::tests::cumulative_token_count_takes_last_value_not_sum
+        PASS [   0.010s] (132/454) jackin-usage token_monitor::codex::tests::headless_usage_lines_sum
+        PASS [   0.010s] (133/454) jackin-usage token_monitor::claude::tests::claude_token_reader_skips_sidechain
+        FAIL [   0.464s] (134/454) jackin-usage host::broker::tests::projection_refresh_runs_due_checks_and_join_settles
+  stdout ───
+
+    running 1 test
+    test host::broker::tests::projection_refresh_runs_due_checks_and_join_settles ... FAILED
+
+    failures:
+
+    failures:
+        host::broker::tests::projection_refresh_runs_due_checks_and_join_settles
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 441 filtered out; finished in 0.45s
+
+  stderr ───
+
+    thread 'host::broker::tests::projection_refresh_runs_due_checks_and_join_settles' (143372204) panicked at crates/jackin-usage/src/host/broker/tests.rs:667:5:
+    assertion `left == right` failed
+      left: Refreshing
+     right: Idle
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 17 tests still running
+        PASS [   0.010s] (135/454) jackin-usage token_monitor::claude::tests::claude_token_reader_uses_costusd_when_present
+        PASS [   0.011s] (136/454) jackin-usage token_monitor::codex::tests::parse_raw_usage_handles_alternate_field_names
+        PASS [   0.011s] (137/454) jackin-usage token_monitor::kimi::tests::kimi_token_reader_parses_wire_jsonl
+        PASS [   0.176s] (138/454) jackin-usage host::tests::multi_account_list_select_and_snapshot
+        PASS [   0.019s] (139/454) jackin-usage token_monitor::codex::tests::conformance_wire_codex_model_is_consumed_without_export
+        PASS [   0.008s] (140/454) jackin-usage token_monitor::pricing::tests::agent_slug_fallback_prices_kimi
+        PASS [   0.008s] (141/454) jackin-usage token_monitor::opencode::tests::opencode_token_reader_db_path_is_correct
+        PASS [   0.060s] (142/454) jackin-usage store_backend::tests::connection_owner_exports_outcome_without_database_path
+        PASS [   0.008s] (143/454) jackin-usage token_monitor::pricing::tests::pricing_table_applies_tiered_calculation
+        PASS [   0.043s] (144/454) jackin-usage tests::contract_baseline_provider_calls_detect_injected_route
+        PASS [   0.085s] (145/454) jackin-usage store_backend::tests::conformance_wire_sql_operations_are_bounded_and_private
+        PASS [   0.554s] (146/454) jackin-usage host::broker::tests::healthy_accounts_publish_while_one_account_stalls
+        PASS [   0.293s] (147/454) jackin-usage host::tests::request_usage_batch_forced_refresh_still_honors_retry_after
+        PASS [   0.703s] (148/454) jackin-usage host::broker::tests::join_publication_timeout_leaves_broker_ownership_intact
+        PASS [   0.946s] (149/454) jackin-usage host::broker::tests::subscribe_all_dedups_reuses_fresh_and_forces_only_on_demand
+        PASS [   0.737s] (150/454) jackin-usage host::tests::request_usage_batch_dedups_capabilities_and_reports_per_account
+        PASS [   0.896s] (151/454) jackin-usage tests::contract_baseline_provider_calls_have_no_unclassified_route
+────────────
+     Summary [   1.384s] 151/454 tests run: 150 passed, 1 failed, 0 skipped
+        FAIL [   0.464s] (134/454) jackin-usage host::broker::tests::projection_refresh_runs_due_checks_and_join_settles
+warning: 303/454 tests were not run due to test failure (run with --no-fail-fast to run all tests, or run with --max-fail)
+error: test run failed
+error: cargo nextest run -p jackin-usage -p jackin-usage-ffi --lib failed with code Some(100)
+mbx[savings]: worktrees come and go. their 912.4 GiB logical now goes with them.
+[desktop-test] ERROR task failed
+[desktop-ci] ERROR task failed
+CI_EXIT=1

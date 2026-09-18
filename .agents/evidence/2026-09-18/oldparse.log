@@ -1,0 +1,6 @@
+error: invalid generation config /private/tmp/d2a-oldparse/.github-gen/velnor-workflow.toml: TOML parse error at line 273, column 1
+    |
+273 | requires_trusted = true
+    | ^^^^^^^^^^^^^^^^
+unknown field `requires_trusted`, expected one of `id`, `label`, `kind`, `root`, `watch`, `pr_commands`, `full_commands`, `depends_on`, `cache`, `pinned_lockfile`, `tool_version`, `workspace_check`, `ci_tasks`, `mise_tools`, `trust`, `platform`
+

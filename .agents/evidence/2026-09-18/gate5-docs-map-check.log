@@ -1,0 +1,10 @@
+error: 4 map-check problem(s):
+3 workspace crate(s) missing from docs/content/reference/getting-oriented/codebase-map.mdx:
+  jackin-otlp-testbed
+  jackin-telemetry
+  jackin-usage-ffi
+docs/content/reference/getting-oriented/codebase-map.mdx: missing inventory row and crate-page link for jackin-otlp-testbed
+docs/content/reference/getting-oriented/codebase-map.mdx: missing inventory row and crate-page link for jackin-telemetry
+docs/content/reference/getting-oriented/codebase-map.mdx: missing inventory row and crate-page link for jackin-usage-ffi
+
+re-run: cargo xtask docs map-check

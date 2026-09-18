@@ -1,0 +1,31 @@
+      ┌─────────┐  mr boxington
+     ╱ ═══════ ╱│
+    ╱─────────╱ │
+    │ •    (◉)│≡│
+    │  ◟▄▄▄◞  │ ╱
+    │   ◀◆▶   │╱
+    └─────────┘
+   Compiling velnor-runner v0.1.275 (/Users/donbeave/Projects/tailrocks/velnor-project/velnor3/.muse/worktrees/subagent-v2-01a0ac95-7322-7412-8f86-f69a41ff2453-01a0ad3f-53c8-7f11-ada6-83bf377afed7/crates/velnor-runner)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.58s
+     Running tests/scaleset_daemon.rs (/Users/donbeave/Projects/tailrocks/velnor-project/velnor3/.muse/worktrees/subagent-v2-01a0ac95-7322-7412-8f86-f69a41ff2453-01a0ad3f-53c8-7f11-ada6-83bf377afed7/target/debug/deps/scaleset_daemon-d16f79797a62fbac)
+
+running 1 test
+TEST-HB e2e-inline iter=1
+LANE-HB fetch_jit STUBBED
+
+thread 'daemon_serves_one_job_end_to_end' (106075350) panicked at crates/velnor-runner/tests/scaleset_daemon.rs:1135:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test daemon_serves_one_job_end_to_end ... FAILED
+
+failures:
+
+failures:
+    daemon_serves_one_job_end_to_end
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.08s
+
+error: test failed, to rerun pass `-p velnor-runner --test scaleset_daemon`
+mbx[savings]: 148.5 GiB in every checkout, 148.5 GiB on disk. arithmetic declined to comment.

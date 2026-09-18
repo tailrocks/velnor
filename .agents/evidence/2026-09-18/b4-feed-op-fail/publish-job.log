@@ -1,0 +1,372 @@
+Publish apt feed	Set up job	﻿2026-09-18T10:26:45.7677512Z Current runner version: '2.337.0'
+Publish apt feed	Set up job	2026-09-18T10:26:45.7712006Z ##[group]Runner Image Provisioner
+Publish apt feed	Set up job	2026-09-18T10:26:45.7714403Z Hosted Compute Agent
+Publish apt feed	Set up job	2026-09-18T10:26:45.7717003Z Version: 20260828.587
+Publish apt feed	Set up job	2026-09-18T10:26:45.7719129Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+Publish apt feed	Set up job	2026-09-18T10:26:45.7721381Z Build Date: 2026-08-28T16:44:25Z
+Publish apt feed	Set up job	2026-09-18T10:26:45.7723523Z Worker ID: {f371347e-c8fc-4672-a48f-ac50ff740104}
+Publish apt feed	Set up job	2026-09-18T10:26:45.7725898Z Azure Region: westus
+Publish apt feed	Set up job	2026-09-18T10:26:45.7728374Z ##[endgroup]
+Publish apt feed	Set up job	2026-09-18T10:26:45.7731688Z ##[group]Operating System
+Publish apt feed	Set up job	2026-09-18T10:26:45.7734150Z Ubuntu
+Publish apt feed	Set up job	2026-09-18T10:26:45.7736658Z 24.04.5
+Publish apt feed	Set up job	2026-09-18T10:26:45.7738929Z LTS
+Publish apt feed	Set up job	2026-09-18T10:26:45.7741295Z ##[endgroup]
+Publish apt feed	Set up job	2026-09-18T10:26:45.7743297Z ##[group]Runner Image
+Publish apt feed	Set up job	2026-09-18T10:26:45.7745222Z Image: ubuntu-24.04
+Publish apt feed	Set up job	2026-09-18T10:26:45.7747364Z Version: 20260907.300.1
+Publish apt feed	Set up job	2026-09-18T10:26:45.7750301Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260907.300/images/ubuntu/Ubuntu2404-Readme.md
+Publish apt feed	Set up job	2026-09-18T10:26:45.7753894Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260907.300
+Publish apt feed	Set up job	2026-09-18T10:26:45.7756928Z ##[endgroup]
+Publish apt feed	Set up job	2026-09-18T10:26:45.7760187Z ##[group]GITHUB_TOKEN Permissions
+Publish apt feed	Set up job	2026-09-18T10:26:45.7764045Z Contents: write
+Publish apt feed	Set up job	2026-09-18T10:26:45.7766295Z Metadata: read
+Publish apt feed	Set up job	2026-09-18T10:26:45.7768243Z ##[endgroup]
+Publish apt feed	Set up job	2026-09-18T10:26:45.7772288Z Secret source: Actions
+Publish apt feed	Set up job	2026-09-18T10:26:45.7775586Z Cache mode: write
+Publish apt feed	Set up job	2026-09-18T10:26:45.7777728Z Prepare workflow directory
+Publish apt feed	Set up job	2026-09-18T10:26:45.8258401Z Prepare all required actions
+Publish apt feed	Set up job	2026-09-18T10:26:45.8307896Z Getting action download info
+Publish apt feed	Set up job	2026-09-18T10:26:46.2337936Z Download action repository 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' (SHA:3d3c42e5aac5ba805825da76410c181273ba90b1)
+Publish apt feed	Set up job	2026-09-18T10:26:46.3404321Z Download action repository 'tailrocks/velnor@fdeed261bd2247a38db6922a7726cd45d3d6f31e' (SHA:fdeed261bd2247a38db6922a7726cd45d3d6f31e)
+Publish apt feed	Set up job	2026-09-18T10:26:46.9586247Z Download action repository 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' (SHA:3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c)
+Publish apt feed	Set up job	2026-09-18T10:26:47.3099158Z Download action repository 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' (SHA:043fb46d1a93c77aae656e7c1c64a875d1fc6a0a)
+Publish apt feed	Set up job	2026-09-18T10:26:47.5283579Z Getting action download info
+Publish apt feed	Set up job	2026-09-18T10:26:47.6990021Z Download action repository 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9' (SHA:55cc8345863c7cc4c66a329aec7e433d2d1c52a9)
+Publish apt feed	Set up job	2026-09-18T10:26:47.9251471Z Complete job name: Publish apt feed
+Publish apt feed	Checkout	﻿2026-09-18T10:26:48.0541011Z ##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+Publish apt feed	Checkout	2026-09-18T10:26:48.0544848Z with:
+Publish apt feed	Checkout	2026-09-18T10:26:48.0547741Z   persist-credentials: false
+Publish apt feed	Checkout	2026-09-18T10:26:48.0550586Z   repository: tailrocks/velnor-apt
+Publish apt feed	Checkout	2026-09-18T10:26:48.0561901Z   token: ***
+Publish apt feed	Checkout	2026-09-18T10:26:48.0564528Z   ssh-strict: true
+Publish apt feed	Checkout	2026-09-18T10:26:48.0567417Z   ssh-user: git
+Publish apt feed	Checkout	2026-09-18T10:26:48.0570058Z   clean: true
+Publish apt feed	Checkout	2026-09-18T10:26:48.0572736Z   sparse-checkout-cone-mode: true
+Publish apt feed	Checkout	2026-09-18T10:26:48.0575814Z   fetch-depth: 1
+Publish apt feed	Checkout	2026-09-18T10:26:48.0578453Z   fetch-tags: false
+Publish apt feed	Checkout	2026-09-18T10:26:48.0581111Z   show-progress: true
+Publish apt feed	Checkout	2026-09-18T10:26:48.0583775Z   lfs: false
+Publish apt feed	Checkout	2026-09-18T10:26:48.0586493Z   submodules: false
+Publish apt feed	Checkout	2026-09-18T10:26:48.0589211Z   set-safe-directory: true
+Publish apt feed	Checkout	2026-09-18T10:26:48.0592029Z   allow-unsafe-pr-checkout: false
+Publish apt feed	Checkout	2026-09-18T10:26:48.0595304Z ##[endgroup]
+Publish apt feed	Checkout	2026-09-18T10:26:48.1729760Z Syncing repository: tailrocks/velnor-apt
+Publish apt feed	Checkout	2026-09-18T10:26:48.1739099Z ##[group]Getting Git version info
+Publish apt feed	Checkout	2026-09-18T10:26:48.1744739Z Working directory is '/home/runner/work/velnor-apt/velnor-apt'
+Publish apt feed	Checkout	2026-09-18T10:26:48.1753547Z [command]/usr/bin/git version
+Publish apt feed	Checkout	2026-09-18T10:26:48.1765035Z git version 2.55.0
+Publish apt feed	Checkout	2026-09-18T10:26:48.1796495Z ##[endgroup]
+Publish apt feed	Checkout	2026-09-18T10:26:48.1815780Z Temporarily overriding HOME='/home/runner/work/_temp/87d482ef-a271-44e5-b7c5-a0e4be0ad584' before making global git config changes
+Publish apt feed	Checkout	2026-09-18T10:26:48.1821937Z Adding repository directory to the temporary git global config as a safe directory
+Publish apt feed	Checkout	2026-09-18T10:26:48.1830422Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor-apt/velnor-apt
+Publish apt feed	Checkout	2026-09-18T10:26:48.1866541Z Deleting the contents of '/home/runner/work/velnor-apt/velnor-apt'
+Publish apt feed	Checkout	2026-09-18T10:26:48.1876037Z ##[group]Determining repository object format
+Publish apt feed	Checkout	2026-09-18T10:26:48.1884394Z ##[endgroup]
+Publish apt feed	Checkout	2026-09-18T10:26:48.1891628Z ##[group]Initializing the repository
+Publish apt feed	Checkout	2026-09-18T10:26:48.1897584Z [command]/usr/bin/git init /home/runner/work/velnor-apt/velnor-apt
+Publish apt feed	Checkout	2026-09-18T10:26:48.1992459Z hint: Using 'master' as the name for the initial branch. This default branch name
+Publish apt feed	Checkout	2026-09-18T10:26:48.1999987Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+Publish apt feed	Checkout	2026-09-18T10:26:48.2007031Z hint: to use in all of your new repositories, which will suppress this warning,
+Publish apt feed	Checkout	2026-09-18T10:26:48.2013025Z hint: call:
+Publish apt feed	Checkout	2026-09-18T10:26:48.2017670Z hint:
+Publish apt feed	Checkout	2026-09-18T10:26:48.2022523Z hint: 	git config --global init.defaultBranch <name>
+Publish apt feed	Checkout	2026-09-18T10:26:48.2028241Z hint:
+Publish apt feed	Checkout	2026-09-18T10:26:48.2033494Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+Publish apt feed	Checkout	2026-09-18T10:26:48.2038526Z hint: 'development'. The just-created branch can be renamed via this command:
+Publish apt feed	Checkout	2026-09-18T10:26:48.2044844Z hint:
+Publish apt feed	Checkout	2026-09-18T10:26:48.2049515Z hint: 	git branch -m <name>
+Publish apt feed	Checkout	2026-09-18T10:26:48.2054182Z hint:
+Publish apt feed	Checkout	2026-09-18T10:26:48.2059739Z hint: Disable this message with "git config set advice.defaultBranchName false"
+Publish apt feed	Checkout	2026-09-18T10:26:48.2067220Z Initialized empty Git repository in /home/runner/work/velnor-apt/velnor-apt/.git/
+Publish apt feed	Checkout	2026-09-18T10:26:48.2080048Z [command]/usr/bin/git remote add origin https://github.com/tailrocks/velnor-apt
+Publish apt feed	Checkout	2026-09-18T10:26:48.2105159Z ##[endgroup]
+Publish apt feed	Checkout	2026-09-18T10:26:48.2112828Z ##[group]Disabling automatic garbage collection
+Publish apt feed	Checkout	2026-09-18T10:26:48.2118518Z [command]/usr/bin/git config --local gc.auto 0
+Publish apt feed	Checkout	2026-09-18T10:26:48.2147843Z ##[endgroup]
+Publish apt feed	Checkout	2026-09-18T10:26:48.2154819Z ##[group]Setting up auth
+Publish apt feed	Checkout	2026-09-18T10:26:48.2159790Z Removing SSH command configuration
+Publish apt feed	Checkout	2026-09-18T10:26:48.2166438Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Publish apt feed	Checkout	2026-09-18T10:26:48.2204062Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Publish apt feed	Checkout	2026-09-18T10:26:48.2577578Z Removing HTTP extra header
+Publish apt feed	Checkout	2026-09-18T10:26:48.2583561Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Publish apt feed	Checkout	2026-09-18T10:26:48.2629115Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Publish apt feed	Checkout	2026-09-18T10:26:48.2864338Z Removing includeIf entries pointing to credentials config files
+Publish apt feed	Checkout	2026-09-18T10:26:48.2871041Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Publish apt feed	Checkout	2026-09-18T10:26:48.2910220Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Publish apt feed	Checkout	2026-09-18T10:26:48.3154287Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-2f0a2e2f-6451-4f24-9bba-3250f3fdf31b.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+Publish apt feed	Checkout	2026-09-18T10:26:48.3199680Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor-apt/velnor-apt/.git.path /home/runner/work/_temp/git-credentials-2f0a2e2f-6451-4f24-9bba-3250f3fdf31b.config
+Publish apt feed	Checkout	2026-09-18T10:26:48.3237506Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor-apt/velnor-apt/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-2f0a2e2f-6451-4f24-9bba-3250f3fdf31b.config
+Publish apt feed	Checkout	2026-09-18T10:26:48.3281309Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-2f0a2e2f-6451-4f24-9bba-3250f3fdf31b.config
+Publish apt feed	Checkout	2026-09-18T10:26:48.3324552Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-2f0a2e2f-6451-4f24-9bba-3250f3fdf31b.config
+Publish apt feed	Checkout	2026-09-18T10:26:48.3363591Z ##[endgroup]
+Publish apt feed	Checkout	2026-09-18T10:26:48.3370985Z ##[group]Fetching the repository
+Publish apt feed	Checkout	2026-09-18T10:26:48.3377793Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +b24d7d4370001119cd5ddcb6f9e07aa9007051e7:refs/remotes/origin/main
+Publish apt feed	Checkout	2026-09-18T10:26:48.8599543Z From https://github.com/tailrocks/velnor-apt
+Publish apt feed	Checkout	2026-09-18T10:26:48.8604104Z  * [new ref]         b24d7d4370001119cd5ddcb6f9e07aa9007051e7 -> origin/main
+Publish apt feed	Checkout	2026-09-18T10:26:48.8614362Z [command]/usr/bin/git branch --list --remote origin/main
+Publish apt feed	Checkout	2026-09-18T10:26:48.8652607Z   origin/main
+Publish apt feed	Checkout	2026-09-18T10:26:48.8662901Z [command]/usr/bin/git rev-parse refs/remotes/origin/main
+Publish apt feed	Checkout	2026-09-18T10:26:48.8698270Z b24d7d4370001119cd5ddcb6f9e07aa9007051e7
+Publish apt feed	Checkout	2026-09-18T10:26:48.8708665Z ##[endgroup]
+Publish apt feed	Checkout	2026-09-18T10:26:48.8713819Z ##[group]Determining the checkout info
+Publish apt feed	Checkout	2026-09-18T10:26:48.8720482Z ##[endgroup]
+Publish apt feed	Checkout	2026-09-18T10:26:48.8724682Z [command]/usr/bin/git sparse-checkout disable
+Publish apt feed	Checkout	2026-09-18T10:26:48.8796581Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+Publish apt feed	Checkout	2026-09-18T10:26:48.8847340Z ##[group]Checking out the ref
+Publish apt feed	Checkout	2026-09-18T10:26:48.8850903Z [command]/usr/bin/git checkout --progress --force -B main refs/remotes/origin/main
+Publish apt feed	Checkout	2026-09-18T10:26:48.8940450Z Switched to a new branch 'main'
+Publish apt feed	Checkout	2026-09-18T10:26:48.8945257Z branch 'main' set up to track 'origin/main'.
+Publish apt feed	Checkout	2026-09-18T10:26:48.8956477Z ##[endgroup]
+Publish apt feed	Checkout	2026-09-18T10:26:48.9018292Z [command]/usr/bin/git log -1 --format=%H
+Publish apt feed	Checkout	2026-09-18T10:26:48.9043198Z b24d7d4370001119cd5ddcb6f9e07aa9007051e7
+Publish apt feed	Checkout	2026-09-18T10:26:48.9054457Z ##[group]Removing auth
+Publish apt feed	Checkout	2026-09-18T10:26:48.9058014Z Removing SSH command configuration
+Publish apt feed	Checkout	2026-09-18T10:26:48.9061475Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Publish apt feed	Checkout	2026-09-18T10:26:48.9104524Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Publish apt feed	Checkout	2026-09-18T10:26:48.9351900Z Removing HTTP extra header
+Publish apt feed	Checkout	2026-09-18T10:26:48.9356158Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Publish apt feed	Checkout	2026-09-18T10:26:48.9398453Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Publish apt feed	Checkout	2026-09-18T10:26:48.9641883Z Removing includeIf entries pointing to credentials config files
+Publish apt feed	Checkout	2026-09-18T10:26:48.9646233Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Publish apt feed	Checkout	2026-09-18T10:26:48.9677927Z includeif.gitdir:/home/runner/work/velnor-apt/velnor-apt/.git.path
+Publish apt feed	Checkout	2026-09-18T10:26:48.9684476Z includeif.gitdir:/home/runner/work/velnor-apt/velnor-apt/.git/worktrees/*.path
+Publish apt feed	Checkout	2026-09-18T10:26:48.9690881Z includeif.gitdir:/github/workspace/.git.path
+Publish apt feed	Checkout	2026-09-18T10:26:48.9696519Z includeif.gitdir:/github/workspace/.git/worktrees/*.path
+Publish apt feed	Checkout	2026-09-18T10:26:48.9704999Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor-apt/velnor-apt/.git.path
+Publish apt feed	Checkout	2026-09-18T10:26:48.9721714Z /home/runner/work/_temp/git-credentials-2f0a2e2f-6451-4f24-9bba-3250f3fdf31b.config
+Publish apt feed	Checkout	2026-09-18T10:26:48.9733959Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor-apt/velnor-apt/.git.path \/home\/runner\/work\/_temp\/git\-credentials\-2f0a2e2f\-6451\-4f24\-9bba\-3250f3fdf31b\.config
+Publish apt feed	Checkout	2026-09-18T10:26:48.9781355Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor-apt/velnor-apt/.git/worktrees/*.path
+Publish apt feed	Checkout	2026-09-18T10:26:48.9815962Z /home/runner/work/_temp/git-credentials-2f0a2e2f-6451-4f24-9bba-3250f3fdf31b.config
+Publish apt feed	Checkout	2026-09-18T10:26:48.9827591Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor-apt/velnor-apt/.git/worktrees/*.path \/home\/runner\/work\/_temp\/git\-credentials\-2f0a2e2f\-6451\-4f24\-9bba\-3250f3fdf31b\.config
+Publish apt feed	Checkout	2026-09-18T10:26:48.9867123Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git.path
+Publish apt feed	Checkout	2026-09-18T10:26:48.9919857Z /github/runner_temp/git-credentials-2f0a2e2f-6451-4f24-9bba-3250f3fdf31b.config
+Publish apt feed	Checkout	2026-09-18T10:26:48.9946917Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git.path \/github\/runner_temp\/git\-credentials\-2f0a2e2f\-6451\-4f24\-9bba\-3250f3fdf31b\.config
+Publish apt feed	Checkout	2026-09-18T10:26:48.9998734Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git/worktrees/*.path
+Publish apt feed	Checkout	2026-09-18T10:26:49.0027171Z /github/runner_temp/git-credentials-2f0a2e2f-6451-4f24-9bba-3250f3fdf31b.config
+Publish apt feed	Checkout	2026-09-18T10:26:49.0042466Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git/worktrees/*.path \/github\/runner_temp\/git\-credentials\-2f0a2e2f\-6451\-4f24\-9bba\-3250f3fdf31b\.config
+Publish apt feed	Checkout	2026-09-18T10:26:49.0075207Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Publish apt feed	Checkout	2026-09-18T10:26:49.0306679Z Removing credentials config '/home/runner/work/_temp/git-credentials-2f0a2e2f-6451-4f24-9bba-3250f3fdf31b.config'
+Publish apt feed	Checkout	2026-09-18T10:26:49.0319127Z ##[endgroup]
+Publish apt feed	Set up Velnor workflow runtime	﻿2026-09-18T10:26:49.1092224Z ##[group]Run tailrocks/velnor/.github/actions/setup-velnor-workflow@fdeed261bd2247a38db6922a7726cd45d3d6f31e
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1120024Z with:
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1123642Z   rev: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1127150Z   checkout-path: /home/runner/work/velnor-apt/velnor-apt
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1130403Z   cache: true
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1133024Z   cache-key-prefix: velnor-workflow-v3
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1144260Z   github-token: ***
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1147128Z ##[endgroup]
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1260664Z ##[start-action display=Resolve source closure;id=runtime.closure]
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1363728Z ##[group]Run set -euo pipefail
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1366814Z ^[[36;1mset -euo pipefail^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1369456Z ^[[36;1msha256_digest() {^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1372245Z ^[[36;1m  if command -v sha256sum >/dev/null 2>&1; then^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1375709Z ^[[36;1m    sha256sum | awk '{print $1}'^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1378717Z ^[[36;1m  elif command -v shasum >/dev/null 2>&1; then^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1382078Z ^[[36;1m    shasum -a 256 | awk '{print $1}'^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1384902Z ^[[36;1m  else^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1388274Z ^[[36;1m    echo "::error::no SHA-256 checksum tool available (sha256sum or shasum)" >&2^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1391655Z ^[[36;1m    return 1^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1394191Z ^[[36;1m  fi^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1396839Z ^[[36;1m}^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1399978Z ^[[36;1mtest "$INSTALL_REV" != '' || { echo "::error::runtime revision is empty" >&2; exit 1; }^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1404494Z ^[[36;1m[[ "$INSTALL_REV" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::runtime revision must be a full commit SHA, got $INSTALL_REV" >&2; exit 1; }^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1408529Z ^[[36;1mlisting=""^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1411784Z ^[[36;1mif git -C "$CHECKOUT_PATH" cat-file -e "$INSTALL_REV^{commit}" 2>/dev/null; then^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1416831Z ^[[36;1m  listing="$(git -C "$CHECKOUT_PATH" ls-tree -r "$INSTALL_REV" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)"^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1421180Z ^[[36;1melse^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1425182Z ^[[36;1m  tree="$(gh api "repos/$PRODUCT_REPOSITORY/git/trees/$INSTALL_REV?recursive=1")" || { echo "::error::unknown generator revision $INSTALL_REV" >&2; exit 1; }^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1430993Z ^[[36;1m  [[ "$(jq -r '.truncated // false' <<<"$tree")" != "true" ]] || { echo "::error::tree API response is truncated; the closure cannot be proven" >&2; exit 1; }^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1438600Z ^[[36;1m  listing="$(jq -r '[.tree[] | select(.type != "tree") | select(.path == "Cargo.toml" or .path == "Cargo.lock" or .path == "rust-toolchain.toml" or .path == "rust-toolchain" or (.path | startswith("crates/velnor-workflow/")) or (.path | startswith(".cargo/"))) | "\(.mode) \(.type) \(.sha)\t\(.path)"] | sort | join("\n")' <<<"$tree")"^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1445244Z ^[[36;1mfi^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1449041Z ^[[36;1mtest "$listing" != '' || { echo "::error::revision $INSTALL_REV has no closure inputs" >&2; exit 1; }^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1453818Z ^[[36;1mclosure="$(printf '%s\nclosure-version:1\nfeatures:\nprofile:release\n' "$(LC_ALL=C sort <<<"$listing")" | sha256_digest)"^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1458767Z ^[[36;1m[[ "$closure" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::closure resolution failed" >&2; exit 1; }^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1462354Z ^[[36;1mecho "value=$closure" >> "$GITHUB_OUTPUT"^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1512637Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1516247Z env:
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1526914Z   GH_TOKEN: ***
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1529646Z   INSTALL_REV: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1533010Z   CHECKOUT_PATH: /home/runner/work/velnor-apt/velnor-apt
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1536635Z   PRODUCT_REPOSITORY: tailrocks/velnor
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.1539602Z ##[endgroup]
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.6830482Z ##[end-action id=runtime.closure;outcome=success;conclusion=success;duration_ms=556]
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.6847738Z ##[start-action display=Restore runtime cache;id=runtime.cache]
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.7048678Z ##[group]Run actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.7075588Z with:
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.7078142Z   path: ~/.cache/velnor/workflow-runtime
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.7081319Z   key: velnor-workflow-v3-Linux-X64-81ba31f87a699c4e24e68baa1cf7cd0b5d765e5970934ec72c38b83772b274dc
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.7084454Z   enableCrossOsArchive: false
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.7087222Z   fail-on-cache-miss: false
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.7089731Z   lookup-only: false
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:49.7092177Z ##[endgroup]
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:50.1286939Z Cache hit for: velnor-workflow-v3-Linux-X64-81ba31f87a699c4e24e68baa1cf7cd0b5d765e5970934ec72c38b83772b274dc
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.4283494Z Received 0 of 3728075 (0.0%), 0.0 MBs/sec
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.6958337Z Received 3728075 of 3728075 (100.0%), 2.8 MBs/sec
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.6959921Z Cache Size: ~4 MB (3728075 B)
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.6990589Z [command]/usr/bin/tar -xf /home/runner/work/_temp/d46ca2dd-2582-4483-aaad-4187aecc9a5a/cache.tzst -P -C /home/runner/work/velnor-apt/velnor-apt --use-compress-program unzstd
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7245761Z Cache restored successfully
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7326407Z Cache restored from key: velnor-workflow-v3-Linux-X64-81ba31f87a699c4e24e68baa1cf7cd0b5d765e5970934ec72c38b83772b274dc
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7395120Z ##[end-action id=runtime.cache;outcome=success;conclusion=success;duration_ms=2054]
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7403916Z ##[start-action display=Download runtime product;id=runtime.__run]
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7421100Z ##[end-action id=runtime.__run;outcome=skipped;conclusion=skipped;duration_ms=0]
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7426163Z ##[start-action display=Verify runtime product;id=runtime.__run_2]
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7453218Z ##[group]Run set -euo pipefail
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7453947Z ^[[36;1mset -euo pipefail^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7454708Z ^[[36;1mruntime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7455798Z ^[[36;1mjq -e \^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7456446Z ^[[36;1m  --arg closure "$CLOSURE" \^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7457265Z ^[[36;1m  --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7458514Z ^[[36;1m  '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$"))' \^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7459688Z ^[[36;1m  "$runtime/manifest.json" >/dev/null^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7460458Z ^[[36;1mif command -v sha256sum >/dev/null 2>&1; then^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7461394Z ^[[36;1m  actual="$(sha256sum "$runtime/bin/velnor-workflow" | awk '{print $1}')"^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7462249Z ^[[36;1melse^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7463216Z ^[[36;1m  actual="$(shasum -a 256 "$runtime/bin/velnor-workflow" | awk '{print $1}')"^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7464049Z ^[[36;1mfi^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7464976Z ^[[36;1mexpected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "$runtime/manifest.json")"^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7466343Z ^[[36;1m[[ "$actual" == "$expected" ]] || { echo "::error::cached runtime digest mismatch" >&2; exit 1; }^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7502923Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7503707Z env:
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7504441Z   CLOSURE: 81ba31f87a699c4e24e68baa1cf7cd0b5d765e5970934ec72c38b83772b274dc
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7505252Z ##[endgroup]
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7730354Z ##[end-action id=runtime.__run_2;outcome=success;conclusion=success;duration_ms=30]
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7736479Z ##[start-action display=Add runtime to PATH;id=runtime.__run_3]
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7783373Z ##[group]Run set -euo pipefail
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7784091Z ^[[36;1mset -euo pipefail^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7784847Z ^[[36;1mruntime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7785965Z ^[[36;1mtest -x "$runtime/bin/velnor-workflow"^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7786718Z ^[[36;1mtest -s "$runtime/manifest.json"^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7787513Z ^[[36;1mreported="$("$runtime/bin/velnor-workflow" --closure)"^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7788820Z ^[[36;1m[[ "$reported" == "$CLOSURE" ]] || { echo "::error::runtime at $runtime reports closure $reported, expected $CLOSURE" >&2; exit 1; }^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7789968Z ^[[36;1mmanifest_revision="$(jq -er '.revision' "$runtime/manifest.json")"^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7790935Z ^[[36;1mreported_revision="$("$runtime/bin/velnor-workflow" --revision)"^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7792228Z ^[[36;1m[[ "$reported_revision" == "$manifest_revision" ]] || { echo "::error::runtime at $runtime reports revision $reported_revision, expected $manifest_revision" >&2; exit 1; }^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7793423Z ^[[36;1mecho "$runtime/bin" >> "$GITHUB_PATH"^[[0m
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7828874Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7829658Z env:
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7830397Z   CLOSURE: 81ba31f87a699c4e24e68baa1cf7cd0b5d765e5970934ec72c38b83772b274dc
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7831240Z ##[endgroup]
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7956124Z ##[end-action id=runtime.__run_3;outcome=success;conclusion=success;duration_ms=21]
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7960097Z ##[start-action display=Save runtime cache;id=runtime.__actions_cache]
+Publish apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:51.7982684Z ##[end-action id=runtime.__actions_cache;outcome=skipped;conclusion=skipped;duration_ms=0]
+Publish apt feed	Set trusted workflow policy revision	﻿2026-09-18T10:26:51.8048707Z ##[group]Run echo "VELNOR_WORKFLOW_POLICY_REVISION=fdeed261bd2247a38db6922a7726cd45d3d6f31e" >> "$GITHUB_ENV"
+Publish apt feed	Set trusted workflow policy revision	2026-09-18T10:26:51.8050010Z ^[[36;1mecho "VELNOR_WORKFLOW_POLICY_REVISION=fdeed261bd2247a38db6922a7726cd45d3d6f31e" >> "$GITHUB_ENV"^[[0m
+Publish apt feed	Set trusted workflow policy revision	2026-09-18T10:26:51.8087250Z shell: /usr/bin/bash -e {0}
+Publish apt feed	Set trusted workflow policy revision	2026-09-18T10:26:51.8087912Z ##[endgroup]
+Publish apt feed	Download verified feed inputs	﻿2026-09-18T10:26:51.8261272Z ##[group]Run actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+Publish apt feed	Download verified feed inputs	2026-09-18T10:26:51.8262171Z with:
+Publish apt feed	Download verified feed inputs	2026-09-18T10:26:51.8262759Z   name: apt-incoming
+Publish apt feed	Download verified feed inputs	2026-09-18T10:26:51.8263374Z   path: incoming
+Publish apt feed	Download verified feed inputs	2026-09-18T10:26:51.8263975Z   merge-multiple: false
+Publish apt feed	Download verified feed inputs	2026-09-18T10:26:51.8264617Z   repository: tailrocks/velnor-apt
+Publish apt feed	Download verified feed inputs	2026-09-18T10:26:51.8265274Z   run-id: 35334663704
+Publish apt feed	Download verified feed inputs	2026-09-18T10:26:51.8266079Z   skip-decompress: false
+Publish apt feed	Download verified feed inputs	2026-09-18T10:26:51.8266698Z   digest-mismatch: error
+Publish apt feed	Download verified feed inputs	2026-09-18T10:26:51.8267302Z env:
+Publish apt feed	Download verified feed inputs	2026-09-18T10:26:51.8268032Z   VELNOR_WORKFLOW_POLICY_REVISION: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+Publish apt feed	Download verified feed inputs	2026-09-18T10:26:51.8268851Z ##[endgroup]
+Publish apt feed	Download verified feed inputs	2026-09-18T10:26:51.9650371Z Downloading single artifact
+Publish apt feed	Download verified feed inputs	2026-09-18T10:26:52.2566547Z Preparing to download the following artifacts:
+Publish apt feed	Download verified feed inputs	2026-09-18T10:26:52.2576983Z - apt-incoming (ID: 10542975411, Size: 243915053, Expected Digest: sha256:77f2e0430d8f29b69983c90bf0583cd7111f2f3d45327267bb72c84d705a867b)
+Publish apt feed	Download verified feed inputs	2026-09-18T10:26:52.7883151Z Redirecting to blob download url: https://productionresultssa9.blob.core.windows.net/actions-results/d4be06da-a558-491c-9040-6128597534c3/workflow-job-run-b40b78fd-5a66-51af-b269-3652b4aa22f0/artifacts/3c90c91779cdf275f06c596eddc2880b1391c2ae30f878e357f92a3837d34e5c.zip
+Publish apt feed	Download verified feed inputs	2026-09-18T10:26:52.7887732Z Starting download of artifact to: /home/runner/work/velnor-apt/velnor-apt/incoming
+Publish apt feed	Download verified feed inputs	2026-09-18T10:26:53.1853796Z (node:2415) [DEP0005] DeprecationWarning: Buffer() is deprecated due to security and usability issues. Please use the Buffer.alloc(), Buffer.allocUnsafe(), or Buffer.from() methods instead.
+Publish apt feed	Download verified feed inputs	2026-09-18T10:26:53.1855863Z (Use `node --trace-deprecation ...` to show where the warning was created)
+Publish apt feed	Download verified feed inputs	2026-09-18T10:27:02.8842677Z SHA256 digest of downloaded artifact is 77f2e0430d8f29b69983c90bf0583cd7111f2f3d45327267bb72c84d705a867b
+Publish apt feed	Download verified feed inputs	2026-09-18T10:27:02.8844515Z Artifact download completed successfully.
+Publish apt feed	Download verified feed inputs	2026-09-18T10:27:02.8857148Z Total of 1 artifact(s) downloaded
+Publish apt feed	Download verified feed inputs	2026-09-18T10:27:02.8858401Z Download artifact has finished successfully
+Publish apt feed	Recover the prior pair and derive the previous pointer	﻿2026-09-18T10:27:02.8995949Z ##[group]Run set -euo pipefail
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.8996771Z ^[[36;1mset -euo pipefail^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.8997413Z ^[[36;1mrm -rf prev^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.8998007Z ^[[36;1mmkdir -p prev^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.8998689Z ^[[36;1mfeed='https://velnor-apt.tailrocks.com'^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.8999451Z ^[[36;1mecho "bootstrap=false" >> "$GITHUB_OUTPUT"^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9000184Z ^[[36;1mcase "$CHANNEL" in^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9000791Z ^[[36;1m  stable)^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9001588Z ^[[36;1m    prev_tag="$(curl --fail --show-error --silent --location "$feed/last-publish")"^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9002459Z ^[[36;1m    prev_version="${prev_tag#v}"^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9003448Z ^[[36;1m    case "$prev_version" in ''|*[!0-9.]*) echo "::error::live last-publish is not a version: $prev_tag" >&2; exit 1 ;; esac^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9004426Z ^[[36;1m    for arch in amd64 arm64; do^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9005237Z ^[[36;1m      curl --fail --show-error --silent --location --retry 3 \^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9006516Z ^[[36;1m        -o "prev/velnor-runner-$prev_version-$arch.deb" \^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9007496Z ^[[36;1m        "$feed/pool/main/v/velnor-runner/velnor-runner_${prev_version}_${arch}.deb"^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9008333Z ^[[36;1m    done^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9009078Z ^[[36;1m    candidate_sha="$(awk '{print $1}' incoming/release-record.json.sha256)"^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9010169Z ^[[36;1m    curl --fail --show-error --silent --location -o published.json "$feed/publication-record.json"^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9011709Z ^[[36;1m    velnor-workflow release apt-previous-pointer --suite stable --published published.json --prior "$prev_tag" --candidate "$VERSION" --candidate-sha "$candidate_sha" > previous-pointer.json^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9012969Z ^[[36;1m    ;;^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9013587Z ^[[36;1m  preview)^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9014471Z ^[[36;1m    if curl --fail --show-error --silent --location --output /dev/null "$feed/dists/preview/InRelease"; then^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9016202Z ^[[36;1m      curl --fail --show-error --silent --location -o live-packages "$feed/dists/preview/main/binary-amd64/Packages"^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9017607Z ^[[36;1m      rollback="$(awk '$1=="Package:"{p=$2} p=="velnor-runner" && $1=="Version:"{print $2}' live-packages | sort -u | grep -Fxv "$VERSION")"^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9018880Z ^[[36;1m      [ -n "$rollback" ] || { echo "::error::no retained rollback in the live preview index" >&2; exit 1; }^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9020140Z ^[[36;1m      [ "$(printf '%s\n' "$rollback" | wc -l | tr -d ' ')" = 1 ] || { echo "::error::live preview index retains more than one rollback" >&2; exit 1; }^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9021499Z ^[[36;1m      case "$rollback" in ''|*[!0-9A-Za-z.+:~-]*) echo "::error::live preview rollback is not a pool version: $rollback" >&2; exit 1 ;; esac^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9022527Z ^[[36;1m      for arch in amd64 arm64; do^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9046088Z ^[[36;1m        curl --fail --show-error --silent --location --retry 3 \^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9047304Z ^[[36;1m          -o "prev/velnor-runner_${rollback}_${arch}.deb" \^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9048304Z ^[[36;1m          "$feed/pool/preview/main/v/velnor-runner/velnor-runner_${rollback}_${arch}.deb"^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9049192Z ^[[36;1m      done^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9050054Z ^[[36;1m      velnor-workflow release apt-previous-pointer --suite preview > previous-pointer.json^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9050978Z ^[[36;1m    else^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9051880Z ^[[36;1m      velnor-workflow release apt-previous-pointer --suite preview --bootstrap true > previous-pointer.json^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9052908Z ^[[36;1m      echo "bootstrap=true" >> "$GITHUB_OUTPUT"^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9053639Z ^[[36;1m    fi^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9054210Z ^[[36;1m    ;;^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9054815Z ^[[36;1mesac^[[0m
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9092330Z shell: /usr/bin/bash -e {0}
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9092973Z env:
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9093713Z   VELNOR_WORKFLOW_POLICY_REVISION: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9094821Z   CHANNEL: stable
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9095706Z   VERSION: v0.1.274
+Publish apt feed	Recover the prior pair and derive the previous pointer	2026-09-18T10:27:02.9096322Z ##[endgroup]
+Publish apt feed	Publish the staged suite	﻿2026-09-18T10:27:07.6660421Z ##[group]Run set -euo pipefail
+Publish apt feed	Publish the staged suite	2026-09-18T10:27:07.6661771Z ^[[36;1mset -euo pipefail^[[0m
+Publish apt feed	Publish the staged suite	2026-09-18T10:27:07.6667174Z ^[[36;1margs=(--suite "$CHANNEL" --source-repo 'tailrocks/velnor' --package 'velnor-runner' --binary 'velnor-runner' --consumer-repo 'tailrocks/velnor-apt' --manifest-schema 'velnor.package-release.v1' --identity-dir 'velnor' --keyring 'velnor.gpg' --origin 'Velnor' --description 'apt repository for the Velnor self-hosted GitHub Actions runner' --feed-url 'https://velnor-apt.tailrocks.com' --signer '7E66E3A53F9B3B5CA61D0F53261EDAC957DEB801' --passphrase-env APT_GPG_PASSPHRASE --key-env APT_GPG_PRIVATE_KEY --version "$VERSION" --incoming incoming --previous-pointer previous-pointer.json --staging public)^[[0m
+Publish apt feed	Publish the staged suite	2026-09-18T10:27:07.6672505Z ^[[36;1mif [ "false" = true ]; then^[[0m
+Publish apt feed	Publish the staged suite	2026-09-18T10:27:07.6673769Z ^[[36;1m  args+=(--bootstrap true)^[[0m
+Publish apt feed	Publish the staged suite	2026-09-18T10:27:07.6674966Z ^[[36;1melse^[[0m
+Publish apt feed	Publish the staged suite	2026-09-18T10:27:07.6676222Z ^[[36;1m  args+=(--prev-dir prev)^[[0m
+Publish apt feed	Publish the staged suite	2026-09-18T10:27:07.6677433Z ^[[36;1mfi^[[0m
+Publish apt feed	Publish the staged suite	2026-09-18T10:27:07.6678650Z ^[[36;1mvelnor-workflow release apt-publish "${args[@]}"^[[0m
+Publish apt feed	Publish the staged suite	2026-09-18T10:27:07.6680015Z ^[[36;1mif [ "$CHANNEL" = stable ]; then^[[0m
+Publish apt feed	Publish the staged suite	2026-09-18T10:27:07.6681208Z ^[[36;1m  ref="refs/tags/$VERSION"^[[0m
+Publish apt feed	Publish the staged suite	2026-09-18T10:27:07.6682428Z ^[[36;1m  manifest="incoming/manifest.json"^[[0m
+Publish apt feed	Publish the staged suite	2026-09-18T10:27:07.6683672Z ^[[36;1melse^[[0m
+Publish apt feed	Publish the staged suite	2026-09-18T10:27:07.6684702Z ^[[36;1m  ref="refs/heads/main"^[[0m
+Publish apt feed	Publish the staged suite	2026-09-18T10:27:07.6686245Z ^[[36;1m  manifest="incoming/release-manifest.json"^[[0m
+Publish apt feed	Publish the staged suite	2026-09-18T10:27:07.6687627Z ^[[36;1mfi^[[0m
+Publish apt feed	Publish the staged suite	2026-09-18T10:27:07.6689954Z ^[[36;1mvelnor-workflow release apt-channel-update --suite "$CHANNEL" --source-repo 'tailrocks/velnor' --source-ref "$ref" --commit "$COMMIT" --version "$VERSION" --package 'velnor-runner' --manifest "$manifest" --staging public^[[0m
+Publish apt feed	Publish the staged suite	2026-09-18T10:27:07.6748620Z shell: /usr/bin/bash -e {0}
+Publish apt feed	Publish the staged suite	2026-09-18T10:27:07.6749851Z env:
+Publish apt feed	Publish the staged suite	2026-09-18T10:27:07.6751147Z   VELNOR_WORKFLOW_POLICY_REVISION: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+Publish apt feed	Publish the staged suite	2026-09-18T10:27:07.6752680Z   CHANNEL: stable
+Publish apt feed	Publish the staged suite	2026-09-18T10:27:07.6753747Z   VERSION: v0.1.274
+Publish apt feed	Publish the staged suite	2026-09-18T10:27:07.6754869Z   COMMIT: 120f223655587ab0bcf2530cd4b203e0375a9dca
+Publish apt feed	Publish the staged suite	2026-09-18T10:27:07.6757125Z   APT_GPG_PASSPHRASE: ***
+Publish apt feed	Publish the staged suite	2026-09-18T10:27:07.6798308Z   APT_GPG_PRIVATE_KEY: ***
+Publish apt feed	Publish the staged suite	2026-09-18T10:27:07.6799559Z ##[endgroup]
+Publish apt feed	Publish the staged suite	2026-09-18T10:27:07.6894647Z error: publish: refusing — verify has not armed the reprepro sentinel
+Publish apt feed	Publish the staged suite	2026-09-18T10:27:07.6913301Z ##[error]Process completed with exit code 1.
+Publish apt feed	Post Checkout	﻿2026-09-18T10:27:07.7099608Z Post job cleanup.
+Publish apt feed	Post Checkout	2026-09-18T10:27:07.8000087Z [command]/usr/bin/git version
+Publish apt feed	Post Checkout	2026-09-18T10:27:07.8048890Z git version 2.55.0
+Publish apt feed	Post Checkout	2026-09-18T10:27:07.8103246Z Temporarily overriding HOME='/home/runner/work/_temp/cb0c2ad8-3791-4169-a0e6-c51e4211a2c6' before making global git config changes
+Publish apt feed	Post Checkout	2026-09-18T10:27:07.8104974Z Adding repository directory to the temporary git global config as a safe directory
+Publish apt feed	Post Checkout	2026-09-18T10:27:07.8109170Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor-apt/velnor-apt
+Publish apt feed	Post Checkout	2026-09-18T10:27:07.8144605Z Removing SSH command configuration
+Publish apt feed	Post Checkout	2026-09-18T10:27:07.8151968Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Publish apt feed	Post Checkout	2026-09-18T10:27:07.8190648Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Publish apt feed	Post Checkout	2026-09-18T10:27:07.8442872Z Removing HTTP extra header
+Publish apt feed	Post Checkout	2026-09-18T10:27:07.8449577Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Publish apt feed	Post Checkout	2026-09-18T10:27:07.8486591Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Publish apt feed	Post Checkout	2026-09-18T10:27:07.8747520Z Removing includeIf entries pointing to credentials config files
+Publish apt feed	Post Checkout	2026-09-18T10:27:07.8753912Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Publish apt feed	Post Checkout	2026-09-18T10:27:07.8794643Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Publish apt feed	Complete job	﻿2026-09-18T10:27:07.9282611Z Evaluate and set job outputs
+Publish apt feed	Complete job	2026-09-18T10:27:07.9288812Z Set output 'version'
+Publish apt feed	Complete job	2026-09-18T10:27:07.9291064Z Set output 'commit'
+Publish apt feed	Complete job	2026-09-18T10:27:07.9292422Z Set output 'channel'
+Publish apt feed	Complete job	2026-09-18T10:27:07.9293850Z Cleaning up orphan processes

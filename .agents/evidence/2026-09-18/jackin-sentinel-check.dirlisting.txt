@@ -1,0 +1,46 @@
+# Recursive listing of /private/tmp/jackin-sentinel-check (evidence stub; only evidence-type files copied under jackin-sentinel-check/)
+# Generated: 2026-09-18T09:58:52Z
+# git HEAD: 95216dfcc524aea82857b64e347110fcb45e85ad
+# du: 332K	/private/tmp/jackin-sentinel-check
+-rw-r--r--@ 1 donbeave  wheel  718 Sep 16 20:32 /private/tmp/jackin-sentinel-check/REUSE.toml
+-rw-r--r--@ 1 donbeave  wheel  11358 Sep 16 20:32 /private/tmp/jackin-sentinel-check/LICENSE
+drwxr-xr-x@ 3 donbeave  wheel  96 Sep 16 20:32 /private/tmp/jackin-sentinel-check/LICENSES
+-rw-r--r--@ 1 donbeave  wheel  11358 Sep 16 20:32 /private/tmp/jackin-sentinel-check/LICENSES/Apache-2.0.txt
+-rw-r--r--@ 1 donbeave  wheel  448 Sep 16 20:32 /private/tmp/jackin-sentinel-check/renovate.json
+drwxr-xr-x@ 3 donbeave  wheel  96 Sep 16 20:32 /private/tmp/jackin-sentinel-check/config
+drwxr-xr-x@ 3 donbeave  wheel  96 Sep 16 20:32 /private/tmp/jackin-sentinel-check/config/fleet
+-rw-r--r--@ 1 donbeave  wheel  518 Sep 16 20:32 /private/tmp/jackin-sentinel-check/config/fleet/velnor-host.env
+-rw-r--r--@ 1 donbeave  wheel  359 Sep 16 20:32 /private/tmp/jackin-sentinel-check/.pre-commit-config.yaml
+-rw-r--r--@ 1 donbeave  wheel  101 Sep 16 20:32 /private/tmp/jackin-sentinel-check/.hadolint.yaml
+-rw-r--r--@ 1 donbeave  wheel  255 Sep 16 20:32 /private/tmp/jackin-sentinel-check/Dockerfile
+-rw-r--r--@ 1 donbeave  wheel  0 Sep 16 20:32 /private/tmp/jackin-sentinel-check/.err
+drwxr-xr-x@ 3 donbeave  wheel  96 Sep 16 20:32 /private/tmp/jackin-sentinel-check/.github-gen
+-rw-r--r--@ 1 donbeave  wheel  443 Sep 16 20:32 /private/tmp/jackin-sentinel-check/.github-gen/velnor-workflow.toml
+-rw-r--r--@ 1 donbeave  wheel  142 Sep 16 20:32 /private/tmp/jackin-sentinel-check/NOTICE
+-rw-r--r--@ 1 donbeave  wheel  2102 Sep 16 20:32 /private/tmp/jackin-sentinel-check/README.md
+-rw-r--r--@ 1 donbeave  wheel  1864 Sep 16 20:32 /private/tmp/jackin-sentinel-check/jackin.role.toml
+-rw-r--r--@ 1 donbeave  wheel  653 Sep 16 20:32 /private/tmp/jackin-sentinel-check/mise.toml
+-rw-r--r--@ 1 donbeave  wheel  33 Sep 16 20:32 /private/tmp/jackin-sentinel-check/.dockerignore
+-rw-r--r--@ 1 donbeave  wheel  130 Sep 16 20:32 /private/tmp/jackin-sentinel-check/.gitignore
+drwxr-xr-x@ 5 donbeave  wheel  160 Sep 16 20:32 /private/tmp/jackin-sentinel-check/hooks
+-rwxr-xr-x@ 1 donbeave  wheel  647 Sep 16 20:32 /private/tmp/jackin-sentinel-check/hooks/preflight.sh
+-rwxr-xr-x@ 1 donbeave  wheel  241 Sep 16 20:32 /private/tmp/jackin-sentinel-check/hooks/source.sh
+-rwxr-xr-x@ 1 donbeave  wheel  1989 Sep 16 20:32 /private/tmp/jackin-sentinel-check/hooks/setup-once.sh
+drwxr-xr-x@ 3 donbeave  wheel  96 Sep 16 20:32 /private/tmp/jackin-sentinel-check/scripts
+-rwxr-xr-x@ 1 donbeave  wheel  624 Sep 16 20:32 /private/tmp/jackin-sentinel-check/scripts/marketplace-audit.sh
+drwxr-xr-x@ 5 donbeave  wheel  160 Sep 16 20:32 /private/tmp/jackin-sentinel-check/.github
+drwxr-xr-x@ 4 donbeave  wheel  128 Sep 16 20:32 /private/tmp/jackin-sentinel-check/.github/ci
+-rw-r--r--@ 1 donbeave  wheel  1447 Sep 16 20:32 /private/tmp/jackin-sentinel-check/.github/ci/project.toml
+-rw-r--r--@ 1 donbeave  wheel  552 Sep 16 20:32 /private/tmp/jackin-sentinel-check/.github/ci/.github-actions-generator-state
+drwxr-xr-x@ 8 donbeave  wheel  256 Sep 16 20:32 /private/tmp/jackin-sentinel-check/.github/workflows
+-rw-r--r--@ 1 donbeave  wheel  6624 Sep 16 20:32 /private/tmp/jackin-sentinel-check/.github/workflows/ci-pr.yml
+-rw-r--r--@ 1 donbeave  wheel  4928 Sep 16 20:32 /private/tmp/jackin-sentinel-check/.github/workflows/ci-policy.yml
+-rw-r--r--@ 1 donbeave  wheel  3770 Sep 16 20:32 /private/tmp/jackin-sentinel-check/.github/workflows/nightly.yml
+-rw-r--r--@ 1 donbeave  wheel  11427 Sep 16 20:32 /private/tmp/jackin-sentinel-check/.github/workflows/ci-main.yml
+-rw-r--r--@ 1 donbeave  wheel  11708 Sep 16 20:32 /private/tmp/jackin-sentinel-check/.github/workflows/ci-unit-docker.yml
+-rw-r--r--@ 1 donbeave  wheel  12832 Sep 16 20:32 /private/tmp/jackin-sentinel-check/.github/workflows/maintenance.yml
+-rw-r--r--@ 1 donbeave  wheel  306 Sep 16 20:32 /private/tmp/jackin-sentinel-check/.github/actionlint.yaml
+-rw-r--r--@ 1 donbeave  wheel  1026 Sep 16 20:32 /private/tmp/jackin-sentinel-check/AGENTS.md
+drwxr-xr-x@ 13 donbeave  wheel  416 Sep 17 05:41 /private/tmp/jackin-sentinel-check/.git
+-rw-r--r--@ 1 donbeave  wheel  12233 Sep 16 20:32 /private/tmp/jackin-sentinel-check/mise.lock
+lrwxr-xr-x@ 1 donbeave  wheel  9 Sep 16 20:32 /private/tmp/jackin-sentinel-check/CLAUDE.md -> AGENTS.md

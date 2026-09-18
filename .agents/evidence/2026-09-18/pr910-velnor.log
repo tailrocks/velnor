@@ -1,0 +1,7 @@
+Rust · Rust production topology / Velnor	UNKNOWN STEP	2026-09-16T21:15:57.9887903Z ##[group]Velnor rejected job (operational_store)
+Rust · Rust production topology / Velnor	UNKNOWN STEP	2026-09-16T21:15:57.9887903Z ##[error]Velnor rejected this job before workflow execution.
+Rust · Rust production topology / Velnor	UNKNOWN STEP	2026-09-16T21:15:57.9887903Z phase: operational_store
+Rust · Rust production topology / Velnor	UNKNOWN STEP	2026-09-16T21:15:57.9887903Z reason: operational store rejected the sanitized admission row; job failed closed before execution
+Rust · Rust production topology / Velnor	UNKNOWN STEP	2026-09-16T21:15:57.9887903Z effect: no declared workflow command was executed
+Rust · Rust production topology / Velnor	UNKNOWN STEP	2026-09-16T21:15:57.9887903Z remediation: correct the rejected workflow field/action/ref or add the exact reviewed capability to Velnor, publish and deploy that Velnor release, then rerun
+Rust · Rust production topology / Velnor	UNKNOWN STEP	2026-09-16T21:15:57.9887903Z ##[endgroup]

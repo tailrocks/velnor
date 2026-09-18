@@ -1,0 +1,581 @@
+Command line invocation:
+    /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -project native/JackinDesktop.xcodeproj -scheme JackinDesktop -destination platform=macOS -parallel-testing-enabled NO "-only-testing:JackinDesktopUITests/JackinDesktopUITests/testOverviewPassesAccessibilityAudit" -derivedDataPath native/DerivedData -resultBundlePath /tmp/loop3.xcresult
+
+Writing result bundle at path:
+	/tmp/loop3.xcresult
+
+ComputePackagePrebuildTargetDependencyGraph
+
+Prepare packages
+
+CreateBuildRequest
+
+SendProjectDescription
+
+CreateBuildOperation
+
+ComputeTargetDependencyGraph
+note: Building targets in dependency order
+note: Target dependency graph (6 targets)
+    Target 'JackinDesktopUITests' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinDesktop' in project 'JackinDesktop'
+    Target 'JackinDesktopTests' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinDesktopUI' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBridge' in project 'JackinDesktop'
+    Target 'JackinDesktop' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinDesktopUI' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBridge' in project 'JackinDesktop'
+    Target 'JackinDesktopUI' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBridge' in project 'JackinDesktop'
+    Target 'JackinUsageBridge' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+    Target 'JackinUsageBindings' in project 'JackinDesktop' (no dependencies)
+
+GatherProvisioningInputs
+
+CreateBuildDescription
+
+ClangStatCache /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang-stat-cache /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKStatCaches.noindex/macosx27.0-26A425-7231f6df4def33e022ae2eb8f782df1a.sdkstatcache
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/JackinDesktop.xcodeproj
+    /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang-stat-cache /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk -o /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKStatCaches.noindex/macosx27.0-26A425-7231f6df4def33e022ae2eb8f782df1a.sdkstatcache
+
+PruneExplicitPrecompiledModules /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/SwiftExplicitPrecompiledModules
+
+PruneExplicitPrecompiledModules /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/ExplicitPrecompiledModules
+
+PruneExplicitPrecompiledModules /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKExplicitPrecompiledModules
+
+2026-09-18 04:39:37.339775+0700 JackinDesktopUITests-Runner[57329:130878060] [Default] Running tests...
+Test Suite 'Selected tests' started at 2026-09-18 04:39:37.370.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 04:39:37.370.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 04:39:37.371.
+Test Case '-[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit]' started.
+    t =     0.00s Start Test at 2026-09-18 04:39:37.371
+    t =     0.17s Set Up
+    t =     0.17s Open com.jackin-project.desktop
+    t =     0.18s     Launch com.jackin-project.desktop
+2026-09-18 04:39:37.585 xcodebuild[57316:130877882] [MT] IDELaunchParametersSnapshot: debugger version lookup failed for path '<nil>': noURL
+2026-09-18 04:39:37.585 xcodebuild[57316:130877882] [MT] IDELaunchParametersSnapshot: no debugger version
+    t =     0.43s         Wait for accessibility to load
+    t =     0.67s         Setting up automation session
+    t =     0.67s         Wait for com.jackin-project.desktop to idle
+    t =     0.72s Open com.jackin-project.desktop
+    t =     0.73s     Activate com.jackin-project.desktop
+    t =     0.73s         Wait for com.jackin-project.desktop to idle
+    t =     0.74s Waiting 8.0s for "usage-window" Window to exist
+    t =     1.78s     Checking `Expect predicate `existsNoRetry == 1` for object "usage-window" Window`
+    t =     1.78s         Checking existence of `"usage-window" Window`
+    t =     1.93s Open com.jackin-project.desktop
+    t =     1.93s     Activate com.jackin-project.desktop
+    t =     1.93s         Wait for com.jackin-project.desktop to idle
+    t =     1.94s Waiting 5.0s for "usage.overview.table" Any to exist
+    t =     2.98s     Checking `Expect predicate `existsNoRetry == 1` for object "usage.overview.table" Any`
+    t =     2.98s         Checking existence of `"usage.overview.table" Any`
+    t =     3.07s Find the "usage.overview.table" Any
+    t =     3.14s Find the "usage.sidebar" Any
+    t =     3.57s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jcQAAAAAAAAA=)
+    t =     4.63s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jcQAAAAAAAAA=) (retry 1)
+    t =     5.69s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jcQAAAAAAAAA=) (retry 2)
+    t =     5.74s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jSAAAAAAAAAD+/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =     5.80s Find the Group
+    t =     5.85s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jXwAAAAAAAAA=)
+    t =     5.91s Find the "usage.sidebar.provider.amp" StaticText
+    t =     5.96s Find the "usage.sidebar.provider.amp" StaticText
+    t =     6.02s Find the "usage.sidebar.provider.amp" StaticText
+    t =     6.07s Unhandled AX audit: XCUIAccessibilityAuditType(rawValue: 1); type=48; id=usage.sidebar.provider.amp; Contrast failed
+    t =     6.07s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jXwAAAAAAAAA=)
+    t =     6.13s Checking existence of `"usage.sidebar.provider.amp" StaticText`
+    t =     6.17s Find the "usage.sidebar.provider.amp" StaticText
+2026-09-18 04:39:43.592327+0700 JackinDesktopUITests-Runner[57329:130878060] [DisplayManager] Found 1 displays containing rect (428.0, 453.0, 58.0, 26.0): [1]
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Contrast failed
+    t =     6.26s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jXAAAAAAAAAA=)
+    t =     6.31s Find the "usage.sidebar.provider.zai" StaticText
+    t =     6.36s Find the "usage.sidebar.provider.zai" StaticText
+    t =     6.42s Find the "usage.sidebar.provider.zai" StaticText
+    t =     6.46s Unhandled AX audit: XCUIAccessibilityAuditType(rawValue: 1); type=48; id=usage.sidebar.provider.zai; Contrast failed
+    t =     6.47s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jXAAAAAAAAAA=)
+    t =     6.52s Checking existence of `"usage.sidebar.provider.zai" StaticText`
+    t =     6.57s Find the "usage.sidebar.provider.zai" StaticText
+2026-09-18 04:39:43.990910+0700 JackinDesktopUITests-Runner[57329:130878060] [DisplayManager] Found 1 displays containing rect (428.0, 521.0, 54.5, 26.0): [1]
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Contrast failed
+    t =     6.63s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jWgAAAAAAAAA=)
+    t =     6.68s Find the "usage.sidebar.provider.kimi" StaticText
+    t =     6.74s Find the "usage.sidebar.provider.kimi" StaticText
+    t =     6.80s Find the "usage.sidebar.provider.kimi" StaticText
+    t =     6.85s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jPAAAAAAAAAA=)
+    t =     6.91s Find the Group
+    t =     6.97s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD//////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =     7.03s Find the Group
+    t =     7.08s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD//////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =     7.13s Find the Group
+    t =     7.18s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD//////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =     7.24s Find the Group
+    t =     7.29s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD//////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =     7.35s Find the Group
+    t =     7.40s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD//////////1cAAAAAAAAAAAAAAAAAAAA=)
+    t =     7.45s Find the Group
+    t =     7.51s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD+/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =     7.56s Find the Group
+    t =     7.61s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jaQAAAAAAAAA=)
+    t =     7.67s Find the "usage.overview.account.codex.codex-personal" StaticText
+    t =     7.73s Find the "usage.overview.account.codex.codex-personal" StaticText
+    t =     7.78s Find the "usage.overview.account.codex.codex-personal" StaticText
+    t =     7.83s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD+/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =     7.90s Find the Group
+    t =     7.96s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD+/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =     8.02s Find the Group
+    t =     8.08s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD+/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =     8.14s Find the Group
+    t =     8.19s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD+/////////1cAAAAAAAAAAAAAAAAAAAA=)
+    t =     8.25s Find the Group
+    t =     8.30s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD9/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =     8.35s Find the Group
+    t =     8.41s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jZgAAAAAAAAA=)
+    t =     8.47s Find the "usage.overview.account.codex.codex-plus" StaticText
+    t =     8.52s Find the "usage.overview.account.codex.codex-plus" StaticText
+    t =     8.57s Find the "usage.overview.account.codex.codex-plus" StaticText
+    t =     8.63s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD9/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =     8.68s Find the Group
+    t =     8.74s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD9/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =     8.80s Find the Group
+    t =     8.85s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD9/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =     8.92s Find the Group
+    t =     8.97s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD9/////////1cAAAAAAAAAAAAAAAAAAAA=)
+    t =     9.02s Find the Group
+    t =     9.08s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD8/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =     9.14s Find the Group
+    t =     9.19s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD8/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =     9.24s Find the Group
+    t =     9.29s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD8/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =     9.35s Find the Group
+    t =     9.41s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD8/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =     9.46s Find the Group
+    t =     9.51s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD8/////////1cAAAAAAAAAAAAAAAAAAAA=)
+    t =     9.56s Find the Group
+    t =     9.61s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD7/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =     9.67s Find the Group
+    t =     9.72s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jaAAAAAAAAAA=)
+    t =     9.78s Find the "usage.overview.account.claude.claude-personal" StaticText
+    t =     9.83s Find the "usage.overview.account.claude.claude-personal" StaticText
+    t =     9.89s Find the "usage.overview.account.claude.claude-personal" StaticText
+    t =     9.95s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD7/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    10.01s Find the Group
+    t =    10.07s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD7/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    10.13s Find the Group
+    t =    10.18s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD7/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    10.23s Find the Group
+    t =    10.28s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD7/////////1cAAAAAAAAAAAAAAAAAAAA=)
+    t =    10.34s Find the Group
+    t =    10.39s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD6/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    10.44s Find the Group
+    t =    10.49s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jbwAAAAAAAAA=)
+    t =    10.54s Find the "usage.overview.account.claude.claude-work" StaticText
+    t =    10.60s Find the "usage.overview.account.claude.claude-work" StaticText
+    t =    10.66s Find the "usage.overview.account.claude.claude-work" StaticText
+    t =    10.71s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD6/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    10.76s Find the Group
+    t =    10.81s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD6/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    10.87s Find the Group
+    t =    10.93s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD6/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    11.00s Find the Group
+    t =    11.06s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD6/////////1cAAAAAAAAAAAAAAAAAAAA=)
+    t =    11.12s Find the Group
+    t =    11.17s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD5/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    11.23s Find the Group
+    t =    11.28s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD5/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    11.34s Find the Group
+    t =    11.39s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD5/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    11.45s Find the Group
+    t =    11.50s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD5/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    11.56s Find the Group
+    t =    11.61s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD5/////////1cAAAAAAAAAAAAAAAAAAAA=)
+    t =    11.67s Find the Group
+    t =    11.72s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD4/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    11.77s Find the Group
+    t =    11.83s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD4/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    11.89s Find the Group
+    t =    11.95s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD4/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    12.00s Find the Group
+    t =    12.05s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD4/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    13.08s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD4/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    14.11s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD4/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    14.14s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =    14.14s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD4/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    15.16s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD4/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    16.20s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD4/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =    16.21s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD4/////////1cAAAAAAAAAAAAAAAAAAAA=)
+    t =    17.23s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD4/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    18.27s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD4/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    18.30s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =    18.30s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD4/////////1cAAAAAAAAAAAAAAAAAAAA=)
+    t =    19.32s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD4/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    20.37s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD4/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =    20.41s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    21.42s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    22.46s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    22.49s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =    22.50s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    23.51s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    24.56s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =    24.59s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jbgAAAAAAAAA=)
+    t =    25.62s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jbgAAAAAAAAA=) (retry 1)
+    t =    26.65s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jbgAAAAAAAAA=) (retry 2)
+    t =    26.69s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 1)
+    t =    26.69s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jbgAAAAAAAAA=)
+    t =    27.70s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jbgAAAAAAAAA=) (retry 1)
+    t =    28.75s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jbgAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Contrast failed
+    t =    28.79s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    29.81s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    30.85s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    30.89s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =    30.89s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    31.90s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    32.95s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =    32.98s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    34.00s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    35.04s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    35.08s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =    35.08s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    36.10s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    37.13s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =    37.16s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    38.18s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    39.21s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    39.24s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =    39.24s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    40.26s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    41.29s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =    41.33s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1cAAAAAAAAAAAAAAAAAAAA=)
+    t =    42.35s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    43.38s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    43.40s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =    43.40s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1cAAAAAAAAAAAAAAAAAAAA=)
+    t =    44.42s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    45.46s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD3/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =    45.49s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    46.51s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    47.54s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    47.57s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =    47.57s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    48.59s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    49.63s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =    49.66s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    50.68s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    51.71s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    51.75s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =    51.75s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    52.76s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    53.79s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =    53.82s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    54.84s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    55.87s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    55.91s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =    55.91s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    56.93s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    57.96s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =    58.00s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    59.02s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    60.06s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    60.10s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =    60.10s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    61.12s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    62.16s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =    62.19s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1cAAAAAAAAAAAAAAAAAAAA=)
+    t =    63.21s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    64.25s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    64.28s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =    64.28s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1cAAAAAAAAAAAAAAAAAAAA=)
+    t =    65.30s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    66.33s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD2/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =    66.37s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    67.38s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    68.42s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    68.46s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =    68.46s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    69.48s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    70.52s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =    70.54s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jcAAAAAAAAAA=)
+    t =    71.56s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jcAAAAAAAAAA=) (retry 1)
+    t =    72.57s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jcAAAAAAAAAA=) (retry 2)
+    t =    72.59s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 1)
+    t =    72.59s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jcAAAAAAAAAA=)
+    t =    73.61s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jcAAAAAAAAAA=) (retry 1)
+    t =    74.63s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jcAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Contrast failed
+    t =    74.67s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    75.68s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    76.70s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    76.74s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =    76.74s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    77.76s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    78.78s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =    78.79s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    79.81s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    80.83s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    80.85s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =    80.85s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    81.86s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    82.89s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =    82.92s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    83.94s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    84.96s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    84.97s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =    84.98s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    85.99s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    87.01s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =    87.03s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1cAAAAAAAAAAAAAAAAAAAA=)
+    t =    88.05s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    89.07s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    89.11s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =    89.11s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1cAAAAAAAAAAAAAAAAAAAA=)
+    t =    90.13s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    91.17s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD1/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =    91.21s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    92.22s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    93.25s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    93.27s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =    93.27s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    94.29s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    95.31s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =    95.33s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    96.35s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    97.38s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =    97.42s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =    97.42s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    98.44s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =    99.48s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =    99.52s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =   100.54s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   101.58s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =   101.61s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =   101.62s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =   102.64s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   103.67s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =   103.69s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =   104.72s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   105.74s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =   105.76s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =   105.76s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =   106.78s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   107.80s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =   107.84s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1cAAAAAAAAAAAAAAAAAAAA=)
+    t =   108.86s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   109.91s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =   109.94s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =   109.94s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1cAAAAAAAAAAAAAAAAAAAA=)
+    t =   110.96s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   112.00s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAAD0/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =   112.05s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =   113.06s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   114.10s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =   114.14s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =   114.14s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =   115.16s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   116.18s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =   116.20s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jYwAAAAAAAAA=)
+    t =   117.23s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jYwAAAAAAAAA=) (retry 1)
+    t =   118.25s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jYwAAAAAAAAA=) (retry 2)
+    t =   118.28s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 1)
+    t =   118.28s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jYwAAAAAAAAA=)
+    t =   119.30s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jYwAAAAAAAAA=) (retry 1)
+    t =   120.32s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jYwAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Contrast failed
+    t =   120.34s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =   121.36s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   122.40s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =   122.44s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =   122.44s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =   123.46s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   124.48s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =   124.51s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =   125.53s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   126.56s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =   126.59s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =   126.59s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =   127.61s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   128.65s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =   128.69s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =   129.70s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   130.75s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =   130.78s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =   130.78s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =   131.80s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   132.83s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =   132.87s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1cAAAAAAAAAAAAAAAAAAAA=)
+    t =   133.89s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   134.92s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =   134.97s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =   134.97s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1cAAAAAAAAAAAAAAAAAAAA=)
+    t =   135.98s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   137.02s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADz/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =   137.06s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =   138.07s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   139.11s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =   139.14s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =   139.14s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =   140.16s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   141.20s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =   141.24s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =   142.25s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   143.29s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =   143.32s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =   143.33s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =   144.34s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   145.38s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =   145.42s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =   146.43s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   147.47s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =   147.51s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =   147.51s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =   148.53s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   149.56s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =   149.60s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =   150.62s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   151.66s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =   151.69s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =   151.69s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =   152.71s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   153.74s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =   153.78s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1cAAAAAAAAAAAAAAAAAAAA=)
+    t =   154.79s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   155.83s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =   155.87s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =   155.87s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1cAAAAAAAAAAAAAAAAAAAA=)
+    t =   156.89s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   157.92s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADy/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =   157.95s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =   158.97s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   160.01s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =   160.05s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =   160.05s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =   161.06s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   162.10s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1MAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =   162.14s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jagAAAAAAAAA=)
+    t =   163.16s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jagAAAAAAAAA=) (retry 1)
+    t =   164.20s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jagAAAAAAAAA=) (retry 2)
+    t =   164.23s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 1)
+    t =   164.23s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jagAAAAAAAAA=)
+    t =   165.24s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jagAAAAAAAAA=) (retry 1)
+    t =   166.28s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jagAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Contrast failed
+    t =   166.32s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =   167.34s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   168.37s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =   168.40s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =   168.40s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =   169.42s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   170.46s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1QAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =   170.50s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =   171.51s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   172.55s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =   172.57s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =   172.57s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =   173.59s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   174.63s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1UAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =   174.67s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =   175.68s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   176.71s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =   176.75s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =   176.75s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =   177.76s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   178.80s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1YAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =   178.84s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1cAAAAAAAAAAAAAAAAAAAA=)
+    t =   179.86s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   180.89s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+    t =   180.92s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =   180.92s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1cAAAAAAAAAAAAAAAAAAAA=)
+    t =   181.94s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 1)
+    t =   182.98s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jTQAAAAAAAADx/////////1cAAAAAAAAAAAAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =   183.02s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jRgAAAAAAAAA=)
+    t =   184.04s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jRgAAAAAAAAA=) (retry 1)
+    t =   185.07s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jRgAAAAAAAAA=) (retry 2)
+    t =   185.10s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =   185.11s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jRgAAAAAAAAA=)
+    t =   186.12s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jRgAAAAAAAAA=) (retry 1)
+    t =   187.14s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jRgAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =   187.18s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jSgAAAAAAAAA=)
+    t =   188.20s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jSgAAAAAAAAA=) (retry 1)
+    t =   189.24s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jSgAAAAAAAAA=) (retry 2)
+    t =   189.28s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 1)
+    t =   189.28s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jSgAAAAAAAAA=)
+    t =   190.29s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jSgAAAAAAAAA=) (retry 1)
+    t =   191.33s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jSgAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Contrast failed
+    t =   191.35s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jQQAAAAAAAAA=)
+    t =   192.37s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jQQAAAAAAAAA=) (retry 1)
+    t =   193.40s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jQQAAAAAAAAA=) (retry 2)
+    t =   193.44s Unhandled AX audit without element: XCUIAccessibilityAuditType(rawValue: 8)
+    t =   193.44s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jQQAAAAAAAAA=)
+    t =   194.45s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jQQAAAAAAAAA=) (retry 1)
+    t =   195.48s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jQQAAAAAAAAA=) (retry 2)
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:476: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Element has no description
+    t =   195.50s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jOAAAAAAAAAA=)
+    t =   196.52s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jOAAAAAAAAAA=) (retry 1)
+    t =   197.54s     Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jOAAAAAAAAAA=) (retry 2)
+    t =   197.56s Find the Any (Descendant with identity binding to AX element pid: 57334, token: 9t8AAAAAAABvY29jLwAAAAAAAAA=)
+    t =   197.58s Find the TouchBar
+    t =   197.59s Terminate com.jackin-project.desktop:57334
+    t =   198.65s Tear Down
+Test Case '-[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit]' failed (199.399 seconds).
+Test Suite 'JackinDesktopUITests' failed at 2026-09-18 04:42:56.770.
+	 Executed 1 test, with 46 failures (0 unexpected) in 199.399 (199.399) seconds
+Test Suite 'JackinDesktopUITests.xctest' failed at 2026-09-18 04:42:56.770.
+	 Executed 1 test, with 46 failures (0 unexpected) in 199.399 (199.400) seconds
+Test Suite 'Selected tests' failed at 2026-09-18 04:42:56.770.
+	 Executed 1 test, with 46 failures (0 unexpected) in 199.399 (199.400) seconds
+2026-09-18 04:43:00.828 xcodebuild[57316:130877882] [MT] IDETestOperationsObserverDebug: 203.805 elapsed -- Testing started completed.
+2026-09-18 04:43:00.828 xcodebuild[57316:130877882] [MT] IDETestOperationsObserverDebug: 0.000 sec, +0.000 sec -- start
+2026-09-18 04:43:00.828 xcodebuild[57316:130877882] [MT] IDETestOperationsObserverDebug: 203.805 sec, +203.805 sec -- end
+
+Test session results, code coverage, and logs:
+	/tmp/loop3.xcresult
+
+Failing tests:
+	JackinDesktopUITests.testOverviewPassesAccessibilityAudit()
+	JackinDesktopUITests.testOverviewPassesAccessibilityAudit()
+
+** TEST FAILED **
+
+Testing started

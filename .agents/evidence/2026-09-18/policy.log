@@ -1,0 +1,831 @@
+Policy	Set up job	﻿2026-09-17T18:20:35.8876560Z Current runner version: '2.337.0'
+Policy	Set up job	2026-09-17T18:20:35.8904600Z ##[group]Runner Image Provisioner
+Policy	Set up job	2026-09-17T18:20:35.8905595Z Hosted Compute Agent
+Policy	Set up job	2026-09-17T18:20:35.8906195Z Version: 20260828.587
+Policy	Set up job	2026-09-17T18:20:35.8906858Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+Policy	Set up job	2026-09-17T18:20:35.8907660Z Build Date: 2026-08-28T16:44:25Z
+Policy	Set up job	2026-09-17T18:20:35.8908342Z Worker ID: {442bda18-f6c2-4be8-9243-058dda568e33}
+Policy	Set up job	2026-09-17T18:20:35.8909143Z Azure Region: westus3
+Policy	Set up job	2026-09-17T18:20:35.8909720Z ##[endgroup]
+Policy	Set up job	2026-09-17T18:20:35.8911570Z ##[group]Operating System
+Policy	Set up job	2026-09-17T18:20:35.8912358Z Ubuntu
+Policy	Set up job	2026-09-17T18:20:35.8912888Z 24.04.5
+Policy	Set up job	2026-09-17T18:20:35.8913443Z LTS
+Policy	Set up job	2026-09-17T18:20:35.8913974Z ##[endgroup]
+Policy	Set up job	2026-09-17T18:20:35.8914599Z ##[group]Runner Image
+Policy	Set up job	2026-09-17T18:20:35.8915264Z Image: ubuntu-24.04
+Policy	Set up job	2026-09-17T18:20:35.8915834Z Version: 20260907.300.1
+Policy	Set up job	2026-09-17T18:20:35.8916954Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260907.300/images/ubuntu/Ubuntu2404-Readme.md
+Policy	Set up job	2026-09-17T18:20:35.8918731Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260907.300
+Policy	Set up job	2026-09-17T18:20:35.8919751Z ##[endgroup]
+Policy	Set up job	2026-09-17T18:20:35.8921149Z ##[group]GITHUB_TOKEN Permissions
+Policy	Set up job	2026-09-17T18:20:35.8923186Z Contents: read
+Policy	Set up job	2026-09-17T18:20:35.8923906Z Metadata: read
+Policy	Set up job	2026-09-17T18:20:35.8924560Z ##[endgroup]
+Policy	Set up job	2026-09-17T18:20:35.8926631Z Secret source: Actions
+Policy	Set up job	2026-09-17T18:20:35.8927540Z Cache mode: read
+Policy	Set up job	2026-09-17T18:20:35.8928484Z Prepare workflow directory
+Policy	Set up job	2026-09-17T18:20:35.9274641Z Prepare all required actions
+Policy	Set up job	2026-09-17T18:20:35.9322906Z Getting action download info
+Policy	Set up job	2026-09-17T18:20:36.2796942Z Download action repository 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' (SHA:3d3c42e5aac5ba805825da76410c181273ba90b1)
+Policy	Set up job	2026-09-17T18:20:36.4036679Z Download action repository 'jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c' (SHA:c2a87611a18de5b3828c5652fe268e992400cb5c)
+Policy	Set up job	2026-09-17T18:20:37.4060065Z Complete job name: Policy
+Policy	Checkout repository history	﻿2026-09-17T18:20:37.4894546Z ##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+Policy	Checkout repository history	2026-09-17T18:20:37.4895742Z with:
+Policy	Checkout repository history	2026-09-17T18:20:37.4896223Z   path: policy-checkout
+Policy	Checkout repository history	2026-09-17T18:20:37.4896763Z   fetch-depth: 0
+Policy	Checkout repository history	2026-09-17T18:20:37.4897280Z   persist-credentials: false
+Policy	Checkout repository history	2026-09-17T18:20:37.4897840Z   repository: tailrocks/velnor
+Policy	Checkout repository history	2026-09-17T18:20:37.4901823Z   token: ***
+Policy	Checkout repository history	2026-09-17T18:20:37.4902323Z   ssh-strict: true
+Policy	Checkout repository history	2026-09-17T18:20:37.4902816Z   ssh-user: git
+Policy	Checkout repository history	2026-09-17T18:20:37.4903278Z   clean: true
+Policy	Checkout repository history	2026-09-17T18:20:37.4903772Z   sparse-checkout-cone-mode: true
+Policy	Checkout repository history	2026-09-17T18:20:37.4904331Z   fetch-tags: false
+Policy	Checkout repository history	2026-09-17T18:20:37.4904818Z   show-progress: true
+Policy	Checkout repository history	2026-09-17T18:20:37.4905300Z   lfs: false
+Policy	Checkout repository history	2026-09-17T18:20:37.4905775Z   submodules: false
+Policy	Checkout repository history	2026-09-17T18:20:37.4906274Z   set-safe-directory: true
+Policy	Checkout repository history	2026-09-17T18:20:37.4906841Z   allow-unsafe-pr-checkout: false
+Policy	Checkout repository history	2026-09-17T18:20:37.4907696Z ##[endgroup]
+Policy	Checkout repository history	2026-09-17T18:20:37.5911217Z Syncing repository: tailrocks/velnor
+Policy	Checkout repository history	2026-09-17T18:20:37.5913314Z ##[group]Getting Git version info
+Policy	Checkout repository history	2026-09-17T18:20:37.5914717Z Working directory is '/home/runner/work/velnor/velnor/policy-checkout'
+Policy	Checkout repository history	2026-09-17T18:20:37.5916744Z [command]/usr/bin/git version
+Policy	Checkout repository history	2026-09-17T18:20:37.6032507Z git version 2.55.0
+Policy	Checkout repository history	2026-09-17T18:20:37.6061104Z ##[endgroup]
+Policy	Checkout repository history	2026-09-17T18:20:37.6071045Z Temporarily overriding HOME='/home/runner/work/_temp/11fbc395-ed4d-4bad-890e-b685ccbc1b20' before making global git config changes
+Policy	Checkout repository history	2026-09-17T18:20:37.6073355Z Adding repository directory to the temporary git global config as a safe directory
+Policy	Checkout repository history	2026-09-17T18:20:37.6082614Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor/policy-checkout
+Policy	Checkout repository history	2026-09-17T18:20:37.6150448Z ##[group]Determining repository object format
+Policy	Checkout repository history	2026-09-17T18:20:37.6152518Z ##[endgroup]
+Policy	Checkout repository history	2026-09-17T18:20:37.6153846Z ##[group]Initializing the repository
+Policy	Checkout repository history	2026-09-17T18:20:37.6155190Z [command]/usr/bin/git init /home/runner/work/velnor/velnor/policy-checkout
+Policy	Checkout repository history	2026-09-17T18:20:37.6283260Z hint: Using 'master' as the name for the initial branch. This default branch name
+Policy	Checkout repository history	2026-09-17T18:20:37.6285515Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+Policy	Checkout repository history	2026-09-17T18:20:37.6286612Z hint: to use in all of your new repositories, which will suppress this warning,
+Policy	Checkout repository history	2026-09-17T18:20:37.6287433Z hint: call:
+Policy	Checkout repository history	2026-09-17T18:20:37.6287898Z hint:
+Policy	Checkout repository history	2026-09-17T18:20:37.6288476Z hint: 	git config --global init.defaultBranch <name>
+Policy	Checkout repository history	2026-09-17T18:20:37.6289144Z hint:
+Policy	Checkout repository history	2026-09-17T18:20:37.6289768Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+Policy	Checkout repository history	2026-09-17T18:20:37.6291308Z hint: 'development'. The just-created branch can be renamed via this command:
+Policy	Checkout repository history	2026-09-17T18:20:37.6292250Z hint:
+Policy	Checkout repository history	2026-09-17T18:20:37.6292721Z hint: 	git branch -m <name>
+Policy	Checkout repository history	2026-09-17T18:20:37.6293245Z hint:
+Policy	Checkout repository history	2026-09-17T18:20:37.6293928Z hint: Disable this message with "git config set advice.defaultBranchName false"
+Policy	Checkout repository history	2026-09-17T18:20:37.6299987Z Initialized empty Git repository in /home/runner/work/velnor/velnor/policy-checkout/.git/
+Policy	Checkout repository history	2026-09-17T18:20:37.6311295Z [command]/usr/bin/git remote add origin https://github.com/tailrocks/velnor
+Policy	Checkout repository history	2026-09-17T18:20:37.6365432Z ##[endgroup]
+Policy	Checkout repository history	2026-09-17T18:20:37.6367236Z ##[group]Disabling automatic garbage collection
+Policy	Checkout repository history	2026-09-17T18:20:37.6370881Z [command]/usr/bin/git config --local gc.auto 0
+Policy	Checkout repository history	2026-09-17T18:20:37.6405902Z ##[endgroup]
+Policy	Checkout repository history	2026-09-17T18:20:37.6407175Z ##[group]Setting up auth
+Policy	Checkout repository history	2026-09-17T18:20:37.6408441Z Removing SSH command configuration
+Policy	Checkout repository history	2026-09-17T18:20:37.6412375Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Policy	Checkout repository history	2026-09-17T18:20:37.6447271Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Policy	Checkout repository history	2026-09-17T18:20:37.6862744Z Removing HTTP extra header
+Policy	Checkout repository history	2026-09-17T18:20:37.6867965Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Policy	Checkout repository history	2026-09-17T18:20:37.6904150Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Policy	Checkout repository history	2026-09-17T18:20:37.7122438Z Removing includeIf entries pointing to credentials config files
+Policy	Checkout repository history	2026-09-17T18:20:37.7127901Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Policy	Checkout repository history	2026-09-17T18:20:37.7169117Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Policy	Checkout repository history	2026-09-17T18:20:37.7396109Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-d7ea3c51-bf11-49cb-9b51-db361ee5062b.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+Policy	Checkout repository history	2026-09-17T18:20:37.7437701Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git.path /home/runner/work/_temp/git-credentials-d7ea3c51-bf11-49cb-9b51-db361ee5062b.config
+Policy	Checkout repository history	2026-09-17T18:20:37.7470384Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-d7ea3c51-bf11-49cb-9b51-db361ee5062b.config
+Policy	Checkout repository history	2026-09-17T18:20:37.7507220Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/policy-checkout/.git.path /github/runner_temp/git-credentials-d7ea3c51-bf11-49cb-9b51-db361ee5062b.config
+Policy	Checkout repository history	2026-09-17T18:20:37.7541900Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/policy-checkout/.git/worktrees/*.path /github/runner_temp/git-credentials-d7ea3c51-bf11-49cb-9b51-db361ee5062b.config
+Policy	Checkout repository history	2026-09-17T18:20:37.7571942Z ##[endgroup]
+Policy	Checkout repository history	2026-09-17T18:20:37.7573565Z ##[group]Fetching the repository
+Policy	Checkout repository history	2026-09-17T18:20:37.7580184Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules origin +refs/heads/*:refs/remotes/origin/* +refs/tags/*:refs/tags/*
+Policy	Checkout repository history	2026-09-17T18:20:43.8535460Z From https://github.com/tailrocks/velnor
+Policy	Checkout repository history	2026-09-17T18:20:43.8538327Z  * [new branch]        feat/a2-consumer-negatives -> origin/feat/a2-consumer-negatives
+Policy	Checkout repository history	2026-09-17T18:20:43.8540019Z  * [new branch]        feat/a2-provision-promotion -> origin/feat/a2-provision-promotion
+Policy	Checkout repository history	2026-09-17T18:20:43.8542339Z  * [new branch]        feat/a2-signer-order    -> origin/feat/a2-signer-order
+Policy	Checkout repository history	2026-09-17T18:20:43.8544644Z  * [new branch]        feat/a2-source-identity -> origin/feat/a2-source-identity
+Policy	Checkout repository history	2026-09-17T18:20:43.8546641Z  * [new branch]        feat/b1-apt-primitives  -> origin/feat/b1-apt-primitives
+Policy	Checkout repository history	2026-09-17T18:20:43.8548338Z  * [new branch]        feat/c2-unbounded-global-n -> origin/feat/c2-unbounded-global-n
+Policy	Checkout repository history	2026-09-17T18:20:43.8550082Z  * [new branch]        feat/d1-daemon-wiring   -> origin/feat/d1-daemon-wiring
+Policy	Checkout repository history	2026-09-17T18:20:43.8552840Z  * [new branch]        feat/d1-processor-loop  -> origin/feat/d1-processor-loop
+Policy	Checkout repository history	2026-09-17T18:20:43.8555538Z  * [new branch]        feat/d1-scaleset-protocol -> origin/feat/d1-scaleset-protocol
+Policy	Checkout repository history	2026-09-17T18:20:43.8557553Z  * [new branch]        feat/d1-worker-lane     -> origin/feat/d1-worker-lane
+Policy	Checkout repository history	2026-09-17T18:20:43.8559340Z  * [new branch]        feat/d2-provider-schema -> origin/feat/d2-provider-schema
+Policy	Checkout repository history	2026-09-17T18:20:43.8561902Z  * [new branch]        feat/d2-provider-schema-rest -> origin/feat/d2-provider-schema-rest
+Policy	Checkout repository history	2026-09-17T18:20:43.8564080Z  * [new branch]        fix/opstore-rejection-cause -> origin/fix/opstore-rejection-cause
+Policy	Checkout repository history	2026-09-17T18:20:43.8566196Z  * [new branch]        fix/pin-fetch-in-tool   -> origin/fix/pin-fetch-in-tool
+Policy	Checkout repository history	2026-09-17T18:20:43.8568264Z  * [new branch]        fix/preview-guest-upload -> origin/fix/preview-guest-upload
+Policy	Checkout repository history	2026-09-17T18:20:43.8570139Z  * [new branch]        fix/publish-403         -> origin/fix/publish-403
+Policy	Checkout repository history	2026-09-17T18:20:43.8572486Z  * [new branch]        fix/security-audit-batch1 -> origin/fix/security-audit-batch1
+Policy	Checkout repository history	2026-09-17T18:20:43.8574456Z  * [new branch]        main                    -> origin/main
+Policy	Checkout repository history	2026-09-17T18:20:43.8576414Z  * [new branch]        perf/main-docker-gha-cache -> origin/perf/main-docker-gha-cache
+Policy	Checkout repository history	2026-09-17T18:20:43.8579351Z  * [new branch]        recovery/pr-W           -> origin/recovery/pr-W
+Policy	Checkout repository history	2026-09-17T18:20:43.8581678Z  * [new branch]        recovery/runner-side    -> origin/recovery/runner-side
+Policy	Checkout repository history	2026-09-17T18:20:43.8584680Z  * [new tag]           archive/velnor2-pre-rebuild-20260831-bc593406 -> archive/velnor2-pre-rebuild-20260831-bc593406
+Policy	Checkout repository history	2026-09-17T18:20:43.8587747Z  * [new tag]           dima/velnor6-archive-4d81a14 -> dima/velnor6-archive-4d81a14
+Policy	Checkout repository history	2026-09-17T18:20:43.8589715Z  * [new tag]           preview                 -> preview
+Policy	Checkout repository history	2026-09-17T18:20:43.8591465Z  * [new tag]           v0.1.10                 -> v0.1.10
+Policy	Checkout repository history	2026-09-17T18:20:43.8593038Z  * [new tag]           v0.1.100                -> v0.1.100
+Policy	Checkout repository history	2026-09-17T18:20:43.8594605Z  * [new tag]           v0.1.101                -> v0.1.101
+Policy	Checkout repository history	2026-09-17T18:20:43.8596221Z  * [new tag]           v0.1.102                -> v0.1.102
+Policy	Checkout repository history	2026-09-17T18:20:43.8598146Z  * [new tag]           v0.1.103                -> v0.1.103
+Policy	Checkout repository history	2026-09-17T18:20:43.8599898Z  * [new tag]           v0.1.104                -> v0.1.104
+Policy	Checkout repository history	2026-09-17T18:20:43.8601628Z  * [new tag]           v0.1.105                -> v0.1.105
+Policy	Checkout repository history	2026-09-17T18:20:43.8603209Z  * [new tag]           v0.1.106                -> v0.1.106
+Policy	Checkout repository history	2026-09-17T18:20:43.8604760Z  * [new tag]           v0.1.107                -> v0.1.107
+Policy	Checkout repository history	2026-09-17T18:20:43.8606319Z  * [new tag]           v0.1.108                -> v0.1.108
+Policy	Checkout repository history	2026-09-17T18:20:43.8607859Z  * [new tag]           v0.1.109                -> v0.1.109
+Policy	Checkout repository history	2026-09-17T18:20:43.8609415Z  * [new tag]           v0.1.11                 -> v0.1.11
+Policy	Checkout repository history	2026-09-17T18:20:43.8611097Z  * [new tag]           v0.1.110                -> v0.1.110
+Policy	Checkout repository history	2026-09-17T18:20:43.8612733Z  * [new tag]           v0.1.111                -> v0.1.111
+Policy	Checkout repository history	2026-09-17T18:20:43.8614602Z  * [new tag]           v0.1.112                -> v0.1.112
+Policy	Checkout repository history	2026-09-17T18:20:43.8616615Z  * [new tag]           v0.1.113                -> v0.1.113
+Policy	Checkout repository history	2026-09-17T18:20:43.8618325Z  * [new tag]           v0.1.114                -> v0.1.114
+Policy	Checkout repository history	2026-09-17T18:20:43.8620146Z  * [new tag]           v0.1.115                -> v0.1.115
+Policy	Checkout repository history	2026-09-17T18:20:43.8622548Z  * [new tag]           v0.1.116                -> v0.1.116
+Policy	Checkout repository history	2026-09-17T18:20:43.8624326Z  * [new tag]           v0.1.117                -> v0.1.117
+Policy	Checkout repository history	2026-09-17T18:20:43.8626229Z  * [new tag]           v0.1.118                -> v0.1.118
+Policy	Checkout repository history	2026-09-17T18:20:43.8627797Z  * [new tag]           v0.1.119                -> v0.1.119
+Policy	Checkout repository history	2026-09-17T18:20:43.8629291Z  * [new tag]           v0.1.12                 -> v0.1.12
+Policy	Checkout repository history	2026-09-17T18:20:43.8630955Z  * [new tag]           v0.1.120                -> v0.1.120
+Policy	Checkout repository history	2026-09-17T18:20:43.8632462Z  * [new tag]           v0.1.121                -> v0.1.121
+Policy	Checkout repository history	2026-09-17T18:20:43.8634106Z  * [new tag]           v0.1.122                -> v0.1.122
+Policy	Checkout repository history	2026-09-17T18:20:43.8635586Z  * [new tag]           v0.1.123                -> v0.1.123
+Policy	Checkout repository history	2026-09-17T18:20:43.8637057Z  * [new tag]           v0.1.124                -> v0.1.124
+Policy	Checkout repository history	2026-09-17T18:20:43.8638557Z  * [new tag]           v0.1.125                -> v0.1.125
+Policy	Checkout repository history	2026-09-17T18:20:43.8640020Z  * [new tag]           v0.1.126                -> v0.1.126
+Policy	Checkout repository history	2026-09-17T18:20:43.8641650Z  * [new tag]           v0.1.127                -> v0.1.127
+Policy	Checkout repository history	2026-09-17T18:20:43.8643106Z  * [new tag]           v0.1.128                -> v0.1.128
+Policy	Checkout repository history	2026-09-17T18:20:43.8644602Z  * [new tag]           v0.1.129                -> v0.1.129
+Policy	Checkout repository history	2026-09-17T18:20:43.8646052Z  * [new tag]           v0.1.13                 -> v0.1.13
+Policy	Checkout repository history	2026-09-17T18:20:43.8647488Z  * [new tag]           v0.1.130                -> v0.1.130
+Policy	Checkout repository history	2026-09-17T18:20:43.8648943Z  * [new tag]           v0.1.131                -> v0.1.131
+Policy	Checkout repository history	2026-09-17T18:20:43.8650395Z  * [new tag]           v0.1.132                -> v0.1.132
+Policy	Checkout repository history	2026-09-17T18:20:43.8651982Z  * [new tag]           v0.1.133                -> v0.1.133
+Policy	Checkout repository history	2026-09-17T18:20:43.8653698Z  * [new tag]           v0.1.134                -> v0.1.134
+Policy	Checkout repository history	2026-09-17T18:20:43.8656064Z  * [new tag]           v0.1.135                -> v0.1.135
+Policy	Checkout repository history	2026-09-17T18:20:43.8658720Z  * [new tag]           v0.1.136                -> v0.1.136
+Policy	Checkout repository history	2026-09-17T18:20:43.8661431Z  * [new tag]           v0.1.137                -> v0.1.137
+Policy	Checkout repository history	2026-09-17T18:20:43.8663303Z  * [new tag]           v0.1.138                -> v0.1.138
+Policy	Checkout repository history	2026-09-17T18:20:43.8665636Z  * [new tag]           v0.1.139                -> v0.1.139
+Policy	Checkout repository history	2026-09-17T18:20:43.8667424Z  * [new tag]           v0.1.14                 -> v0.1.14
+Policy	Checkout repository history	2026-09-17T18:20:43.8668977Z  * [new tag]           v0.1.140                -> v0.1.140
+Policy	Checkout repository history	2026-09-17T18:20:43.8670526Z  * [new tag]           v0.1.141                -> v0.1.141
+Policy	Checkout repository history	2026-09-17T18:20:43.8672453Z  * [new tag]           v0.1.142                -> v0.1.142
+Policy	Checkout repository history	2026-09-17T18:20:43.8674188Z  * [new tag]           v0.1.143                -> v0.1.143
+Policy	Checkout repository history	2026-09-17T18:20:43.8675740Z  * [new tag]           v0.1.144                -> v0.1.144
+Policy	Checkout repository history	2026-09-17T18:20:43.8677254Z  * [new tag]           v0.1.145                -> v0.1.145
+Policy	Checkout repository history	2026-09-17T18:20:43.8678766Z  * [new tag]           v0.1.146                -> v0.1.146
+Policy	Checkout repository history	2026-09-17T18:20:43.8680379Z  * [new tag]           v0.1.147                -> v0.1.147
+Policy	Checkout repository history	2026-09-17T18:20:43.8682206Z  * [new tag]           v0.1.148                -> v0.1.148
+Policy	Checkout repository history	2026-09-17T18:20:43.8683727Z  * [new tag]           v0.1.149                -> v0.1.149
+Policy	Checkout repository history	2026-09-17T18:20:43.8685504Z  * [new tag]           v0.1.15                 -> v0.1.15
+Policy	Checkout repository history	2026-09-17T18:20:43.8687718Z  * [new tag]           v0.1.150                -> v0.1.150
+Policy	Checkout repository history	2026-09-17T18:20:43.8689404Z  * [new tag]           v0.1.151                -> v0.1.151
+Policy	Checkout repository history	2026-09-17T18:20:43.8691114Z  * [new tag]           v0.1.152                -> v0.1.152
+Policy	Checkout repository history	2026-09-17T18:20:43.8692647Z  * [new tag]           v0.1.153                -> v0.1.153
+Policy	Checkout repository history	2026-09-17T18:20:43.8694118Z  * [new tag]           v0.1.154                -> v0.1.154
+Policy	Checkout repository history	2026-09-17T18:20:43.8695556Z  * [new tag]           v0.1.155                -> v0.1.155
+Policy	Checkout repository history	2026-09-17T18:20:43.8697035Z  * [new tag]           v0.1.156                -> v0.1.156
+Policy	Checkout repository history	2026-09-17T18:20:43.8698691Z  * [new tag]           v0.1.157                -> v0.1.157
+Policy	Checkout repository history	2026-09-17T18:20:43.8700145Z  * [new tag]           v0.1.158                -> v0.1.158
+Policy	Checkout repository history	2026-09-17T18:20:43.8701761Z  * [new tag]           v0.1.159                -> v0.1.159
+Policy	Checkout repository history	2026-09-17T18:20:43.8703218Z  * [new tag]           v0.1.16                 -> v0.1.16
+Policy	Checkout repository history	2026-09-17T18:20:43.8704697Z  * [new tag]           v0.1.160                -> v0.1.160
+Policy	Checkout repository history	2026-09-17T18:20:43.8706170Z  * [new tag]           v0.1.161                -> v0.1.161
+Policy	Checkout repository history	2026-09-17T18:20:43.8707618Z  * [new tag]           v0.1.162                -> v0.1.162
+Policy	Checkout repository history	2026-09-17T18:20:43.8709085Z  * [new tag]           v0.1.163                -> v0.1.163
+Policy	Checkout repository history	2026-09-17T18:20:43.8710543Z  * [new tag]           v0.1.164                -> v0.1.164
+Policy	Checkout repository history	2026-09-17T18:20:43.8712184Z  * [new tag]           v0.1.165                -> v0.1.165
+Policy	Checkout repository history	2026-09-17T18:20:43.8713637Z  * [new tag]           v0.1.166                -> v0.1.166
+Policy	Checkout repository history	2026-09-17T18:20:43.8715073Z  * [new tag]           v0.1.167                -> v0.1.167
+Policy	Checkout repository history	2026-09-17T18:20:43.8716539Z  * [new tag]           v0.1.168                -> v0.1.168
+Policy	Checkout repository history	2026-09-17T18:20:43.8717958Z  * [new tag]           v0.1.17                 -> v0.1.17
+Policy	Checkout repository history	2026-09-17T18:20:43.8719703Z  * [new tag]           v0.1.170                -> v0.1.170
+Policy	Checkout repository history	2026-09-17T18:20:43.8721711Z  * [new tag]           v0.1.171                -> v0.1.171
+Policy	Checkout repository history	2026-09-17T18:20:43.8723457Z  * [new tag]           v0.1.172                -> v0.1.172
+Policy	Checkout repository history	2026-09-17T18:20:43.8725039Z  * [new tag]           v0.1.173                -> v0.1.173
+Policy	Checkout repository history	2026-09-17T18:20:43.8727112Z  * [new tag]           v0.1.174                -> v0.1.174
+Policy	Checkout repository history	2026-09-17T18:20:43.8728969Z  * [new tag]           v0.1.175                -> v0.1.175
+Policy	Checkout repository history	2026-09-17T18:20:43.8730496Z  * [new tag]           v0.1.176                -> v0.1.176
+Policy	Checkout repository history	2026-09-17T18:20:43.8732143Z  * [new tag]           v0.1.177                -> v0.1.177
+Policy	Checkout repository history	2026-09-17T18:20:43.8733603Z  * [new tag]           v0.1.178                -> v0.1.178
+Policy	Checkout repository history	2026-09-17T18:20:43.8735080Z  * [new tag]           v0.1.179                -> v0.1.179
+Policy	Checkout repository history	2026-09-17T18:20:43.8736939Z  * [new tag]           v0.1.18                 -> v0.1.18
+Policy	Checkout repository history	2026-09-17T18:20:43.8738393Z  * [new tag]           v0.1.180                -> v0.1.180
+Policy	Checkout repository history	2026-09-17T18:20:43.8739860Z  * [new tag]           v0.1.181                -> v0.1.181
+Policy	Checkout repository history	2026-09-17T18:20:43.8741619Z  * [new tag]           v0.1.182                -> v0.1.182
+Policy	Checkout repository history	2026-09-17T18:20:43.8743096Z  * [new tag]           v0.1.183                -> v0.1.183
+Policy	Checkout repository history	2026-09-17T18:20:43.8744558Z  * [new tag]           v0.1.184                -> v0.1.184
+Policy	Checkout repository history	2026-09-17T18:20:43.8746347Z  * [new tag]           v0.1.185                -> v0.1.185
+Policy	Checkout repository history	2026-09-17T18:20:43.8748179Z  * [new tag]           v0.1.186                -> v0.1.186
+Policy	Checkout repository history	2026-09-17T18:20:43.8749636Z  * [new tag]           v0.1.187                -> v0.1.187
+Policy	Checkout repository history	2026-09-17T18:20:43.8751227Z  * [new tag]           v0.1.188                -> v0.1.188
+Policy	Checkout repository history	2026-09-17T18:20:43.8752662Z  * [new tag]           v0.1.189                -> v0.1.189
+Policy	Checkout repository history	2026-09-17T18:20:43.8754110Z  * [new tag]           v0.1.19                 -> v0.1.19
+Policy	Checkout repository history	2026-09-17T18:20:43.8755521Z  * [new tag]           v0.1.190                -> v0.1.190
+Policy	Checkout repository history	2026-09-17T18:20:43.8756941Z  * [new tag]           v0.1.191                -> v0.1.191
+Policy	Checkout repository history	2026-09-17T18:20:43.8758379Z  * [new tag]           v0.1.192                -> v0.1.192
+Policy	Checkout repository history	2026-09-17T18:20:43.8759845Z  * [new tag]           v0.1.193                -> v0.1.193
+Policy	Checkout repository history	2026-09-17T18:20:43.8762147Z  * [new tag]           v0.1.194                -> v0.1.194
+Policy	Checkout repository history	2026-09-17T18:20:43.8763611Z  * [new tag]           v0.1.195                -> v0.1.195
+Policy	Checkout repository history	2026-09-17T18:20:43.8765494Z  * [new tag]           v0.1.196                -> v0.1.196
+Policy	Checkout repository history	2026-09-17T18:20:43.8767147Z  * [new tag]           v0.1.197                -> v0.1.197
+Policy	Checkout repository history	2026-09-17T18:20:43.8768608Z  * [new tag]           v0.1.198                -> v0.1.198
+Policy	Checkout repository history	2026-09-17T18:20:43.8770043Z  * [new tag]           v0.1.199                -> v0.1.199
+Policy	Checkout repository history	2026-09-17T18:20:43.8771816Z  * [new tag]           v0.1.2                  -> v0.1.2
+Policy	Checkout repository history	2026-09-17T18:20:43.8773743Z  * [new tag]           v0.1.20                 -> v0.1.20
+Policy	Checkout repository history	2026-09-17T18:20:43.8775202Z  * [new tag]           v0.1.200                -> v0.1.200
+Policy	Checkout repository history	2026-09-17T18:20:43.8776633Z  * [new tag]           v0.1.201                -> v0.1.201
+Policy	Checkout repository history	2026-09-17T18:20:43.8778060Z  * [new tag]           v0.1.202                -> v0.1.202
+Policy	Checkout repository history	2026-09-17T18:20:43.8779488Z  * [new tag]           v0.1.203                -> v0.1.203
+Policy	Checkout repository history	2026-09-17T18:20:43.8781234Z  * [new tag]           v0.1.204                -> v0.1.204
+Policy	Checkout repository history	2026-09-17T18:20:43.8782703Z  * [new tag]           v0.1.205                -> v0.1.205
+Policy	Checkout repository history	2026-09-17T18:20:43.8784123Z  * [new tag]           v0.1.206                -> v0.1.206
+Policy	Checkout repository history	2026-09-17T18:20:43.8785558Z  * [new tag]           v0.1.207                -> v0.1.207
+Policy	Checkout repository history	2026-09-17T18:20:43.8786994Z  * [new tag]           v0.1.208                -> v0.1.208
+Policy	Checkout repository history	2026-09-17T18:20:43.8788431Z  * [new tag]           v0.1.209                -> v0.1.209
+Policy	Checkout repository history	2026-09-17T18:20:43.8789846Z  * [new tag]           v0.1.21                 -> v0.1.21
+Policy	Checkout repository history	2026-09-17T18:20:43.8791435Z  * [new tag]           v0.1.210                -> v0.1.210
+Policy	Checkout repository history	2026-09-17T18:20:43.8792854Z  * [new tag]           v0.1.211                -> v0.1.211
+Policy	Checkout repository history	2026-09-17T18:20:43.8794287Z  * [new tag]           v0.1.212                -> v0.1.212
+Policy	Checkout repository history	2026-09-17T18:20:43.8795709Z  * [new tag]           v0.1.213                -> v0.1.213
+Policy	Checkout repository history	2026-09-17T18:20:43.8797125Z  * [new tag]           v0.1.214                -> v0.1.214
+Policy	Checkout repository history	2026-09-17T18:20:43.8798546Z  * [new tag]           v0.1.215                -> v0.1.215
+Policy	Checkout repository history	2026-09-17T18:20:43.8799966Z  * [new tag]           v0.1.217                -> v0.1.217
+Policy	Checkout repository history	2026-09-17T18:20:43.8801520Z  * [new tag]           v0.1.218                -> v0.1.218
+Policy	Checkout repository history	2026-09-17T18:20:43.8802940Z  * [new tag]           v0.1.219                -> v0.1.219
+Policy	Checkout repository history	2026-09-17T18:20:43.8804356Z  * [new tag]           v0.1.22                 -> v0.1.22
+Policy	Checkout repository history	2026-09-17T18:20:43.8805752Z  * [new tag]           v0.1.220                -> v0.1.220
+Policy	Checkout repository history	2026-09-17T18:20:43.8807360Z  * [new tag]           v0.1.221                -> v0.1.221
+Policy	Checkout repository history	2026-09-17T18:20:43.8808785Z  * [new tag]           v0.1.222                -> v0.1.222
+Policy	Checkout repository history	2026-09-17T18:20:43.8810210Z  * [new tag]           v0.1.223                -> v0.1.223
+Policy	Checkout repository history	2026-09-17T18:20:43.8811992Z  * [new tag]           v0.1.224                -> v0.1.224
+Policy	Checkout repository history	2026-09-17T18:20:43.8813444Z  * [new tag]           v0.1.225                -> v0.1.225
+Policy	Checkout repository history	2026-09-17T18:20:43.8814873Z  * [new tag]           v0.1.226                -> v0.1.226
+Policy	Checkout repository history	2026-09-17T18:20:43.8816303Z  * [new tag]           v0.1.227                -> v0.1.227
+Policy	Checkout repository history	2026-09-17T18:20:43.8817728Z  * [new tag]           v0.1.228                -> v0.1.228
+Policy	Checkout repository history	2026-09-17T18:20:43.8819160Z  * [new tag]           v0.1.229                -> v0.1.229
+Policy	Checkout repository history	2026-09-17T18:20:43.8820578Z  * [new tag]           v0.1.23                 -> v0.1.23
+Policy	Checkout repository history	2026-09-17T18:20:43.8822354Z  * [new tag]           v0.1.230                -> v0.1.230
+Policy	Checkout repository history	2026-09-17T18:20:43.8823831Z  * [new tag]           v0.1.231                -> v0.1.231
+Policy	Checkout repository history	2026-09-17T18:20:43.8825305Z  * [new tag]           v0.1.232                -> v0.1.232
+Policy	Checkout repository history	2026-09-17T18:20:43.8826770Z  * [new tag]           v0.1.233                -> v0.1.233
+Policy	Checkout repository history	2026-09-17T18:20:43.8828221Z  * [new tag]           v0.1.234                -> v0.1.234
+Policy	Checkout repository history	2026-09-17T18:20:43.8829660Z  * [new tag]           v0.1.235                -> v0.1.235
+Policy	Checkout repository history	2026-09-17T18:20:43.8831258Z  * [new tag]           v0.1.236                -> v0.1.236
+Policy	Checkout repository history	2026-09-17T18:20:43.8832705Z  * [new tag]           v0.1.237                -> v0.1.237
+Policy	Checkout repository history	2026-09-17T18:20:43.8834148Z  * [new tag]           v0.1.238                -> v0.1.238
+Policy	Checkout repository history	2026-09-17T18:20:43.8835584Z  * [new tag]           v0.1.239                -> v0.1.239
+Policy	Checkout repository history	2026-09-17T18:20:43.8837007Z  * [new tag]           v0.1.24                 -> v0.1.24
+Policy	Checkout repository history	2026-09-17T18:20:43.8838448Z  * [new tag]           v0.1.240                -> v0.1.240
+Policy	Checkout repository history	2026-09-17T18:20:43.8839887Z  * [new tag]           v0.1.241                -> v0.1.241
+Policy	Checkout repository history	2026-09-17T18:20:43.8841469Z  * [new tag]           v0.1.242                -> v0.1.242
+Policy	Checkout repository history	2026-09-17T18:20:43.8843110Z  * [new tag]           v0.1.243                -> v0.1.243
+Policy	Checkout repository history	2026-09-17T18:20:43.8844559Z  * [new tag]           v0.1.244                -> v0.1.244
+Policy	Checkout repository history	2026-09-17T18:20:43.8845997Z  * [new tag]           v0.1.245                -> v0.1.245
+Policy	Checkout repository history	2026-09-17T18:20:43.8847449Z  * [new tag]           v0.1.246                -> v0.1.246
+Policy	Checkout repository history	2026-09-17T18:20:43.8848881Z  * [new tag]           v0.1.247                -> v0.1.247
+Policy	Checkout repository history	2026-09-17T18:20:43.8850320Z  * [new tag]           v0.1.248                -> v0.1.248
+Policy	Checkout repository history	2026-09-17T18:20:43.8852084Z  * [new tag]           v0.1.249                -> v0.1.249
+Policy	Checkout repository history	2026-09-17T18:20:43.8853536Z  * [new tag]           v0.1.25                 -> v0.1.25
+Policy	Checkout repository history	2026-09-17T18:20:43.8854995Z  * [new tag]           v0.1.250                -> v0.1.250
+Policy	Checkout repository history	2026-09-17T18:20:43.8856435Z  * [new tag]           v0.1.251                -> v0.1.251
+Policy	Checkout repository history	2026-09-17T18:20:43.8857882Z  * [new tag]           v0.1.252                -> v0.1.252
+Policy	Checkout repository history	2026-09-17T18:20:43.8859384Z  * [new tag]           v0.1.253                -> v0.1.253
+Policy	Checkout repository history	2026-09-17T18:20:43.8861171Z  * [new tag]           v0.1.254                -> v0.1.254
+Policy	Checkout repository history	2026-09-17T18:20:43.8862697Z  * [new tag]           v0.1.255                -> v0.1.255
+Policy	Checkout repository history	2026-09-17T18:20:43.8864144Z  * [new tag]           v0.1.256                -> v0.1.256
+Policy	Checkout repository history	2026-09-17T18:20:43.8865576Z  * [new tag]           v0.1.257                -> v0.1.257
+Policy	Checkout repository history	2026-09-17T18:20:43.8867013Z  * [new tag]           v0.1.258                -> v0.1.258
+Policy	Checkout repository history	2026-09-17T18:20:43.8868450Z  * [new tag]           v0.1.259                -> v0.1.259
+Policy	Checkout repository history	2026-09-17T18:20:43.8869886Z  * [new tag]           v0.1.26                 -> v0.1.26
+Policy	Checkout repository history	2026-09-17T18:20:43.8871449Z  * [new tag]           v0.1.260                -> v0.1.260
+Policy	Checkout repository history	2026-09-17T18:20:43.8872887Z  * [new tag]           v0.1.261                -> v0.1.261
+Policy	Checkout repository history	2026-09-17T18:20:43.8874321Z  * [new tag]           v0.1.262                -> v0.1.262
+Policy	Checkout repository history	2026-09-17T18:20:43.8875739Z  * [new tag]           v0.1.263                -> v0.1.263
+Policy	Checkout repository history	2026-09-17T18:20:43.8877356Z  * [new tag]           v0.1.264                -> v0.1.264
+Policy	Checkout repository history	2026-09-17T18:20:43.8878775Z  * [new tag]           v0.1.265                -> v0.1.265
+Policy	Checkout repository history	2026-09-17T18:20:43.8880198Z  * [new tag]           v0.1.266                -> v0.1.266
+Policy	Checkout repository history	2026-09-17T18:20:43.8881823Z  * [new tag]           v0.1.267                -> v0.1.267
+Policy	Checkout repository history	2026-09-17T18:20:43.8883253Z  * [new tag]           v0.1.268                -> v0.1.268
+Policy	Checkout repository history	2026-09-17T18:20:43.8884661Z  * [new tag]           v0.1.269                -> v0.1.269
+Policy	Checkout repository history	2026-09-17T18:20:43.8886073Z  * [new tag]           v0.1.27                 -> v0.1.27
+Policy	Checkout repository history	2026-09-17T18:20:43.8887484Z  * [new tag]           v0.1.270                -> v0.1.270
+Policy	Checkout repository history	2026-09-17T18:20:43.8888898Z  * [new tag]           v0.1.271                -> v0.1.271
+Policy	Checkout repository history	2026-09-17T18:20:43.8890313Z  * [new tag]           v0.1.272                -> v0.1.272
+Policy	Checkout repository history	2026-09-17T18:20:43.8891893Z  * [new tag]           v0.1.273                -> v0.1.273
+Policy	Checkout repository history	2026-09-17T18:20:43.8893323Z  * [new tag]           v0.1.274                -> v0.1.274
+Policy	Checkout repository history	2026-09-17T18:20:43.8894724Z  * [new tag]           v0.1.28                 -> v0.1.28
+Policy	Checkout repository history	2026-09-17T18:20:43.8896122Z  * [new tag]           v0.1.29                 -> v0.1.29
+Policy	Checkout repository history	2026-09-17T18:20:43.8897512Z  * [new tag]           v0.1.3                  -> v0.1.3
+Policy	Checkout repository history	2026-09-17T18:20:43.8898898Z  * [new tag]           v0.1.30                 -> v0.1.30
+Policy	Checkout repository history	2026-09-17T18:20:43.8900299Z  * [new tag]           v0.1.31                 -> v0.1.31
+Policy	Checkout repository history	2026-09-17T18:20:43.8902070Z  * [new tag]           v0.1.32                 -> v0.1.32
+Policy	Checkout repository history	2026-09-17T18:20:43.8903494Z  * [new tag]           v0.1.33                 -> v0.1.33
+Policy	Checkout repository history	2026-09-17T18:20:43.8904900Z  * [new tag]           v0.1.34                 -> v0.1.34
+Policy	Checkout repository history	2026-09-17T18:20:43.8906299Z  * [new tag]           v0.1.35                 -> v0.1.35
+Policy	Checkout repository history	2026-09-17T18:20:43.8907707Z  * [new tag]           v0.1.36                 -> v0.1.36
+Policy	Checkout repository history	2026-09-17T18:20:43.8909112Z  * [new tag]           v0.1.37                 -> v0.1.37
+Policy	Checkout repository history	2026-09-17T18:20:43.8910881Z  * [new tag]           v0.1.38                 -> v0.1.38
+Policy	Checkout repository history	2026-09-17T18:20:43.8912330Z  * [new tag]           v0.1.39                 -> v0.1.39
+Policy	Checkout repository history	2026-09-17T18:20:43.8913746Z  * [new tag]           v0.1.4                  -> v0.1.4
+Policy	Checkout repository history	2026-09-17T18:20:43.8915135Z  * [new tag]           v0.1.40                 -> v0.1.40
+Policy	Checkout repository history	2026-09-17T18:20:43.8916535Z  * [new tag]           v0.1.41                 -> v0.1.41
+Policy	Checkout repository history	2026-09-17T18:20:43.8917926Z  * [new tag]           v0.1.42                 -> v0.1.42
+Policy	Checkout repository history	2026-09-17T18:20:43.8919314Z  * [new tag]           v0.1.43                 -> v0.1.43
+Policy	Checkout repository history	2026-09-17T18:20:43.8920845Z  * [new tag]           v0.1.44                 -> v0.1.44
+Policy	Checkout repository history	2026-09-17T18:20:43.8922238Z  * [new tag]           v0.1.45                 -> v0.1.45
+Policy	Checkout repository history	2026-09-17T18:20:43.8923647Z  * [new tag]           v0.1.46                 -> v0.1.46
+Policy	Checkout repository history	2026-09-17T18:20:43.8925050Z  * [new tag]           v0.1.47                 -> v0.1.47
+Policy	Checkout repository history	2026-09-17T18:20:43.8926441Z  * [new tag]           v0.1.48                 -> v0.1.48
+Policy	Checkout repository history	2026-09-17T18:20:43.8927842Z  * [new tag]           v0.1.49                 -> v0.1.49
+Policy	Checkout repository history	2026-09-17T18:20:43.8929215Z  * [new tag]           v0.1.5                  -> v0.1.5
+Policy	Checkout repository history	2026-09-17T18:20:43.8930604Z  * [new tag]           v0.1.50                 -> v0.1.50
+Policy	Checkout repository history	2026-09-17T18:20:43.8932162Z  * [new tag]           v0.1.51                 -> v0.1.51
+Policy	Checkout repository history	2026-09-17T18:20:43.8933552Z  * [new tag]           v0.1.52                 -> v0.1.52
+Policy	Checkout repository history	2026-09-17T18:20:43.8934934Z  * [new tag]           v0.1.53                 -> v0.1.53
+Policy	Checkout repository history	2026-09-17T18:20:43.8936312Z  * [new tag]           v0.1.54                 -> v0.1.54
+Policy	Checkout repository history	2026-09-17T18:20:43.8937691Z  * [new tag]           v0.1.55                 -> v0.1.55
+Policy	Checkout repository history	2026-09-17T18:20:43.8939078Z  * [new tag]           v0.1.56                 -> v0.1.56
+Policy	Checkout repository history	2026-09-17T18:20:43.8940455Z  * [new tag]           v0.1.57                 -> v0.1.57
+Policy	Checkout repository history	2026-09-17T18:20:43.8942188Z  * [new tag]           v0.1.58                 -> v0.1.58
+Policy	Checkout repository history	2026-09-17T18:20:43.8943609Z  * [new tag]           v0.1.59                 -> v0.1.59
+Policy	Checkout repository history	2026-09-17T18:20:43.8945166Z  * [new tag]           v0.1.6                  -> v0.1.6
+Policy	Checkout repository history	2026-09-17T18:20:43.8946548Z  * [new tag]           v0.1.60                 -> v0.1.60
+Policy	Checkout repository history	2026-09-17T18:20:43.8947929Z  * [new tag]           v0.1.61                 -> v0.1.61
+Policy	Checkout repository history	2026-09-17T18:20:43.8949309Z  * [new tag]           v0.1.62                 -> v0.1.62
+Policy	Checkout repository history	2026-09-17T18:20:43.8950684Z  * [new tag]           v0.1.63                 -> v0.1.63
+Policy	Checkout repository history	2026-09-17T18:20:43.8952246Z  * [new tag]           v0.1.64                 -> v0.1.64
+Policy	Checkout repository history	2026-09-17T18:20:43.8953648Z  * [new tag]           v0.1.65                 -> v0.1.65
+Policy	Checkout repository history	2026-09-17T18:20:43.8955030Z  * [new tag]           v0.1.66                 -> v0.1.66
+Policy	Checkout repository history	2026-09-17T18:20:43.8956405Z  * [new tag]           v0.1.67                 -> v0.1.67
+Policy	Checkout repository history	2026-09-17T18:20:43.8957776Z  * [new tag]           v0.1.68                 -> v0.1.68
+Policy	Checkout repository history	2026-09-17T18:20:43.8959151Z  * [new tag]           v0.1.69                 -> v0.1.69
+Policy	Checkout repository history	2026-09-17T18:20:43.8960517Z  * [new tag]           v0.1.7                  -> v0.1.7
+Policy	Checkout repository history	2026-09-17T18:20:43.8962026Z  * [new tag]           v0.1.70                 -> v0.1.70
+Policy	Checkout repository history	2026-09-17T18:20:43.8963406Z  * [new tag]           v0.1.71                 -> v0.1.71
+Policy	Checkout repository history	2026-09-17T18:20:43.8964772Z  * [new tag]           v0.1.72                 -> v0.1.72
+Policy	Checkout repository history	2026-09-17T18:20:43.8966135Z  * [new tag]           v0.1.73                 -> v0.1.73
+Policy	Checkout repository history	2026-09-17T18:20:43.8967526Z  * [new tag]           v0.1.74                 -> v0.1.74
+Policy	Checkout repository history	2026-09-17T18:20:43.8968909Z  * [new tag]           v0.1.75                 -> v0.1.75
+Policy	Checkout repository history	2026-09-17T18:20:43.8970279Z  * [new tag]           v0.1.76                 -> v0.1.76
+Policy	Checkout repository history	2026-09-17T18:20:43.8971805Z  * [new tag]           v0.1.77                 -> v0.1.77
+Policy	Checkout repository history	2026-09-17T18:20:43.8973188Z  * [new tag]           v0.1.78                 -> v0.1.78
+Policy	Checkout repository history	2026-09-17T18:20:43.8974541Z  * [new tag]           v0.1.79                 -> v0.1.79
+Policy	Checkout repository history	2026-09-17T18:20:43.8975913Z  * [new tag]           v0.1.8                  -> v0.1.8
+Policy	Checkout repository history	2026-09-17T18:20:43.8977453Z  * [new tag]           v0.1.80                 -> v0.1.80
+Policy	Checkout repository history	2026-09-17T18:20:43.8978830Z  * [new tag]           v0.1.81                 -> v0.1.81
+Policy	Checkout repository history	2026-09-17T18:20:43.8980206Z  * [new tag]           v0.1.82                 -> v0.1.82
+Policy	Checkout repository history	2026-09-17T18:20:43.8981943Z  * [new tag]           v0.1.83                 -> v0.1.83
+Policy	Checkout repository history	2026-09-17T18:20:43.8983331Z  * [new tag]           v0.1.84                 -> v0.1.84
+Policy	Checkout repository history	2026-09-17T18:20:43.8984700Z  * [new tag]           v0.1.85                 -> v0.1.85
+Policy	Checkout repository history	2026-09-17T18:20:43.8986073Z  * [new tag]           v0.1.86                 -> v0.1.86
+Policy	Checkout repository history	2026-09-17T18:20:43.8987449Z  * [new tag]           v0.1.87                 -> v0.1.87
+Policy	Checkout repository history	2026-09-17T18:20:43.8988818Z  * [new tag]           v0.1.88                 -> v0.1.88
+Policy	Checkout repository history	2026-09-17T18:20:43.8990203Z  * [new tag]           v0.1.89                 -> v0.1.89
+Policy	Checkout repository history	2026-09-17T18:20:43.8991718Z  * [new tag]           v0.1.9                  -> v0.1.9
+Policy	Checkout repository history	2026-09-17T18:20:43.8993087Z  * [new tag]           v0.1.90                 -> v0.1.90
+Policy	Checkout repository history	2026-09-17T18:20:43.8994477Z  * [new tag]           v0.1.91                 -> v0.1.91
+Policy	Checkout repository history	2026-09-17T18:20:43.8995856Z  * [new tag]           v0.1.92                 -> v0.1.92
+Policy	Checkout repository history	2026-09-17T18:20:43.8997223Z  * [new tag]           v0.1.93                 -> v0.1.93
+Policy	Checkout repository history	2026-09-17T18:20:43.8998608Z  * [new tag]           v0.1.94                 -> v0.1.94
+Policy	Checkout repository history	2026-09-17T18:20:43.8999982Z  * [new tag]           v0.1.95                 -> v0.1.95
+Policy	Checkout repository history	2026-09-17T18:20:43.9001468Z  * [new tag]           v0.1.96                 -> v0.1.96
+Policy	Checkout repository history	2026-09-17T18:20:43.9002846Z  * [new tag]           v0.1.97                 -> v0.1.97
+Policy	Checkout repository history	2026-09-17T18:20:43.9004219Z  * [new tag]           v0.1.98                 -> v0.1.98
+Policy	Checkout repository history	2026-09-17T18:20:43.9005571Z  * [new tag]           v0.1.99                 -> v0.1.99
+Policy	Checkout repository history	2026-09-17T18:20:43.9007825Z  * [new tag]           velnor-workflow-runtime-v1-0a69e008ff8703af -> velnor-workflow-runtime-v1-0a69e008ff8703af
+Policy	Checkout repository history	2026-09-17T18:20:43.9011082Z  * [new tag]           velnor-workflow-runtime-v1-12309460ffb8359c -> velnor-workflow-runtime-v1-12309460ffb8359c
+Policy	Checkout repository history	2026-09-17T18:20:43.9014480Z  * [new tag]           velnor-workflow-runtime-v1-1b7e82ab726aa53b -> velnor-workflow-runtime-v1-1b7e82ab726aa53b
+Policy	Checkout repository history	2026-09-17T18:20:43.9017605Z  * [new tag]           velnor-workflow-runtime-v1-1ff514a2852c82d3 -> velnor-workflow-runtime-v1-1ff514a2852c82d3
+Policy	Checkout repository history	2026-09-17T18:20:43.9020942Z  * [new tag]           velnor-workflow-runtime-v1-203eb9b79141e5a2 -> velnor-workflow-runtime-v1-203eb9b79141e5a2
+Policy	Checkout repository history	2026-09-17T18:20:43.9024200Z  * [new tag]           velnor-workflow-runtime-v1-2bd48976b59bf084 -> velnor-workflow-runtime-v1-2bd48976b59bf084
+Policy	Checkout repository history	2026-09-17T18:20:43.9027287Z  * [new tag]           velnor-workflow-runtime-v1-304405643c571048 -> velnor-workflow-runtime-v1-304405643c571048
+Policy	Checkout repository history	2026-09-17T18:20:43.9030362Z  * [new tag]           velnor-workflow-runtime-v1-3b8d2b29eca331f4 -> velnor-workflow-runtime-v1-3b8d2b29eca331f4
+Policy	Checkout repository history	2026-09-17T18:20:43.9033582Z  * [new tag]           velnor-workflow-runtime-v1-49d0a3970c57d4d6 -> velnor-workflow-runtime-v1-49d0a3970c57d4d6
+Policy	Checkout repository history	2026-09-17T18:20:43.9036652Z  * [new tag]           velnor-workflow-runtime-v1-4ef63457fa892a18 -> velnor-workflow-runtime-v1-4ef63457fa892a18
+Policy	Checkout repository history	2026-09-17T18:20:43.9039720Z  * [new tag]           velnor-workflow-runtime-v1-561387508ee5fcc6 -> velnor-workflow-runtime-v1-561387508ee5fcc6
+Policy	Checkout repository history	2026-09-17T18:20:43.9042948Z  * [new tag]           velnor-workflow-runtime-v1-64fdd0bf7a8a5800 -> velnor-workflow-runtime-v1-64fdd0bf7a8a5800
+Policy	Checkout repository history	2026-09-17T18:20:43.9046037Z  * [new tag]           velnor-workflow-runtime-v1-6945ed5e15305462 -> velnor-workflow-runtime-v1-6945ed5e15305462
+Policy	Checkout repository history	2026-09-17T18:20:43.9049107Z  * [new tag]           velnor-workflow-runtime-v1-69a010b248a76d58 -> velnor-workflow-runtime-v1-69a010b248a76d58
+Policy	Checkout repository history	2026-09-17T18:20:43.9052328Z  * [new tag]           velnor-workflow-runtime-v1-6ae4ca31ef453567 -> velnor-workflow-runtime-v1-6ae4ca31ef453567
+Policy	Checkout repository history	2026-09-17T18:20:43.9055424Z  * [new tag]           velnor-workflow-runtime-v1-716a0b98ec7d1b4d -> velnor-workflow-runtime-v1-716a0b98ec7d1b4d
+Policy	Checkout repository history	2026-09-17T18:20:43.9058698Z  * [new tag]           velnor-workflow-runtime-v1-71e623219d2db42c -> velnor-workflow-runtime-v1-71e623219d2db42c
+Policy	Checkout repository history	2026-09-17T18:20:43.9062285Z  * [new tag]           velnor-workflow-runtime-v1-78673ee16c42581e -> velnor-workflow-runtime-v1-78673ee16c42581e
+Policy	Checkout repository history	2026-09-17T18:20:43.9065383Z  * [new tag]           velnor-workflow-runtime-v1-81a6d4d42427c1f8 -> velnor-workflow-runtime-v1-81a6d4d42427c1f8
+Policy	Checkout repository history	2026-09-17T18:20:43.9068437Z  * [new tag]           velnor-workflow-runtime-v1-93c8a35808d1210b -> velnor-workflow-runtime-v1-93c8a35808d1210b
+Policy	Checkout repository history	2026-09-17T18:20:43.9071620Z  * [new tag]           velnor-workflow-runtime-v1-956c48e84c4f858e -> velnor-workflow-runtime-v1-956c48e84c4f858e
+Policy	Checkout repository history	2026-09-17T18:20:43.9074655Z  * [new tag]           velnor-workflow-runtime-v1-9f236b40635970a4 -> velnor-workflow-runtime-v1-9f236b40635970a4
+Policy	Checkout repository history	2026-09-17T18:20:43.9077702Z  * [new tag]           velnor-workflow-runtime-v1-a3dc1e44d51b3cb2 -> velnor-workflow-runtime-v1-a3dc1e44d51b3cb2
+Policy	Checkout repository history	2026-09-17T18:20:43.9080879Z  * [new tag]           velnor-workflow-runtime-v1-a8356a89d2859dd3 -> velnor-workflow-runtime-v1-a8356a89d2859dd3
+Policy	Checkout repository history	2026-09-17T18:20:43.9083933Z  * [new tag]           velnor-workflow-runtime-v1-ace4fa94864c59e5 -> velnor-workflow-runtime-v1-ace4fa94864c59e5
+Policy	Checkout repository history	2026-09-17T18:20:43.9086952Z  * [new tag]           velnor-workflow-runtime-v1-ad493401f003a130 -> velnor-workflow-runtime-v1-ad493401f003a130
+Policy	Checkout repository history	2026-09-17T18:20:43.9089981Z  * [new tag]           velnor-workflow-runtime-v1-c0ce56f09b27859c -> velnor-workflow-runtime-v1-c0ce56f09b27859c
+Policy	Checkout repository history	2026-09-17T18:20:43.9093156Z  * [new tag]           velnor-workflow-runtime-v1-d39cbf21e351b410 -> velnor-workflow-runtime-v1-d39cbf21e351b410
+Policy	Checkout repository history	2026-09-17T18:20:43.9096181Z  * [new tag]           velnor-workflow-runtime-v1-e5ad6f4f923cd154 -> velnor-workflow-runtime-v1-e5ad6f4f923cd154
+Policy	Checkout repository history	2026-09-17T18:20:43.9099185Z  * [new tag]           velnor-workflow-runtime-v1-eee20d4ac15650f0 -> velnor-workflow-runtime-v1-eee20d4ac15650f0
+Policy	Checkout repository history	2026-09-17T18:20:43.9102552Z  * [new tag]           velnor-workflow-runtime-v1-f1f88c200e5b3b82 -> velnor-workflow-runtime-v1-f1f88c200e5b3b82
+Policy	Checkout repository history	2026-09-17T18:20:43.9105752Z  * [new tag]           velnor-workflow-runtime-v1-fd45efac853b6570 -> velnor-workflow-runtime-v1-fd45efac853b6570
+Policy	Checkout repository history	2026-09-17T18:20:43.9108731Z  * [new tag]           velnor-workflow-runtime-v1-ff27a1c010cb4faf -> velnor-workflow-runtime-v1-ff27a1c010cb4faf
+Policy	Checkout repository history	2026-09-17T18:20:43.9112869Z [command]/usr/bin/git branch --list --remote origin/main
+Policy	Checkout repository history	2026-09-17T18:20:43.9114238Z   origin/main
+Policy	Checkout repository history	2026-09-17T18:20:43.9116378Z [command]/usr/bin/git rev-parse refs/remotes/origin/main
+Policy	Checkout repository history	2026-09-17T18:20:43.9117725Z 58a94b12d0139c303ddf1dfdd57a36260c39fa02
+Policy	Checkout repository history	2026-09-17T18:20:43.9120393Z ##[endgroup]
+Policy	Checkout repository history	2026-09-17T18:20:43.9121960Z ##[group]Determining the checkout info
+Policy	Checkout repository history	2026-09-17T18:20:43.9123530Z ##[endgroup]
+Policy	Checkout repository history	2026-09-17T18:20:43.9124456Z [command]/usr/bin/git sparse-checkout disable
+Policy	Checkout repository history	2026-09-17T18:20:43.9127156Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+Policy	Checkout repository history	2026-09-17T18:20:43.9130218Z ##[group]Checking out the ref
+Policy	Checkout repository history	2026-09-17T18:20:43.9131904Z [command]/usr/bin/git checkout --progress --force -B main refs/remotes/origin/main
+Policy	Checkout repository history	2026-09-17T18:20:43.9818814Z Switched to a new branch 'main'
+Policy	Checkout repository history	2026-09-17T18:20:43.9824832Z branch 'main' set up to track 'origin/main'.
+Policy	Checkout repository history	2026-09-17T18:20:43.9891085Z ##[endgroup]
+Policy	Checkout repository history	2026-09-17T18:20:43.9894614Z [command]/usr/bin/git log -1 --format=%H
+Policy	Checkout repository history	2026-09-17T18:20:43.9925005Z 58a94b12d0139c303ddf1dfdd57a36260c39fa02
+Policy	Checkout repository history	2026-09-17T18:20:43.9943107Z ##[group]Removing auth
+Policy	Checkout repository history	2026-09-17T18:20:43.9944802Z Removing SSH command configuration
+Policy	Checkout repository history	2026-09-17T18:20:43.9947005Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Policy	Checkout repository history	2026-09-17T18:20:43.9988753Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Policy	Checkout repository history	2026-09-17T18:20:44.0218131Z Removing HTTP extra header
+Policy	Checkout repository history	2026-09-17T18:20:44.0222865Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Policy	Checkout repository history	2026-09-17T18:20:44.0257258Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Policy	Checkout repository history	2026-09-17T18:20:44.0480278Z Removing includeIf entries pointing to credentials config files
+Policy	Checkout repository history	2026-09-17T18:20:44.0483359Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Policy	Checkout repository history	2026-09-17T18:20:44.0517298Z includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git.path
+Policy	Checkout repository history	2026-09-17T18:20:44.0519921Z includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git/worktrees/*.path
+Policy	Checkout repository history	2026-09-17T18:20:44.0522854Z includeif.gitdir:/github/workspace/policy-checkout/.git.path
+Policy	Checkout repository history	2026-09-17T18:20:44.0525087Z includeif.gitdir:/github/workspace/policy-checkout/.git/worktrees/*.path
+Policy	Checkout repository history	2026-09-17T18:20:44.0529164Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git.path
+Policy	Checkout repository history	2026-09-17T18:20:44.0556189Z /home/runner/work/_temp/git-credentials-d7ea3c51-bf11-49cb-9b51-db361ee5062b.config
+Policy	Checkout repository history	2026-09-17T18:20:44.0568966Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git.path \/home\/runner\/work\/_temp\/git\-credentials\-d7ea3c51\-bf11\-49cb\-9b51\-db361ee5062b\.config
+Policy	Checkout repository history	2026-09-17T18:20:44.0605990Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git/worktrees/*.path
+Policy	Checkout repository history	2026-09-17T18:20:44.0632772Z /home/runner/work/_temp/git-credentials-d7ea3c51-bf11-49cb-9b51-db361ee5062b.config
+Policy	Checkout repository history	2026-09-17T18:20:44.0643082Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git/worktrees/*.path \/home\/runner\/work\/_temp\/git\-credentials\-d7ea3c51\-bf11\-49cb\-9b51\-db361ee5062b\.config
+Policy	Checkout repository history	2026-09-17T18:20:44.0687712Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/policy-checkout/.git.path
+Policy	Checkout repository history	2026-09-17T18:20:44.0716412Z /github/runner_temp/git-credentials-d7ea3c51-bf11-49cb-9b51-db361ee5062b.config
+Policy	Checkout repository history	2026-09-17T18:20:44.0725768Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/policy-checkout/.git.path \/github\/runner_temp\/git\-credentials\-d7ea3c51\-bf11\-49cb\-9b51\-db361ee5062b\.config
+Policy	Checkout repository history	2026-09-17T18:20:44.0759978Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/policy-checkout/.git/worktrees/*.path
+Policy	Checkout repository history	2026-09-17T18:20:44.0785606Z /github/runner_temp/git-credentials-d7ea3c51-bf11-49cb-9b51-db361ee5062b.config
+Policy	Checkout repository history	2026-09-17T18:20:44.0795891Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/policy-checkout/.git/worktrees/*.path \/github\/runner_temp\/git\-credentials\-d7ea3c51\-bf11\-49cb\-9b51\-db361ee5062b\.config
+Policy	Checkout repository history	2026-09-17T18:20:44.0830009Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Policy	Checkout repository history	2026-09-17T18:20:44.1051757Z Removing credentials config '/home/runner/work/_temp/git-credentials-d7ea3c51-bf11-49cb-9b51-db361ee5062b.config'
+Policy	Checkout repository history	2026-09-17T18:20:44.1060082Z ##[endgroup]
+Policy	Check out audited head	﻿2026-09-17T18:20:44.1320241Z ##[group]Run set -euo pipefail
+Policy	Check out audited head	2026-09-17T18:20:44.1321705Z ^[[36;1mset -euo pipefail^[[0m
+Policy	Check out audited head	2026-09-17T18:20:44.1322975Z ^[[36;1mif ! git cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null; then^[[0m
+Policy	Check out audited head	2026-09-17T18:20:44.1324750Z ^[[36;1m  git fetch --no-tags "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$HEAD_SHA"^[[0m
+Policy	Check out audited head	2026-09-17T18:20:44.1326188Z ^[[36;1mfi^[[0m
+Policy	Check out audited head	2026-09-17T18:20:44.1327096Z ^[[36;1mgit checkout --quiet --detach "$HEAD_SHA"^[[0m
+Policy	Check out audited head	2026-09-17T18:20:44.1371605Z shell: /usr/bin/bash -e {0}
+Policy	Check out audited head	2026-09-17T18:20:44.1372570Z env:
+Policy	Check out audited head	2026-09-17T18:20:44.1373430Z   HEAD_SHA: 67fc180e07f6cfd45d2eac5b8f72473f8afe9acc
+Policy	Check out audited head	2026-09-17T18:20:44.1374668Z   HEAD_REPOSITORY: tailrocks/velnor
+Policy	Check out audited head	2026-09-17T18:20:44.1375658Z ##[endgroup]
+Policy	Check out base setup action	﻿2026-09-17T18:20:44.2475558Z ##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+Policy	Check out base setup action	2026-09-17T18:20:44.2477175Z with:
+Policy	Check out base setup action	2026-09-17T18:20:44.2478006Z   ref: 58a94b12d0139c303ddf1dfdd57a36260c39fa02
+Policy	Check out base setup action	2026-09-17T18:20:44.2479152Z   path: policy-setup-action
+Policy	Check out base setup action	2026-09-17T18:20:44.2480275Z   sparse-checkout: .github/actions/setup-velnor-workflow
+Policy	Check out base setup action	2026-09-17T18:20:44.2481672Z   fetch-depth: 1
+Policy	Check out base setup action	2026-09-17T18:20:44.2482511Z   persist-credentials: false
+Policy	Check out base setup action	2026-09-17T18:20:44.2483478Z   repository: tailrocks/velnor
+Policy	Check out base setup action	2026-09-17T18:20:44.2491829Z   token: ***
+Policy	Check out base setup action	2026-09-17T18:20:44.2492633Z   ssh-strict: true
+Policy	Check out base setup action	2026-09-17T18:20:44.2493428Z   ssh-user: git
+Policy	Check out base setup action	2026-09-17T18:20:44.2494190Z   clean: true
+Policy	Check out base setup action	2026-09-17T18:20:44.2495023Z   sparse-checkout-cone-mode: true
+Policy	Check out base setup action	2026-09-17T18:20:44.2496009Z   fetch-tags: false
+Policy	Check out base setup action	2026-09-17T18:20:44.2496819Z   show-progress: true
+Policy	Check out base setup action	2026-09-17T18:20:44.2497635Z   lfs: false
+Policy	Check out base setup action	2026-09-17T18:20:44.2498388Z   submodules: false
+Policy	Check out base setup action	2026-09-17T18:20:44.2499221Z   set-safe-directory: true
+Policy	Check out base setup action	2026-09-17T18:20:44.2500172Z   allow-unsafe-pr-checkout: false
+Policy	Check out base setup action	2026-09-17T18:20:44.2501345Z ##[endgroup]
+Policy	Check out base setup action	2026-09-17T18:20:44.3373342Z Syncing repository: tailrocks/velnor
+Policy	Check out base setup action	2026-09-17T18:20:44.3376680Z ##[group]Getting Git version info
+Policy	Check out base setup action	2026-09-17T18:20:44.3379524Z Working directory is '/home/runner/work/velnor/velnor/policy-setup-action'
+Policy	Check out base setup action	2026-09-17T18:20:44.3425813Z [command]/usr/bin/git version
+Policy	Check out base setup action	2026-09-17T18:20:44.3470183Z git version 2.55.0
+Policy	Check out base setup action	2026-09-17T18:20:44.3494094Z ##[endgroup]
+Policy	Check out base setup action	2026-09-17T18:20:44.3504318Z Temporarily overriding HOME='/home/runner/work/_temp/1c79ac5b-3bd7-4f07-8a9d-fd09b0a8d081' before making global git config changes
+Policy	Check out base setup action	2026-09-17T18:20:44.3509108Z Adding repository directory to the temporary git global config as a safe directory
+Policy	Check out base setup action	2026-09-17T18:20:44.3513534Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor/policy-setup-action
+Policy	Check out base setup action	2026-09-17T18:20:44.3545867Z ##[group]Determining repository object format
+Policy	Check out base setup action	2026-09-17T18:20:44.3548781Z ##[endgroup]
+Policy	Check out base setup action	2026-09-17T18:20:44.3551465Z ##[group]Initializing the repository
+Policy	Check out base setup action	2026-09-17T18:20:44.3553533Z [command]/usr/bin/git init /home/runner/work/velnor/velnor/policy-setup-action
+Policy	Check out base setup action	2026-09-17T18:20:44.3599405Z hint: Using 'master' as the name for the initial branch. This default branch name
+Policy	Check out base setup action	2026-09-17T18:20:44.3603018Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+Policy	Check out base setup action	2026-09-17T18:20:44.3605932Z hint: to use in all of your new repositories, which will suppress this warning,
+Policy	Check out base setup action	2026-09-17T18:20:44.3607734Z hint: call:
+Policy	Check out base setup action	2026-09-17T18:20:44.3608675Z hint:
+Policy	Check out base setup action	2026-09-17T18:20:44.3609811Z hint: 	git config --global init.defaultBranch <name>
+Policy	Check out base setup action	2026-09-17T18:20:44.3611677Z hint:
+Policy	Check out base setup action	2026-09-17T18:20:44.3613552Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+Policy	Check out base setup action	2026-09-17T18:20:44.3616044Z hint: 'development'. The just-created branch can be renamed via this command:
+Policy	Check out base setup action	2026-09-17T18:20:44.3617708Z hint:
+Policy	Check out base setup action	2026-09-17T18:20:44.3618682Z hint: 	git branch -m <name>
+Policy	Check out base setup action	2026-09-17T18:20:44.3619738Z hint:
+Policy	Check out base setup action	2026-09-17T18:20:44.3621830Z hint: Disable this message with "git config set advice.defaultBranchName false"
+Policy	Check out base setup action	2026-09-17T18:20:44.3625813Z Initialized empty Git repository in /home/runner/work/velnor/velnor/policy-setup-action/.git/
+Policy	Check out base setup action	2026-09-17T18:20:44.3632655Z [command]/usr/bin/git remote add origin https://github.com/tailrocks/velnor
+Policy	Check out base setup action	2026-09-17T18:20:44.3655111Z ##[endgroup]
+Policy	Check out base setup action	2026-09-17T18:20:44.3656846Z ##[group]Disabling automatic garbage collection
+Policy	Check out base setup action	2026-09-17T18:20:44.3658618Z [command]/usr/bin/git config --local gc.auto 0
+Policy	Check out base setup action	2026-09-17T18:20:44.3691092Z ##[endgroup]
+Policy	Check out base setup action	2026-09-17T18:20:44.3692489Z ##[group]Setting up auth
+Policy	Check out base setup action	2026-09-17T18:20:44.3693482Z Removing SSH command configuration
+Policy	Check out base setup action	2026-09-17T18:20:44.3697511Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Policy	Check out base setup action	2026-09-17T18:20:44.3738405Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Policy	Check out base setup action	2026-09-17T18:20:44.4012195Z Removing HTTP extra header
+Policy	Check out base setup action	2026-09-17T18:20:44.4028614Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Policy	Check out base setup action	2026-09-17T18:20:44.4058723Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Policy	Check out base setup action	2026-09-17T18:20:44.4313023Z Removing includeIf entries pointing to credentials config files
+Policy	Check out base setup action	2026-09-17T18:20:44.4322146Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Policy	Check out base setup action	2026-09-17T18:20:44.4372693Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Policy	Check out base setup action	2026-09-17T18:20:44.4627986Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-47a009fa-0c73-4d40-b008-ee18ed64bb5a.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+Policy	Check out base setup action	2026-09-17T18:20:44.4680253Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/policy-setup-action/.git.path /home/runner/work/_temp/git-credentials-47a009fa-0c73-4d40-b008-ee18ed64bb5a.config
+Policy	Check out base setup action	2026-09-17T18:20:44.4715542Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/policy-setup-action/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-47a009fa-0c73-4d40-b008-ee18ed64bb5a.config
+Policy	Check out base setup action	2026-09-17T18:20:44.4758197Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/policy-setup-action/.git.path /github/runner_temp/git-credentials-47a009fa-0c73-4d40-b008-ee18ed64bb5a.config
+Policy	Check out base setup action	2026-09-17T18:20:44.4801228Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/policy-setup-action/.git/worktrees/*.path /github/runner_temp/git-credentials-47a009fa-0c73-4d40-b008-ee18ed64bb5a.config
+Policy	Check out base setup action	2026-09-17T18:20:44.4833958Z ##[endgroup]
+Policy	Check out base setup action	2026-09-17T18:20:44.4836113Z ##[group]Fetching the repository
+Policy	Check out base setup action	2026-09-17T18:20:44.4841786Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --filter=blob:none --depth=1 origin 58a94b12d0139c303ddf1dfdd57a36260c39fa02
+Policy	Check out base setup action	2026-09-17T18:20:45.2017916Z From https://github.com/tailrocks/velnor
+Policy	Check out base setup action	2026-09-17T18:20:45.2018579Z  * branch            58a94b12d0139c303ddf1dfdd57a36260c39fa02 -> FETCH_HEAD
+Policy	Check out base setup action	2026-09-17T18:20:45.2030995Z [command]/usr/bin/git rev-parse --verify --quiet 58a94b12d0139c303ddf1dfdd57a36260c39fa02^{object}
+Policy	Check out base setup action	2026-09-17T18:20:45.2065919Z 58a94b12d0139c303ddf1dfdd57a36260c39fa02
+Policy	Check out base setup action	2026-09-17T18:20:45.2079000Z ##[endgroup]
+Policy	Check out base setup action	2026-09-17T18:20:45.2079672Z ##[group]Determining the checkout info
+Policy	Check out base setup action	2026-09-17T18:20:45.2080421Z ##[endgroup]
+Policy	Check out base setup action	2026-09-17T18:20:45.2081309Z ##[group]Setting up sparse checkout
+Policy	Check out base setup action	2026-09-17T18:20:45.2082119Z [command]/usr/bin/git sparse-checkout set .github/actions/setup-velnor-workflow
+Policy	Check out base setup action	2026-09-17T18:20:45.2125650Z ##[endgroup]
+Policy	Check out base setup action	2026-09-17T18:20:45.2126298Z ##[group]Checking out the ref
+Policy	Check out base setup action	2026-09-17T18:20:45.2132926Z [command]/usr/bin/git checkout --progress --force 58a94b12d0139c303ddf1dfdd57a36260c39fa02
+Policy	Check out base setup action	2026-09-17T18:20:45.8300000Z Note: switching to '58a94b12d0139c303ddf1dfdd57a36260c39fa02'.
+Policy	Check out base setup action	2026-09-17T18:20:45.8300598Z 
+Policy	Check out base setup action	2026-09-17T18:20:45.8301113Z You are in 'detached HEAD' state. You can look around, make experimental
+Policy	Check out base setup action	2026-09-17T18:20:45.8301923Z changes and commit them, and you can discard any commits you make in this
+Policy	Check out base setup action	2026-09-17T18:20:45.8302816Z state without impacting any branches by switching back to a branch.
+Policy	Check out base setup action	2026-09-17T18:20:45.8303318Z 
+Policy	Check out base setup action	2026-09-17T18:20:45.8303686Z If you want to create a new branch to retain commits you create, you may
+Policy	Check out base setup action	2026-09-17T18:20:45.8304537Z do so (now or later) by using -c with the switch command. Example:
+Policy	Check out base setup action	2026-09-17T18:20:45.8305054Z 
+Policy	Check out base setup action	2026-09-17T18:20:45.8305255Z   git switch -c <new-branch-name>
+Policy	Check out base setup action	2026-09-17T18:20:45.8305584Z 
+Policy	Check out base setup action	2026-09-17T18:20:45.8305808Z Or undo this operation with:
+Policy	Check out base setup action	2026-09-17T18:20:45.8306107Z 
+Policy	Check out base setup action	2026-09-17T18:20:45.8306273Z   git switch -
+Policy	Check out base setup action	2026-09-17T18:20:45.8306516Z 
+Policy	Check out base setup action	2026-09-17T18:20:45.8306880Z Turn off this advice by setting config variable advice.detachedHead to false
+Policy	Check out base setup action	2026-09-17T18:20:45.8307915Z 
+Policy	Check out base setup action	2026-09-17T18:20:45.8308373Z HEAD is now at 58a94b1 Merge pull request #912 from tailrocks/docs/bastion-final-plan
+Policy	Check out base setup action	2026-09-17T18:20:45.8310231Z ##[endgroup]
+Policy	Check out base setup action	2026-09-17T18:20:45.8361554Z [command]/usr/bin/git log -1 --format=%H
+Policy	Check out base setup action	2026-09-17T18:20:45.8393264Z 58a94b12d0139c303ddf1dfdd57a36260c39fa02
+Policy	Check out base setup action	2026-09-17T18:20:45.8402610Z ##[group]Removing auth
+Policy	Check out base setup action	2026-09-17T18:20:45.8402895Z Removing SSH command configuration
+Policy	Check out base setup action	2026-09-17T18:20:45.8406480Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Policy	Check out base setup action	2026-09-17T18:20:45.8444961Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Policy	Check out base setup action	2026-09-17T18:20:45.8676813Z Removing HTTP extra header
+Policy	Check out base setup action	2026-09-17T18:20:45.8682507Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Policy	Check out base setup action	2026-09-17T18:20:45.8727519Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Policy	Check out base setup action	2026-09-17T18:20:45.8966710Z Removing includeIf entries pointing to credentials config files
+Policy	Check out base setup action	2026-09-17T18:20:45.8970244Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Policy	Check out base setup action	2026-09-17T18:20:45.9002342Z includeif.gitdir:/home/runner/work/velnor/velnor/policy-setup-action/.git.path
+Policy	Check out base setup action	2026-09-17T18:20:45.9003000Z includeif.gitdir:/home/runner/work/velnor/velnor/policy-setup-action/.git/worktrees/*.path
+Policy	Check out base setup action	2026-09-17T18:20:45.9003562Z includeif.gitdir:/github/workspace/policy-setup-action/.git.path
+Policy	Check out base setup action	2026-09-17T18:20:45.9004069Z includeif.gitdir:/github/workspace/policy-setup-action/.git/worktrees/*.path
+Policy	Check out base setup action	2026-09-17T18:20:45.9010397Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/policy-setup-action/.git.path
+Policy	Check out base setup action	2026-09-17T18:20:45.9038703Z /home/runner/work/_temp/git-credentials-47a009fa-0c73-4d40-b008-ee18ed64bb5a.config
+Policy	Check out base setup action	2026-09-17T18:20:45.9048525Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/policy-setup-action/.git.path \/home\/runner\/work\/_temp\/git\-credentials\-47a009fa\-0c73\-4d40\-b008\-ee18ed64bb5a\.config
+Policy	Check out base setup action	2026-09-17T18:20:45.9086747Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/policy-setup-action/.git/worktrees/*.path
+Policy	Check out base setup action	2026-09-17T18:20:45.9114302Z /home/runner/work/_temp/git-credentials-47a009fa-0c73-4d40-b008-ee18ed64bb5a.config
+Policy	Check out base setup action	2026-09-17T18:20:45.9122852Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/policy-setup-action/.git/worktrees/*.path \/home\/runner\/work\/_temp\/git\-credentials\-47a009fa\-0c73\-4d40\-b008\-ee18ed64bb5a\.config
+Policy	Check out base setup action	2026-09-17T18:20:45.9194363Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/policy-setup-action/.git.path
+Policy	Check out base setup action	2026-09-17T18:20:45.9221245Z /github/runner_temp/git-credentials-47a009fa-0c73-4d40-b008-ee18ed64bb5a.config
+Policy	Check out base setup action	2026-09-17T18:20:45.9230490Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/policy-setup-action/.git.path \/github\/runner_temp\/git\-credentials\-47a009fa\-0c73\-4d40\-b008\-ee18ed64bb5a\.config
+Policy	Check out base setup action	2026-09-17T18:20:45.9268500Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/policy-setup-action/.git/worktrees/*.path
+Policy	Check out base setup action	2026-09-17T18:20:45.9296687Z /github/runner_temp/git-credentials-47a009fa-0c73-4d40-b008-ee18ed64bb5a.config
+Policy	Check out base setup action	2026-09-17T18:20:45.9308273Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/policy-setup-action/.git/worktrees/*.path \/github\/runner_temp\/git\-credentials\-47a009fa\-0c73\-4d40\-b008\-ee18ed64bb5a\.config
+Policy	Check out base setup action	2026-09-17T18:20:45.9346917Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Policy	Check out base setup action	2026-09-17T18:20:45.9570170Z Removing credentials config '/home/runner/work/_temp/git-credentials-47a009fa-0c73-4d40-b008-ee18ed64bb5a.config'
+Policy	Check out base setup action	2026-09-17T18:20:45.9579058Z ##[endgroup]
+Policy	Set up Velnor workflow runtime	﻿2026-09-17T18:20:45.9903032Z Prepare all required actions
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:45.9903599Z Getting action download info
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.1388356Z Download action repository 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9' (SHA:55cc8345863c7cc4c66a329aec7e433d2d1c52a9)
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2734963Z ##[group]Run ./policy-setup-action/.github/actions/setup-velnor-workflow
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2735372Z with:
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2735594Z   rev: ec3995277f82473777f18969e58ea76f63e54cfd
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2735969Z   checkout-path: /home/runner/work/velnor/velnor/policy-checkout
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2736311Z   cache: true
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2736525Z   cache-key-prefix: velnor-workflow-v3
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2738939Z   github-token: ***
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2739163Z ##[endgroup]
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2800582Z ##[start-action display=Resolve source closure;id=__self.closure]
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2825419Z ##[group]Run set -euo pipefail
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2825755Z ^[[36;1mset -euo pipefail^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2825995Z ^[[36;1msha256_digest() {^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2826309Z ^[[36;1m  if command -v sha256sum >/dev/null 2>&1; then^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2826644Z ^[[36;1m    sha256sum | awk '{print $1}'^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2826965Z ^[[36;1m  elif command -v shasum >/dev/null 2>&1; then^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2827293Z ^[[36;1m    shasum -a 256 | awk '{print $1}'^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2827565Z ^[[36;1m  else^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2827914Z ^[[36;1m    echo "::error::no SHA-256 checksum tool available (sha256sum or shasum)" >&2^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2828337Z ^[[36;1m    return 1^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2828544Z ^[[36;1m  fi^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2828732Z ^[[36;1m}^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2829074Z ^[[36;1mtest "$INSTALL_REV" != '' || { echo "::error::runtime revision is empty" >&2; exit 1; }^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2829771Z ^[[36;1m[[ "$INSTALL_REV" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::runtime revision must be a full commit SHA, got $INSTALL_REV" >&2; exit 1; }^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2830312Z ^[[36;1mlisting=""^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2830670Z ^[[36;1mif git -C "$CHECKOUT_PATH" cat-file -e "$INSTALL_REV^{commit}" 2>/dev/null; then^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2831774Z ^[[36;1m  listing="$(git -C "$CHECKOUT_PATH" ls-tree -r "$INSTALL_REV" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)"^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2832442Z ^[[36;1melse^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2833010Z ^[[36;1m  tree="$(gh api "repos/$PRODUCT_REPOSITORY/git/trees/$INSTALL_REV?recursive=1")" || { echo "::error::unknown generator revision $INSTALL_REV" >&2; exit 1; }^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2833979Z ^[[36;1m  [[ "$(jq -r '.truncated // false' <<<"$tree")" != "true" ]] || { echo "::error::tree API response is truncated; the closure cannot be proven" >&2; exit 1; }^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2835445Z ^[[36;1m  listing="$(jq -r '[.tree[] | select(.type != "tree") | select(.path == "Cargo.toml" or .path == "Cargo.lock" or .path == "rust-toolchain.toml" or .path == "rust-toolchain" or (.path | startswith("crates/velnor-workflow/")) or (.path | startswith(".cargo/"))) | "\(.mode) \(.type) \(.sha)\t\(.path)"] | sort | join("\n")' <<<"$tree")"^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2836589Z ^[[36;1mfi^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2836975Z ^[[36;1mtest "$listing" != '' || { echo "::error::revision $INSTALL_REV has no closure inputs" >&2; exit 1; }^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2837722Z ^[[36;1mclosure="$(printf '%s\nclosure-version:1\nfeatures:\nprofile:release\n' "$(LC_ALL=C sort <<<"$listing")" | sha256_digest)"^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2838439Z ^[[36;1m[[ "$closure" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::closure resolution failed" >&2; exit 1; }^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2838903Z ^[[36;1mecho "value=$closure" >> "$GITHUB_OUTPUT"^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2876510Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2876856Z env:
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2879144Z   GH_TOKEN: ***
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2879408Z   INSTALL_REV: ec3995277f82473777f18969e58ea76f63e54cfd
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2879987Z   CHECKOUT_PATH: /home/runner/work/velnor/velnor/policy-checkout
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2880357Z   PRODUCT_REPOSITORY: tailrocks/velnor
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.2881052Z ##[endgroup]
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.3063171Z ##[end-action id=__self.closure;outcome=success;conclusion=success;duration_ms=26]
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.3067196Z ##[start-action display=Restore runtime cache;id=__self.cache]
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.3139306Z ##[group]Run actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.3139733Z with:
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.3139951Z   path: ~/.cache/velnor/workflow-runtime
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.3140520Z   key: velnor-workflow-v3-Linux-X64-12309460ffb8359c0e1437f7f0e55ea6406cbedd740aa59039719d47557e99ae
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.3141371Z   enableCrossOsArchive: false
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.3141652Z   fail-on-cache-miss: false
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.3141898Z   lookup-only: false
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.3142113Z ##[endgroup]
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:46.6979569Z Cache hit for: velnor-workflow-v3-Linux-X64-12309460ffb8359c0e1437f7f0e55ea6406cbedd740aa59039719d47557e99ae
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9312451Z Received 3538699 of 3538699 (100.0%), 3.4 MBs/sec
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9313018Z Cache Size: ~3 MB (3538699 B)
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9340615Z [command]/usr/bin/tar -xf /home/runner/work/_temp/e411e778-ebda-4a22-b130-bce3d0010e69/cache.tzst -P -C /home/runner/work/velnor/velnor --use-compress-program unzstd
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9608628Z Cache restored successfully
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9689056Z Cache restored from key: velnor-workflow-v3-Linux-X64-12309460ffb8359c0e1437f7f0e55ea6406cbedd740aa59039719d47557e99ae
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9757995Z ##[end-action id=__self.cache;outcome=success;conclusion=success;duration_ms=1668]
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9766942Z ##[start-action display=Download runtime product;id=__self.__run]
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9776292Z ##[end-action id=__self.__run;outcome=skipped;conclusion=skipped;duration_ms=0]
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9778778Z ##[start-action display=Verify runtime product;id=__self.__run_2]
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9796184Z ##[group]Run set -euo pipefail
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9796502Z ^[[36;1mset -euo pipefail^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9796857Z ^[[36;1mruntime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9797231Z ^[[36;1mjq -e \^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9797465Z ^[[36;1m  --arg closure "$CLOSURE" \^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9797822Z ^[[36;1m  --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9798477Z ^[[36;1m  '.closure == $closure and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$"))' \^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9799128Z ^[[36;1m  "$runtime/manifest.json" >/dev/null^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9799499Z ^[[36;1mif command -v sha256sum >/dev/null 2>&1; then^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9800018Z ^[[36;1m  actual="$(sha256sum "$runtime/bin/velnor-workflow" | awk '{print $1}')"^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9800440Z ^[[36;1melse^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9801079Z ^[[36;1m  actual="$(shasum -a 256 "$runtime/bin/velnor-workflow" | awk '{print $1}')"^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9801511Z ^[[36;1mfi^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9802021Z ^[[36;1mexpected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "$runtime/manifest.json")"^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9802791Z ^[[36;1m[[ "$actual" == "$expected" ]] || { echo "::error::cached runtime digest mismatch" >&2; exit 1; }^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9838190Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9838547Z env:
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9838873Z   CLOSURE: 12309460ffb8359c0e1437f7f0e55ea6406cbedd740aa59039719d47557e99ae
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:47.9839279Z ##[endgroup]
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:48.0053831Z ##[end-action id=__self.__run_2;outcome=success;conclusion=success;duration_ms=27]
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:48.0056832Z ##[start-action display=Add runtime to PATH;id=__self.__run_3]
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:48.0072823Z ##[group]Run set -euo pipefail
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:48.0073123Z ^[[36;1mset -euo pipefail^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:48.0073466Z ^[[36;1mruntime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:48.0074021Z ^[[36;1mtest -x "$runtime/bin/velnor-workflow"^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:48.0074349Z ^[[36;1mtest -s "$runtime/manifest.json"^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:48.0074863Z ^[[36;1mreported="$("$runtime/bin/velnor-workflow" --closure)"^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:48.0075540Z ^[[36;1m[[ "$reported" == "$CLOSURE" ]] || { echo "::error::runtime at $runtime reports closure $reported, expected $CLOSURE" >&2; exit 1; }^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:48.0076165Z ^[[36;1mecho "$runtime/bin" >> "$GITHUB_PATH"^[[0m
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:48.0112153Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:48.0112623Z env:
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:48.0112954Z   CLOSURE: 12309460ffb8359c0e1437f7f0e55ea6406cbedd740aa59039719d47557e99ae
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:48.0113374Z ##[endgroup]
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:48.0187240Z ##[end-action id=__self.__run_3;outcome=success;conclusion=success;duration_ms=12]
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:48.0189105Z ##[start-action display=Save runtime cache;id=__self.__actions_cache]
+Policy	Set up Velnor workflow runtime	2026-09-17T18:20:48.0198497Z ##[end-action id=__self.__actions_cache;outcome=skipped;conclusion=skipped;duration_ms=0]
+Policy	Acquire candidate generator product	﻿2026-09-17T18:20:48.0251288Z ##[group]Run set -euo pipefail
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0251691Z ^[[36;1mset -euo pipefail^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0252264Z ^[[36;1mpin="$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' .github-gen/velnor-workflow.toml | head -n 1)"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0253208Z ^[[36;1mtest "$pin" != '' || pin="$(sed -n -E 's/^.*VELNOR_WORKFLOW_POLICY_REVISION:[[:space:]]*([0-9a-f]{40}).*/\1/p' .github/workflows/ci-policy.yml | head -n 1)"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0254024Z ^[[36;1mtest "$pin" != '' || { echo "::error::audited tree declares no generator pin" >&2; exit 1; }^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0254595Z ^[[36;1mbase_closure="$(velnor-workflow closure --rev="$BASE_PIN")"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0255051Z ^[[36;1mpin_closure="$(velnor-workflow closure --rev="$pin")"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0255450Z ^[[36;1mif [[ "$pin_closure" == "$base_closure" ]]; then^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0255886Z ^[[36;1m  # Same closure means the running base validator IS the pin's^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0256356Z ^[[36;1m  # renderer, so --check decides tree==pin-render with no extra^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0256867Z ^[[36;1m  # provisioning. A match exits early; a differ falls through to^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0257349Z ^[[36;1m  # the candidate path (a generator change in flight) instead of^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0257830Z ^[[36;1m  # stranding the validator with a cleared manifest and a red pin^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0258307Z ^[[36;1m  # leg. The check output stays visible: on a fall-through it is^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0258713Z ^[[36;1m  # the diagnosis, on a match it is one line.^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0259069Z ^[[36;1m  if velnor-workflow --plain --check; then^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0259580Z ^[[36;1m    echo "pin $pin shares the base closure and renders the tree; the Stage-0 validator renders"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0260147Z ^[[36;1m    echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=" >> "$GITHUB_ENV"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0260563Z ^[[36;1m    exit 0^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0260976Z ^[[36;1m  fi^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0261472Z ^[[36;1m  echo "pin $pin shares the base closure but the tree differs from its render; falling through to the candidate path"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0262020Z ^[[36;1mfi^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0262780Z ^[[36;1m[[ "$HEAD_REPOSITORY" == "$GITHUB_REPOSITORY" ]] || { echo "::error::generator changes from forks cannot be verified here; open the generator change from a branch of $GITHUB_REPOSITORY" >&2; exit 1; }^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0263699Z ^[[36;1mif ! git cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null; then^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0264174Z ^[[36;1m  git fetch --no-tags "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$HEAD_SHA"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0264573Z ^[[36;1mfi^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0264912Z ^[[36;1mhead_candidate="$(velnor-workflow closure --rev="$HEAD_SHA" --candidate)"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0265545Z ^[[36;1mname="velnor-workflow-candidate-${head_candidate:0:16}-${RUNNER_OS}-${RUNNER_ARCH}"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0266204Z ^[[36;1mdeadline=$((SECONDS + 900))^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0266465Z ^[[36;1mrun_id=""^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0266696Z ^[[36;1mwhile (( SECONDS < deadline )); do^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0267601Z ^[[36;1m  runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=5" --jq '[.workflow_runs[] | select(.head_repository.id == .repository.id)]')"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0268480Z ^[[36;1m  waiting=false^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0268718Z ^[[36;1m  seen=false^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0268968Z ^[[36;1m  while read -r candidate_run; do^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0269295Z ^[[36;1m    test "$candidate_run" != '' || continue^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0269604Z ^[[36;1m    seen=true^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0269874Z ^[[36;1m    status="$(jq -r .status <<<"$candidate_run")"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0270235Z ^[[36;1m    id="$(jq -r .id <<<"$candidate_run")"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0270630Z ^[[36;1m    # $name in the filter is a jq variable, not a shell expansion.^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0271252Z ^[[36;1m    # shellcheck disable=SC2016^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0272100Z ^[[36;1m    if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts?per_page=100" | jq -e --arg name "$name" '[.artifacts[] | select(.name == $name and .expired == false)] | length > 0' >/dev/null; then^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0273113Z ^[[36;1m      run_id="$id"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0273351Z ^[[36;1m      break 2^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0273562Z ^[[36;1m    fi^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0273808Z ^[[36;1m    [[ "$status" == "completed" ]] || waiting=true^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0274160Z ^[[36;1m  done <<<"$(jq -c '.[]' <<<"$runs")"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0274554Z ^[[36;1m  # No runs yet means the API has not indexed the sibling run, not^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0275024Z ^[[36;1m  # that it will never come: keep polling until the deadline.^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0275417Z ^[[36;1m  [[ "$seen" == "true" ]] || waiting=true^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0275974Z ^[[36;1m  [[ "$waiting" == "true" ]] || { echo "::error::no same-repository PR run published candidate $name" >&2; exit 1; }^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0277008Z ^[[36;1m  sleep 15^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0277232Z ^[[36;1mdone^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0277681Z ^[[36;1m[[ -n "$run_id" ]] || { echo "::error::no candidate product $name was published within 15 minutes" >&2; exit 1; }^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0278276Z ^[[36;1mcandidate="$RUNNER_TEMP/velnor-workflow-candidate"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0278629Z ^[[36;1mrm -rf "$candidate"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0278879Z ^[[36;1mmkdir -p "$candidate"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0279315Z ^[[36;1mgh run download "$run_id" --name "$name" --dir "$candidate" --repo "$GITHUB_REPOSITORY"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0281098Z ^[[36;1mjq -e --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg repo "$GITHUB_REPOSITORY" --arg run "$run_id" '.profile == "debug" and .platform == $platform and .repository == $repo and .run_id == $run and (.revision | test("^[0-9a-f]{40}$")) and (.closure | test("^[0-9a-f]{64}$")) and (.binary_sha256 | test("^[0-9a-f]{64}$"))' "$candidate/candidate-manifest.json" >/dev/null^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0282503Z ^[[36;1mif command -v sha256sum >/dev/null 2>&1; then^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0282951Z ^[[36;1m  actual="$(sha256sum "$candidate/velnor-workflow" | awk '{print $1}')"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0283354Z ^[[36;1melse^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0283677Z ^[[36;1m  actual="$(shasum -a 256 "$candidate/velnor-workflow" | awk '{print $1}')"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0284079Z ^[[36;1mfi^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0284406Z ^[[36;1mexpected="$(jq -er .binary_sha256 "$candidate/candidate-manifest.json")"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0284985Z ^[[36;1m[[ "$actual" == "$expected" ]] || { echo "::error::candidate digest mismatch" >&2; exit 1; }^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0285458Z ^[[36;1mchmod 0755 "$candidate/velnor-workflow"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0285903Z ^[[36;1mmanifest_closure="$(jq -er .closure "$candidate/candidate-manifest.json")"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0286784Z ^[[36;1m[[ "$manifest_closure" == "$head_candidate" ]] || { echo "::error::candidate manifest closure $manifest_closure is not the head's candidate $head_candidate" >&2; exit 1; }^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0287830Z ^[[36;1mreported="$(GH_TOKEN="" GITHUB_TOKEN="" "$candidate/velnor-workflow" --closure)"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0288652Z ^[[36;1m[[ "$reported" == "$manifest_closure" ]] || { echo "::error::candidate reports closure $reported, manifest claims $manifest_closure" >&2; exit 1; }^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0289481Z ^[[36;1mecho "VELNOR_WORKFLOW_PINNED_BINARY=$candidate/velnor-workflow" >> "$GITHUB_ENV"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0290170Z ^[[36;1mecho "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=$candidate/candidate-manifest.json" >> "$GITHUB_ENV"^[[0m
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0325049Z shell: /usr/bin/bash -e {0}
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0325312Z env:
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0327848Z   GH_TOKEN: ***
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0328112Z   HEAD_SHA: 67fc180e07f6cfd45d2eac5b8f72473f8afe9acc
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0328453Z   HEAD_REPOSITORY: tailrocks/velnor
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0328759Z   BASE_PIN: ec3995277f82473777f18969e58ea76f63e54cfd
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.0329076Z ##[endgroup]
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.6837888Z error: generated files differ: .github/workflows/ci-runtime-products.yml, .github/workflows/ci-unit-rust.yml, .github/workflows/release.yml, .github/ci/.github-actions-generator-state; rerun generate
+Policy	Acquire candidate generator product	2026-09-17T18:20:48.6845207Z pin ec3995277f82473777f18969e58ea76f63e54cfd shares the base closure but the tree differs from its render; falling through to the candidate path
+Policy	Acquire candidate generator product	2026-09-17T18:29:33.2870283Z ##[error]no same-repository PR run published candidate velnor-workflow-candidate-2f16c35c5f26374c-Linux-X64
+Policy	Acquire candidate generator product	2026-09-17T18:29:33.2881563Z ##[error]Process completed with exit code 1.
+Policy	Post Check out base setup action	﻿2026-09-17T18:29:33.3012622Z Post job cleanup.
+Policy	Post Check out base setup action	2026-09-17T18:29:33.3862063Z [command]/usr/bin/git version
+Policy	Post Check out base setup action	2026-09-17T18:29:33.3909312Z git version 2.55.0
+Policy	Post Check out base setup action	2026-09-17T18:29:33.3949909Z Temporarily overriding HOME='/home/runner/work/_temp/67d23fdf-aed6-48a4-ab73-112a60daf9ac' before making global git config changes
+Policy	Post Check out base setup action	2026-09-17T18:29:33.3951485Z Adding repository directory to the temporary git global config as a safe directory
+Policy	Post Check out base setup action	2026-09-17T18:29:33.3956523Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor/policy-setup-action
+Policy	Post Check out base setup action	2026-09-17T18:29:33.3995092Z Removing SSH command configuration
+Policy	Post Check out base setup action	2026-09-17T18:29:33.4002082Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Policy	Post Check out base setup action	2026-09-17T18:29:33.4072920Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Policy	Post Check out base setup action	2026-09-17T18:29:33.4321478Z Removing HTTP extra header
+Policy	Post Check out base setup action	2026-09-17T18:29:33.4327550Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Policy	Post Check out base setup action	2026-09-17T18:29:33.4366068Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Policy	Post Check out base setup action	2026-09-17T18:29:33.4621151Z Removing includeIf entries pointing to credentials config files
+Policy	Post Check out base setup action	2026-09-17T18:29:33.4629516Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Policy	Post Check out base setup action	2026-09-17T18:29:33.4668735Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Policy	Post Checkout repository history	﻿2026-09-17T18:29:33.5105557Z Post job cleanup.
+Policy	Post Checkout repository history	2026-09-17T18:29:33.6016823Z [command]/usr/bin/git version
+Policy	Post Checkout repository history	2026-09-17T18:29:33.6081777Z git version 2.55.0
+Policy	Post Checkout repository history	2026-09-17T18:29:33.6173554Z Temporarily overriding HOME='/home/runner/work/_temp/865863d2-5af2-4d8f-8cec-ead1efbf6a86' before making global git config changes
+Policy	Post Checkout repository history	2026-09-17T18:29:33.6175078Z Adding repository directory to the temporary git global config as a safe directory
+Policy	Post Checkout repository history	2026-09-17T18:29:33.6176371Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor/policy-checkout
+Policy	Post Checkout repository history	2026-09-17T18:29:33.6178060Z Removing SSH command configuration
+Policy	Post Checkout repository history	2026-09-17T18:29:33.6178906Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Policy	Post Checkout repository history	2026-09-17T18:29:33.6218380Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Policy	Post Checkout repository history	2026-09-17T18:29:33.6473503Z Removing HTTP extra header
+Policy	Post Checkout repository history	2026-09-17T18:29:33.6480612Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Policy	Post Checkout repository history	2026-09-17T18:29:33.6522202Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Policy	Post Checkout repository history	2026-09-17T18:29:33.6789040Z Removing includeIf entries pointing to credentials config files
+Policy	Post Checkout repository history	2026-09-17T18:29:33.6799535Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Policy	Post Checkout repository history	2026-09-17T18:29:33.6837302Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Policy	Complete job	﻿2026-09-17T18:29:33.7309239Z Cleaning up orphan processes

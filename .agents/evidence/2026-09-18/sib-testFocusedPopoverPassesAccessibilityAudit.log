@@ -1,0 +1,56 @@
+Command line invocation:
+    /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -project native/JackinDesktop.xcodeproj -scheme JackinDesktop -destination platform=macOS -parallel-testing-enabled NO "-only-testing:JackinDesktopUITests/JackinDesktopUITests/testFocusedPopoverPassesAccessibilityAudit" -derivedDataPath native/DerivedData -resultBundlePath /tmp/sib-testFocusedPopoverPassesAccessibilityAudit.xcresult
+
+Writing result bundle at path:
+	/tmp/sib-testFocusedPopoverPassesAccessibilityAudit.xcresult
+
+ComputePackagePrebuildTargetDependencyGraph
+
+Prepare packages
+
+CreateBuildRequest
+
+SendProjectDescription
+
+CreateBuildOperation
+
+ComputeTargetDependencyGraph
+note: Building targets in dependency order
+note: Target dependency graph (6 targets)
+    Target 'JackinDesktopUITests' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinDesktop' in project 'JackinDesktop'
+    Target 'JackinDesktopTests' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinDesktopUI' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBridge' in project 'JackinDesktop'
+    Target 'JackinDesktop' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinDesktopUI' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBridge' in project 'JackinDesktop'
+    Target 'JackinDesktopUI' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBridge' in project 'JackinDesktop'
+    Target 'JackinUsageBridge' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+    Target 'JackinUsageBindings' in project 'JackinDesktop' (no dependencies)
+
+GatherProvisioningInputs
+
+CreateBuildDescription
+
+error: There is no XCFramework found at '/Users/donbeave/Projects/tailrocks/jackin-project/jackin/target/xcframework/JackinUsage.xcframework'. (in target 'JackinDesktopTests' from project 'JackinDesktop')
+error: There is no XCFramework found at '/Users/donbeave/Projects/tailrocks/jackin-project/jackin/target/xcframework/JackinUsage.xcframework'. (in target 'JackinDesktop' from project 'JackinDesktop')
+
+Test session results, code coverage, and logs:
+	/tmp/sib-testFocusedPopoverPassesAccessibilityAudit.xcresult
+
+Testing failed:
+	There is no XCFramework found at '/Users/donbeave/Projects/tailrocks/jackin-project/jackin/target/xcframework/JackinUsage.xcframework'.
+	Testing cancelled because the build failed.
+
+** TEST FAILED **
+
+
+The following build commands failed:
+	Testing project JackinDesktop with scheme JackinDesktop
+(1 failure)

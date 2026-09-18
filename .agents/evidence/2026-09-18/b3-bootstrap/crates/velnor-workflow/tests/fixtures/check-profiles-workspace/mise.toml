@@ -1,0 +1,14 @@
+[tasks.check-smoke]
+run = "echo smoke"
+
+[tasks.check-load]
+run = "echo load"
+
+[tasks.check-load-report]
+run = "echo load-report"
+
+[tasks.check-fleet]
+run = "echo fleet"
+
+[tasks.check-compat]
+run = "echo compat"

@@ -1,0 +1,35 @@
+== Scentbird docs oracle ==
+root: /Users/donbeave/Projects/scentbird/scentbird   build-gates: off   branch: docs/service-documentation-loop
+ledger: done=90 todo=0 blocked=0
+universe: proto_modules=49 flyway_modules=24 amqp_modules=9 events_modules=6
+catalog: domains=7 services=198 events=219 commands=954 queries=706 channels=79 entities=148 flows=96
+GAP:SOURCE:2 sources: path(s) do not resolve to a file (sample: docs/content/technical/service-ownership.mdx -> CODEOWNERS; docs/content/technical/team-directory.mdx -> CODEOWNERS ...)
+GAP:RUSTCOUNT:production jobs — the page says 7, the workspace has 9
+GAP:RUSTCOUNT:gRPC client libraries — the page says 11, the workspace has 12
+GAP:SENTRYMAP:the page says 84 deployables carry a DSN; the environment files say 88
+GAP:SENTRYMAP:project 119 is shared by 3 deployables and has no row on the page
+GAP:SENTRYMAP:project 286 is shared by 2 deployables and has no row on the page
+GAP:SENTRYMAP:project 289 is shared by 2 deployables and has no row on the page
+GAP:VENDOR:netstock is active but does not say `why_bought` — the build-vs-buy rationale
+GAP:VENDOR:netstock is active but has no `sourcing` (chosen | inherited)
+GAP:VENDOR:netstock is active but carries no `criticality` tier — what breaks if it is down is unrecorded
+GAP:VENDOR:netstock has no `engineering_owner` — nobody is named for the integration
+GAP:VENDOR:netstock no integration page
+GAP:VENDOR:netstock no catalog service node
+GAP:VENDOR:smartsheet is active but does not say `why_bought` — the build-vs-buy rationale
+GAP:VENDOR:smartsheet is active but has no `sourcing` (chosen | inherited)
+GAP:VENDOR:smartsheet is active but carries no `criticality` tier — what breaks if it is down is unrecorded
+GAP:VENDOR:smartsheet has no `engineering_owner` — nobody is named for the integration
+GAP:VENDOR:smartsheet no integration page
+GAP:VENDOR:smartsheet no catalog service node
+GAP:VENDOR:sps-commerce is active but does not say `why_bought` — the build-vs-buy rationale
+GAP:VENDOR:sps-commerce is active but has no `sourcing` (chosen | inherited)
+GAP:VENDOR:sps-commerce is active but carries no `criticality` tier — what breaks if it is down is unrecorded
+GAP:VENDOR:sps-commerce has no `engineering_owner` — nobody is named for the integration
+GAP:VENDOR:sps-commerce no integration page
+GAP:VENDOR:sps-commerce no catalog service node
+GAP:VENDORCRED:user-status:commercetools holds credentials in backend/user-status/user-status-app/kubernetes/env/preprod.yaml but shows no code/config usage — dead credential surface or missed derivation
+GAP:VENDORCRED:corebird:zendesk holds credentials in backend/corebird/corebird-app/kubernetes/env/preprod.yaml but shows no code/config usage — dead credential surface or missed derivation
+GAP:VENDORCRED:lepbird:new-relic holds credentials in backend/lepbird/lepbird-app/kubernetes/env/prod.yaml but shows no code/config usage — dead credential surface or missed derivation
+note: build gates skipped (run with --build for the final done check)
+== 28 gap(s) ==

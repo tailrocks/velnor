@@ -1,0 +1,810 @@
+Policy	UNKNOWN STEP	﻿2026-09-16T17:37:43.3525653Z Current runner version: '2.337.0'
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.3562223Z ##[group]Runner Image Provisioner
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.3563588Z Hosted Compute Agent
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.3565006Z Version: 20260828.587
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.3566157Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.3567575Z Build Date: 2026-08-28T16:44:25Z
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.3568743Z Worker ID: {af93985e-771a-4566-8d69-6a4988a4ec1b}
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.3570127Z Azure Region: eastus
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.3571932Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.3574603Z ##[group]Operating System
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.3575702Z Ubuntu
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.3576771Z 24.04.5
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.3577755Z LTS
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.3578814Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.3579979Z ##[group]Runner Image
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.3581166Z Image: ubuntu-24.04
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.3582340Z Version: 20260907.300.1
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.3584917Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260907.300/images/ubuntu/Ubuntu2404-Readme.md
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.3588035Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260907.300
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.3589834Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.3592054Z ##[group]GITHUB_TOKEN Permissions
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.3595346Z Contents: read
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.3596524Z Metadata: read
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.3597569Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.3600712Z Secret source: Actions
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.3602367Z Cache mode: write
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.3603864Z Prepare workflow directory
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.4077974Z Prepare all required actions
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.4152670Z Getting action download info
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.6653699Z Download action repository 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' (SHA:3d3c42e5aac5ba805825da76410c181273ba90b1)
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.7715231Z Download action repository 'jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777' (SHA:7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777)
+Policy	UNKNOWN STEP	2026-09-16T17:37:43.9455472Z Download action repository 'jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c' (SHA:c2a87611a18de5b3828c5652fe268e992400cb5c)
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.2726720Z Complete job name: Policy
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.3549925Z ##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.3551045Z with:
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.3551470Z   path: policy-checkout
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.3551933Z   fetch-depth: 0
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.3552376Z   persist-credentials: false
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.3552878Z   repository: tailrocks/velnor
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.3556826Z   token: ***
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.3557264Z   ssh-strict: true
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.3557688Z   ssh-user: git
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.3558088Z   clean: true
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.3558518Z   sparse-checkout-cone-mode: true
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.3559021Z   fetch-tags: false
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.3559450Z   show-progress: true
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.3559952Z   lfs: false
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.3560413Z   submodules: false
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.3560908Z   set-safe-directory: true
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.3561464Z   allow-unsafe-pr-checkout: false
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.3562287Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4649898Z Syncing repository: tailrocks/velnor
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4653313Z ##[group]Getting Git version info
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4655058Z Working directory is '/home/runner/work/velnor/velnor/policy-checkout'
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4657140Z [command]/usr/bin/git version
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4730902Z git version 2.55.0
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4767816Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4776058Z Temporarily overriding HOME='/home/runner/work/_temp/f949d7cb-a25e-4e2d-983e-5f43f9cff2d9' before making global git config changes
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4777610Z Adding repository directory to the temporary git global config as a safe directory
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4779358Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor/policy-checkout
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4845148Z ##[group]Determining repository object format
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4847570Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4861662Z ##[group]Initializing the repository
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4864514Z [command]/usr/bin/git init /home/runner/work/velnor/velnor/policy-checkout
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4960912Z hint: Using 'master' as the name for the initial branch. This default branch name
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4962304Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4963395Z hint: to use in all of your new repositories, which will suppress this warning,
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4964572Z hint: call:
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4965220Z hint:
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4965848Z hint: 	git config --global init.defaultBranch <name>
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4966582Z hint:
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4967332Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4968372Z hint: 'development'. The just-created branch can be renamed via this command:
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4969314Z hint:
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4969856Z hint: 	git branch -m <name>
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4970413Z hint:
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4971202Z hint: Disable this message with "git config set advice.defaultBranchName false"
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4977359Z Initialized empty Git repository in /home/runner/work/velnor/velnor/policy-checkout/.git/
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.4989755Z [command]/usr/bin/git remote add origin https://github.com/tailrocks/velnor
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.5072795Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.5073832Z ##[group]Disabling automatic garbage collection
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.5077632Z [command]/usr/bin/git config --local gc.auto 0
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.5115979Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.5117434Z ##[group]Setting up auth
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.5118878Z Removing SSH command configuration
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.5122054Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.5160329Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.5521285Z Removing HTTP extra header
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.5528404Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.5563687Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.5786042Z Removing includeIf entries pointing to credentials config files
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.5791104Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.5828830Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.6068049Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-3819926e-ff55-4408-b95f-76ee45f8e985.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.6110648Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git.path /home/runner/work/_temp/git-credentials-3819926e-ff55-4408-b95f-76ee45f8e985.config
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.6143768Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-3819926e-ff55-4408-b95f-76ee45f8e985.config
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.6180488Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/policy-checkout/.git.path /github/runner_temp/git-credentials-3819926e-ff55-4408-b95f-76ee45f8e985.config
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.6216374Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/policy-checkout/.git/worktrees/*.path /github/runner_temp/git-credentials-3819926e-ff55-4408-b95f-76ee45f8e985.config
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.6248221Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.6250495Z ##[group]Fetching the repository
+Policy	UNKNOWN STEP	2026-09-16T17:37:44.6256233Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules origin +refs/heads/*:refs/remotes/origin/* +refs/tags/*:refs/tags/*
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9846697Z From https://github.com/tailrocks/velnor
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9849674Z  * [new branch]        feat/ci-immutable-runtime-products -> origin/feat/ci-immutable-runtime-products
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9853317Z  * [new branch]        fix/dogfood-pin-ruleset-403-fallback -> origin/fix/dogfood-pin-ruleset-403-fallback
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9856021Z  * [new branch]        fix/ruleset-403-fallback-pin -> origin/fix/ruleset-403-fallback-pin
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9857999Z  * [new branch]        main       -> origin/main
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9859855Z  * [new tag]           archive/velnor2-pre-rebuild-20260831-bc593406 -> archive/velnor2-pre-rebuild-20260831-bc593406
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9862200Z  * [new tag]           dima/velnor6-archive-4d81a14 -> dima/velnor6-archive-4d81a14
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9864455Z  * [new tag]           preview    -> preview
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9865700Z  * [new tag]           v0.1.10    -> v0.1.10
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9866879Z  * [new tag]           v0.1.100   -> v0.1.100
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9868008Z  * [new tag]           v0.1.101   -> v0.1.101
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9869214Z  * [new tag]           v0.1.102   -> v0.1.102
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9870329Z  * [new tag]           v0.1.103   -> v0.1.103
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9871767Z  * [new tag]           v0.1.104   -> v0.1.104
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9873033Z  * [new tag]           v0.1.105   -> v0.1.105
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9874448Z  * [new tag]           v0.1.106   -> v0.1.106
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9875854Z  * [new tag]           v0.1.107   -> v0.1.107
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9877007Z  * [new tag]           v0.1.108   -> v0.1.108
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9878296Z  * [new tag]           v0.1.109   -> v0.1.109
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9879511Z  * [new tag]           v0.1.11    -> v0.1.11
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9880699Z  * [new tag]           v0.1.110   -> v0.1.110
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9882014Z  * [new tag]           v0.1.111   -> v0.1.111
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9883406Z  * [new tag]           v0.1.112   -> v0.1.112
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9885159Z  * [new tag]           v0.1.113   -> v0.1.113
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9886922Z  * [new tag]           v0.1.114   -> v0.1.114
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9888407Z  * [new tag]           v0.1.115   -> v0.1.115
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9889941Z  * [new tag]           v0.1.116   -> v0.1.116
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9891453Z  * [new tag]           v0.1.117   -> v0.1.117
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9892925Z  * [new tag]           v0.1.118   -> v0.1.118
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9894745Z  * [new tag]           v0.1.119   -> v0.1.119
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9896258Z  * [new tag]           v0.1.12    -> v0.1.12
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9897776Z  * [new tag]           v0.1.120   -> v0.1.120
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9899271Z  * [new tag]           v0.1.121   -> v0.1.121
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9900768Z  * [new tag]           v0.1.122   -> v0.1.122
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9902475Z  * [new tag]           v0.1.123   -> v0.1.123
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9903967Z  * [new tag]           v0.1.124   -> v0.1.124
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9905929Z  * [new tag]           v0.1.125   -> v0.1.125
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9907479Z  * [new tag]           v0.1.126   -> v0.1.126
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9908982Z  * [new tag]           v0.1.127   -> v0.1.127
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9910559Z  * [new tag]           v0.1.128   -> v0.1.128
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9912035Z  * [new tag]           v0.1.129   -> v0.1.129
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9913561Z  * [new tag]           v0.1.13    -> v0.1.13
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9915252Z  * [new tag]           v0.1.130   -> v0.1.130
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9916707Z  * [new tag]           v0.1.131   -> v0.1.131
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9918178Z  * [new tag]           v0.1.132   -> v0.1.132
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9920314Z  * [new tag]           v0.1.133   -> v0.1.133
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9922732Z  * [new tag]           v0.1.134   -> v0.1.134
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9925544Z  * [new tag]           v0.1.135   -> v0.1.135
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9927892Z  * [new tag]           v0.1.136   -> v0.1.136
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9930380Z  * [new tag]           v0.1.137   -> v0.1.137
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9933000Z  * [new tag]           v0.1.138   -> v0.1.138
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9935389Z  * [new tag]           v0.1.139   -> v0.1.139
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9937598Z  * [new tag]           v0.1.14    -> v0.1.14
+Policy	UNKNOWN STEP	2026-09-16T17:37:50.9939922Z  * [new tag]           v0.1.140   -> v0.1.140
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0009967Z  * [new tag]           v0.1.141   -> v0.1.141
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0012657Z  * [new tag]           v0.1.142   -> v0.1.142
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0014925Z  * [new tag]           v0.1.143   -> v0.1.143
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0016880Z  * [new tag]           v0.1.144   -> v0.1.144
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0018962Z  * [new tag]           v0.1.145   -> v0.1.145
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0021100Z  * [new tag]           v0.1.146   -> v0.1.146
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0023223Z  * [new tag]           v0.1.147   -> v0.1.147
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0025751Z  * [new tag]           v0.1.148   -> v0.1.148
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0027949Z  * [new tag]           v0.1.149   -> v0.1.149
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0030321Z  * [new tag]           v0.1.15    -> v0.1.15
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0031931Z  * [new tag]           v0.1.150   -> v0.1.150
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0033329Z  * [new tag]           v0.1.151   -> v0.1.151
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0035188Z  * [new tag]           v0.1.152   -> v0.1.152
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0036762Z  * [new tag]           v0.1.153   -> v0.1.153
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0038130Z  * [new tag]           v0.1.154   -> v0.1.154
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0039431Z  * [new tag]           v0.1.155   -> v0.1.155
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0040731Z  * [new tag]           v0.1.156   -> v0.1.156
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0042007Z  * [new tag]           v0.1.157   -> v0.1.157
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0043287Z  * [new tag]           v0.1.158   -> v0.1.158
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0044911Z  * [new tag]           v0.1.159   -> v0.1.159
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0046218Z  * [new tag]           v0.1.16    -> v0.1.16
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0047736Z  * [new tag]           v0.1.160   -> v0.1.160
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0049506Z  * [new tag]           v0.1.161   -> v0.1.161
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0050842Z  * [new tag]           v0.1.162   -> v0.1.162
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0052140Z  * [new tag]           v0.1.163   -> v0.1.163
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0053683Z  * [new tag]           v0.1.164   -> v0.1.164
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0055296Z  * [new tag]           v0.1.165   -> v0.1.165
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0056584Z  * [new tag]           v0.1.166   -> v0.1.166
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0057856Z  * [new tag]           v0.1.167   -> v0.1.167
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0059117Z  * [new tag]           v0.1.168   -> v0.1.168
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0060389Z  * [new tag]           v0.1.17    -> v0.1.17
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0061835Z  * [new tag]           v0.1.170   -> v0.1.170
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0063686Z  * [new tag]           v0.1.171   -> v0.1.171
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0065439Z  * [new tag]           v0.1.172   -> v0.1.172
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0066790Z  * [new tag]           v0.1.173   -> v0.1.173
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0068319Z  * [new tag]           v0.1.174   -> v0.1.174
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0069986Z  * [new tag]           v0.1.175   -> v0.1.175
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0071372Z  * [new tag]           v0.1.176   -> v0.1.176
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0072630Z  * [new tag]           v0.1.177   -> v0.1.177
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0073949Z  * [new tag]           v0.1.178   -> v0.1.178
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0075506Z  * [new tag]           v0.1.179   -> v0.1.179
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0076955Z  * [new tag]           v0.1.18    -> v0.1.18
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0078203Z  * [new tag]           v0.1.180   -> v0.1.180
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0079458Z  * [new tag]           v0.1.181   -> v0.1.181
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0080689Z  * [new tag]           v0.1.182   -> v0.1.182
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0081912Z  * [new tag]           v0.1.183   -> v0.1.183
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0083138Z  * [new tag]           v0.1.184   -> v0.1.184
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0084593Z  * [new tag]           v0.1.185   -> v0.1.185
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0085857Z  * [new tag]           v0.1.186   -> v0.1.186
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0087111Z  * [new tag]           v0.1.187   -> v0.1.187
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0088347Z  * [new tag]           v0.1.188   -> v0.1.188
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0089806Z  * [new tag]           v0.1.189   -> v0.1.189
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0091050Z  * [new tag]           v0.1.19    -> v0.1.19
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0092272Z  * [new tag]           v0.1.190   -> v0.1.190
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0093490Z  * [new tag]           v0.1.191   -> v0.1.191
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0095079Z  * [new tag]           v0.1.192   -> v0.1.192
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0096314Z  * [new tag]           v0.1.193   -> v0.1.193
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0097536Z  * [new tag]           v0.1.194   -> v0.1.194
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0098744Z  * [new tag]           v0.1.195   -> v0.1.195
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0099962Z  * [new tag]           v0.1.196   -> v0.1.196
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0101316Z  * [new tag]           v0.1.197   -> v0.1.197
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0102536Z  * [new tag]           v0.1.198   -> v0.1.198
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0103759Z  * [new tag]           v0.1.199   -> v0.1.199
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0105308Z  * [new tag]           v0.1.2     -> v0.1.2
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0106524Z  * [new tag]           v0.1.20    -> v0.1.20
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0107726Z  * [new tag]           v0.1.200   -> v0.1.200
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0108930Z  * [new tag]           v0.1.201   -> v0.1.201
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0110135Z  * [new tag]           v0.1.202   -> v0.1.202
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0111336Z  * [new tag]           v0.1.203   -> v0.1.203
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0112677Z  * [new tag]           v0.1.204   -> v0.1.204
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0113922Z  * [new tag]           v0.1.205   -> v0.1.205
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0115585Z  * [new tag]           v0.1.206   -> v0.1.206
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0116824Z  * [new tag]           v0.1.207   -> v0.1.207
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0118026Z  * [new tag]           v0.1.208   -> v0.1.208
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0119223Z  * [new tag]           v0.1.209   -> v0.1.209
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0120403Z  * [new tag]           v0.1.21    -> v0.1.21
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0121593Z  * [new tag]           v0.1.210   -> v0.1.210
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0122810Z  * [new tag]           v0.1.211   -> v0.1.211
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0124030Z  * [new tag]           v0.1.212   -> v0.1.212
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0125763Z  * [new tag]           v0.1.213   -> v0.1.213
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0127184Z  * [new tag]           v0.1.214   -> v0.1.214
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0128419Z  * [new tag]           v0.1.215   -> v0.1.215
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0129628Z  * [new tag]           v0.1.217   -> v0.1.217
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0130829Z  * [new tag]           v0.1.218   -> v0.1.218
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0132036Z  * [new tag]           v0.1.219   -> v0.1.219
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0133268Z  * [new tag]           v0.1.22    -> v0.1.22
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0134622Z  * [new tag]           v0.1.220   -> v0.1.220
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0135834Z  * [new tag]           v0.1.221   -> v0.1.221
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0137047Z  * [new tag]           v0.1.222   -> v0.1.222
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0138254Z  * [new tag]           v0.1.223   -> v0.1.223
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0139464Z  * [new tag]           v0.1.224   -> v0.1.224
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0140680Z  * [new tag]           v0.1.225   -> v0.1.225
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0141890Z  * [new tag]           v0.1.226   -> v0.1.226
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0143091Z  * [new tag]           v0.1.227   -> v0.1.227
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0144429Z  * [new tag]           v0.1.228   -> v0.1.228
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0145642Z  * [new tag]           v0.1.229   -> v0.1.229
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0146844Z  * [new tag]           v0.1.23    -> v0.1.23
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0148033Z  * [new tag]           v0.1.230   -> v0.1.230
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0149230Z  * [new tag]           v0.1.231   -> v0.1.231
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0150431Z  * [new tag]           v0.1.232   -> v0.1.232
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0151646Z  * [new tag]           v0.1.233   -> v0.1.233
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0152841Z  * [new tag]           v0.1.234   -> v0.1.234
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0154040Z  * [new tag]           v0.1.235   -> v0.1.235
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0155708Z  * [new tag]           v0.1.236   -> v0.1.236
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0156953Z  * [new tag]           v0.1.237   -> v0.1.237
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0158178Z  * [new tag]           v0.1.238   -> v0.1.238
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0159561Z  * [new tag]           v0.1.239   -> v0.1.239
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0160775Z  * [new tag]           v0.1.24    -> v0.1.24
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0161982Z  * [new tag]           v0.1.240   -> v0.1.240
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0163196Z  * [new tag]           v0.1.241   -> v0.1.241
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0164698Z  * [new tag]           v0.1.242   -> v0.1.242
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0165931Z  * [new tag]           v0.1.243   -> v0.1.243
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0167141Z  * [new tag]           v0.1.244   -> v0.1.244
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0168341Z  * [new tag]           v0.1.245   -> v0.1.245
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0169539Z  * [new tag]           v0.1.246   -> v0.1.246
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0170738Z  * [new tag]           v0.1.247   -> v0.1.247
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0171935Z  * [new tag]           v0.1.248   -> v0.1.248
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0173137Z  * [new tag]           v0.1.249   -> v0.1.249
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0174460Z  * [new tag]           v0.1.25    -> v0.1.25
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0175682Z  * [new tag]           v0.1.250   -> v0.1.250
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0176877Z  * [new tag]           v0.1.251   -> v0.1.251
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0178072Z  * [new tag]           v0.1.252   -> v0.1.252
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0179247Z  * [new tag]           v0.1.253   -> v0.1.253
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0180406Z  * [new tag]           v0.1.254   -> v0.1.254
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0181574Z  * [new tag]           v0.1.255   -> v0.1.255
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0182746Z  * [new tag]           v0.1.256   -> v0.1.256
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0183919Z  * [new tag]           v0.1.257   -> v0.1.257
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0185226Z  * [new tag]           v0.1.258   -> v0.1.258
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0186414Z  * [new tag]           v0.1.259   -> v0.1.259
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0187571Z  * [new tag]           v0.1.26    -> v0.1.26
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0188737Z  * [new tag]           v0.1.260   -> v0.1.260
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0189922Z  * [new tag]           v0.1.261   -> v0.1.261
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0191100Z  * [new tag]           v0.1.262   -> v0.1.262
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0192275Z  * [new tag]           v0.1.263   -> v0.1.263
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0193620Z  * [new tag]           v0.1.264   -> v0.1.264
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0195269Z  * [new tag]           v0.1.265   -> v0.1.265
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0196497Z  * [new tag]           v0.1.266   -> v0.1.266
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0197686Z  * [new tag]           v0.1.267   -> v0.1.267
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0198876Z  * [new tag]           v0.1.268   -> v0.1.268
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0200070Z  * [new tag]           v0.1.269   -> v0.1.269
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0201249Z  * [new tag]           v0.1.27    -> v0.1.27
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0202446Z  * [new tag]           v0.1.270   -> v0.1.270
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0203626Z  * [new tag]           v0.1.271   -> v0.1.271
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0205158Z  * [new tag]           v0.1.272   -> v0.1.272
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0206356Z  * [new tag]           v0.1.273   -> v0.1.273
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0207522Z  * [new tag]           v0.1.274   -> v0.1.274
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0208670Z  * [new tag]           v0.1.28    -> v0.1.28
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0209838Z  * [new tag]           v0.1.29    -> v0.1.29
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0210977Z  * [new tag]           v0.1.3     -> v0.1.3
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0212129Z  * [new tag]           v0.1.30    -> v0.1.30
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0213281Z  * [new tag]           v0.1.31    -> v0.1.31
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0214581Z  * [new tag]           v0.1.32    -> v0.1.32
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0215741Z  * [new tag]           v0.1.33    -> v0.1.33
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0216890Z  * [new tag]           v0.1.34    -> v0.1.34
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0218036Z  * [new tag]           v0.1.35    -> v0.1.35
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0219193Z  * [new tag]           v0.1.36    -> v0.1.36
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0220336Z  * [new tag]           v0.1.37    -> v0.1.37
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0221481Z  * [new tag]           v0.1.38    -> v0.1.38
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0222629Z  * [new tag]           v0.1.39    -> v0.1.39
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0223769Z  * [new tag]           v0.1.4     -> v0.1.4
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0225268Z  * [new tag]           v0.1.40    -> v0.1.40
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0226432Z  * [new tag]           v0.1.41    -> v0.1.41
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0227583Z  * [new tag]           v0.1.42    -> v0.1.42
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0228731Z  * [new tag]           v0.1.43    -> v0.1.43
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0229891Z  * [new tag]           v0.1.44    -> v0.1.44
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0231027Z  * [new tag]           v0.1.45    -> v0.1.45
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0232178Z  * [new tag]           v0.1.46    -> v0.1.46
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0233367Z  * [new tag]           v0.1.47    -> v0.1.47
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0234968Z  * [new tag]           v0.1.48    -> v0.1.48
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0236167Z  * [new tag]           v0.1.49    -> v0.1.49
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0237317Z  * [new tag]           v0.1.5     -> v0.1.5
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0238467Z  * [new tag]           v0.1.50    -> v0.1.50
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0239616Z  * [new tag]           v0.1.51    -> v0.1.51
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0240781Z  * [new tag]           v0.1.52    -> v0.1.52
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0241944Z  * [new tag]           v0.1.53    -> v0.1.53
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0243100Z  * [new tag]           v0.1.54    -> v0.1.54
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0244574Z  * [new tag]           v0.1.55    -> v0.1.55
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0245773Z  * [new tag]           v0.1.56    -> v0.1.56
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0246948Z  * [new tag]           v0.1.57    -> v0.1.57
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0248112Z  * [new tag]           v0.1.58    -> v0.1.58
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0249280Z  * [new tag]           v0.1.59    -> v0.1.59
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0250444Z  * [new tag]           v0.1.6     -> v0.1.6
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0251597Z  * [new tag]           v0.1.60    -> v0.1.60
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0252770Z  * [new tag]           v0.1.61    -> v0.1.61
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0253930Z  * [new tag]           v0.1.62    -> v0.1.62
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0255264Z  * [new tag]           v0.1.63    -> v0.1.63
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0256425Z  * [new tag]           v0.1.64    -> v0.1.64
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0257585Z  * [new tag]           v0.1.65    -> v0.1.65
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0258757Z  * [new tag]           v0.1.66    -> v0.1.66
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0260081Z  * [new tag]           v0.1.67    -> v0.1.67
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0261262Z  * [new tag]           v0.1.68    -> v0.1.68
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0262440Z  * [new tag]           v0.1.69    -> v0.1.69
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0263580Z  * [new tag]           v0.1.7     -> v0.1.7
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0264883Z  * [new tag]           v0.1.70    -> v0.1.70
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0266055Z  * [new tag]           v0.1.71    -> v0.1.71
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0267215Z  * [new tag]           v0.1.72    -> v0.1.72
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0268347Z  * [new tag]           v0.1.73    -> v0.1.73
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0269502Z  * [new tag]           v0.1.74    -> v0.1.74
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0270648Z  * [new tag]           v0.1.75    -> v0.1.75
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0271790Z  * [new tag]           v0.1.76    -> v0.1.76
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0272935Z  * [new tag]           v0.1.77    -> v0.1.77
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0274080Z  * [new tag]           v0.1.78    -> v0.1.78
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0275646Z  * [new tag]           v0.1.79    -> v0.1.79
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0276805Z  * [new tag]           v0.1.8     -> v0.1.8
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0277933Z  * [new tag]           v0.1.80    -> v0.1.80
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0279088Z  * [new tag]           v0.1.81    -> v0.1.81
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0280229Z  * [new tag]           v0.1.82    -> v0.1.82
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0281374Z  * [new tag]           v0.1.83    -> v0.1.83
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0282533Z  * [new tag]           v0.1.84    -> v0.1.84
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0283668Z  * [new tag]           v0.1.85    -> v0.1.85
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0285088Z  * [new tag]           v0.1.86    -> v0.1.86
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0286253Z  * [new tag]           v0.1.87    -> v0.1.87
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0287411Z  * [new tag]           v0.1.88    -> v0.1.88
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0288560Z  * [new tag]           v0.1.89    -> v0.1.89
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0289694Z  * [new tag]           v0.1.9     -> v0.1.9
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0290833Z  * [new tag]           v0.1.90    -> v0.1.90
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0292192Z  * [new tag]           v0.1.91    -> v0.1.91
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0293353Z  * [new tag]           v0.1.92    -> v0.1.92
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0294696Z  * [new tag]           v0.1.93    -> v0.1.93
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0295858Z  * [new tag]           v0.1.94    -> v0.1.94
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0297003Z  * [new tag]           v0.1.95    -> v0.1.95
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0298152Z  * [new tag]           v0.1.96    -> v0.1.96
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0299316Z  * [new tag]           v0.1.97    -> v0.1.97
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0300471Z  * [new tag]           v0.1.98    -> v0.1.98
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0301625Z  * [new tag]           v0.1.99    -> v0.1.99
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0304481Z [command]/usr/bin/git branch --list --remote origin/main
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0305928Z   origin/main
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0308017Z [command]/usr/bin/git rev-parse refs/remotes/origin/main
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0309377Z 3353310c7648fca22698b6c0f4a69ab245127786
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0312082Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0313478Z ##[group]Determining the checkout info
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0315597Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0316538Z [command]/usr/bin/git sparse-checkout disable
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0319317Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0322524Z ##[group]Checking out the ref
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0324082Z [command]/usr/bin/git checkout --progress --force -B main refs/remotes/origin/main
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0893308Z Switched to a new branch 'main'
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0897468Z branch 'main' set up to track 'origin/main'.
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0916692Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0963689Z [command]/usr/bin/git log -1 --format=%H
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.0992156Z 3353310c7648fca22698b6c0f4a69ab245127786
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.1006131Z ##[group]Removing auth
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.1007458Z Removing SSH command configuration
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.1009608Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.1052020Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.1274960Z Removing HTTP extra header
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.1278750Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.1317961Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.1541591Z Removing includeIf entries pointing to credentials config files
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.1545481Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.1577651Z includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git.path
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.1581521Z includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git/worktrees/*.path
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.1585516Z includeif.gitdir:/github/workspace/policy-checkout/.git.path
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.1588612Z includeif.gitdir:/github/workspace/policy-checkout/.git/worktrees/*.path
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.1593252Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git.path
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.1615606Z /home/runner/work/_temp/git-credentials-3819926e-ff55-4408-b95f-76ee45f8e985.config
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.1628071Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git.path \/home\/runner\/work\/_temp\/git\-credentials\-3819926e\-ff55\-4408\-b95f\-76ee45f8e985\.config
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.1666536Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git/worktrees/*.path
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.1694871Z /home/runner/work/_temp/git-credentials-3819926e-ff55-4408-b95f-76ee45f8e985.config
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.1705945Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git/worktrees/*.path \/home\/runner\/work\/_temp\/git\-credentials\-3819926e\-ff55\-4408\-b95f\-76ee45f8e985\.config
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.1746355Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/policy-checkout/.git.path
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.1773109Z /github/runner_temp/git-credentials-3819926e-ff55-4408-b95f-76ee45f8e985.config
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.1785776Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/policy-checkout/.git.path \/github\/runner_temp\/git\-credentials\-3819926e\-ff55\-4408\-b95f\-76ee45f8e985\.config
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.1820226Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/policy-checkout/.git/worktrees/*.path
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.1845404Z /github/runner_temp/git-credentials-3819926e-ff55-4408-b95f-76ee45f8e985.config
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.1864607Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/policy-checkout/.git/worktrees/*.path \/github\/runner_temp\/git\-credentials\-3819926e\-ff55\-4408\-b95f\-76ee45f8e985\.config
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.1897820Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.2143398Z Removing credentials config '/home/runner/work/_temp/git-credentials-3819926e-ff55-4408-b95f-76ee45f8e985.config'
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.2151365Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.2393261Z ##[group]Run set -euo pipefail
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.2394414Z ^[[36;1mset -euo pipefail^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.2395306Z ^[[36;1mif ! git cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null; then^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.2396395Z ^[[36;1m  git fetch --no-tags "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$HEAD_SHA"^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.2397320Z ^[[36;1mfi^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.2398042Z ^[[36;1mgit checkout --quiet --detach "$HEAD_SHA"^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.2438965Z shell: /usr/bin/bash -e {0}
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.2439741Z env:
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.2440450Z   HEAD_SHA: 3353310c7648fca22698b6c0f4a69ab245127786
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.2441292Z   HEAD_REPOSITORY: tailrocks/velnor
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.2442032Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.3057579Z ##[group]Run echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.3058587Z ^[[36;1mecho "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.3098262Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.3099148Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.3308147Z ##[group]Run jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.3309147Z with:
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.3309816Z   backend: github
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.3310510Z   version: 1.11.1
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.3311434Z   cache-key: velnor-policy-mbx-1.11.1-Linux-X64-b9c3156cdb88e63c11b9e595a3e694b02238c09a
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.3312521Z   restore-keys: velnor-policy-mbx-1.11.1-Linux-X64-
+Policy	UNKNOWN STEP	
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.3316211Z   github-token: ***
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.3316986Z   cache-generation: v1
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.3317721Z   github-cache-mode: target
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.3318503Z   save-on-workflow-dispatch: false
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.3319261Z   cache-links: auto
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.3319972Z   server-mode: read-write
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.3320698Z env:
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.3321369Z   MBX_GC_MAX_SIZE: 12GiB
+Policy	UNKNOWN STEP	2026-09-16T17:37:51.3322108Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.3182958Z [command]/usr/bin/tar xz --warning=no-unknown-keyword --overwrite -C /home/runner/work/_temp/1a333ffe-2b7c-41a6-8b6e-c318d4245ef4 -f /home/runner/work/_temp/db66ddda-29e0-471d-926b-68ee1f5eda34
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4423071Z Set up mbx 1.11.1
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4427438Z No mbx cache found
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4612732Z ##[group]Run set -euo pipefail
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4613141Z ^[[36;1mset -euo pipefail^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4613451Z ^[[36;1minstall -d -m 700 \^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4613750Z ^[[36;1m  "$CARGO_HOME" \^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4614046Z ^[[36;1m  "$CARGO_TARGET_DIR" \^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4614946Z ^[[36;1m  "$VELNOR_WORKFLOW_INSTALL_DIR"^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4615305Z ^[[36;1mcd "$VELNOR_WORKFLOW_INSTALL_DIR"^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4615903Z ^[[36;1menv -u RUSTC_WRAPPER -u SCCACHE_GHA_ENABLED -u CARGO_INCREMENTAL -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4616517Z ^[[36;1m  cargo install \^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4616816Z ^[[36;1m  --locked \^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4617175Z ^[[36;1m  --git https://github.com/tailrocks/velnor \^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4617654Z ^[[36;1m  --rev b9c3156cdb88e63c11b9e595a3e694b02238c09a \^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4618078Z ^[[36;1m  --root "$VELNOR_WORKFLOW_ROOT" \^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4618422Z ^[[36;1m  velnor-workflow \^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4618764Z ^[[36;1m  --bin velnor-workflow^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4619134Z ^[[36;1mecho "$VELNOR_WORKFLOW_ROOT/bin" >> "$GITHUB_PATH"^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4660386Z shell: /usr/bin/bash -e {0}
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4660717Z env:
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4660970Z   MBX_GC_MAX_SIZE: 12GiB
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4661276Z   MBX_CACHE_LINKS: 0
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4661545Z   MBX_REMOTE_URL: 
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4661815Z   MBX_TARGET_VIEWS: 0
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4662180Z   CARGO_HOME: /home/runner/work/_temp/velnor-workflow-cargo-home
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4662717Z   CARGO_TARGET_DIR: /home/runner/work/_temp/velnor-workflow-cargo-target
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4663294Z   VELNOR_WORKFLOW_INSTALL_DIR: /home/runner/work/_temp/velnor-workflow-install
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4663843Z   VELNOR_WORKFLOW_ROOT: /home/runner/work/_temp/velnor-workflow
+Policy	UNKNOWN STEP	2026-09-16T17:37:52.4664495Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-16T17:37:53.5608994Z     Updating git repository `https://github.com/tailrocks/velnor`
+Policy	UNKNOWN STEP	2026-09-16T17:37:59.4035741Z   Installing velnor-workflow v0.1.0 (https://github.com/tailrocks/velnor?rev=b9c3156cdb88e63c11b9e595a3e694b02238c09a#b9c3156c)
+Policy	UNKNOWN STEP	2026-09-16T17:37:59.4513295Z     Updating crates.io index
+Policy	UNKNOWN STEP	2026-09-16T17:37:59.4632833Z     Updating git repository `https://github.com/tailrocks/termrock.git`
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.2463313Z  Downloading crates ...
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.2834348Z   Downloaded itoa v1.0.18
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.2922925Z   Downloaded base64 v0.23.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.2969315Z   Downloaded cfg-if v1.0.4
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.2984878Z   Downloaded instability v0.3.13
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.3009582Z   Downloaded convert_case v0.10.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.3037460Z   Downloaded time-core v0.1.9
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.3099512Z   Downloaded log v0.4.34
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.3140511Z   Downloaded anstyle v1.0.14
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.3163492Z   Downloaded hashbrown v0.17.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.3238224Z   Downloaded libm v0.2.16
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.3374717Z   Downloaded palette_derive v0.7.7
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.3396046Z   Downloaded rustc-hash v2.1.3
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.3415338Z   Downloaded unicode-segmentation v1.13.3
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.3448595Z   Downloaded tui-scrollbar v0.2.7
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.3471614Z   Downloaded strum v0.28.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.3485603Z   Downloaded toml v1.1.4+spec-1.1.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.3534624Z   Downloaded thiserror-impl v2.0.20
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.3551217Z   Downloaded web-time v1.1.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.3574455Z   Downloaded toml_datetime v1.1.1+spec-1.1.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.3588970Z   Downloaded strum_macros v0.28.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.3629943Z   Downloaded thiserror v2.0.20
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.3743883Z   Downloaded anstyle-parse v1.0.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.3766814Z   Downloaded toml_parser v1.1.3+spec-1.1.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.3804724Z   Downloaded utf8parse v0.2.2
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.3820502Z   Downloaded winnow v1.0.4
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.3959391Z   Downloaded toml_writer v1.1.2+spec-1.1.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.3974200Z   Downloaded unicode-ident v1.0.24
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.4005148Z   Downloaded bstr v1.13.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.4090184Z   Downloaded typenum v1.20.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.4128930Z   Downloaded time v0.3.55
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.4292711Z   Downloaded syn v3.0.4
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.4408579Z   Downloaded unicode-truncate v2.0.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.4429275Z   Downloaded anstream v1.0.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.4451460Z   Downloaded syn v2.0.119
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.4567567Z   Downloaded unicode-width v0.2.2
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.4630283Z   Downloaded zmij v1.0.23
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.4649825Z   Downloaded aho-corasick v1.1.5
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.4707101Z   Downloaded powerfmt v0.2.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.4719081Z   Downloaded clap_builder v4.6.6
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.4789222Z   Downloaded equivalent v1.0.2
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.4800029Z   Downloaded parking_lot v0.12.5
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.4827267Z   Downloaded foldhash v0.2.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.4847164Z   Downloaded allocator-api2 v0.2.21
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.4884595Z   Downloaded approx v0.5.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.4904622Z   Downloaded lock_api v0.4.14
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.4918090Z   Downloaded memchr v2.8.3
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5008006Z   Downloaded clap v4.6.6
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5130311Z   Downloaded either v1.18.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5146816Z   Downloaded line-clipping v0.3.8
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5165012Z   Downloaded rustc_version v0.4.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5179233Z   Downloaded scopeguard v1.2.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5192283Z   Downloaded block-buffer v0.12.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5206172Z   Downloaded strsim v0.11.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5220177Z   Downloaded cpufeatures v0.3.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5236273Z   Downloaded document-features v0.2.12
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5250033Z   Downloaded globset v0.4.20
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5266582Z   Downloaded anstyle-query v1.1.5
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5279909Z   Downloaded is_terminal_polyfill v1.70.2
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5291402Z   Downloaded lru v0.18.4
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5304624Z   Downloaded autocfg v1.5.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5326141Z   Downloaded errno v0.3.14
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5343038Z   Downloaded hybrid-array v0.4.14
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5367985Z   Downloaded clap_lex v1.1.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5380132Z   Downloaded portable-atomic v1.15.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5460863Z   Downloaded ratatui-crossterm v0.1.2
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5472065Z   Downloaded colorchoice v1.0.5
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5482827Z   Downloaded serde_spanned v1.1.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5495839Z   Downloaded castaway v0.2.4
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5513598Z   Downloaded darling_macro v0.24.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5521392Z   Downloaded ident_case v1.0.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5531070Z   Downloaded heck v0.5.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5545100Z   Downloaded palette_math v0.7.7
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5560363Z   Downloaded semver v1.0.28
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5586039Z   Downloaded proc-macro2 v1.0.107
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5618094Z   Downloaded signal-hook-mio v0.2.5
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5631489Z   Downloaded num-conv v0.2.2
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5640533Z   Downloaded num_threads v0.1.7
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5651722Z   Downloaded ratatui v0.30.2
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5692599Z   Downloaded signal-hook-registry v1.4.8
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5705337Z   Downloaded by_address v1.2.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5714374Z   Downloaded const-oid v0.10.2
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5740048Z   Downloaded serde_ignored v0.1.14
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5753850Z   Downloaded static_assertions v1.1.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5769555Z   Downloaded deranged v0.5.8
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5784186Z   Downloaded crypto-common v0.2.2
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5797025Z   Downloaded digest v0.11.3
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5823122Z   Downloaded kasuari v0.4.12
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5849343Z   Downloaded quote v1.0.47
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5879731Z   Downloaded rustversion v1.0.23
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5911345Z   Downloaded indoc v2.0.7
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5945405Z   Downloaded smallvec v1.15.2
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5960659Z   Downloaded num-traits v0.2.19
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.5989351Z   Downloaded ryu v1.0.23
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.6025952Z   Downloaded sha2 v0.11.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.6069110Z   Downloaded clap_derive v4.6.4
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.6093402Z   Downloaded darling v0.24.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.6172228Z   Downloaded darling_core v0.24.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.6240524Z   Downloaded litrs v1.0.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.6273570Z   Downloaded bitflags v2.13.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.6324685Z   Downloaded serde_core v1.0.229
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.6354864Z   Downloaded serde v1.0.229
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.6392569Z   Downloaded signal-hook v0.3.18
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.6426639Z   Downloaded parking_lot_core v0.9.12
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.6449643Z   Downloaded serde_derive v1.0.229
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.6483072Z   Downloaded compact_str v0.9.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.6520537Z   Downloaded mio v1.2.2
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.6589075Z   Downloaded derive_more v2.1.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.6740777Z   Downloaded derive_more-impl v2.1.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.6800211Z   Downloaded indexmap v2.14.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.6848163Z   Downloaded itertools v0.14.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.6926132Z   Downloaded crossterm v0.29.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.7003164Z   Downloaded serde_json v1.0.151
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.7084882Z   Downloaded regex-syntax v0.8.11
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.7156216Z   Downloaded hashbrown v0.16.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.7211069Z   Downloaded ratatui-core v0.1.2
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.7285661Z   Downloaded ratatui-widgets v0.3.2
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.7372398Z   Downloaded palette v0.7.7
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.7509299Z   Downloaded rustix v1.1.4
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.7816774Z   Downloaded regex-automata v0.4.18
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.7967506Z   Downloaded libc v0.2.189
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.8453494Z   Downloaded noyalib v0.0.28
+Policy	UNKNOWN STEP	2026-09-16T17:38:13.9062281Z   Downloaded linux-raw-sys v0.12.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:14.3312569Z    Compiling proc-macro2 v1.0.107
+Policy	UNKNOWN STEP	2026-09-16T17:38:14.3313217Z    Compiling unicode-ident v1.0.24
+Policy	UNKNOWN STEP	2026-09-16T17:38:14.3313691Z    Compiling quote v1.0.47
+Policy	UNKNOWN STEP	2026-09-16T17:38:14.3314398Z    Compiling libc v0.2.189
+Policy	UNKNOWN STEP	2026-09-16T17:38:16.8415345Z    Compiling allocator-api2 v0.2.21
+Policy	UNKNOWN STEP	2026-09-16T17:38:17.9591444Z    Compiling foldhash v0.2.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:18.4398418Z    Compiling equivalent v1.0.2
+Policy	UNKNOWN STEP	2026-09-16T17:38:18.4716198Z    Compiling cfg-if v1.0.4
+Policy	UNKNOWN STEP	2026-09-16T17:38:18.4935132Z    Compiling serde_core v1.0.229
+Policy	UNKNOWN STEP	2026-09-16T17:38:18.6098966Z    Compiling rustversion v1.0.23
+Policy	UNKNOWN STEP	2026-09-16T17:38:18.6288005Z    Compiling heck v0.5.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:18.7676110Z    Compiling hashbrown v0.17.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:18.7748637Z    Compiling itoa v1.0.18
+Policy	UNKNOWN STEP	2026-09-16T17:38:19.1249119Z    Compiling thiserror v2.0.20
+Policy	UNKNOWN STEP	2026-09-16T17:38:19.2665964Z    Compiling bitflags v2.13.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:19.8545041Z    Compiling strsim v0.11.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:20.0552767Z    Compiling syn v3.0.4
+Policy	UNKNOWN STEP	2026-09-16T17:38:20.1275576Z    Compiling syn v2.0.119
+Policy	UNKNOWN STEP	2026-09-16T17:38:20.1455871Z    Compiling ident_case v1.0.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:20.2145636Z    Compiling either v1.18.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:20.4395246Z    Compiling ryu v1.0.23
+Policy	UNKNOWN STEP	2026-09-16T17:38:20.7245502Z    Compiling itertools v0.14.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:22.1635452Z    Compiling castaway v0.2.4
+Policy	UNKNOWN STEP	2026-09-16T17:38:22.2715351Z    Compiling errno v0.3.14
+Policy	UNKNOWN STEP	2026-09-16T17:38:22.4025468Z    Compiling hashbrown v0.16.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:22.5125654Z    Compiling strum_macros v0.28.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:22.5525635Z    Compiling parking_lot_core v0.9.12
+Policy	UNKNOWN STEP	2026-09-16T17:38:22.6775419Z    Compiling unicode-width v0.2.2
+Policy	UNKNOWN STEP	2026-09-16T17:38:22.9125617Z    Compiling unicode-segmentation v1.13.3
+Policy	UNKNOWN STEP	2026-09-16T17:38:23.1525442Z    Compiling darling_core v0.24.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:23.5785584Z    Compiling static_assertions v1.1.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:23.6205329Z    Compiling signal-hook v0.3.18
+Policy	UNKNOWN STEP	2026-09-16T17:38:23.6995216Z    Compiling smallvec v1.15.2
+Policy	UNKNOWN STEP	2026-09-16T17:38:24.2705377Z    Compiling log v0.4.34
+Policy	UNKNOWN STEP	2026-09-16T17:38:24.4255375Z    Compiling strum v0.28.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:24.4445075Z    Compiling convert_case v0.10.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:24.4935254Z    Compiling compact_str v0.9.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:24.6515136Z    Compiling unicode-truncate v2.0.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:24.7275761Z    Compiling thiserror-impl v2.0.20
+Policy	UNKNOWN STEP	2026-09-16T17:38:24.7685783Z    Compiling signal-hook-registry v1.4.8
+Policy	UNKNOWN STEP	2026-09-16T17:38:25.2072874Z    Compiling lru v0.18.4
+Policy	UNKNOWN STEP	2026-09-16T17:38:25.3655839Z    Compiling instability v0.3.13
+Policy	UNKNOWN STEP	2026-09-16T17:38:25.4525679Z    Compiling rustix v1.1.4
+Policy	UNKNOWN STEP	2026-09-16T17:38:25.6911554Z    Compiling memchr v2.8.3
+Policy	UNKNOWN STEP	2026-09-16T17:38:25.7665635Z    Compiling kasuari v0.4.12
+Policy	UNKNOWN STEP	2026-09-16T17:38:26.0796003Z    Compiling darling_macro v0.24.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:26.1613992Z    Compiling scopeguard v1.2.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:26.2123015Z    Compiling litrs v1.0.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:26.2736019Z    Compiling darling v0.24.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:26.3125418Z    Compiling lock_api v0.4.14
+Policy	UNKNOWN STEP	2026-09-16T17:38:26.5175428Z    Compiling ratatui-core v0.1.2
+Policy	UNKNOWN STEP	2026-09-16T17:38:26.6785255Z    Compiling document-features v0.2.12
+Policy	UNKNOWN STEP	2026-09-16T17:38:27.3611462Z    Compiling derive_more-impl v2.1.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:27.5045422Z    Compiling mio v1.2.2
+Policy	UNKNOWN STEP	2026-09-16T17:38:27.6151638Z    Compiling typenum v1.20.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:27.8835439Z    Compiling linux-raw-sys v0.12.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:28.1745361Z    Compiling utf8parse v0.2.2
+Policy	UNKNOWN STEP	2026-09-16T17:38:28.2190300Z    Compiling indoc v2.0.7
+Policy	UNKNOWN STEP	2026-09-16T17:38:28.2305081Z    Compiling anstyle-parse v1.0.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:28.5426014Z    Compiling hybrid-array v0.4.14
+Policy	UNKNOWN STEP	2026-09-16T17:38:28.9175438Z    Compiling derive_more v2.1.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:28.9635470Z    Compiling signal-hook-mio v0.2.5
+Policy	UNKNOWN STEP	2026-09-16T17:38:29.0375798Z    Compiling parking_lot v0.12.5
+Policy	UNKNOWN STEP	2026-09-16T17:38:29.1235492Z    Compiling num_threads v0.1.7
+Policy	UNKNOWN STEP	2026-09-16T17:38:29.2795403Z    Compiling time-core v0.1.9
+Policy	UNKNOWN STEP	2026-09-16T17:38:29.4401821Z    Compiling num-conv v0.2.2
+Policy	UNKNOWN STEP	2026-09-16T17:38:29.5610590Z    Compiling powerfmt v0.2.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:29.6875403Z    Compiling deranged v0.5.8
+Policy	UNKNOWN STEP	2026-09-16T17:38:29.7665476Z    Compiling crossterm v0.29.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:29.9695270Z    Compiling line-clipping v0.3.8
+Policy	UNKNOWN STEP	2026-09-16T17:38:30.3266460Z    Compiling anstyle v1.0.14
+Policy	UNKNOWN STEP	2026-09-16T17:38:30.5492266Z    Compiling anstyle-query v1.1.5
+Policy	UNKNOWN STEP	2026-09-16T17:38:30.5995560Z    Compiling zmij v1.0.23
+Policy	UNKNOWN STEP	2026-09-16T17:38:30.7341706Z    Compiling is_terminal_polyfill v1.70.2
+Policy	UNKNOWN STEP	2026-09-16T17:38:30.7875889Z    Compiling colorchoice v1.0.5
+Policy	UNKNOWN STEP	2026-09-16T17:38:30.8445440Z    Compiling libm v0.2.16
+Policy	UNKNOWN STEP	2026-09-16T17:38:30.9525521Z    Compiling time v0.3.55
+Policy	UNKNOWN STEP	2026-09-16T17:38:31.0325457Z    Compiling anstream v1.0.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:31.5255065Z    Compiling ratatui-crossterm v0.1.2
+Policy	UNKNOWN STEP	2026-09-16T17:38:31.7016014Z    Compiling block-buffer v0.12.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:31.8255412Z    Compiling ratatui-widgets v0.3.2
+Policy	UNKNOWN STEP	2026-09-16T17:38:31.9455989Z    Compiling crypto-common v0.2.2
+Policy	UNKNOWN STEP	2026-09-16T17:38:32.0805428Z    Compiling aho-corasick v1.1.5
+Policy	UNKNOWN STEP	2026-09-16T17:38:32.3715304Z    Compiling serde_json v1.0.151
+Policy	UNKNOWN STEP	2026-09-16T17:38:32.4576771Z    Compiling regex-syntax v0.8.11
+Policy	UNKNOWN STEP	2026-09-16T17:38:33.3675507Z    Compiling serde v1.0.229
+Policy	UNKNOWN STEP	2026-09-16T17:38:33.5275511Z    Compiling noyalib v0.0.28
+Policy	UNKNOWN STEP	2026-09-16T17:38:33.6675863Z    Compiling clap_lex v1.1.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:34.8337943Z    Compiling winnow v1.0.4
+Policy	UNKNOWN STEP	2026-09-16T17:38:35.2825504Z    Compiling const-oid v0.10.2
+Policy	UNKNOWN STEP	2026-09-16T17:38:35.5285568Z    Compiling digest v0.11.3
+Policy	UNKNOWN STEP	2026-09-16T17:38:35.6615502Z    Compiling toml_parser v1.1.3+spec-1.1.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:37.2545773Z    Compiling clap_builder v4.6.6
+Policy	UNKNOWN STEP	2026-09-16T17:38:37.8765678Z    Compiling regex-automata v0.4.18
+Policy	UNKNOWN STEP	2026-09-16T17:38:39.9565236Z    Compiling tui-scrollbar v0.2.7
+Policy	UNKNOWN STEP	2026-09-16T17:38:40.2859067Z    Compiling bstr v1.13.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:41.0265261Z    Compiling serde_derive v1.0.229
+Policy	UNKNOWN STEP	2026-09-16T17:38:42.1127454Z    Compiling clap_derive v4.6.4
+Policy	UNKNOWN STEP	2026-09-16T17:38:43.8435512Z    Compiling toml_datetime v1.1.1+spec-1.1.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:43.9985844Z    Compiling serde_spanned v1.1.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:44.0885911Z    Compiling serde_ignored v0.1.14
+Policy	UNKNOWN STEP	2026-09-16T17:38:44.2435637Z    Compiling indexmap v2.14.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:44.2771463Z    Compiling toml_writer v1.1.2+spec-1.1.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:44.5275941Z    Compiling velnor-workflow v0.1.0 (/home/runner/work/_temp/velnor-workflow-cargo-home/git/checkouts/velnor-09f3d470aa1f0308/b9c3156/crates/velnor-workflow)
+Policy	UNKNOWN STEP	2026-09-16T17:38:44.6745443Z    Compiling base64 v0.23.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:45.2505461Z    Compiling cpufeatures v0.3.1
+Policy	UNKNOWN STEP	2026-09-16T17:38:45.2895578Z    Compiling web-time v1.1.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:45.3252163Z    Compiling rustc-hash v2.1.3
+Policy	UNKNOWN STEP	2026-09-16T17:38:45.4796121Z    Compiling termrock v0.11.0 (https://github.com/tailrocks/termrock.git?rev=5283c2acf9154d0cfcd37b1ffe821c00faf90ea2#5283c2ac)
+Policy	UNKNOWN STEP	2026-09-16T17:38:50.1745505Z    Compiling sha2 v0.11.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:50.6786967Z    Compiling toml v1.1.4+spec-1.1.0
+Policy	UNKNOWN STEP	2026-09-16T17:38:53.0925923Z    Compiling clap v4.6.6
+Policy	UNKNOWN STEP	2026-09-16T17:38:53.1405569Z    Compiling globset v0.4.20
+Policy	UNKNOWN STEP	2026-09-16T17:38:56.8825585Z    Compiling ratatui v0.30.2
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.1810941Z     Finished `release` profile [optimized] target(s) in 1m 53s
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.1931808Z   Installing /home/runner/work/_temp/velnor-workflow/bin/velnor-workflow
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.1940666Z    Installed package `velnor-workflow v0.1.0 (https://github.com/tailrocks/velnor?rev=b9c3156cdb88e63c11b9e595a3e694b02238c09a#b9c3156c)` (executable `velnor-workflow`)
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.1952862Z warning: be sure to add `/home/runner/work/_temp/velnor-workflow/bin` to your PATH to be able to run the installed binaries
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2239086Z ##[group]Run set -euo pipefail
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2239436Z ^[[36;1mset -euo pipefail^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2239691Z ^[[36;1mstderr="$(mktemp)"^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2239950Z ^[[36;1mtrap 'rm -f "$stderr"' EXIT^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2240453Z ^[[36;1mif contexts="$(gh api "repos/$GITHUB_REPOSITORY/rulesets?includes_parents=true" 2>"$stderr" \^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2241107Z ^[[36;1m  | jq -r '.[] | select(.target == "branch" and .enforcement == "active") | .id' \^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2241657Z ^[[36;1m  | while read -r id; do gh api "repos/$GITHUB_REPOSITORY/rulesets/$id"; done \^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2242771Z ^[[36;1m  | jq -r --arg branch "refs/heads/$DEFAULT_BRANCH" 'select(.conditions.ref_name.include | any(. == "~DEFAULT_BRANCH" or . == "~ALL" or . == $branch)) | .rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context' \^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2243752Z ^[[36;1m  | sort -u | paste -sd, -)"; then^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2244069Z ^[[36;1m  :^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2244703Z ^[[36;1melif grep -qE '(HTTP 403|Upgrade to GitHub Team)' "$stderr"; then^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2245335Z ^[[36;1m  echo "::warning::rulesets API returned 403; falling back to declared contexts [$DECLARED_RULESET_CONTEXTS]"^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2245882Z ^[[36;1m  contexts="$DECLARED_RULESET_CONTEXTS"^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2246185Z ^[[36;1melse^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2246391Z ^[[36;1m  cat "$stderr" >&2^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2246626Z ^[[36;1m  exit 1^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2246825Z ^[[36;1mfi^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2247078Z ^[[36;1mecho "RULESET_CONTEXTS=$contexts" >> "$GITHUB_ENV"^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2284062Z shell: /usr/bin/bash -e {0}
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2284599Z env:
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2284801Z   MBX_GC_MAX_SIZE: 12GiB
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2285038Z   MBX_CACHE_LINKS: 0
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2285249Z   MBX_REMOTE_URL: 
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2285466Z   MBX_TARGET_VIEWS: 0
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2287846Z   GH_TOKEN: ***
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2288078Z   DEFAULT_BRANCH: main
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2288359Z   DECLARED_RULESET_CONTEXTS: DCO,Policy,ci-required
+Policy	UNKNOWN STEP	2026-09-16T17:39:46.2288674Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.6317747Z ##[group]Run set -euo pipefail
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.6318078Z ^[[36;1mset -euo pipefail^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.6318344Z ^[[36;1mvelnor-workflow policy \^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.6318668Z ^[[36;1m  --workflow-root "$WORKFLOW_ROOT" \^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.6318987Z ^[[36;1m  --head-sha "$HEAD_SHA" \^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.6319258Z ^[[36;1m  --base-sha "$BASE_SHA" \^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.6319553Z ^[[36;1m  --ruleset-contexts "$RULESET_CONTEXTS"^[[0m
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.6355869Z shell: /usr/bin/bash -e {0}
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.6356130Z env:
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.6356330Z   MBX_GC_MAX_SIZE: 12GiB
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.6356568Z   MBX_CACHE_LINKS: 0
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.6356784Z   MBX_REMOTE_URL: 
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.6356992Z   MBX_TARGET_VIEWS: 0
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.6357241Z   RULESET_CONTEXTS: DCO,Policy,ci-required
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.6357623Z   WORKFLOW_ROOT: /home/runner/work/velnor/velnor/policy-checkout
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.6358048Z   HEAD_SHA: 3353310c7648fca22698b6c0f4a69ab245127786
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.6358430Z   BASE_SHA: 3353310c7648fca22698b6c0f4a69ab245127786
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.6358858Z   VELNOR_WORKFLOW_POLICY_REVISION: b9c3156cdb88e63c11b9e595a3e694b02238c09a
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.6359449Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.7902337Z error: workflow policy failed: generated-tree
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.7903894Z PASS pin-declared           .github-gen/velnor-workflow.toml [generator] revision = b9c3156cdb88e63c11b9e595a3e694b02238c09a
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.7906637Z PASS pin-reachable          b9c3156cdb88e63c11b9e595a3e694b02238c09a is an ancestor of head 3353310c7648fca22698b6c0f4a69ab245127786 (inherited from the base branch)
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.7908400Z PASS pin-monotonic          the declared pin is the base validator b9c3156cdb88e63c11b9e595a3e694b02238c09a
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.7909467Z PASS entrypoint-pin         .github/workflows/ci-policy.yml installs and exports the declared pin (2 literals)
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.7910285Z FAIL generated-tree         the tree differs from the render of velnor-workflow at b9c3156cdb88e63c11b9e595a3e694b02238c09a
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.7911012Z        - .github/ci/.github-actions-generator-state: differs from the pinned render
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.7911577Z        - .github/workflows/ci-main.yml: differs from the pinned render
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.7912038Z        - .github/workflows/ci-policy.yml: differs from the pinned render
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.7912721Z PASS pull-request-target    only .github/workflows/ci-policy.yml runs on pull_request_target, with the reviewed trigger set
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.7913639Z PASS entrypoint-privileges  .github/workflows/ci-policy.yml holds contents: read only, references no secrets, and persists no credentials
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.7914775Z PASS trusted-runners        every self-hosted job is gated on a trusted event and an approved runner
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.7915409Z PASS action-pins            every action reference is a full-SHA pin or a reviewed local path
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.7915966Z PASS workflow-structure     every workflow parses as GitHub would run it
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.7916649Z PASS required-checks        .github/workflows/ci-pr.yml emits [ci-required]; live ruleset requires [DCO, Policy, ci-required]
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.7917219Z policy: 11 rules, 1 failed
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.7926871Z ##[error]Process completed with exit code 1.
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.8120349Z Post job cleanup.
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.8981883Z [command]/usr/bin/git version
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.9027201Z git version 2.55.0
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.9072594Z Temporarily overriding HOME='/home/runner/work/_temp/4f961094-5a45-493e-8546-58c35a9533e2' before making global git config changes
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.9074026Z Adding repository directory to the temporary git global config as a safe directory
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.9079739Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor/policy-checkout
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.9110429Z Removing SSH command configuration
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.9117121Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.9153884Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.9395612Z Removing HTTP extra header
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.9402460Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.9438732Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.9697578Z Removing includeIf entries pointing to credentials config files
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.9706076Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Policy	UNKNOWN STEP	2026-09-16T17:39:48.9748773Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Policy	UNKNOWN STEP	2026-09-16T17:39:49.0178433Z Cleaning up orphan processes

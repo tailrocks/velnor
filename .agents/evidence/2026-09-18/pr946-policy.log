@@ -1,0 +1,843 @@
+Policy	UNKNOWN STEP	﻿2026-09-18T05:11:13.5348917Z Current runner version: '2.337.0'
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5374532Z ##[group]Runner Image Provisioner
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5375396Z Hosted Compute Agent
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5376022Z Version: 20260828.587
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5376757Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5377499Z Build Date: 2026-08-28T16:44:25Z
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5378268Z Worker ID: {86c4b72f-d025-469a-8f3a-ff989a3bdbda}
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5379036Z Azure Region: eastus2
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5379626Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5381148Z ##[group]Operating System
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5381799Z Ubuntu
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5382345Z 24.04.5
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5383361Z LTS
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5383990Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5384633Z ##[group]Runner Image
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5385252Z Image: ubuntu-24.04
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5385845Z Version: 20260907.300.1
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5387191Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260907.300/images/ubuntu/Ubuntu2404-Readme.md
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5388864Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260907.300
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5389854Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5391021Z ##[group]GITHUB_TOKEN Permissions
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5393537Z Contents: read
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5394159Z Metadata: read
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5394832Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5396999Z Secret source: Actions
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5398301Z Cache mode: read
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5399235Z Prepare workflow directory
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5735211Z Prepare all required actions
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.5783856Z Getting action download info
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.8323662Z Download action repository 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' (SHA:3d3c42e5aac5ba805825da76410c181273ba90b1)
+Policy	UNKNOWN STEP	2026-09-18T05:11:13.9561462Z Download action repository 'jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c' (SHA:c2a87611a18de5b3828c5652fe268e992400cb5c)
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.3501606Z Complete job name: Policy
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.4300545Z ##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.4301685Z with:
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.4302164Z   path: policy-checkout
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.4303038Z   fetch-depth: 0
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.4303662Z   persist-credentials: false
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.4304186Z   repository: tailrocks/velnor
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.4308141Z   token: ***
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.4308588Z   ssh-strict: true
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.4309030Z   ssh-user: git
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.4309455Z   clean: true
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.4309899Z   sparse-checkout-cone-mode: true
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.4310427Z   fetch-tags: false
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.4310868Z   show-progress: true
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.4311316Z   lfs: false
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.4311731Z   submodules: false
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.4312214Z   set-safe-directory: true
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.4312870Z   allow-unsafe-pr-checkout: false
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.4313777Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5376121Z Syncing repository: tailrocks/velnor
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5378935Z ##[group]Getting Git version info
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5380342Z Working directory is '/home/runner/work/velnor/velnor/policy-checkout'
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5382472Z [command]/usr/bin/git version
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5532264Z git version 2.55.0
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5567630Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5588358Z Temporarily overriding HOME='/home/runner/work/_temp/ef1459a4-c5ac-4228-ab3b-da4dde3214e0' before making global git config changes
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5606510Z Adding repository directory to the temporary git global config as a safe directory
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5608731Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor/policy-checkout
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5679338Z ##[group]Determining repository object format
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5681018Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5682293Z ##[group]Initializing the repository
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5689719Z [command]/usr/bin/git init /home/runner/work/velnor/velnor/policy-checkout
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5828160Z hint: Using 'master' as the name for the initial branch. This default branch name
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5838020Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5854360Z hint: to use in all of your new repositories, which will suppress this warning,
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5855933Z hint: call:
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5856775Z hint:
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5857770Z hint: 	git config --global init.defaultBranch <name>
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5859034Z hint:
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5860335Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5861999Z hint: 'development'. The just-created branch can be renamed via this command:
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5863267Z hint:
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5864081Z hint: 	git branch -m <name>
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5864789Z hint:
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5865428Z hint: Disable this message with "git config set advice.defaultBranchName false"
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5866546Z Initialized empty Git repository in /home/runner/work/velnor/velnor/policy-checkout/.git/
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5876182Z [command]/usr/bin/git remote add origin https://github.com/tailrocks/velnor
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5941833Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5943602Z ##[group]Disabling automatic garbage collection
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5953903Z [command]/usr/bin/git config --local gc.auto 0
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5985798Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5987064Z ##[group]Setting up auth
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.5992349Z Removing SSH command configuration
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.6000079Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.6042927Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.6456077Z Removing HTTP extra header
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.6464935Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.6502012Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.6739547Z Removing includeIf entries pointing to credentials config files
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.6746128Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.6783791Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.7014719Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-fb585864-bacc-4346-bcaf-abd4711438a8.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.7056239Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git.path /home/runner/work/_temp/git-credentials-fb585864-bacc-4346-bcaf-abd4711438a8.config
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.7093236Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-fb585864-bacc-4346-bcaf-abd4711438a8.config
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.7133858Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/policy-checkout/.git.path /github/runner_temp/git-credentials-fb585864-bacc-4346-bcaf-abd4711438a8.config
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.7168831Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/policy-checkout/.git/worktrees/*.path /github/runner_temp/git-credentials-fb585864-bacc-4346-bcaf-abd4711438a8.config
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.7200590Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.7202558Z ##[group]Fetching the repository
+Policy	UNKNOWN STEP	2026-09-18T05:11:14.7208852Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules origin +refs/heads/*:refs/remotes/origin/* +refs/tags/*:refs/tags/*
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1680814Z From https://github.com/tailrocks/velnor
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1683309Z  * [new branch]        chore/pin-bump-9f40f929 -> origin/chore/pin-bump-9f40f929
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1685256Z  * [new branch]        chore/release-bump-0.1.277 -> origin/chore/release-bump-0.1.277
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1687210Z  * [new branch]        feat/a2-consumer-negatives -> origin/feat/a2-consumer-negatives
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1689239Z  * [new branch]        feat/a2-provision-promotion -> origin/feat/a2-provision-promotion
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1690863Z  * [new branch]        feat/a2-signer-order    -> origin/feat/a2-signer-order
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1691864Z  * [new branch]        feat/a2-source-identity -> origin/feat/a2-source-identity
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1693233Z  * [new branch]        feat/b1-apt-primitives  -> origin/feat/b1-apt-primitives
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1695317Z  * [new branch]        feat/c2-unbounded-global-n -> origin/feat/c2-unbounded-global-n
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1697037Z  * [new branch]        feat/d1-daemon-wiring   -> origin/feat/d1-daemon-wiring
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1698064Z  * [new branch]        feat/d1-processor-loop  -> origin/feat/d1-processor-loop
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1699129Z  * [new branch]        feat/d1-scaleset-protocol -> origin/feat/d1-scaleset-protocol
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1700130Z  * [new branch]        feat/d1-worker-lane     -> origin/feat/d1-worker-lane
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1701659Z  * [new branch]        feat/d2-provider-schema -> origin/feat/d2-provider-schema
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1703165Z  * [new branch]        feat/d2-provider-schema-rest -> origin/feat/d2-provider-schema-rest
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1704471Z  * [new branch]        fix/opstore-rejection-cause -> origin/fix/opstore-rejection-cause
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1705515Z  * [new branch]        fix/pin-fetch-in-tool   -> origin/fix/pin-fetch-in-tool
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1706498Z  * [new branch]        fix/preview-guest-upload -> origin/fix/preview-guest-upload
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1707450Z  * [new branch]        fix/publish-403         -> origin/fix/publish-403
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1708659Z  * [new branch]        fix/security-audit-batch1 -> origin/fix/security-audit-batch1
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1709934Z  * [new branch]        fix/typed-docker-contexts -> origin/fix/typed-docker-contexts
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1710839Z  * [new branch]        main                    -> origin/main
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1711767Z  * [new branch]        perf/main-docker-gha-cache -> origin/perf/main-docker-gha-cache
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1713393Z  * [new tag]           archive/velnor2-pre-rebuild-20260831-bc593406 -> archive/velnor2-pre-rebuild-20260831-bc593406
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1714647Z  * [new tag]           dima/velnor6-archive-4d81a14 -> dima/velnor6-archive-4d81a14
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1715510Z  * [new tag]           preview                 -> preview
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1716285Z  * [new tag]           v0.0.0-b3probe          -> v0.0.0-b3probe
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1717033Z  * [new tag]           v0.1.10                 -> v0.1.10
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1717752Z  * [new tag]           v0.1.100                -> v0.1.100
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1718573Z  * [new tag]           v0.1.101                -> v0.1.101
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1719593Z  * [new tag]           v0.1.102                -> v0.1.102
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1720305Z  * [new tag]           v0.1.103                -> v0.1.103
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1721001Z  * [new tag]           v0.1.104                -> v0.1.104
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1721697Z  * [new tag]           v0.1.105                -> v0.1.105
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1722383Z  * [new tag]           v0.1.106                -> v0.1.106
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1723592Z  * [new tag]           v0.1.107                -> v0.1.107
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1724316Z  * [new tag]           v0.1.108                -> v0.1.108
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1725016Z  * [new tag]           v0.1.109                -> v0.1.109
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1725724Z  * [new tag]           v0.1.11                 -> v0.1.11
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1726426Z  * [new tag]           v0.1.110                -> v0.1.110
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1727134Z  * [new tag]           v0.1.111                -> v0.1.111
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1728024Z  * [new tag]           v0.1.112                -> v0.1.112
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1728719Z  * [new tag]           v0.1.113                -> v0.1.113
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1729409Z  * [new tag]           v0.1.114                -> v0.1.114
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1730101Z  * [new tag]           v0.1.115                -> v0.1.115
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1730800Z  * [new tag]           v0.1.116                -> v0.1.116
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1731489Z  * [new tag]           v0.1.117                -> v0.1.117
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1732190Z  * [new tag]           v0.1.118                -> v0.1.118
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1733129Z  * [new tag]           v0.1.119                -> v0.1.119
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1733841Z  * [new tag]           v0.1.12                 -> v0.1.12
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1734536Z  * [new tag]           v0.1.120                -> v0.1.120
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1735230Z  * [new tag]           v0.1.121                -> v0.1.121
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1735942Z  * [new tag]           v0.1.122                -> v0.1.122
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1736640Z  * [new tag]           v0.1.123                -> v0.1.123
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1737332Z  * [new tag]           v0.1.124                -> v0.1.124
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1738018Z  * [new tag]           v0.1.125                -> v0.1.125
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1738708Z  * [new tag]           v0.1.126                -> v0.1.126
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1739398Z  * [new tag]           v0.1.127                -> v0.1.127
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1740089Z  * [new tag]           v0.1.128                -> v0.1.128
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1740781Z  * [new tag]           v0.1.129                -> v0.1.129
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1741466Z  * [new tag]           v0.1.13                 -> v0.1.13
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1742154Z  * [new tag]           v0.1.130                -> v0.1.130
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1743068Z  * [new tag]           v0.1.131                -> v0.1.131
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1743782Z  * [new tag]           v0.1.132                -> v0.1.132
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1744675Z  * [new tag]           v0.1.133                -> v0.1.133
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1745403Z  * [new tag]           v0.1.134                -> v0.1.134
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1746095Z  * [new tag]           v0.1.135                -> v0.1.135
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1746779Z  * [new tag]           v0.1.136                -> v0.1.136
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1747475Z  * [new tag]           v0.1.137                -> v0.1.137
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1748167Z  * [new tag]           v0.1.138                -> v0.1.138
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1748854Z  * [new tag]           v0.1.139                -> v0.1.139
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1749562Z  * [new tag]           v0.1.14                 -> v0.1.14
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1750259Z  * [new tag]           v0.1.140                -> v0.1.140
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1750944Z  * [new tag]           v0.1.141                -> v0.1.141
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1751634Z  * [new tag]           v0.1.142                -> v0.1.142
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1752377Z  * [new tag]           v0.1.143                -> v0.1.143
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1753346Z  * [new tag]           v0.1.144                -> v0.1.144
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1754046Z  * [new tag]           v0.1.145                -> v0.1.145
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1754737Z  * [new tag]           v0.1.146                -> v0.1.146
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1755432Z  * [new tag]           v0.1.147                -> v0.1.147
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1756136Z  * [new tag]           v0.1.148                -> v0.1.148
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1756854Z  * [new tag]           v0.1.149                -> v0.1.149
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1757555Z  * [new tag]           v0.1.15                 -> v0.1.15
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1758255Z  * [new tag]           v0.1.150                -> v0.1.150
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1758951Z  * [new tag]           v0.1.151                -> v0.1.151
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1759645Z  * [new tag]           v0.1.152                -> v0.1.152
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1760340Z  * [new tag]           v0.1.153                -> v0.1.153
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1761048Z  * [new tag]           v0.1.154                -> v0.1.154
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1762291Z  * [new tag]           v0.1.155                -> v0.1.155
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1763636Z  * [new tag]           v0.1.156                -> v0.1.156
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1764347Z  * [new tag]           v0.1.157                -> v0.1.157
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1765043Z  * [new tag]           v0.1.158                -> v0.1.158
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1765914Z  * [new tag]           v0.1.159                -> v0.1.159
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1766846Z  * [new tag]           v0.1.16                 -> v0.1.16
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1767549Z  * [new tag]           v0.1.160                -> v0.1.160
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1768239Z  * [new tag]           v0.1.161                -> v0.1.161
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1768936Z  * [new tag]           v0.1.162                -> v0.1.162
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1769685Z  * [new tag]           v0.1.163                -> v0.1.163
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1770656Z  * [new tag]           v0.1.164                -> v0.1.164
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1771691Z  * [new tag]           v0.1.165                -> v0.1.165
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1772536Z  * [new tag]           v0.1.166                -> v0.1.166
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1773569Z  * [new tag]           v0.1.167                -> v0.1.167
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1774281Z  * [new tag]           v0.1.168                -> v0.1.168
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1774972Z  * [new tag]           v0.1.17                 -> v0.1.17
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1775677Z  * [new tag]           v0.1.170                -> v0.1.170
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1776386Z  * [new tag]           v0.1.171                -> v0.1.171
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1777075Z  * [new tag]           v0.1.172                -> v0.1.172
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1777756Z  * [new tag]           v0.1.173                -> v0.1.173
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1778443Z  * [new tag]           v0.1.174                -> v0.1.174
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1779269Z  * [new tag]           v0.1.175                -> v0.1.175
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1780264Z  * [new tag]           v0.1.176                -> v0.1.176
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1781006Z  * [new tag]           v0.1.177                -> v0.1.177
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1781706Z  * [new tag]           v0.1.178                -> v0.1.178
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1782401Z  * [new tag]           v0.1.179                -> v0.1.179
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1783390Z  * [new tag]           v0.1.18                 -> v0.1.18
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1784093Z  * [new tag]           v0.1.180                -> v0.1.180
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1784784Z  * [new tag]           v0.1.181                -> v0.1.181
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1785480Z  * [new tag]           v0.1.182                -> v0.1.182
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1786171Z  * [new tag]           v0.1.183                -> v0.1.183
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1786859Z  * [new tag]           v0.1.184                -> v0.1.184
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1787544Z  * [new tag]           v0.1.185                -> v0.1.185
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1788233Z  * [new tag]           v0.1.186                -> v0.1.186
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1788926Z  * [new tag]           v0.1.187                -> v0.1.187
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1789640Z  * [new tag]           v0.1.188                -> v0.1.188
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1790344Z  * [new tag]           v0.1.189                -> v0.1.189
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1791039Z  * [new tag]           v0.1.19                 -> v0.1.19
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1791731Z  * [new tag]           v0.1.190                -> v0.1.190
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1792415Z  * [new tag]           v0.1.191                -> v0.1.191
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1793460Z  * [new tag]           v0.1.192                -> v0.1.192
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1794158Z  * [new tag]           v0.1.193                -> v0.1.193
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1794844Z  * [new tag]           v0.1.194                -> v0.1.194
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1795531Z  * [new tag]           v0.1.195                -> v0.1.195
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1796214Z  * [new tag]           v0.1.196                -> v0.1.196
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1796897Z  * [new tag]           v0.1.197                -> v0.1.197
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1797735Z  * [new tag]           v0.1.198                -> v0.1.198
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1798490Z  * [new tag]           v0.1.199                -> v0.1.199
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1799774Z  * [new tag]           v0.1.2                  -> v0.1.2
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1800687Z  * [new tag]           v0.1.20                 -> v0.1.20
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1801410Z  * [new tag]           v0.1.200                -> v0.1.200
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1802119Z  * [new tag]           v0.1.201                -> v0.1.201
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1803392Z  * [new tag]           v0.1.202                -> v0.1.202
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1804125Z  * [new tag]           v0.1.203                -> v0.1.203
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1805088Z  * [new tag]           v0.1.204                -> v0.1.204
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1805847Z  * [new tag]           v0.1.205                -> v0.1.205
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1806598Z  * [new tag]           v0.1.206                -> v0.1.206
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1807369Z  * [new tag]           v0.1.207                -> v0.1.207
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1808116Z  * [new tag]           v0.1.208                -> v0.1.208
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1808855Z  * [new tag]           v0.1.209                -> v0.1.209
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1809836Z  * [new tag]           v0.1.21                 -> v0.1.21
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1811208Z  * [new tag]           v0.1.210                -> v0.1.210
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1811986Z  * [new tag]           v0.1.211                -> v0.1.211
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1812948Z  * [new tag]           v0.1.212                -> v0.1.212
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1813690Z  * [new tag]           v0.1.213                -> v0.1.213
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1814378Z  * [new tag]           v0.1.214                -> v0.1.214
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1815060Z  * [new tag]           v0.1.215                -> v0.1.215
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1815746Z  * [new tag]           v0.1.217                -> v0.1.217
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1816430Z  * [new tag]           v0.1.218                -> v0.1.218
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1817305Z  * [new tag]           v0.1.219                -> v0.1.219
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1818178Z  * [new tag]           v0.1.22                 -> v0.1.22
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1818929Z  * [new tag]           v0.1.220                -> v0.1.220
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1819623Z  * [new tag]           v0.1.221                -> v0.1.221
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1820307Z  * [new tag]           v0.1.222                -> v0.1.222
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1820988Z  * [new tag]           v0.1.223                -> v0.1.223
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1821678Z  * [new tag]           v0.1.224                -> v0.1.224
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1822357Z  * [new tag]           v0.1.225                -> v0.1.225
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1823237Z  * [new tag]           v0.1.226                -> v0.1.226
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1823935Z  * [new tag]           v0.1.227                -> v0.1.227
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1824621Z  * [new tag]           v0.1.228                -> v0.1.228
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1825305Z  * [new tag]           v0.1.229                -> v0.1.229
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1826021Z  * [new tag]           v0.1.23                 -> v0.1.23
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1826727Z  * [new tag]           v0.1.230                -> v0.1.230
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1827429Z  * [new tag]           v0.1.231                -> v0.1.231
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1828141Z  * [new tag]           v0.1.232                -> v0.1.232
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1828827Z  * [new tag]           v0.1.233                -> v0.1.233
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1830047Z  * [new tag]           v0.1.234                -> v0.1.234
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1831283Z  * [new tag]           v0.1.235                -> v0.1.235
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1832379Z  * [new tag]           v0.1.236                -> v0.1.236
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1833430Z  * [new tag]           v0.1.237                -> v0.1.237
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1834136Z  * [new tag]           v0.1.238                -> v0.1.238
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1834816Z  * [new tag]           v0.1.239                -> v0.1.239
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1835515Z  * [new tag]           v0.1.24                 -> v0.1.24
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1836403Z  * [new tag]           v0.1.240                -> v0.1.240
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1837104Z  * [new tag]           v0.1.241                -> v0.1.241
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1837779Z  * [new tag]           v0.1.242                -> v0.1.242
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1838455Z  * [new tag]           v0.1.243                -> v0.1.243
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1839134Z  * [new tag]           v0.1.244                -> v0.1.244
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1839813Z  * [new tag]           v0.1.245                -> v0.1.245
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1840486Z  * [new tag]           v0.1.246                -> v0.1.246
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1841306Z  * [new tag]           v0.1.247                -> v0.1.247
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1842012Z  * [new tag]           v0.1.248                -> v0.1.248
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1842858Z  * [new tag]           v0.1.249                -> v0.1.249
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1843587Z  * [new tag]           v0.1.25                 -> v0.1.25
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1844452Z  * [new tag]           v0.1.250                -> v0.1.250
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1845164Z  * [new tag]           v0.1.251                -> v0.1.251
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1845865Z  * [new tag]           v0.1.252                -> v0.1.252
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1846753Z  * [new tag]           v0.1.253                -> v0.1.253
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1847467Z  * [new tag]           v0.1.254                -> v0.1.254
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1848176Z  * [new tag]           v0.1.255                -> v0.1.255
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1848872Z  * [new tag]           v0.1.256                -> v0.1.256
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1849865Z  * [new tag]           v0.1.257                -> v0.1.257
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1850591Z  * [new tag]           v0.1.258                -> v0.1.258
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1851288Z  * [new tag]           v0.1.259                -> v0.1.259
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1851989Z  * [new tag]           v0.1.26                 -> v0.1.26
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1853186Z  * [new tag]           v0.1.260                -> v0.1.260
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1854042Z  * [new tag]           v0.1.261                -> v0.1.261
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1854836Z  * [new tag]           v0.1.262                -> v0.1.262
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1855762Z  * [new tag]           v0.1.263                -> v0.1.263
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1856465Z  * [new tag]           v0.1.264                -> v0.1.264
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1857543Z  * [new tag]           v0.1.265                -> v0.1.265
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1858276Z  * [new tag]           v0.1.266                -> v0.1.266
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1859240Z  * [new tag]           v0.1.267                -> v0.1.267
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1860097Z  * [new tag]           v0.1.268                -> v0.1.268
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1860844Z  * [new tag]           v0.1.269                -> v0.1.269
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1861580Z  * [new tag]           v0.1.27                 -> v0.1.27
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1862327Z  * [new tag]           v0.1.270                -> v0.1.270
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1863255Z  * [new tag]           v0.1.271                -> v0.1.271
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1864450Z  * [new tag]           v0.1.272                -> v0.1.272
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1865568Z  * [new tag]           v0.1.273                -> v0.1.273
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1866387Z  * [new tag]           v0.1.274                -> v0.1.274
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1867123Z  * [new tag]           v0.1.275                -> v0.1.275
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1867808Z  * [new tag]           v0.1.276                -> v0.1.276
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1868496Z  * [new tag]           v0.1.28                 -> v0.1.28
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1869174Z  * [new tag]           v0.1.29                 -> v0.1.29
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1869852Z  * [new tag]           v0.1.3                  -> v0.1.3
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1870537Z  * [new tag]           v0.1.30                 -> v0.1.30
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1871207Z  * [new tag]           v0.1.31                 -> v0.1.31
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1871884Z  * [new tag]           v0.1.32                 -> v0.1.32
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1873048Z  * [new tag]           v0.1.33                 -> v0.1.33
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1874040Z  * [new tag]           v0.1.34                 -> v0.1.34
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1874743Z  * [new tag]           v0.1.35                 -> v0.1.35
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1875431Z  * [new tag]           v0.1.36                 -> v0.1.36
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1876112Z  * [new tag]           v0.1.37                 -> v0.1.37
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1876793Z  * [new tag]           v0.1.38                 -> v0.1.38
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1877468Z  * [new tag]           v0.1.39                 -> v0.1.39
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1878149Z  * [new tag]           v0.1.4                  -> v0.1.4
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1878825Z  * [new tag]           v0.1.40                 -> v0.1.40
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1879510Z  * [new tag]           v0.1.41                 -> v0.1.41
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1880237Z  * [new tag]           v0.1.42                 -> v0.1.42
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1880932Z  * [new tag]           v0.1.43                 -> v0.1.43
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1881612Z  * [new tag]           v0.1.44                 -> v0.1.44
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1882305Z  * [new tag]           v0.1.45                 -> v0.1.45
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1883987Z  * [new tag]           v0.1.46                 -> v0.1.46
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1884904Z  * [new tag]           v0.1.47                 -> v0.1.47
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1885599Z  * [new tag]           v0.1.48                 -> v0.1.48
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1886278Z  * [new tag]           v0.1.49                 -> v0.1.49
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1886956Z  * [new tag]           v0.1.5                  -> v0.1.5
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1887645Z  * [new tag]           v0.1.50                 -> v0.1.50
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1888330Z  * [new tag]           v0.1.51                 -> v0.1.51
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1889028Z  * [new tag]           v0.1.52                 -> v0.1.52
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1889708Z  * [new tag]           v0.1.53                 -> v0.1.53
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1890563Z  * [new tag]           v0.1.54                 -> v0.1.54
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1891262Z  * [new tag]           v0.1.55                 -> v0.1.55
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1891947Z  * [new tag]           v0.1.56                 -> v0.1.56
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1892634Z  * [new tag]           v0.1.57                 -> v0.1.57
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1893801Z  * [new tag]           v0.1.58                 -> v0.1.58
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1894508Z  * [new tag]           v0.1.59                 -> v0.1.59
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1895222Z  * [new tag]           v0.1.6                  -> v0.1.6
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1895922Z  * [new tag]           v0.1.60                 -> v0.1.60
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1896676Z  * [new tag]           v0.1.61                 -> v0.1.61
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1897655Z  * [new tag]           v0.1.62                 -> v0.1.62
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1898330Z  * [new tag]           v0.1.63                 -> v0.1.63
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1898998Z  * [new tag]           v0.1.64                 -> v0.1.64
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1899682Z  * [new tag]           v0.1.65                 -> v0.1.65
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1900363Z  * [new tag]           v0.1.66                 -> v0.1.66
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1901128Z  * [new tag]           v0.1.67                 -> v0.1.67
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1902032Z  * [new tag]           v0.1.68                 -> v0.1.68
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1903022Z  * [new tag]           v0.1.69                 -> v0.1.69
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1903759Z  * [new tag]           v0.1.7                  -> v0.1.7
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1904447Z  * [new tag]           v0.1.70                 -> v0.1.70
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1905124Z  * [new tag]           v0.1.71                 -> v0.1.71
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1905802Z  * [new tag]           v0.1.72                 -> v0.1.72
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1906476Z  * [new tag]           v0.1.73                 -> v0.1.73
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1907158Z  * [new tag]           v0.1.74                 -> v0.1.74
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1907847Z  * [new tag]           v0.1.75                 -> v0.1.75
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1908536Z  * [new tag]           v0.1.76                 -> v0.1.76
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1909528Z  * [new tag]           v0.1.77                 -> v0.1.77
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1910295Z  * [new tag]           v0.1.78                 -> v0.1.78
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1910970Z  * [new tag]           v0.1.79                 -> v0.1.79
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1911649Z  * [new tag]           v0.1.8                  -> v0.1.8
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1912323Z  * [new tag]           v0.1.80                 -> v0.1.80
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1913361Z  * [new tag]           v0.1.81                 -> v0.1.81
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1914069Z  * [new tag]           v0.1.82                 -> v0.1.82
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1914745Z  * [new tag]           v0.1.83                 -> v0.1.83
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1915417Z  * [new tag]           v0.1.84                 -> v0.1.84
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1916086Z  * [new tag]           v0.1.85                 -> v0.1.85
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1916769Z  * [new tag]           v0.1.86                 -> v0.1.86
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1917517Z  * [new tag]           v0.1.87                 -> v0.1.87
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1918238Z  * [new tag]           v0.1.88                 -> v0.1.88
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1918916Z  * [new tag]           v0.1.89                 -> v0.1.89
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1919794Z  * [new tag]           v0.1.9                  -> v0.1.9
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1921143Z  * [new tag]           v0.1.90                 -> v0.1.90
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1922021Z  * [new tag]           v0.1.91                 -> v0.1.91
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1922918Z  * [new tag]           v0.1.92                 -> v0.1.92
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1923624Z  * [new tag]           v0.1.93                 -> v0.1.93
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1924297Z  * [new tag]           v0.1.94                 -> v0.1.94
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1924973Z  * [new tag]           v0.1.95                 -> v0.1.95
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1925642Z  * [new tag]           v0.1.96                 -> v0.1.96
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1926549Z  * [new tag]           v0.1.97                 -> v0.1.97
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1927261Z  * [new tag]           v0.1.98                 -> v0.1.98
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1927931Z  * [new tag]           v0.1.99                 -> v0.1.99
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1928977Z  * [new tag]           velnor-workflow-runtime-v1-0a69e008ff8703af -> velnor-workflow-runtime-v1-0a69e008ff8703af
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1930393Z  * [new tag]           velnor-workflow-runtime-v1-12309460ffb8359c -> velnor-workflow-runtime-v1-12309460ffb8359c
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1931805Z  * [new tag]           velnor-workflow-runtime-v1-1b7e82ab726aa53b -> velnor-workflow-runtime-v1-1b7e82ab726aa53b
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1933498Z  * [new tag]           velnor-workflow-runtime-v1-1ff514a2852c82d3 -> velnor-workflow-runtime-v1-1ff514a2852c82d3
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1934932Z  * [new tag]           velnor-workflow-runtime-v1-203eb9b79141e5a2 -> velnor-workflow-runtime-v1-203eb9b79141e5a2
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1936345Z  * [new tag]           velnor-workflow-runtime-v1-2bd48976b59bf084 -> velnor-workflow-runtime-v1-2bd48976b59bf084
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1937742Z  * [new tag]           velnor-workflow-runtime-v1-304405643c571048 -> velnor-workflow-runtime-v1-304405643c571048
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1939290Z  * [new tag]           velnor-workflow-runtime-v1-32565cc6272a84d4 -> velnor-workflow-runtime-v1-32565cc6272a84d4
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1940722Z  * [new tag]           velnor-workflow-runtime-v1-3b8d2b29eca331f4 -> velnor-workflow-runtime-v1-3b8d2b29eca331f4
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1942123Z  * [new tag]           velnor-workflow-runtime-v1-49d0a3970c57d4d6 -> velnor-workflow-runtime-v1-49d0a3970c57d4d6
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1943704Z  * [new tag]           velnor-workflow-runtime-v1-4ef63457fa892a18 -> velnor-workflow-runtime-v1-4ef63457fa892a18
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1945088Z  * [new tag]           velnor-workflow-runtime-v1-561387508ee5fcc6 -> velnor-workflow-runtime-v1-561387508ee5fcc6
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1946495Z  * [new tag]           velnor-workflow-runtime-v1-64fdd0bf7a8a5800 -> velnor-workflow-runtime-v1-64fdd0bf7a8a5800
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1947894Z  * [new tag]           velnor-workflow-runtime-v1-6945ed5e15305462 -> velnor-workflow-runtime-v1-6945ed5e15305462
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1949677Z  * [new tag]           velnor-workflow-runtime-v1-69a010b248a76d58 -> velnor-workflow-runtime-v1-69a010b248a76d58
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1951091Z  * [new tag]           velnor-workflow-runtime-v1-6ae4ca31ef453567 -> velnor-workflow-runtime-v1-6ae4ca31ef453567
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1952484Z  * [new tag]           velnor-workflow-runtime-v1-6f74f2b31301972a -> velnor-workflow-runtime-v1-6f74f2b31301972a
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1954176Z  * [new tag]           velnor-workflow-runtime-v1-716a0b98ec7d1b4d -> velnor-workflow-runtime-v1-716a0b98ec7d1b4d
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1955604Z  * [new tag]           velnor-workflow-runtime-v1-71e623219d2db42c -> velnor-workflow-runtime-v1-71e623219d2db42c
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1956999Z  * [new tag]           velnor-workflow-runtime-v1-78673ee16c42581e -> velnor-workflow-runtime-v1-78673ee16c42581e
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1958396Z  * [new tag]           velnor-workflow-runtime-v1-81a6d4d42427c1f8 -> velnor-workflow-runtime-v1-81a6d4d42427c1f8
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1959809Z  * [new tag]           velnor-workflow-runtime-v1-83e34588fffe93e9 -> velnor-workflow-runtime-v1-83e34588fffe93e9
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1961198Z  * [new tag]           velnor-workflow-runtime-v1-93c8a35808d1210b -> velnor-workflow-runtime-v1-93c8a35808d1210b
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1962576Z  * [new tag]           velnor-workflow-runtime-v1-956c48e84c4f858e -> velnor-workflow-runtime-v1-956c48e84c4f858e
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1964110Z  * [new tag]           velnor-workflow-runtime-v1-997f662c6ee999c4 -> velnor-workflow-runtime-v1-997f662c6ee999c4
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1965497Z  * [new tag]           velnor-workflow-runtime-v1-9f236b40635970a4 -> velnor-workflow-runtime-v1-9f236b40635970a4
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1966888Z  * [new tag]           velnor-workflow-runtime-v1-a3dc1e44d51b3cb2 -> velnor-workflow-runtime-v1-a3dc1e44d51b3cb2
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1968455Z  * [new tag]           velnor-workflow-runtime-v1-a55ade440d4fd658 -> velnor-workflow-runtime-v1-a55ade440d4fd658
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1969912Z  * [new tag]           velnor-workflow-runtime-v1-a8356a89d2859dd3 -> velnor-workflow-runtime-v1-a8356a89d2859dd3
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1971341Z  * [new tag]           velnor-workflow-runtime-v1-ace4fa94864c59e5 -> velnor-workflow-runtime-v1-ace4fa94864c59e5
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1972882Z  * [new tag]           velnor-workflow-runtime-v1-ad493401f003a130 -> velnor-workflow-runtime-v1-ad493401f003a130
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1974314Z  * [new tag]           velnor-workflow-runtime-v1-c0ce56f09b27859c -> velnor-workflow-runtime-v1-c0ce56f09b27859c
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1975730Z  * [new tag]           velnor-workflow-runtime-v1-d39cbf21e351b410 -> velnor-workflow-runtime-v1-d39cbf21e351b410
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1977128Z  * [new tag]           velnor-workflow-runtime-v1-e5ad6f4f923cd154 -> velnor-workflow-runtime-v1-e5ad6f4f923cd154
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1978553Z  * [new tag]           velnor-workflow-runtime-v1-eee20d4ac15650f0 -> velnor-workflow-runtime-v1-eee20d4ac15650f0
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1979975Z  * [new tag]           velnor-workflow-runtime-v1-f1f88c200e5b3b82 -> velnor-workflow-runtime-v1-f1f88c200e5b3b82
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1981432Z  * [new tag]           velnor-workflow-runtime-v1-fd45efac853b6570 -> velnor-workflow-runtime-v1-fd45efac853b6570
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1982978Z  * [new tag]           velnor-workflow-runtime-v1-ff27a1c010cb4faf -> velnor-workflow-runtime-v1-ff27a1c010cb4faf
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1984962Z [command]/usr/bin/git branch --list --remote origin/main
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1985728Z   origin/main
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1986901Z [command]/usr/bin/git rev-parse refs/remotes/origin/main
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1987609Z 9f40f92925f930ef9359a71805fd386f0378d065
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1989061Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1989841Z ##[group]Determining the checkout info
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1990698Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1991209Z [command]/usr/bin/git sparse-checkout disable
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1992905Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1994888Z ##[group]Checking out the ref
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.1995708Z [command]/usr/bin/git checkout --progress --force -B main refs/remotes/origin/main
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.3147333Z Switched to a new branch 'main'
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.3150279Z branch 'main' set up to track 'origin/main'.
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.3179655Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.3231533Z [command]/usr/bin/git log -1 --format=%H
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.3263167Z 9f40f92925f930ef9359a71805fd386f0378d065
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.3278463Z ##[group]Removing auth
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.3279412Z Removing SSH command configuration
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.3284759Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.3320940Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.3547586Z Removing HTTP extra header
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.3550896Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.3585545Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.3810178Z Removing includeIf entries pointing to credentials config files
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.3814000Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.3845152Z includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git.path
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.3848302Z includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git/worktrees/*.path
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.3851033Z includeif.gitdir:/github/workspace/policy-checkout/.git.path
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.3854467Z includeif.gitdir:/github/workspace/policy-checkout/.git/worktrees/*.path
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.3859619Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git.path
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.3882863Z /home/runner/work/_temp/git-credentials-fb585864-bacc-4346-bcaf-abd4711438a8.config
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.3894263Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git.path \/home\/runner\/work\/_temp\/git\-credentials\-fb585864\-bacc\-4346\-bcaf\-abd4711438a8\.config
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.3931607Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git/worktrees/*.path
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.3958263Z /home/runner/work/_temp/git-credentials-fb585864-bacc-4346-bcaf-abd4711438a8.config
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.3967902Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/policy-checkout/.git/worktrees/*.path \/home\/runner\/work\/_temp\/git\-credentials\-fb585864\-bacc\-4346\-bcaf\-abd4711438a8\.config
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.4010451Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/policy-checkout/.git.path
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.4088128Z /github/runner_temp/git-credentials-fb585864-bacc-4346-bcaf-abd4711438a8.config
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.4097753Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/policy-checkout/.git.path \/github\/runner_temp\/git\-credentials\-fb585864\-bacc\-4346\-bcaf\-abd4711438a8\.config
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.4128887Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/policy-checkout/.git/worktrees/*.path
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.4155306Z /github/runner_temp/git-credentials-fb585864-bacc-4346-bcaf-abd4711438a8.config
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.4163620Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/policy-checkout/.git/worktrees/*.path \/github\/runner_temp\/git\-credentials\-fb585864\-bacc\-4346\-bcaf\-abd4711438a8\.config
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.4198664Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.4420540Z Removing credentials config '/home/runner/work/_temp/git-credentials-fb585864-bacc-4346-bcaf-abd4711438a8.config'
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.4427571Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.4694645Z ##[group]Run set -euo pipefail
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.4695952Z ^[[36;1mset -euo pipefail^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.4697404Z ^[[36;1mif ! git cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null; then^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.4699486Z ^[[36;1m  git fetch --no-tags "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$HEAD_SHA"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.4701203Z ^[[36;1mfi^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.4702265Z ^[[36;1mgit checkout --quiet --detach "$HEAD_SHA"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.4745239Z shell: /usr/bin/bash -e {0}
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.4746363Z env:
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.4747387Z   HEAD_SHA: 3e9e67fc04d3fa075b77739e7c839a36eac5005c
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.4748841Z   HEAD_REPOSITORY: tailrocks/velnor
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.4750031Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.5813833Z ##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.5815450Z with:
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.5816397Z   ref: 9f40f92925f930ef9359a71805fd386f0378d065
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.5817689Z   path: policy-setup-action
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.5818966Z   sparse-checkout: .github/actions/setup-velnor-workflow
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.5840190Z   fetch-depth: 1
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.5841239Z   persist-credentials: false
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.5842347Z   repository: tailrocks/velnor
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.5852897Z   token: ***
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.5854000Z   ssh-strict: true
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.5854922Z   ssh-user: git
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.5855795Z   clean: true
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.5856719Z   sparse-checkout-cone-mode: true
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.5857828Z   fetch-tags: false
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.5858743Z   show-progress: true
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.5859664Z   lfs: false
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.5860518Z   submodules: false
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.5861447Z   set-safe-directory: true
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.5862567Z   allow-unsafe-pr-checkout: false
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.5863833Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6712553Z Syncing repository: tailrocks/velnor
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6716325Z ##[group]Getting Git version info
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6719121Z Working directory is '/home/runner/work/velnor/velnor/policy-setup-action'
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6745026Z [command]/usr/bin/git version
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6786619Z git version 2.55.0
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6812355Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6821729Z Temporarily overriding HOME='/home/runner/work/_temp/97468894-a135-48e9-af0c-6372c2046c4f' before making global git config changes
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6828926Z Adding repository directory to the temporary git global config as a safe directory
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6834914Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor/policy-setup-action
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6864470Z ##[group]Determining repository object format
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6871492Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6874192Z ##[group]Initializing the repository
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6877112Z [command]/usr/bin/git init /home/runner/work/velnor/velnor/policy-setup-action
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6914962Z hint: Using 'master' as the name for the initial branch. This default branch name
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6918435Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6921768Z hint: to use in all of your new repositories, which will suppress this warning,
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6924667Z hint: call:
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6926048Z hint:
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6929843Z hint: 	git config --global init.defaultBranch <name>
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6932980Z hint:
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6934863Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6938120Z hint: 'development'. The just-created branch can be renamed via this command:
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6940801Z hint:
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6942201Z hint: 	git branch -m <name>
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6944306Z hint:
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6946814Z hint: Disable this message with "git config set advice.defaultBranchName false"
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6949588Z Initialized empty Git repository in /home/runner/work/velnor/velnor/policy-setup-action/.git/
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6956038Z [command]/usr/bin/git remote add origin https://github.com/tailrocks/velnor
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6980786Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6983496Z ##[group]Disabling automatic garbage collection
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.6985748Z [command]/usr/bin/git config --local gc.auto 0
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.7020332Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.7022899Z ##[group]Setting up auth
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.7024771Z Removing SSH command configuration
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.7027449Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.7060249Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.7317735Z Removing HTTP extra header
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.7321279Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.7364474Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.7616203Z Removing includeIf entries pointing to credentials config files
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.7622341Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.7670810Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.7931178Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-9a761cf9-735a-4fec-9471-c9aeb4517efc.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.7974833Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/policy-setup-action/.git.path /home/runner/work/_temp/git-credentials-9a761cf9-735a-4fec-9471-c9aeb4517efc.config
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.8008459Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/policy-setup-action/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-9a761cf9-735a-4fec-9471-c9aeb4517efc.config
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.8043375Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/policy-setup-action/.git.path /github/runner_temp/git-credentials-9a761cf9-735a-4fec-9471-c9aeb4517efc.config
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.8079600Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/policy-setup-action/.git/worktrees/*.path /github/runner_temp/git-credentials-9a761cf9-735a-4fec-9471-c9aeb4517efc.config
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.8110136Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.8111610Z ##[group]Fetching the repository
+Policy	UNKNOWN STEP	2026-09-18T05:11:17.8117000Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --filter=blob:none --depth=1 origin 9f40f92925f930ef9359a71805fd386f0378d065
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.0562367Z From https://github.com/tailrocks/velnor
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.0575525Z  * branch            9f40f92925f930ef9359a71805fd386f0378d065 -> FETCH_HEAD
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.0581829Z [command]/usr/bin/git rev-parse --verify --quiet 9f40f92925f930ef9359a71805fd386f0378d065^{object}
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.0612236Z 9f40f92925f930ef9359a71805fd386f0378d065
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.0618034Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.0619548Z ##[group]Determining the checkout info
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.0622027Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.0624334Z ##[group]Setting up sparse checkout
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.0625967Z [command]/usr/bin/git sparse-checkout set .github/actions/setup-velnor-workflow
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.0665375Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.0667813Z ##[group]Checking out the ref
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.0670771Z [command]/usr/bin/git checkout --progress --force 9f40f92925f930ef9359a71805fd386f0378d065
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.2972563Z Note: switching to '9f40f92925f930ef9359a71805fd386f0378d065'.
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.2974052Z 
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.2975171Z You are in 'detached HEAD' state. You can look around, make experimental
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.2977306Z changes and commit them, and you can discard any commits you make in this
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.2979424Z state without impacting any branches by switching back to a branch.
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.2980599Z 
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.2981281Z If you want to create a new branch to retain commits you create, you may
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.2983609Z do so (now or later) by using -c with the switch command. Example:
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.2984805Z 
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.2985158Z   git switch -c <new-branch-name>
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.2985842Z 
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.2986203Z Or undo this operation with:
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.2986872Z 
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.2987142Z   git switch -
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.2987603Z 
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.2988900Z Turn off this advice by setting config variable advice.detachedHead to false
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.2990626Z 
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.2991934Z HEAD is now at 9f40f92 Merge pull request #944 from tailrocks/fix/b3-release-legs-plan-selection
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.2995743Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.3035767Z [command]/usr/bin/git log -1 --format=%H
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.3066350Z 9f40f92925f930ef9359a71805fd386f0378d065
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.3076140Z ##[group]Removing auth
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.3079831Z Removing SSH command configuration
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.3080875Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.3118235Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.3342072Z Removing HTTP extra header
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.3346278Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.3385464Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.3620844Z Removing includeIf entries pointing to credentials config files
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.3626116Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.3655521Z includeif.gitdir:/home/runner/work/velnor/velnor/policy-setup-action/.git.path
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.3657161Z includeif.gitdir:/home/runner/work/velnor/velnor/policy-setup-action/.git/worktrees/*.path
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.3658607Z includeif.gitdir:/github/workspace/policy-setup-action/.git.path
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.3659864Z includeif.gitdir:/github/workspace/policy-setup-action/.git/worktrees/*.path
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.3664485Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/policy-setup-action/.git.path
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.3691079Z /home/runner/work/_temp/git-credentials-9a761cf9-735a-4fec-9471-c9aeb4517efc.config
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.3701375Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/policy-setup-action/.git.path \/home\/runner\/work\/_temp\/git\-credentials\-9a761cf9\-735a\-4fec\-9471\-c9aeb4517efc\.config
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.3737088Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/policy-setup-action/.git/worktrees/*.path
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.3790617Z /home/runner/work/_temp/git-credentials-9a761cf9-735a-4fec-9471-c9aeb4517efc.config
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.3798526Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/policy-setup-action/.git/worktrees/*.path \/home\/runner\/work\/_temp\/git\-credentials\-9a761cf9\-735a\-4fec\-9471\-c9aeb4517efc\.config
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.3831924Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/policy-setup-action/.git.path
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.3858993Z /github/runner_temp/git-credentials-9a761cf9-735a-4fec-9471-c9aeb4517efc.config
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.3868534Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/policy-setup-action/.git.path \/github\/runner_temp\/git\-credentials\-9a761cf9\-735a\-4fec\-9471\-c9aeb4517efc\.config
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.3908776Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/policy-setup-action/.git/worktrees/*.path
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.3955008Z /github/runner_temp/git-credentials-9a761cf9-735a-4fec-9471-c9aeb4517efc.config
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.3961250Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/policy-setup-action/.git/worktrees/*.path \/github\/runner_temp\/git\-credentials\-9a761cf9\-735a\-4fec\-9471\-c9aeb4517efc\.config
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.4028819Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.4279079Z Removing credentials config '/home/runner/work/_temp/git-credentials-9a761cf9-735a-4fec-9471-c9aeb4517efc.config'
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.4290527Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.4639438Z Prepare all required actions
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.4640106Z Getting action download info
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.5871585Z Download action repository 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9' (SHA:55cc8345863c7cc4c66a329aec7e433d2d1c52a9)
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7261875Z ##[group]Run ./policy-setup-action/.github/actions/setup-velnor-workflow
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7262341Z with:
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7262623Z   rev: 3e276ad81a84d325ff9241f2decc31104b6868fd
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7263315Z   checkout-path: /home/runner/work/velnor/velnor/policy-checkout
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7263733Z   cache: true
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7264010Z   cache-key-prefix: velnor-workflow-v3
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7266910Z   github-token: ***
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7267178Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7329278Z ##[start-action display=Resolve source closure;id=__self.closure]
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7364046Z ##[group]Run set -euo pipefail
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7364421Z ^[[36;1mset -euo pipefail^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7364763Z ^[[36;1msha256_digest() {^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7365103Z ^[[36;1m  if command -v sha256sum >/dev/null 2>&1; then^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7365488Z ^[[36;1m    sha256sum | awk '{print $1}'^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7365862Z ^[[36;1m  elif command -v shasum >/dev/null 2>&1; then^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7366249Z ^[[36;1m    shasum -a 256 | awk '{print $1}'^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7366570Z ^[[36;1m  else^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7366973Z ^[[36;1m    echo "::error::no SHA-256 checksum tool available (sha256sum or shasum)" >&2^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7367448Z ^[[36;1m    return 1^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7367705Z ^[[36;1m  fi^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7367935Z ^[[36;1m}^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7368320Z ^[[36;1mtest "$INSTALL_REV" != '' || { echo "::error::runtime revision is empty" >&2; exit 1; }^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7369082Z ^[[36;1m[[ "$INSTALL_REV" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::runtime revision must be a full commit SHA, got $INSTALL_REV" >&2; exit 1; }^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7369682Z ^[[36;1mlisting=""^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7370102Z ^[[36;1mif git -C "$CHECKOUT_PATH" cat-file -e "$INSTALL_REV^{commit}" 2>/dev/null; then^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7370987Z ^[[36;1m  listing="$(git -C "$CHECKOUT_PATH" ls-tree -r "$INSTALL_REV" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7371690Z ^[[36;1melse^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7372317Z ^[[36;1m  tree="$(gh api "repos/$PRODUCT_REPOSITORY/git/trees/$INSTALL_REV?recursive=1")" || { echo "::error::unknown generator revision $INSTALL_REV" >&2; exit 1; }^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7373834Z ^[[36;1m  [[ "$(jq -r '.truncated // false' <<<"$tree")" != "true" ]] || { echo "::error::tree API response is truncated; the closure cannot be proven" >&2; exit 1; }^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7375403Z ^[[36;1m  listing="$(jq -r '[.tree[] | select(.type != "tree") | select(.path == "Cargo.toml" or .path == "Cargo.lock" or .path == "rust-toolchain.toml" or .path == "rust-toolchain" or (.path | startswith("crates/velnor-workflow/")) or (.path | startswith(".cargo/"))) | "\(.mode) \(.type) \(.sha)\t\(.path)"] | sort | join("\n")' <<<"$tree")"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7376785Z ^[[36;1mfi^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7377231Z ^[[36;1mtest "$listing" != '' || { echo "::error::revision $INSTALL_REV has no closure inputs" >&2; exit 1; }^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7378037Z ^[[36;1mclosure="$(printf '%s\nclosure-version:1\nfeatures:\nprofile:release\n' "$(LC_ALL=C sort <<<"$listing")" | sha256_digest)"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7378797Z ^[[36;1m[[ "$closure" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::closure resolution failed" >&2; exit 1; }^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7379304Z ^[[36;1mecho "value=$closure" >> "$GITHUB_OUTPUT"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7418369Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7418768Z env:
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7421544Z   GH_TOKEN: ***
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7421863Z   INSTALL_REV: 3e276ad81a84d325ff9241f2decc31104b6868fd
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7422331Z   CHECKOUT_PATH: /home/runner/work/velnor/velnor/policy-checkout
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7423176Z   PRODUCT_REPOSITORY: tailrocks/velnor
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7423506Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7608884Z ##[end-action id=__self.closure;outcome=success;conclusion=success;duration_ms=27]
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7613901Z ##[start-action display=Restore runtime cache;id=__self.cache]
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7706659Z ##[group]Run actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7707082Z with:
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7707335Z   path: ~/.cache/velnor/workflow-runtime
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7707902Z   key: velnor-workflow-v3-Linux-X64-6f74f2b31301972a8c99ccdc4fbd346fa9695a890f571bba4cb3968f8a643f67
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7708481Z   enableCrossOsArchive: false
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7708773Z   fail-on-cache-miss: false
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7709042Z   lookup-only: false
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.7709301Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:18.9568763Z Cache hit for: velnor-workflow-v3-Linux-X64-6f74f2b31301972a8c99ccdc4fbd346fa9695a890f571bba4cb3968f8a643f67
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.1668901Z Received 3693558 of 3693558 (100.0%), 24.0 MBs/sec
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.1700743Z Cache Size: ~4 MB (3693558 B)
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.1702282Z [command]/usr/bin/tar -xf /home/runner/work/_temp/8213fe25-e5bf-4ee5-b6dc-4a5bd1b33f0c/cache.tzst -P -C /home/runner/work/velnor/velnor --use-compress-program unzstd
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.1969848Z Cache restored successfully
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2111300Z Cache restored from key: velnor-workflow-v3-Linux-X64-6f74f2b31301972a8c99ccdc4fbd346fa9695a890f571bba4cb3968f8a643f67
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2183414Z ##[end-action id=__self.cache;outcome=success;conclusion=success;duration_ms=456]
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2190142Z ##[start-action display=Download runtime product;id=__self.__run]
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2200900Z ##[end-action id=__self.__run;outcome=skipped;conclusion=skipped;duration_ms=0]
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2204836Z ##[start-action display=Verify runtime product;id=__self.__run_2]
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2235265Z ##[group]Run set -euo pipefail
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2235636Z ^[[36;1mset -euo pipefail^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2236025Z ^[[36;1mruntime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2236448Z ^[[36;1mjq -e \^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2236728Z ^[[36;1m  --arg closure "$CLOSURE" \^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2237114Z ^[[36;1m  --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2237889Z ^[[36;1m  '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$"))' \^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2238638Z ^[[36;1m  "$runtime/manifest.json" >/dev/null^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2239032Z ^[[36;1mif command -v sha256sum >/dev/null 2>&1; then^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2239523Z ^[[36;1m  actual="$(sha256sum "$runtime/bin/velnor-workflow" | awk '{print $1}')"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2240142Z ^[[36;1melse^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2240540Z ^[[36;1m  actual="$(shasum -a 256 "$runtime/bin/velnor-workflow" | awk '{print $1}')"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2240980Z ^[[36;1mfi^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2241521Z ^[[36;1mexpected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "$runtime/manifest.json")"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2242302Z ^[[36;1m[[ "$actual" == "$expected" ]] || { echo "::error::cached runtime digest mismatch" >&2; exit 1; }^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2281782Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2282185Z env:
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2282557Z   CLOSURE: 6f74f2b31301972a8c99ccdc4fbd346fa9695a890f571bba4cb3968f8a643f67
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2283337Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2505371Z ##[end-action id=__self.__run_2;outcome=success;conclusion=success;duration_ms=29]
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2508848Z ##[start-action display=Add runtime to PATH;id=__self.__run_3]
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2536563Z ##[group]Run set -euo pipefail
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2536930Z ^[[36;1mset -euo pipefail^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2537320Z ^[[36;1mruntime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2537944Z ^[[36;1mtest -x "$runtime/bin/velnor-workflow"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2538327Z ^[[36;1mtest -s "$runtime/manifest.json"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2538750Z ^[[36;1mreported="$("$runtime/bin/velnor-workflow" --closure)"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2539439Z ^[[36;1m[[ "$reported" == "$CLOSURE" ]] || { echo "::error::runtime at $runtime reports closure $reported, expected $CLOSURE" >&2; exit 1; }^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2540168Z ^[[36;1mmanifest_revision="$(jq -er '.revision' "$runtime/manifest.json")"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2540733Z ^[[36;1mreported_revision="$("$runtime/bin/velnor-workflow" --revision)"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2541603Z ^[[36;1m[[ "$reported_revision" == "$manifest_revision" ]] || { echo "::error::runtime at $runtime reports revision $reported_revision, expected $manifest_revision" >&2; exit 1; }^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2542397Z ^[[36;1mecho "$runtime/bin" >> "$GITHUB_PATH"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2578409Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2578820Z env:
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2579211Z   CLOSURE: 6f74f2b31301972a8c99ccdc4fbd346fa9695a890f571bba4cb3968f8a643f67
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2579659Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2698254Z ##[end-action id=__self.__run_3;outcome=success;conclusion=success;duration_ms=18]
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2700548Z ##[start-action display=Save runtime cache;id=__self.__actions_cache]
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2711692Z ##[end-action id=__self.__actions_cache;outcome=skipped;conclusion=skipped;duration_ms=0]
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2778443Z ##[group]Run set -euo pipefail
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2778920Z ^[[36;1mset -euo pipefail^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2779553Z ^[[36;1mpin="$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' .github-gen/velnor-workflow.toml | head -n 1)"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2780554Z ^[[36;1mtest "$pin" != '' || pin="$(sed -n -E 's/^.*VELNOR_WORKFLOW_POLICY_REVISION:[[:space:]]*([0-9a-f]{40}).*/\1/p' .github/workflows/ci-policy.yml | head -n 1)"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2781433Z ^[[36;1mtest "$pin" != '' || { echo "::error::audited tree declares no generator pin" >&2; exit 1; }^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2782052Z ^[[36;1mbase_closure="$(velnor-workflow closure --rev="$BASE_PIN")"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2782583Z ^[[36;1mpin_closure="$(velnor-workflow closure --rev="$pin")"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2783576Z ^[[36;1mif [[ "$pin_closure" == "$base_closure" ]]; then^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2784175Z ^[[36;1m  # Same closure means the running base validator IS the pin's^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2784744Z ^[[36;1m  # renderer, so --check decides tree==pin-render with no extra^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2785296Z ^[[36;1m  # provisioning. A match exits early; a differ falls through to^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2785840Z ^[[36;1m  # the candidate path (a generator change in flight) instead of^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2786375Z ^[[36;1m  # stranding the validator with a cleared manifest and a red pin^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2787109Z ^[[36;1m  # leg. The check output stays visible: on a fall-through it is^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2787586Z ^[[36;1m  # the diagnosis, on a match it is one line.^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2788006Z ^[[36;1m  if velnor-workflow --plain --check; then^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2788583Z ^[[36;1m    echo "pin $pin shares the base closure and renders the tree; the Stage-0 validator renders"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2789207Z ^[[36;1m    echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=" >> "$GITHUB_ENV"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2789632Z ^[[36;1m    exit 0^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2789905Z ^[[36;1m  fi^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2790457Z ^[[36;1m  echo "pin $pin shares the base closure but the tree differs from its render; falling through to the candidate path"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2791057Z ^[[36;1mfi^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2791852Z ^[[36;1m[[ "$HEAD_REPOSITORY" == "$GITHUB_REPOSITORY" ]] || { echo "::error::generator changes from forks cannot be verified here; open the generator change from a branch of $GITHUB_REPOSITORY" >&2; exit 1; }^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2793001Z ^[[36;1mif ! git cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null; then^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2793559Z ^[[36;1m  git fetch --no-tags "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$HEAD_SHA"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2794006Z ^[[36;1mfi^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2794414Z ^[[36;1mhead_candidate="$(velnor-workflow closure --rev="$HEAD_SHA" --candidate)"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2795083Z ^[[36;1mname="velnor-workflow-candidate-${head_candidate:0:16}-${RUNNER_OS}-${RUNNER_ARCH}"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2795611Z ^[[36;1mdeadline=$((SECONDS + 900))^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2795946Z ^[[36;1mrun_id=""^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2796250Z ^[[36;1mwhile (( SECONDS < deadline )); do^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2797170Z ^[[36;1m  runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=5" --jq '[.workflow_runs[] | select(.head_repository.id == .repository.id)]')"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2798066Z ^[[36;1m  waiting=false^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2798361Z ^[[36;1m  seen=false^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2798680Z ^[[36;1m  while read -r candidate_run; do^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2799065Z ^[[36;1m    test "$candidate_run" != '' || continue^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2799428Z ^[[36;1m    seen=true^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2799770Z ^[[36;1m    status="$(jq -r .status <<<"$candidate_run")"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2800184Z ^[[36;1m    id="$(jq -r .id <<<"$candidate_run")"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2800632Z ^[[36;1m    # $name in the filter is a jq variable, not a shell expansion.^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2801081Z ^[[36;1m    # shellcheck disable=SC2016^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2802114Z ^[[36;1m    if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts?per_page=100" | jq -e --arg name "$name" '[.artifacts[] | select(.name == $name and .expired == false)] | length > 0' >/dev/null; then^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2803132Z ^[[36;1m      run_id="$id"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2803436Z ^[[36;1m      break 2^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2803726Z ^[[36;1m    fi^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2804045Z ^[[36;1m    [[ "$status" == "completed" ]] || waiting=true^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2804445Z ^[[36;1m  done <<<"$(jq -c '.[]' <<<"$runs")"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2804895Z ^[[36;1m  # No runs yet means the API has not indexed the sibling run, not^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2805418Z ^[[36;1m  # that it will never come: keep polling until the deadline.^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2805865Z ^[[36;1m  [[ "$seen" == "true" ]] || waiting=true^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2806460Z ^[[36;1m  [[ "$waiting" == "true" ]] || { echo "::error::no same-repository PR run published candidate $name" >&2; exit 1; }^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2807036Z ^[[36;1m  sleep 15^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2807310Z ^[[36;1mdone^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2807809Z ^[[36;1m[[ -n "$run_id" ]] || { echo "::error::no candidate product $name was published within 15 minutes" >&2; exit 1; }^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2808446Z ^[[36;1mcandidate="$RUNNER_TEMP/velnor-workflow-candidate"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2808858Z ^[[36;1mrm -rf "$candidate"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2809307Z ^[[36;1mmkdir -p "$candidate"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2809795Z ^[[36;1mgh run download "$run_id" --name "$name" --dir "$candidate" --repo "$GITHUB_REPOSITORY"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2811293Z ^[[36;1mjq -e --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg repo "$GITHUB_REPOSITORY" --arg run "$run_id" '.profile == "debug" and .platform == $platform and .repository == $repo and .run_id == $run and (.revision | test("^[0-9a-f]{40}$")) and (.closure | test("^[0-9a-f]{64}$")) and (.binary_sha256 | test("^[0-9a-f]{64}$"))' "$candidate/candidate-manifest.json" >/dev/null^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2812810Z ^[[36;1mif command -v sha256sum >/dev/null 2>&1; then^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2813315Z ^[[36;1m  actual="$(sha256sum "$candidate/velnor-workflow" | awk '{print $1}')"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2813764Z ^[[36;1melse^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2814151Z ^[[36;1m  actual="$(shasum -a 256 "$candidate/velnor-workflow" | awk '{print $1}')"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2814617Z ^[[36;1mfi^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2815032Z ^[[36;1mexpected="$(jq -er .binary_sha256 "$candidate/candidate-manifest.json")"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2815666Z ^[[36;1m[[ "$actual" == "$expected" ]] || { echo "::error::candidate digest mismatch" >&2; exit 1; }^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2816204Z ^[[36;1mchmod 0755 "$candidate/velnor-workflow"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2816705Z ^[[36;1mmanifest_closure="$(jq -er .closure "$candidate/candidate-manifest.json")"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2817612Z ^[[36;1m[[ "$manifest_closure" == "$head_candidate" ]] || { echo "::error::candidate manifest closure $manifest_closure is not the head's candidate $head_candidate" >&2; exit 1; }^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2818529Z ^[[36;1mreported="$(GH_TOKEN="" GITHUB_TOKEN="" "$candidate/velnor-workflow" --closure)"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2819375Z ^[[36;1m[[ "$reported" == "$manifest_closure" ]] || { echo "::error::candidate reports closure $reported, manifest claims $manifest_closure" >&2; exit 1; }^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2820218Z ^[[36;1mecho "VELNOR_WORKFLOW_PINNED_BINARY=$candidate/velnor-workflow" >> "$GITHUB_ENV"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2820937Z ^[[36;1mecho "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=$candidate/candidate-manifest.json" >> "$GITHUB_ENV"^[[0m
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2859090Z shell: /usr/bin/bash -e {0}
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2859408Z env:
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2862309Z   GH_TOKEN: ***
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2862836Z   HEAD_SHA: 3e9e67fc04d3fa075b77739e7c839a36eac5005c
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2863242Z   HEAD_REPOSITORY: tailrocks/velnor
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2863607Z   BASE_PIN: 3e276ad81a84d325ff9241f2decc31104b6868fd
+Policy	UNKNOWN STEP	2026-09-18T05:11:19.2863965Z ##[endgroup]
+Policy	UNKNOWN STEP	2026-09-18T05:11:20.0397769Z error: generated files differ: .github/workflows/release.yml, .github/ci/.github-actions-generator-state; rerun generate
+Policy	UNKNOWN STEP	2026-09-18T05:11:20.0406188Z pin 3e276ad81a84d325ff9241f2decc31104b6868fd shares the base closure but the tree differs from its render; falling through to the candidate path
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.1338625Z ##[error]no same-repository PR run published candidate velnor-workflow-candidate-3f19102d41096f17-Linux-X64
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.1348636Z ##[error]Process completed with exit code 1.
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.1504918Z Post job cleanup.
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.2383387Z [command]/usr/bin/git version
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.2425498Z git version 2.55.0
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.2463253Z Temporarily overriding HOME='/home/runner/work/_temp/d9865e8b-f8c6-462e-942e-98d0d7506c2f' before making global git config changes
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.2464613Z Adding repository directory to the temporary git global config as a safe directory
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.2469304Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor/policy-setup-action
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.2508065Z Removing SSH command configuration
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.2513925Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.2553886Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.2805940Z Removing HTTP extra header
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.2806891Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.2849660Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.3122621Z Removing includeIf entries pointing to credentials config files
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.3130195Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.3179291Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.3597354Z Post job cleanup.
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.4513717Z [command]/usr/bin/git version
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.4593659Z git version 2.55.0
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.4629767Z Temporarily overriding HOME='/home/runner/work/_temp/7fe6deaf-8abf-43ce-9e6e-bce1abc4071e' before making global git config changes
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.4631336Z Adding repository directory to the temporary git global config as a safe directory
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.4638106Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor/policy-checkout
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.4680782Z Removing SSH command configuration
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.4689067Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.4736621Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.5055811Z Removing HTTP extra header
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.5070243Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.5146172Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.5394126Z Removing includeIf entries pointing to credentials config files
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.5400840Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.5444805Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Policy	UNKNOWN STEP	2026-09-18T05:17:51.5847821Z Cleaning up orphan processes

@@ -1,0 +1,957 @@
+OpenTofu · OpenTofu / Velnor	UNKNOWN STEP	2026-09-17T14:19:42.7666147Z ##[group]Velnor rejected job (operational_store)
+OpenTofu · OpenTofu / Velnor	UNKNOWN STEP	2026-09-17T14:19:42.7666147Z ##[error]Velnor rejected this job before workflow execution.
+OpenTofu · OpenTofu / Velnor	UNKNOWN STEP	2026-09-17T14:19:42.7666147Z phase: operational_store
+OpenTofu · OpenTofu / Velnor	UNKNOWN STEP	2026-09-17T14:19:42.7666147Z reason: operational store rejected the sanitized admission row; job failed closed before execution
+OpenTofu · OpenTofu / Velnor	UNKNOWN STEP	2026-09-17T14:19:42.7666147Z effect: no declared workflow command was executed
+OpenTofu · OpenTofu / Velnor	UNKNOWN STEP	2026-09-17T14:19:42.7666147Z remediation: correct the rejected workflow field/action/ref or add the exact reviewed capability to Velnor, publish and deploy that Velnor release, then rerun
+OpenTofu · OpenTofu / Velnor	UNKNOWN STEP	2026-09-17T14:19:42.7666147Z ##[endgroup]
+Docker · Docker / Velnor	UNKNOWN STEP	2026-09-17T14:19:29.8878469Z ##[group]Velnor rejected job (operational_store)
+Docker · Docker / Velnor	UNKNOWN STEP	2026-09-17T14:19:29.8878469Z ##[error]Velnor rejected this job before workflow execution.
+Docker · Docker / Velnor	UNKNOWN STEP	2026-09-17T14:19:29.8878469Z phase: operational_store
+Docker · Docker / Velnor	UNKNOWN STEP	2026-09-17T14:19:29.8878469Z reason: operational store rejected the sanitized admission row; job failed closed before execution
+Docker · Docker / Velnor	UNKNOWN STEP	2026-09-17T14:19:29.8878469Z effect: no declared workflow command was executed
+Docker · Docker / Velnor	UNKNOWN STEP	2026-09-17T14:19:29.8878469Z remediation: correct the rejected workflow field/action/ref or add the exact reviewed capability to Velnor, publish and deploy that Velnor release, then rerun
+Docker · Docker / Velnor	UNKNOWN STEP	2026-09-17T14:19:29.8878469Z ##[endgroup]
+Bun · Bun package (velnor) / Velnor	UNKNOWN STEP	2026-09-17T14:19:29.9166565Z ##[group]Velnor rejected job (operational_store)
+Bun · Bun package (velnor) / Velnor	UNKNOWN STEP	2026-09-17T14:19:29.9166565Z ##[error]Velnor rejected this job before workflow execution.
+Bun · Bun package (velnor) / Velnor	UNKNOWN STEP	2026-09-17T14:19:29.9166565Z phase: operational_store
+Bun · Bun package (velnor) / Velnor	UNKNOWN STEP	2026-09-17T14:19:29.9166565Z reason: operational store rejected the sanitized admission row; job failed closed before execution
+Bun · Bun package (velnor) / Velnor	UNKNOWN STEP	2026-09-17T14:19:29.9166565Z effect: no declared workflow command was executed
+Bun · Bun package (velnor) / Velnor	UNKNOWN STEP	2026-09-17T14:19:29.9166565Z remediation: correct the rejected workflow field/action/ref or add the exact reviewed capability to Velnor, publish and deploy that Velnor release, then rerun
+Bun · Bun package (velnor) / Velnor	UNKNOWN STEP	2026-09-17T14:19:29.9166565Z ##[endgroup]
+Documentation · Documentation / Velnor	UNKNOWN STEP	2026-09-17T14:19:29.8957052Z ##[group]Velnor rejected job (operational_store)
+Documentation · Documentation / Velnor	UNKNOWN STEP	2026-09-17T14:19:29.8957052Z ##[error]Velnor rejected this job before workflow execution.
+Documentation · Documentation / Velnor	UNKNOWN STEP	2026-09-17T14:19:29.8957052Z phase: operational_store
+Documentation · Documentation / Velnor	UNKNOWN STEP	2026-09-17T14:19:29.8957052Z reason: operational store rejected the sanitized admission row; job failed closed before execution
+Documentation · Documentation / Velnor	UNKNOWN STEP	2026-09-17T14:19:29.8957052Z effect: no declared workflow command was executed
+Documentation · Documentation / Velnor	UNKNOWN STEP	2026-09-17T14:19:29.8957052Z remediation: correct the rejected workflow field/action/ref or add the exact reviewed capability to Velnor, publish and deploy that Velnor release, then rerun
+Documentation · Documentation / Velnor	UNKNOWN STEP	2026-09-17T14:19:29.8957052Z ##[endgroup]
+Control / Prepare Cargo / prepare-cargo	UNKNOWN STEP	2026-09-17T14:19:42.6580731Z ##[group]Velnor rejected job (operational_store)
+Control / Prepare Cargo / prepare-cargo	UNKNOWN STEP	2026-09-17T14:19:42.6580731Z ##[error]Velnor rejected this job before workflow execution.
+Control / Prepare Cargo / prepare-cargo	UNKNOWN STEP	2026-09-17T14:19:42.6580731Z phase: operational_store
+Control / Prepare Cargo / prepare-cargo	UNKNOWN STEP	2026-09-17T14:19:42.6580731Z reason: operational store rejected the sanitized admission row; job failed closed before execution
+Control / Prepare Cargo / prepare-cargo	UNKNOWN STEP	2026-09-17T14:19:42.6580731Z effect: no declared workflow command was executed
+Control / Prepare Cargo / prepare-cargo	UNKNOWN STEP	2026-09-17T14:19:42.6580731Z remediation: correct the rejected workflow field/action/ref or add the exact reviewed capability to Velnor, publish and deploy that Velnor release, then rerun
+Control / Prepare Cargo / prepare-cargo	UNKNOWN STEP	2026-09-17T14:19:42.6580731Z ##[endgroup]
+ci-required	Validate generated stack results	﻿2026-09-17T14:23:57.9183935Z ##[group]Run set -euo pipefail
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9185497Z ^[[36;1mset -euo pipefail^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9186036Z ^[[36;1mresult_for_job() {^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9186771Z ^[[36;1m  jq -r --arg job "$1" '.[$job].result // empty' <<<"$NEEDS_JSON"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9187483Z ^[[36;1m}^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9187973Z ^[[36;1mresult="$(result_for_job plan)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9188593Z ^[[36;1mif [[ "$result" != success ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9189370Z ^[[36;1m  echo "required CI prerequisite plan did not pass: $result" >&2^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9190100Z ^[[36;1m  exit 1^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9190542Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9191129Z ^[[36;1mresult="$(result_for_job velnor-lane-admission)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9191782Z ^[[36;1mcase "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9192302Z ^[[36;1m  success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9193616Z ^[[36;1m  *) echo "required CI prerequisite velnor-lane-admission did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9194510Z ^[[36;1mesac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9194998Z ^[[36;1mselected=",$SELECTED_UNITS,"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9195618Z ^[[36;1mif [[ "$selected" == *",bun-velnor,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9196316Z ^[[36;1m  result="$(result_for_job github-bun-velnor)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9197008Z ^[[36;1m  if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9197647Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9198163Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9198897Z ^[[36;1m      *) echo "selected CI job github-bun-velnor did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9199703Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9200146Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9200599Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9201114Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9202193Z ^[[36;1m      *) echo "selected CI job github-bun-velnor ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9203573Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9204015Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9204446Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9204951Z ^[[36;1m  result="$(result_for_job github-bun-velnor)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9205576Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9206087Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9207205Z ^[[36;1m    *) echo "unselected CI job github-bun-velnor failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9208046Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9208464Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9208946Z ^[[36;1mif [[ "$selected" == *",bun-velnor,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9209614Z ^[[36;1m  result="$(result_for_job velnor-bun-velnor)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9210279Z ^[[36;1m  if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9210891Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9211389Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9212120Z ^[[36;1m      *) echo "selected CI job velnor-bun-velnor did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9213136Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9213632Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9214075Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9214583Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9215663Z ^[[36;1m      *) echo "selected CI job velnor-bun-velnor ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9216807Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9217244Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9217667Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9218180Z ^[[36;1m  result="$(result_for_job velnor-bun-velnor)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9218838Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9219355Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9220192Z ^[[36;1m    *) echo "unselected CI job velnor-bun-velnor failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9221053Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9221476Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9222140Z ^[[36;1mif [[ "$selected" == *",docker,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9222791Z ^[[36;1m  result="$(result_for_job github-docker)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9223592Z ^[[36;1m  if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9224213Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9224733Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9225441Z ^[[36;1m      *) echo "selected CI job github-docker did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9226204Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9226634Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9227071Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9227573Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9228618Z ^[[36;1m      *) echo "selected CI job github-docker ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9229766Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9230193Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9230607Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9231100Z ^[[36;1m  result="$(result_for_job github-docker)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9231701Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9232200Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9233109Z ^[[36;1m    *) echo "unselected CI job github-docker failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9233932Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9234351Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9234822Z ^[[36;1mif [[ "$selected" == *",docker,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9235463Z ^[[36;1m  result="$(result_for_job velnor-docker)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9236147Z ^[[36;1m  if [[ "$LANE_ADMITTED_VELNOR_TRUSTED" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9236795Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9237288Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9237986Z ^[[36;1m      *) echo "selected CI job velnor-docker did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9238745Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9239171Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9239610Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9240140Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9241264Z ^[[36;1m      *) echo "selected CI job velnor-docker ran outside its lane admission (LANE_ADMITTED_VELNOR_TRUSTED=$LANE_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9242623Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9243144Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9243565Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9244047Z ^[[36;1m  result="$(result_for_job velnor-docker)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9244649Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9245151Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9245947Z ^[[36;1m    *) echo "unselected CI job velnor-docker failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9246759Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9247186Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9247646Z ^[[36;1mif [[ "$selected" == *",docs,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9248276Z ^[[36;1m  result="$(result_for_job github-docs)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9248935Z ^[[36;1m  if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9249542Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9250043Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9250732Z ^[[36;1m      *) echo "selected CI job github-docs did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9251490Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9251911Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9252339Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9253067Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9254162Z ^[[36;1m      *) echo "selected CI job github-docs ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9255242Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9255669Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9256079Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9256550Z ^[[36;1m  result="$(result_for_job github-docs)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9257166Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9257823Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9258589Z ^[[36;1m    *) echo "unselected CI job github-docs failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9259378Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9259800Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9260261Z ^[[36;1mif [[ "$selected" == *",docs,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9260884Z ^[[36;1m  result="$(result_for_job velnor-docs)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9261525Z ^[[36;1m  if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9262133Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9262636Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9263551Z ^[[36;1m      *) echo "selected CI job velnor-docs did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9264298Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9264719Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9265164Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9265659Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9266700Z ^[[36;1m      *) echo "selected CI job velnor-docs ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9267776Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9268200Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9268617Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9269102Z ^[[36;1m  result="$(result_for_job velnor-docs)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9269688Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9270188Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9270951Z ^[[36;1m    *) echo "unselected CI job velnor-docs failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9271748Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9272164Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9272632Z ^[[36;1mif [[ "$selected" == *",opentofu,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9273484Z ^[[36;1m  result="$(result_for_job github-opentofu)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9274147Z ^[[36;1m  if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9274748Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9275250Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9275949Z ^[[36;1m      *) echo "selected CI job github-opentofu did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9276711Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9277143Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9277836Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9278341Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9279401Z ^[[36;1m      *) echo "selected CI job github-opentofu ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9280501Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9280944Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9281361Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9281850Z ^[[36;1m  result="$(result_for_job github-opentofu)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9282451Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9283080Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9283880Z ^[[36;1m    *) echo "unselected CI job github-opentofu failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9284707Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9285126Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9285612Z ^[[36;1mif [[ "$selected" == *",opentofu,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9286263Z ^[[36;1m  result="$(result_for_job velnor-opentofu)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9286928Z ^[[36;1m  if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9287533Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9288031Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9288741Z ^[[36;1m      *) echo "selected CI job velnor-opentofu did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9289499Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9289938Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9290407Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9290901Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9291953Z ^[[36;1m      *) echo "selected CI job velnor-opentofu ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9293473Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9293905Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9294325Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9294807Z ^[[36;1m  result="$(result_for_job velnor-opentofu)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9295397Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9295906Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9296696Z ^[[36;1m    *) echo "unselected CI job velnor-opentofu failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9297511Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9297924Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9300608Z ^[[36;1mif [[ "$selected" == *",rust-unit-collector,"* || "$selected" == *",rust-velnor-bench,"* || "$selected" == *",rust-velnor-client,"* || "$selected" == *",rust-velnor-control,"* || "$selected" == *",rust-velnor-model,"* || "$selected" == *",rust-velnor-render,"* || "$selected" == *",rust-velnor-runner,"* || "$selected" == *",rust-velnor-tools,"* || "$selected" == *",rust-velnor-workflow,"* || "$selected" == *",rust-velnor-workflow-contract,"* || "$selected" == *",rust-velnorctl,"* || "$selected" == *",rust-production-topology,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9303703Z ^[[36;1m  result="$(result_for_job prepare-cargo)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9304355Z ^[[36;1m  if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9304966Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9305456Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9306219Z ^[[36;1m      *) echo "selected CI prerequisite prepare-cargo did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9307033Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9307449Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9307876Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9308368Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9309465Z ^[[36;1m      *) echo "selected CI prerequisite prepare-cargo ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9310602Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9311015Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9311423Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9311898Z ^[[36;1m  result="$(result_for_job prepare-cargo)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9312498Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9313100Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9314097Z ^[[36;1m    *) echo "unselected CI prerequisite prepare-cargo failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9314955Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9315376Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9315852Z ^[[36;1mif [[ "$selected" == *",rust-policy,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9316514Z ^[[36;1m  result="$(result_for_job github-rust-policy)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9317172Z ^[[36;1m  if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9317770Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9318254Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9318971Z ^[[36;1m      *) echo "selected CI job github-rust-policy did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9319754Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9320169Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9320603Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9321141Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9322204Z ^[[36;1m      *) echo "selected CI job github-rust-policy ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9323521Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9323941Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9324352Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9324852Z ^[[36;1m  result="$(result_for_job github-rust-policy)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9325464Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9325960Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9326771Z ^[[36;1m    *) echo "unselected CI job github-rust-policy failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9327595Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9328004Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9328672Z ^[[36;1mif [[ "$selected" == *",rust-policy,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9329347Z ^[[36;1m  result="$(result_for_job velnor-rust-policy)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9330007Z ^[[36;1m  if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9330606Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9331105Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9331827Z ^[[36;1m      *) echo "selected CI job velnor-rust-policy did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9332602Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9333123Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9333553Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9334044Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9335101Z ^[[36;1m      *) echo "selected CI job velnor-rust-policy ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9336270Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9336688Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9337101Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9337691Z ^[[36;1m  result="$(result_for_job velnor-rust-policy)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9338299Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9338792Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9339601Z ^[[36;1m    *) echo "unselected CI job velnor-rust-policy failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9340431Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9340833Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9341338Z ^[[36;1mif [[ "$selected" == *",rust-unit-collector,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9342079Z ^[[36;1m  result="$(result_for_job github-rust-unit-collector)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9342783Z ^[[36;1m  if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9343607Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9344098Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9344878Z ^[[36;1m      *) echo "selected CI job github-rust-unit-collector did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9345720Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9346148Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9346570Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9347058Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9348159Z ^[[36;1m      *) echo "selected CI job github-rust-unit-collector ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9349463Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9349871Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9350275Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9350802Z ^[[36;1m  result="$(result_for_job github-rust-unit-collector)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9351446Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9351930Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9352767Z ^[[36;1m    *) echo "unselected CI job github-rust-unit-collector failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9353873Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9354279Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9354787Z ^[[36;1mif [[ "$selected" == *",rust-unit-collector,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9355535Z ^[[36;1m  result="$(result_for_job velnor-rust-unit-collector)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9356244Z ^[[36;1m  if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9356845Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9357345Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9358109Z ^[[36;1m      *) echo "selected CI job velnor-rust-unit-collector did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9358948Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9359363Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9359784Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9360275Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9361427Z ^[[36;1m      *) echo "selected CI job velnor-rust-unit-collector ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9362571Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9363176Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9363890Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9364584Z ^[[36;1m  result="$(result_for_job velnor-rust-unit-collector)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9365239Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9365755Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9366612Z ^[[36;1m    *) echo "unselected CI job velnor-rust-unit-collector failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9367504Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9367914Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9368405Z ^[[36;1mif [[ "$selected" == *",rust-velnor-bench,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9369125Z ^[[36;1m  result="$(result_for_job github-rust-velnor-bench)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9369812Z ^[[36;1m  if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9370401Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9370885Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9371659Z ^[[36;1m      *) echo "selected CI job github-rust-velnor-bench did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9372473Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9372988Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9373411Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9373895Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9374982Z ^[[36;1m      *) echo "selected CI job github-rust-velnor-bench ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9376119Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9376528Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9376928Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9377446Z ^[[36;1m  result="$(result_for_job github-rust-velnor-bench)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9378084Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9378574Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9379408Z ^[[36;1m    *) echo "unselected CI job github-rust-velnor-bench failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9380264Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9380665Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9381171Z ^[[36;1mif [[ "$selected" == *",rust-velnor-bench,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9381885Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-bench)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9382570Z ^[[36;1m  if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9383366Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9383990Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9384743Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-bench did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9385545Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9385949Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9386369Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9386849Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9387929Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-bench ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9389063Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9389515Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9389922Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9390440Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-bench)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9391074Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9391564Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9392401Z ^[[36;1m    *) echo "unselected CI job velnor-rust-velnor-bench failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9393372Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9393780Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9394286Z ^[[36;1mif [[ "$selected" == *",rust-velnor-client,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9395032Z ^[[36;1m  result="$(result_for_job github-rust-velnor-client)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9395730Z ^[[36;1m  if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9396320Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9396800Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9397564Z ^[[36;1m      *) echo "selected CI job github-rust-velnor-client did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9398538Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9398953Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9399373Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9399861Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9400954Z ^[[36;1m      *) echo "selected CI job github-rust-velnor-client ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9402102Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9402509Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9403126Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9403690Z ^[[36;1m  result="$(result_for_job github-rust-velnor-client)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9404332Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9404834Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9405683Z ^[[36;1m    *) echo "unselected CI job github-rust-velnor-client failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9406555Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9406956Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9407462Z ^[[36;1mif [[ "$selected" == *",rust-velnor-client,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9408185Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-client)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9408874Z ^[[36;1m  if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9409469Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9409970Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9410761Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-client did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9411588Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9412006Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9412427Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9413027Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9414131Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-client ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9415280Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9415687Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9416095Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9416613Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-client)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9417257Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9417755Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9418599Z ^[[36;1m    *) echo "unselected CI job velnor-rust-velnor-client failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9419631Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9420033Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9420537Z ^[[36;1mif [[ "$selected" == *",rust-velnor-control,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9421276Z ^[[36;1m  result="$(result_for_job github-rust-velnor-control)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9421978Z ^[[36;1m  if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9422569Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9423268Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9424035Z ^[[36;1m      *) echo "selected CI job github-rust-velnor-control did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9424858Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9425265Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9425684Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9426164Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9427287Z ^[[36;1m      *) echo "selected CI job github-rust-velnor-control ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9428446Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9428855Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9429258Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9429783Z ^[[36;1m  result="$(result_for_job github-rust-velnor-control)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9430424Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9430919Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9431765Z ^[[36;1m    *) echo "unselected CI job github-rust-velnor-control failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9432638Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9433314Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9433957Z ^[[36;1mif [[ "$selected" == *",rust-velnor-control,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9434698Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-control)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9435398Z ^[[36;1m  if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9435985Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9436477Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9437240Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-control did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9438058Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9438464Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9438883Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9439367Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9440464Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-control ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9441617Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9442034Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9442450Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9443215Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-control)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9443870Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9444362Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9445215Z ^[[36;1m    *) echo "unselected CI job velnor-rust-velnor-control failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9446097Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9446526Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9447039Z ^[[36;1mif [[ "$selected" == *",rust-velnor-model,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9447759Z ^[[36;1m  result="$(result_for_job github-rust-velnor-model)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9448447Z ^[[36;1m  if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9449040Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9449526Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9450292Z ^[[36;1m      *) echo "selected CI job github-rust-velnor-model did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9451103Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9451516Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9451945Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9452429Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9453773Z ^[[36;1m      *) echo "selected CI job github-rust-velnor-model ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9455095Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9455508Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9455909Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9456423Z ^[[36;1m  result="$(result_for_job github-rust-velnor-model)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9457060Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9457556Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9458405Z ^[[36;1m    *) echo "unselected CI job github-rust-velnor-model failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9459257Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9459669Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9460171Z ^[[36;1mif [[ "$selected" == *",rust-velnor-model,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9460888Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-model)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9461572Z ^[[36;1m  if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9462162Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9462683Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9463654Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-model did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9464464Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9464876Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9465297Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9465829Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9466917Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-model ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9468051Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9468478Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9469022Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9469538Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-model)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9470173Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9470657Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9471482Z ^[[36;1m    *) echo "unselected CI job velnor-rust-velnor-model failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9472351Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9472757Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9473369Z ^[[36;1mif [[ "$selected" == *",rust-velnor-render,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9474104Z ^[[36;1m  result="$(result_for_job github-rust-velnor-render)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9474811Z ^[[36;1m  if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9475407Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9475894Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9476656Z ^[[36;1m      *) echo "selected CI job github-rust-velnor-render did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9477484Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9477908Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9478333Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9478811Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9479906Z ^[[36;1m      *) echo "selected CI job github-rust-velnor-render ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9481063Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9481475Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9481890Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9482409Z ^[[36;1m  result="$(result_for_job github-rust-velnor-render)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9483176Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9483676Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9484513Z ^[[36;1m    *) echo "unselected CI job github-rust-velnor-render failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9485374Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9485784Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9486294Z ^[[36;1mif [[ "$selected" == *",rust-velnor-render,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9487019Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-render)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9487716Z ^[[36;1m  if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9488311Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9488974Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9489728Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-render did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9490540Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9490951Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9491378Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9491866Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9493238Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-render ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9494397Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9494807Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9495217Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9495735Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-render)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9496379Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9496868Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9497714Z ^[[36;1m    *) echo "unselected CI job velnor-rust-velnor-render failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9498583Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9498991Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9499492Z ^[[36;1mif [[ "$selected" == *",rust-velnor-runner,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9500216Z ^[[36;1m  result="$(result_for_job github-rust-velnor-runner)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9500909Z ^[[36;1m  if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9501502Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9501996Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9502761Z ^[[36;1m      *) echo "selected CI job github-rust-velnor-runner did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9503961Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9504373Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9504799Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9505288Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9506384Z ^[[36;1m      *) echo "selected CI job github-rust-velnor-runner ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9507529Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9507940Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9508343Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9508860Z ^[[36;1m  result="$(result_for_job github-rust-velnor-runner)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9509489Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9509978Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9510813Z ^[[36;1m    *) echo "unselected CI job github-rust-velnor-runner failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9511672Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9512071Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9512578Z ^[[36;1mif [[ "$selected" == *",rust-velnor-runner,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9513501Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-runner)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9514201Z ^[[36;1m  if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9514822Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9515307Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9516067Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-runner did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9516876Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9517290Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9517708Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9518191Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9519275Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-runner ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9520420Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9520823Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9521227Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9521740Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-runner)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9522368Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9522948Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9523793Z ^[[36;1m    *) echo "unselected CI job velnor-rust-velnor-runner failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9524817Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9525222Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9525724Z ^[[36;1mif [[ "$selected" == *",rust-velnor-tools,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9526435Z ^[[36;1m  result="$(result_for_job github-rust-velnor-tools)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9527119Z ^[[36;1m  if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9527708Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9528194Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9528942Z ^[[36;1m      *) echo "selected CI job github-rust-velnor-tools did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9529748Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9530162Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9530580Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9531063Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9532147Z ^[[36;1m      *) echo "selected CI job github-rust-velnor-tools ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9533570Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9533977Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9534390Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9534894Z ^[[36;1m  result="$(result_for_job github-rust-velnor-tools)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9535523Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9536005Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9536833Z ^[[36;1m    *) echo "unselected CI job github-rust-velnor-tools failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9537687Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9538087Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9538785Z ^[[36;1mif [[ "$selected" == *",rust-velnor-tools,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9539493Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-tools)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9540162Z ^[[36;1m  if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9540746Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9541233Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9541977Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-tools did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9542782Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9543407Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9543827Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9544303Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9545384Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-tools ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9546541Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9546946Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9547353Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9547867Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-tools)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9548501Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9548985Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9549821Z ^[[36;1m    *) echo "unselected CI job velnor-rust-velnor-tools failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9550678Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9551081Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9551586Z ^[[36;1mif [[ "$selected" == *",rust-velnor-workflow,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9552324Z ^[[36;1m  result="$(result_for_job github-rust-velnor-workflow)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9553198Z ^[[36;1m  if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9553840Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9554331Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9555099Z ^[[36;1m      *) echo "selected CI job github-rust-velnor-workflow did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9555928Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9556336Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9556752Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9557237Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9558340Z ^[[36;1m      *) echo "selected CI job github-rust-velnor-workflow ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9559662Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9560079Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9560476Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9561018Z ^[[36;1m  result="$(result_for_job github-rust-velnor-workflow)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9561663Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9562143Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9563100Z ^[[36;1m    *) echo "unselected CI job github-rust-velnor-workflow failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9563977Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9564376Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9564886Z ^[[36;1mif [[ "$selected" == *",rust-velnor-workflow,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9565622Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-workflow)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9566322Z ^[[36;1m  if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9566914Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9567401Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9568172Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-workflow did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9568994Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9569400Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9569816Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9570298Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9571412Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-workflow ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9572568Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9573202Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9573596Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9574116Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-workflow)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9574760Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9575242Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9576345Z ^[[36;1m    *) echo "unselected CI job velnor-rust-velnor-workflow failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9577408Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9577802Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9578356Z ^[[36;1mif [[ "$selected" == *",rust-velnor-workflow-contract,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9579203Z ^[[36;1m  result="$(result_for_job github-rust-velnor-workflow-contract)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9579957Z ^[[36;1m  if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9580543Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9581028Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9581860Z ^[[36;1m      *) echo "selected CI job github-rust-velnor-workflow-contract did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9582762Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9583390Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9583807Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9584291Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9585460Z ^[[36;1m      *) echo "selected CI job github-rust-velnor-workflow-contract ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9586692Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9587098Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9644961Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9646023Z ^[[36;1m  result="$(result_for_job github-rust-velnor-workflow-contract)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9647060Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9647566Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9648541Z ^[[36;1m    *) echo "unselected CI job github-rust-velnor-workflow-contract failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9649545Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9649958Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9650515Z ^[[36;1mif [[ "$selected" == *",rust-velnor-workflow-contract,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9651373Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-workflow-contract)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9652131Z ^[[36;1m  if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9653279Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9653792Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9654655Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-workflow-contract did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9655549Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9655953Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9656375Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9656848Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9658032Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnor-workflow-contract ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9659277Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9659685Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9660164Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9660806Z ^[[36;1m  result="$(result_for_job velnor-rust-velnor-workflow-contract)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9661529Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9662020Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9663135Z ^[[36;1m    *) echo "unselected CI job velnor-rust-velnor-workflow-contract failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9664090Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9664487Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9664969Z ^[[36;1mif [[ "$selected" == *",rust-velnorctl,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9665650Z ^[[36;1m  result="$(result_for_job github-rust-velnorctl)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9666303Z ^[[36;1m  if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9666878Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9667354Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9668241Z ^[[36;1m      *) echo "selected CI job github-rust-velnorctl did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9669026Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9669432Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9669851Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9670344Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9671427Z ^[[36;1m      *) echo "selected CI job github-rust-velnorctl ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9672551Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9673192Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9673593Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9674082Z ^[[36;1m  result="$(result_for_job github-rust-velnorctl)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9674688Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9675170Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9675974Z ^[[36;1m    *) echo "unselected CI job github-rust-velnorctl failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9676818Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9677224Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9677703Z ^[[36;1mif [[ "$selected" == *",rust-velnorctl,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9678385Z ^[[36;1m  result="$(result_for_job velnor-rust-velnorctl)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9679047Z ^[[36;1m  if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9679627Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9680099Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9680812Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnorctl did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9681582Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9681984Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9682402Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9683105Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9684233Z ^[[36;1m      *) echo "selected CI job velnor-rust-velnorctl ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9685359Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9685763Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9686155Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9686658Z ^[[36;1m  result="$(result_for_job velnor-rust-velnorctl)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9687319Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9687954Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9688770Z ^[[36;1m    *) echo "unselected CI job velnor-rust-velnorctl failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9689615Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9690019Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9690549Z ^[[36;1mif [[ "$selected" == *",rust-production-topology,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9691342Z ^[[36;1m  result="$(result_for_job github-rust-production-topology)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9692058Z ^[[36;1m  if [[ "$LANE_ADMITTED_GITHUB" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9692639Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9693464Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9694287Z ^[[36;1m      *) echo "selected CI job github-rust-production-topology did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9695136Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9695538Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9695951Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9696434Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9697570Z ^[[36;1m      *) echo "selected CI job github-rust-production-topology ran outside its lane admission (LANE_ADMITTED_GITHUB=$LANE_ADMITTED_GITHUB): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9698753Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9699157Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9699546Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9700097Z ^[[36;1m  result="$(result_for_job github-rust-production-topology)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9700757Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9701235Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9702118Z ^[[36;1m    *) echo "unselected CI job github-rust-production-topology failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9703507Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9703904Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9704425Z ^[[36;1mif [[ "$selected" == *",rust-production-topology,"* ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9705196Z ^[[36;1m  result="$(result_for_job velnor-rust-production-topology)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9705922Z ^[[36;1m  if [[ "$LANE_ADMITTED_VELNOR" == true ]]; then^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9706500Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9706981Z ^[[36;1m      success) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9707766Z ^[[36;1m      *) echo "selected CI job velnor-rust-production-topology did not pass: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9708610Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9709012Z ^[[36;1m  else^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9709417Z ^[[36;1m    case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9709892Z ^[[36;1m      skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9711019Z ^[[36;1m      *) echo "selected CI job velnor-rust-production-topology ran outside its lane admission (LANE_ADMITTED_VELNOR=$LANE_ADMITTED_VELNOR): $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9712220Z ^[[36;1m    esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9712619Z ^[[36;1m  fi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9713144Z ^[[36;1melse^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9713680Z ^[[36;1m  result="$(result_for_job velnor-rust-production-topology)"^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9714342Z ^[[36;1m  case "$result" in^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9714818Z ^[[36;1m    success|skipped) ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9715711Z ^[[36;1m    *) echo "unselected CI job velnor-rust-production-topology failed unexpectedly: $result" >&2; exit 1 ;;^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9716613Z ^[[36;1m  esac^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:57.9717013Z ^[[36;1mfi^[[0m
+ci-required	Validate generated stack results	2026-09-17T14:23:58.0075331Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+ci-required	Validate generated stack results	2026-09-17T14:23:58.0076399Z env:
+ci-required	Validate generated stack results	2026-09-17T14:23:58.0100639Z   NEEDS_JSON: {
+ci-required	Validate generated stack results	  "plan": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {
+ci-required	Validate generated stack results	      "base_sha": "40206d9fe60a8e0693046d1695762c62883a0578",
+ci-required	Validate generated stack results	      "head_sha": "4d6aa38379c8a7cf1ccf962536ae3b57225aa542",
+ci-required	Validate generated stack results	      "full_units": "bun-velnor,docker,docs,opentofu,rust-policy,rust-production-topology,rust-unit-collector,rust-velnor-bench,rust-velnor-client,rust-velnor-control,rust-velnor-model,rust-velnor-render,rust-velnor-runner,rust-velnor-tools,rust-velnor-workflow,rust-velnor-workflow-contract,rust-velnorctl",
+ci-required	Validate generated stack results	      "bun_matrix": "[{\"label\":\"Bun package (velnor)\",\"unit\":\"bun-velnor\"}]",
+ci-required	Validate generated stack results	      "docker_matrix": "[{\"label\":\"Docker\",\"unit\":\"docker\"}]",
+ci-required	Validate generated stack results	      "docs_matrix": "[{\"label\":\"Documentation\",\"unit\":\"docs\"}]",
+ci-required	Validate generated stack results	      "opentofu_matrix": "[{\"label\":\"OpenTofu\",\"unit\":\"opentofu\"}]",
+ci-required	Validate generated stack results	      "rust_matrix": "[{\"label\":\"Rust dependency policy\",\"unit\":\"rust-policy\"},{\"label\":\"Rust crate (unit-collector)\",\"unit\":\"rust-unit-collector\"},{\"label\":\"Rust crate (velnor-bench)\",\"unit\":\"rust-velnor-bench\"},{\"label\":\"Rust crate (velnor-client)\",\"unit\":\"rust-velnor-client\"},{\"label\":\"Rust crate (velnor-control)\",\"unit\":\"rust-velnor-control\"},{\"label\":\"Rust crate (velnor-model)\",\"unit\":\"rust-velnor-model\"},{\"label\":\"Rust crate (velnor-render)\",\"unit\":\"rust-velnor-render\"},{\"label\":\"Rust crate (velnor-runner)\",\"unit\":\"rust-velnor-runner\"},{\"label\":\"Rust crate (velnor-tools)\",\"unit\":\"rust-velnor-tools\"},{\"label\":\"Rust crate (velnor-workflow)\",\"unit\":\"rust-velnor-workflow\"},{\"label\":\"Rust crate (velnor-workflow-contract)\",\"unit\":\"rust-velnor-workflow-contract\"},{\"label\":\"Rust crate (velnorctl)\",\"unit\":\"rust-velnorctl\"},{\"label\":\"Rust production topology\",\"unit\":\"rust-production-topology\"}]",
+ci-required	Validate generated stack results	      "scope": "affected",
+ci-required	Validate generated stack results	      "units": "bun-velnor,docker,docs,opentofu,rust-policy,rust-unit-collector,rust-velnor-model,rust-velnor-render,rust-velnor-workflow-contract,rust-production-topology,rust-velnor-client,rust-velnor-control,rust-velnor-runner,rust-velnor-tools,rust-velnor-workflow,rust-velnorctl,rust-velnor-bench"
+ci-required	Validate generated stack results	    }
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-lane-admission": {
+ci-required	Validate generated stack results	    "result": "skipped",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-bun-velnor": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-bun-velnor": {
+ci-required	Validate generated stack results	    "result": "failure",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-docker": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-docker": {
+ci-required	Validate generated stack results	    "result": "failure",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-docs": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-docs": {
+ci-required	Validate generated stack results	    "result": "failure",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-opentofu": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-opentofu": {
+ci-required	Validate generated stack results	    "result": "failure",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "prepare-cargo": {
+ci-required	Validate generated stack results	    "result": "failure",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-rust-policy": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-rust-policy": {
+ci-required	Validate generated stack results	    "result": "skipped",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-rust-unit-collector": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-rust-unit-collector": {
+ci-required	Validate generated stack results	    "result": "skipped",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-rust-velnor-bench": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-rust-velnor-bench": {
+ci-required	Validate generated stack results	    "result": "skipped",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-rust-velnor-client": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-rust-velnor-client": {
+ci-required	Validate generated stack results	    "result": "skipped",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-rust-velnor-control": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-rust-velnor-control": {
+ci-required	Validate generated stack results	    "result": "skipped",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-rust-velnor-model": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-rust-velnor-model": {
+ci-required	Validate generated stack results	    "result": "skipped",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-rust-velnor-render": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-rust-velnor-render": {
+ci-required	Validate generated stack results	    "result": "skipped",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-rust-velnor-runner": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-rust-velnor-runner": {
+ci-required	Validate generated stack results	    "result": "skipped",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-rust-velnor-tools": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-rust-velnor-tools": {
+ci-required	Validate generated stack results	    "result": "skipped",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-rust-velnor-workflow": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-rust-velnor-workflow": {
+ci-required	Validate generated stack results	    "result": "skipped",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-rust-velnor-workflow-contract": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-rust-velnor-workflow-contract": {
+ci-required	Validate generated stack results	    "result": "skipped",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-rust-velnorctl": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-rust-velnorctl": {
+ci-required	Validate generated stack results	    "result": "skipped",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "github-rust-production-topology": {
+ci-required	Validate generated stack results	    "result": "success",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  },
+ci-required	Validate generated stack results	  "velnor-rust-production-topology": {
+ci-required	Validate generated stack results	    "result": "skipped",
+ci-required	Validate generated stack results	    "outputs": {}
+ci-required	Validate generated stack results	  }
+ci-required	Validate generated stack results	}
+ci-required	Validate generated stack results	2026-09-17T14:23:58.0142610Z   SELECTED_UNITS: bun-velnor,docker,docs,opentofu,rust-policy,rust-unit-collector,rust-velnor-model,rust-velnor-render,rust-velnor-workflow-contract,rust-production-topology,rust-velnor-client,rust-velnor-control,rust-velnor-runner,rust-velnor-tools,rust-velnor-workflow,rust-velnorctl,rust-velnor-bench
+ci-required	Validate generated stack results	2026-09-17T14:23:58.0145585Z   LANE_ADMITTED_GITHUB: true
+ci-required	Validate generated stack results	2026-09-17T14:23:58.0146084Z   LANE_ADMITTED_VELNOR: true
+ci-required	Validate generated stack results	2026-09-17T14:23:58.0146577Z   LANE_ADMITTED_VELNOR_TRUSTED: true
+ci-required	Validate generated stack results	2026-09-17T14:23:58.0147079Z ##[endgroup]
+ci-required	Validate generated stack results	2026-09-17T14:23:58.0529448Z selected CI job velnor-bun-velnor did not pass: failure
+ci-required	Validate generated stack results	2026-09-17T14:23:58.0546776Z ##[error]Process completed with exit code 1.
+Control / Required	UNKNOWN STEP	﻿2026-09-17T14:24:02.8470715Z Current runner version: '2.337.0'
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8489457Z ##[group]Runner Image Provisioner
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8490016Z Hosted Compute Agent
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8490356Z Version: 20260828.587
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8490764Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8491213Z Build Date: 2026-08-28T16:44:25Z
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8491677Z Worker ID: {3f063467-c816-43be-aff4-2e9fb9effc0c}
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8492094Z Azure Region: centralus
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8492641Z ##[endgroup]
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8493523Z ##[group]Operating System
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8493870Z Ubuntu
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8494209Z 24.04.5
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8494523Z LTS
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8494824Z ##[endgroup]
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8495176Z ##[group]Runner Image
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8495546Z Image: ubuntu-24.04
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8495865Z Version: 20260907.300.1
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8496646Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260907.300/images/ubuntu/Ubuntu2404-Readme.md
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8497550Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260907.300
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8498086Z ##[endgroup]
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8498797Z ##[group]GITHUB_TOKEN Permissions
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8499968Z Actions: read
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8500290Z Contents: read
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8500729Z Metadata: read
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8501049Z ##[endgroup]
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8502649Z Secret source: Actions
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8503157Z Cache mode: write
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8503644Z Prepare workflow directory
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8731948Z Prepare all required actions
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.8801059Z Complete job name: Control / Required
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.9424095Z ##[group]Run exit 1
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:02.9424799Z ^[[36;1mexit 1^[[0m
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:03.0084727Z shell: /usr/bin/bash -e {0}
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:03.0085340Z ##[endgroup]
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:03.0247306Z ##[error]Process completed with exit code 1.
+Control / Required	UNKNOWN STEP	2026-09-17T14:24:03.0354570Z Cleaning up orphan processes

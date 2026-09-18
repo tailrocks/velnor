@@ -1,0 +1,215 @@
+Repository jackin-project/jackin
+  source: static-filesystem-and-manifest-inspection
+  profile: generic
+  runners: github
+
+Detected
+
+  ✓ cargo audit policy
+  ✓ cargo deny policy
+  ✓ cargo lockfile
+  ✓ cargo nextest policy
+  ✓ mise present
+  ✓ bun package manager · docs
+  ✓ package.json script `build` · docs
+  ✓ package.json script `test` · docs
+  ✓ renovate configuration
+  ✓ rust-binaries: jackin-capsule:1
+  ✓ rust-binaries: jackin-config-fuzz:2
+  ✓ rust-binaries: jackin-dev:1
+  ✓ rust-binaries: jackin-env-fuzz:1
+  ✓ rust-binaries: jackin-manifest-fuzz:2
+  ✓ rust-binaries: jackin-protocol-fuzz:1
+  ✓ rust-binaries: jackin-runtime:1
+  ✓ rust-binaries: jackin-xtask:1
+  ✓ rust-binaries: jackin:3
+  ✓ rust-build-script: jackin
+  ✓ rust-build-script: jackin-capsule
+  ✓ rust-build-script: jackin-diagnostics
+  ✓ rust-build-script: jackin-docker
+  ✓ rust-build-script: jackin-image
+  ✓ rust-build-script: jackin-launch
+  ✓ rust-build-script: jackin-runtime
+  ✓ rust-features: jackin-agent-status:2
+  ✓ rust-features: jackin-capsule:3
+  ✓ rust-features: jackin-config:1
+  ✓ rust-features: jackin-console:1
+  ✓ rust-features: jackin-diagnostics:2
+  ✓ rust-features: jackin-instance:1
+  ✓ rust-features: jackin-isolation:1
+  ✓ rust-features: jackin-runtime:1
+  ✓ rust-features: jackin-usage:1
+  ✓ rust-features: jackin:2
+  ✓ rust-ffi: jackin-usage-ffi
+  ✓ rust-test-targets: jackin-capsule:1
+  ✓ rust-test-targets: jackin-config:1
+  ✓ rust-test-targets: jackin-diagnostics:17
+  ✓ rust-test-targets: jackin-manifest:1
+  ✓ rust-test-targets: jackin-protocol:1
+  ✓ rust-test-targets: jackin-runtime:1
+  ✓ rust-test-targets: jackin-telemetry:1
+  ✓ rust-test-targets: jackin-usage:1
+  ✓ rust-test-targets: jackin:1
+  ✓ Rust workspace · 35 packages
+  ✓ swift-package: native/Design/Prototypes/UnifiedAgentUsage
+
+Execution units
+
+  Rust: 36 jobs
+  Bun: 1 job
+  Swift / Apple: 2 jobs
+  Docker: 1 job
+  - bun-jackin-docs [Bun] · root=docs · runners=github: ubuntu-26.04
+    PR: cd -- 'docs' && bun install --frozen-lockfile ; cd -- 'docs' && bun run build ; cd -- 'docs' && bun run test
+  - docker-docker-construct [Docker] · root=docker/construct · runners=github: ubuntu-26.04
+    PR: docker build --file 'docker/construct/Dockerfile' --tag local-ci:docker-construct-dockerfile 'docker/construct'
+  - rust-arrayref [Rust] · root=vendor/arrayref · runners=github: ubuntu-26.04
+    PR: cd -- 'vendor/arrayref' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'vendor/arrayref' && mbx nextest run --locked --all-features --package 'arrayref' --no-tests pass ; cd -- 'vendor/arrayref' && mbx clippy --locked --profile test --all-targets --all-features --package 'arrayref' -- -D warnings
+  - rust-jackin [Rust] · root=crates/jackin · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin' && mbx nextest run --locked --all-features --package 'jackin' --no-tests pass ; cd -- 'crates/jackin' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin' -- -D warnings
+    needs: rust-jackin-brand, rust-jackin-build-meta, rust-jackin-config, rust-jackin-console, rust-jackin-core, rust-jackin-diagnostics, rust-jackin-docker, rust-jackin-env, rust-jackin-image, rust-jackin-launch, rust-jackin-manifest, rust-jackin-otlp-testbed, rust-jackin-process, rust-jackin-protocol, rust-jackin-runtime, rust-jackin-telemetry, rust-jackin-test-support, rust-jackin-tui, rust-jackin-usage
+  - rust-jackin-agent-status [Rust] · root=crates/jackin-agent-status · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-agent-status' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-agent-status' && mbx nextest run --locked --all-features --package 'jackin-agent-status' --no-tests pass ; cd -- 'crates/jackin-agent-status' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-agent-status' -- -D warnings
+    needs: rust-jackin-core, rust-jackin-protocol
+  - rust-jackin-brand [Rust] · root=crates/jackin-brand · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-brand' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-brand' && mbx nextest run --locked --all-features --package 'jackin-brand' --no-tests pass ; cd -- 'crates/jackin-brand' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-brand' -- -D warnings
+  - rust-jackin-build-meta [Rust] · root=crates/jackin-build-meta · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-build-meta' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-build-meta' && mbx nextest run --locked --all-features --package 'jackin-build-meta' --no-tests pass ; cd -- 'crates/jackin-build-meta' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-build-meta' -- -D warnings
+    needs: rust-jackin-process
+  - rust-jackin-capsule [Rust] · root=crates/jackin-capsule · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-capsule' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-capsule' && mbx nextest run --locked --all-features --package 'jackin-capsule' --no-tests pass ; cd -- 'crates/jackin-capsule' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-capsule' -- -D warnings
+    needs: rust-jackin-agent-status, rust-jackin-brand, rust-jackin-build-meta, rust-jackin-core, rust-jackin-diagnostics, rust-jackin-otlp-testbed, rust-jackin-process, rust-jackin-protocol, rust-jackin-telemetry, rust-jackin-tui, rust-jackin-usage
+  - rust-jackin-config [Rust] · root=crates/jackin-config · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-config' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-config' && mbx nextest run --locked --all-features --package 'jackin-config' --no-tests pass ; cd -- 'crates/jackin-config' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-config' -- -D warnings
+    needs: rust-jackin-core, rust-jackin-diagnostics, rust-jackin-otlp-testbed, rust-jackin-telemetry
+  - rust-jackin-config-fuzz [Rust] · root=crates/jackin-config/fuzz · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-config/fuzz' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-config/fuzz' && mbx nextest run --locked --all-features --package 'jackin-config-fuzz' --no-tests pass ; cd -- 'crates/jackin-config/fuzz' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-config-fuzz' -- -D warnings
+    needs: rust-jackin-config
+  - rust-jackin-console [Rust] · root=crates/jackin-console · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-console' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-console' && mbx nextest run --locked --all-features --package 'jackin-console' --no-tests pass ; cd -- 'crates/jackin-console' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-console' -- -D warnings
+    needs: rust-jackin-config, rust-jackin-core, rust-jackin-diagnostics, rust-jackin-env, rust-jackin-oppicker, rust-jackin-otlp-testbed, rust-jackin-protocol, rust-jackin-telemetry, rust-jackin-tui
+  - rust-jackin-core [Rust] · root=crates/jackin-core · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-core' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-core' && mbx nextest run --locked --all-features --package 'jackin-core' --no-tests pass ; cd -- 'crates/jackin-core' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-core' -- -D warnings
+  - rust-jackin-dev [Rust] · root=crates/jackin-dev · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-dev' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-dev' && mbx nextest run --locked --all-features --package 'jackin-dev' --no-tests pass ; cd -- 'crates/jackin-dev' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-dev' -- -D warnings
+  - rust-jackin-diagnostics [Rust] · root=crates/jackin-diagnostics · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-diagnostics' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-diagnostics' && mbx nextest run --locked --all-features --package 'jackin-diagnostics' --no-tests pass ; cd -- 'crates/jackin-diagnostics' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-diagnostics' -- -D warnings
+    needs: rust-jackin-core, rust-jackin-otlp-testbed, rust-jackin-telemetry
+  - rust-jackin-docker [Rust] · root=crates/jackin-docker · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-docker' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-docker' && mbx nextest run --locked --all-features --package 'jackin-docker' --no-tests pass ; cd -- 'crates/jackin-docker' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-docker' -- -D warnings
+    needs: rust-jackin-build-meta, rust-jackin-core, rust-jackin-diagnostics, rust-jackin-otlp-testbed, rust-jackin-process, rust-jackin-telemetry
+  - rust-jackin-env [Rust] · root=crates/jackin-env · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-env' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-env' && mbx nextest run --locked --all-features --package 'jackin-env' --no-tests pass ; cd -- 'crates/jackin-env' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-env' -- -D warnings
+    needs: rust-jackin-config, rust-jackin-core, rust-jackin-diagnostics, rust-jackin-process, rust-jackin-protocol, rust-jackin-telemetry
+  - rust-jackin-env-fuzz [Rust] · root=crates/jackin-env/fuzz · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-env/fuzz' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-env/fuzz' && mbx nextest run --locked --all-features --package 'jackin-env-fuzz' --no-tests pass ; cd -- 'crates/jackin-env/fuzz' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-env-fuzz' -- -D warnings
+    needs: rust-jackin-config, rust-jackin-core, rust-jackin-env
+  - rust-jackin-host [Rust] · root=crates/jackin-host · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-host' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-host' && mbx nextest run --locked --all-features --package 'jackin-host' --no-tests pass ; cd -- 'crates/jackin-host' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-host' -- -D warnings
+    needs: rust-jackin-core, rust-jackin-diagnostics, rust-jackin-docker, rust-jackin-process, rust-jackin-protocol, rust-jackin-telemetry, rust-jackin-test-support
+  - rust-jackin-image [Rust] · root=crates/jackin-image · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-image' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-image' && mbx nextest run --locked --all-features --package 'jackin-image' --no-tests pass ; cd -- 'crates/jackin-image' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-image' -- -D warnings
+    needs: rust-jackin-build-meta, rust-jackin-core, rust-jackin-diagnostics, rust-jackin-docker, rust-jackin-manifest, rust-jackin-otlp-testbed, rust-jackin-process, rust-jackin-telemetry
+  - rust-jackin-instance [Rust] · root=crates/jackin-instance · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-instance' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-instance' && mbx nextest run --locked --all-features --package 'jackin-instance' --no-tests pass ; cd -- 'crates/jackin-instance' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-instance' -- -D warnings
+    needs: rust-jackin-config, rust-jackin-core, rust-jackin-diagnostics, rust-jackin-manifest, rust-jackin-process, rust-jackin-telemetry
+  - rust-jackin-isolation [Rust] · root=crates/jackin-isolation · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-isolation' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-isolation' && mbx nextest run --locked --all-features --package 'jackin-isolation' --no-tests pass ; cd -- 'crates/jackin-isolation' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-isolation' -- -D warnings
+    needs: rust-jackin-config, rust-jackin-core, rust-jackin-diagnostics, rust-jackin-docker, rust-jackin-process, rust-jackin-protocol, rust-jackin-telemetry, rust-jackin-test-support
+  - rust-jackin-launch [Rust] · root=crates/jackin-launch · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-launch' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-launch' && mbx nextest run --locked --all-features --package 'jackin-launch' --no-tests pass ; cd -- 'crates/jackin-launch' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-launch' -- -D warnings
+    needs: rust-jackin-brand, rust-jackin-build-meta, rust-jackin-core, rust-jackin-diagnostics, rust-jackin-telemetry, rust-jackin-tui
+  - rust-jackin-manifest [Rust] · root=crates/jackin-manifest · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-manifest' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-manifest' && mbx nextest run --locked --all-features --package 'jackin-manifest' --no-tests pass ; cd -- 'crates/jackin-manifest' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-manifest' -- -D warnings
+    needs: rust-jackin-config, rust-jackin-core
+  - rust-jackin-manifest-fuzz [Rust] · root=crates/jackin-manifest/fuzz · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-manifest/fuzz' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-manifest/fuzz' && mbx nextest run --locked --all-features --package 'jackin-manifest-fuzz' --no-tests pass ; cd -- 'crates/jackin-manifest/fuzz' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-manifest-fuzz' -- -D warnings
+    needs: rust-jackin-manifest
+  - rust-jackin-oppicker [Rust] · root=crates/jackin-oppicker · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-oppicker' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-oppicker' && mbx nextest run --locked --all-features --package 'jackin-oppicker' --no-tests pass ; cd -- 'crates/jackin-oppicker' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-oppicker' -- -D warnings
+    needs: rust-jackin-core, rust-jackin-telemetry
+  - rust-jackin-otlp-testbed [Rust] · root=crates/jackin-otlp-testbed · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-otlp-testbed' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-otlp-testbed' && mbx nextest run --locked --all-features --package 'jackin-otlp-testbed' --no-tests pass ; cd -- 'crates/jackin-otlp-testbed' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-otlp-testbed' -- -D warnings
+    needs: rust-jackin-telemetry
+  - rust-jackin-pr-trailers [Rust] · root=crates/jackin-pr-trailers · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-pr-trailers' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-pr-trailers' && mbx nextest run --locked --all-features --package 'jackin-pr-trailers' --no-tests pass ; cd -- 'crates/jackin-pr-trailers' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-pr-trailers' -- -D warnings
+    needs: rust-jackin-process
+  - rust-jackin-process [Rust] · root=crates/jackin-process · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-process' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-process' && mbx nextest run --locked --all-features --package 'jackin-process' --no-tests pass ; cd -- 'crates/jackin-process' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-process' -- -D warnings
+  - rust-jackin-protocol [Rust] · root=crates/jackin-protocol · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-protocol' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-protocol' && mbx nextest run --locked --all-features --package 'jackin-protocol' --no-tests pass ; cd -- 'crates/jackin-protocol' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-protocol' -- -D warnings
+    needs: rust-jackin-core, rust-jackin-telemetry
+  - rust-jackin-protocol-fuzz [Rust] · root=crates/jackin-protocol/fuzz · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-protocol/fuzz' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-protocol/fuzz' && mbx nextest run --locked --all-features --package 'jackin-protocol-fuzz' --no-tests pass ; cd -- 'crates/jackin-protocol/fuzz' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-protocol-fuzz' -- -D warnings
+    needs: rust-jackin-protocol
+  - rust-jackin-runtime [Rust] · root=crates/jackin-runtime · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-runtime' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-runtime' && mbx nextest run --locked --all-features --package 'jackin-runtime' --no-tests pass ; cd -- 'crates/jackin-runtime' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-runtime' -- -D warnings
+    needs: rust-jackin-brand, rust-jackin-build-meta, rust-jackin-config, rust-jackin-core, rust-jackin-diagnostics, rust-jackin-docker, rust-jackin-env, rust-jackin-host, rust-jackin-image, rust-jackin-instance, rust-jackin-isolation, rust-jackin-launch, rust-jackin-manifest, rust-jackin-otlp-testbed, rust-jackin-process, rust-jackin-protocol, rust-jackin-telemetry, rust-jackin-test-support, rust-jackin-usage
+  - rust-jackin-telemetry [Rust] · root=crates/jackin-telemetry · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-telemetry' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-telemetry' && mbx nextest run --locked --all-features --package 'jackin-telemetry' --no-tests pass ; cd -- 'crates/jackin-telemetry' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-telemetry' -- -D warnings
+  - rust-jackin-test-support [Rust] · root=crates/jackin-test-support · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-test-support' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-test-support' && mbx nextest run --locked --all-features --package 'jackin-test-support' --no-tests pass ; cd -- 'crates/jackin-test-support' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-test-support' -- -D warnings
+    needs: rust-jackin-core, rust-jackin-manifest
+  - rust-jackin-tui [Rust] · root=crates/jackin-tui · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-tui' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-tui' && mbx nextest run --locked --all-features --package 'jackin-tui' --no-tests pass ; cd -- 'crates/jackin-tui' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-tui' -- -D warnings
+    needs: rust-jackin-brand
+  - rust-jackin-usage [Rust] · root=crates/jackin-usage · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-usage' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-usage' && mbx nextest run --locked --all-features --package 'jackin-usage' --no-tests pass ; cd -- 'crates/jackin-usage' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-usage' -- -D warnings
+    needs: rust-jackin-config, rust-jackin-core, rust-jackin-diagnostics, rust-jackin-otlp-testbed, rust-jackin-protocol, rust-jackin-telemetry
+  - rust-jackin-usage-ffi [Rust] · root=crates/jackin-usage-ffi · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-usage-ffi' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-usage-ffi' && mbx nextest run --locked --all-features --package 'jackin-usage-ffi' --no-tests pass ; cd -- 'crates/jackin-usage-ffi' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-usage-ffi' -- -D warnings
+    needs: rust-jackin-config, rust-jackin-core, rust-jackin-env, rust-jackin-protocol, rust-jackin-telemetry, rust-jackin-usage
+  - rust-jackin-xtask [Rust] · root=crates/jackin-xtask · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/jackin-xtask' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/jackin-xtask' && mbx nextest run --locked --all-features --package 'jackin-xtask' --no-tests pass ; cd -- 'crates/jackin-xtask' && mbx clippy --locked --profile test --all-targets --all-features --package 'jackin-xtask' -- -D warnings
+    needs: rust-jackin-process
+  - rust-policy [Rust] · root=. · runners=github: ubuntu-26.04
+    PR: mbx deny check ; mbx audit
+  - swift-package-native-design-prototypes-unifiedagentusage [Swift / Apple] · root=native/Design/Prototypes/UnifiedAgentUsage · runners=github: macos-26
+    PR: cd -- 'native/Design/Prototypes/UnifiedAgentUsage' && swift build ; cd -- 'native/Design/Prototypes/UnifiedAgentUsage' && swift test --parallel
+  - swift-package-native [Swift / Apple] · root=native · runners=github: macos-26
+    PR: mise run swift-package-native-ci
+    needs: rust-jackin-usage-ffi
+  total: 40 units · 146 dependency edges
+
+Generated files
+
+  = unchanged .github/actionlint.yaml                    actionlint runner-label contract
+  = unchanged .github/ci/project.toml                    detected CI graph + binary runtime contract
+  = unchanged .github/workflows/ci-main.yml              trusted main verification
+  = unchanged .github/workflows/ci-policy.yml            base-owned pull-request policy gate
+  = unchanged .github/workflows/ci-pr.yml                parallel PR verification
+  = unchanged .github/workflows/ci-unit-bun.yml          generated CI support file
+  = unchanged .github/workflows/ci-unit-docker.yml       generated CI support file
+  = unchanged .github/workflows/ci-unit-rust.yml         generated CI support file
+  = unchanged .github/workflows/ci-unit-swift.yml        generated CI support file
+  = unchanged .github/workflows/desktop-merge.yml        generated CI support file
+  = unchanged .github/workflows/desktop-scheduled.yml    generated CI support file
+  = unchanged .github/workflows/maintenance.yml          closed-PR cache cleanup
+  = unchanged .github/workflows/nightly.yml              scheduled full verification
+  = unchanged .github/workflows/renovate-validate.yml    generated CI support file
+  = unchanged .github/workflows/renovate.yml             generated CI support file
+  = unchanged config/fleet/velnor-host.env               generated CI support file
+  ~ update    .github/ci/.github-actions-generator-state ownership and overwrite safety state
+
+Why
+
+  → Rust manifests become independently schedulable jobs per crate; Cargo resolves prerequisites inside each job while ci-required aggregates every selected result.
+  → package.json scripts and lockfiles select the native package manager, install mode, cache, and package job.
+  → Shared Xcode schemes run as isolated Apple jobs on macOS; unknown schemes/destinations are not guessed.
+  → Only checked-in, statically detected evidence controls generated commands; project code and task runners are never executed.
+  → Generated jobs invoke `velnor-workflow run` directly; the checked-in TOML remains the runtime contract for planning, execution, policy, and release commands.
+
+Boundaries
+
+  ! Manifests nested under tests/ or benches/ directories are treated as test fixtures and ignored.
+  ! Project code, build scripts, task runners, and commands are never executed during analysis.
+  ! Release, signing, registry, deployment, branch-protection, and runner-capability contracts remain explicit manual inputs.
+  ! Rust build scripts are watched but their system dependencies and generated outputs are not inferred.
+
+Template memory (ceiling 5.00 MiB, GitHub limit 10 MiB)
+
+  → .github/workflows/ci-main.yml: 2.60 MiB expanded (own 357.3 KiB; 1×ci-unit-bun.yml @ 38.5 KiB, 1×ci-unit-docker.yml @ 35.8 KiB, 36×ci-unit-rust.yml @ 60.1 KiB, 2×ci-unit-swift.yml @ 35.5 KiB)
+  → .github/workflows/ci-pr.yml: 2.58 MiB expanded (own 338.4 KiB; 1×ci-unit-bun.yml @ 38.5 KiB, 1×ci-unit-docker.yml @ 35.8 KiB, 36×ci-unit-rust.yml @ 60.1 KiB, 2×ci-unit-swift.yml @ 35.5 KiB)
+
+Result Generated 17 files in /Users/donbeave/Projects/jackin-project/jackin
+

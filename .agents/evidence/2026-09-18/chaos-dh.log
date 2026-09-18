@@ -1,0 +1,138 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.43s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID 75a94de6-0c48-4308-a604-5f6dca31f5a0 with nextest profile: docker-e2e
+    Starting 1 test across 4 binaries (22 tests and 27 binaries skipped, including 27 binaries via profile.docker-e2e.default-filter)
+        SLOW [> 60.000s] (───) jackin::dind_e2e chaos_drop_control_socket
+        SLOW [>120.000s] (───) jackin::dind_e2e chaos_drop_control_socket
+        SLOW [>180.000s] (───) jackin::dind_e2e chaos_drop_control_socket
+        SLOW [>240.000s] (───) jackin::dind_e2e chaos_drop_control_socket
+        SLOW [>300.000s] (───) jackin::dind_e2e chaos_drop_control_socket
+        SLOW [>360.000s] (───) jackin::dind_e2e chaos_drop_control_socket
+  TRY 1 FAIL [ 360.463s] (───) jackin::dind_e2e chaos_drop_control_socket
+  stdout ───
+
+    running 1 test
+    test chaos_drop_control_socket has been running for over 60 seconds
+    test chaos_drop_control_socket ... FAILED
+
+    failures:
+
+    failures:
+        chaos_drop_control_socket
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 360.46s
+
+  stderr ───
+    JACKIN_CHAOS_SEED=52781473517
+
+    thread '<unnamed>' (137497925) panicked at crates/jackin/tests/dind_e2e/pty_runner.rs:182:5:
+    timed out waiting for sentinel file /var/folders/8p/h376l_nn3375kyj72czdq2x80000gn/T/.tmpMaSx4h/workspace/jackin-e2e-report.txt
+    diagnostics:
+    captured process output is the diagnostic source; legacy artifact directory exists=false (/var/folders/8p/h376l_nn3375kyj72czdq2x80000gn/T/.tmpMaSx4h/home/.jackin/data/diagnostics/runs)
+    stdout tail:
+     jackin❯  · Loading agent-smith in /workspace━━━━━━───────────────────────────identityrolecredentialsconstload █████████▆░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   9%                                               Ctrl-C abort   Ctrl-Q quit                                                Resolving role identity…                                                                                               4Pqidentiy  role  credntials  constru Resolving role identity…                                                                                               identiy  role  credntials  construct Resolving role identity…                                                                                               L]*46Pk88<identity role credentials construct  Resolving role identity…                                                                                               Lo]*h4v6v<k6M8z8<cz{identity role credentials construct  Resolving role identity…                                                                                               Loaidentity role credentials construct  Resolving role identity…                                                                                               LoadA SBH*Nmbg63<k0UR6M8z8N<>Ac~]{w#H━━━━━━━━━━━━rolecredentials    construct  agent binaries derived ima██████████████████████████████▂36 Preparing runtime binaries…                                                                                   zyqyq7fq LoadiBH*Emb268<kLDR6C98BRp#<GPd&c~]I{&NwL#HW7vole   credentials   construct   agent binaries   derived image  Preparing runtime binaries…                                                                                   zyqyq7fq Loadine  credntials  construct  agent binaries  derived image   Preparing runtime binaries…                                                                                   zyqyq7fq LoadingoIH*pEm6b208<kLDlnqw6C938B]Rp6<HGPdz&c0~]|{o>XNwL#EHI7WF7vXC2 credntials  construct  agent binaries  derived image  w Preparing runtime binaries…                                                                                   zyqyq7fq Loading ovHj%Emvnb208<kY%LDRnlM6C9@8S\Rp6<uQPdz*cq~]|{o>X]1w&L#EHe[I7WF7gvw\XYV2yVmcredntials  construct  agent binaries  derive
+    ranscript truncated; final output follows ...
+    [0m
+    stderr tail:
+
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+    thread 'chaos_drop_control_socket' (137497560) panicked at crates/jackin/tests/dind_e2e.rs:639:9:
+    chaos_drop_socket: no container appeared
+
+   DELAY 2/3 by   1.000s (───) jackin::dind_e2e chaos_drop_control_socket
+  TRY 2 SLOW [> 60.000s] (───) jackin::dind_e2e chaos_drop_control_socket
+  TRY 2 SLOW [>120.000s] (───) jackin::dind_e2e chaos_drop_control_socket
+  TRY 2 SLOW [>180.000s] (───) jackin::dind_e2e chaos_drop_control_socket
+  TRY 2 SLOW [>240.000s] (───) jackin::dind_e2e chaos_drop_control_socket
+  TRY 2 SLOW [>300.000s] (───) jackin::dind_e2e chaos_drop_control_socket
+  TRY 2 SLOW [>360.000s] (───) jackin::dind_e2e chaos_drop_control_socket
+  TRY 2 FAIL [ 360.653s] (───) jackin::dind_e2e chaos_drop_control_socket
+  stdout ───
+
+    running 1 test
+    test chaos_drop_control_socket has been running for over 60 seconds
+    test chaos_drop_control_socket ... FAILED
+
+    failures:
+
+    failures:
+        chaos_drop_control_socket
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 360.64s
+
+  stderr ───
+    JACKIN_CHAOS_SEED=52781473517
+
+    thread '<unnamed>' (137572963) panicked at crates/jackin/tests/dind_e2e/pty_runner.rs:182:5:
+    timed out waiting for sentinel file /var/folders/8p/h376l_nn3375kyj72czdq2x80000gn/T/.tmpXbxTca/workspace/jackin-e2e-report.txt
+    diagnostics:
+    captured process output is the diagnostic source; legacy artifact directory exists=false (/var/folders/8p/h376l_nn3375kyj72czdq2x80000gn/T/.tmpXbxTca/home/.jackin/data/diagnostics/runs)
+    stdout tail:
+            cleaned up orphaned resources for jk-zyqyq7fq-agentsmith
+     jackin❯  · Loading agent-smith in /workspace━━━━━━───────────────────────────identityrolecredentialsconstload █████████▆░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   9%                                               Ctrl-C abort   Ctrl-Q quit                                                Resolving role identity…                                                                                               4Pqidentiy  role  credntials  constru Resolving role identity…                                                                                               identiy  role  credntials  construct Resolving role identity…                                                                                               L]*46Pk88<identity role credentials construct  Resolving role identity…                                                                                               Lo]*h4v6v<k6M8z8<cz{identity role credentials construct  Resolving role identity…                                                                                               Loaidentity role credentials construct  Resolving role identity…                                                                                               LoadA SBH*Nmbg63<k0UR6M8z8N<>Ac~]{w#H━━━━━━━━━━━━rolecredentials    construct  agent binaries derived ima██████████████████████████████▂36 Preparing runtime binaries…                                                                                   j9rdeqn3 LoadiBH*Emb268<kLDR6C98BRp#<GPd&c~]I{&NwL#HW7vole   credentials   construct   agent binaries   derived image  Preparing runtime binaries…                                                                                   j9rdeqn3 Loadine  credntials  construct  agent binaries  derived image   Preparing runtime binaries…                                                                                   j9rdeqn3 LoadingoIH*pEm6b208<kLDlnqw6C938B]Rp6<HGPdz&c0~]|{o>XNwL#EHI7WF7vXC2 credntials  construct  agent binaries  derived image  w Preparing runtime binaries…                                                                                   j9rdeqn3 Loading ovHj%Emvnb208<kY%LDRnlM6C9@8S\Rp6<uQPdz*cq~]|{o>X]1w&L#EHe[I7WF7gvw\XYV2yVmcredntials  construct  agent binaries  der
+    ... transcript truncated; final output follows ...
+    [0m
+    stderr tail:
+
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+    thread 'chaos_drop_control_socket' (137572600) panicked at crates/jackin/tests/dind_e2e.rs:639:9:
+    chaos_drop_socket: no container appeared
+
+   DELAY 3/3 by   1.000s (───) jackin::dind_e2e chaos_drop_control_socket
+  TRY 3 SLOW [> 60.000s] (───) jackin::dind_e2e chaos_drop_control_socket
+  TRY 3 SLOW [>120.000s] (───) jackin::dind_e2e chaos_drop_control_socket
+  TRY 3 SLOW [>180.000s] (───) jackin::dind_e2e chaos_drop_control_socket
+  TRY 3 SLOW [>240.000s] (───) jackin::dind_e2e chaos_drop_control_socket
+  TRY 3 SLOW [>300.000s] (───) jackin::dind_e2e chaos_drop_control_socket
+  TRY 3 SLOW [>360.000s] (───) jackin::dind_e2e chaos_drop_control_socket
+  TRY 3 FAIL [ 360.359s] (1/1) jackin::dind_e2e chaos_drop_control_socket
+  stdout ───
+
+    running 1 test
+    test chaos_drop_control_socket has been running for over 60 seconds
+    test chaos_drop_control_socket ... FAILED
+
+    failures:
+
+    failures:
+        chaos_drop_control_socket
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 360.35s
+
+  stderr ───
+    JACKIN_CHAOS_SEED=52781473517
+
+    thread 'chaos_drop_control_socket' (137653325) panicked at crates/jackin/tests/dind_e2e.rs:639:9:
+    chaos_drop_socket: no container appeared
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 
+────────────
+     Summary [1083.482s] 1 test run: 0 passed, 1 failed, 22 skipped
+  TRY 3 FAIL [ 360.359s] (1/1) jackin::dind_e2e chaos_drop_control_socket
+  stdout ───
+
+    running 1 test
+    test chaos_drop_control_socket has been running for over 60 seconds
+    test chaos_drop_control_socket ... FAILED
+
+    failures:
+
+    failures:
+        chaos_drop_control_socket
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 360.35s
+
+  stderr ───
+    JACKIN_CHAOS_SEED=52781473517
+
+    thread 'chaos_drop_control_socket' (137653325) panicked at crates/jackin/tests/dind_e2e.rs:639:9:
+    chaos_drop_socket: no container appeared
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+error: test run failed
+mbx[savings]: 19h 32m of compilation avoided across 6289 builds. imagine the fan noise. now stop.

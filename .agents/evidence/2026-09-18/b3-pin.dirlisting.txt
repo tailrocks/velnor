@@ -1,0 +1,4 @@
+# Recursive listing of /private/tmp/b3-pin (evidence stub; only evidence-type files copied under b3-pin/)
+# Generated: 2026-09-18T09:59:30Z
+# du: 7.6M	/private/tmp/b3-pin
+-rwxr-xr-x@ 1 donbeave  wheel  8012144 Sep 18 08:31 /private/tmp/b3-pin/velnor-workflow-macOS-ARM64

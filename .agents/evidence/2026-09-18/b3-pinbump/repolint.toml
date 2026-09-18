@@ -1,0 +1,19 @@
+# Repository-local adoption configuration. Generator-owned census values are
+# cached here; map and deferred sections remain repository-owned.
+[repo]
+tier = "workspace"
+kind = "ci-producer"
+visibility = "public"
+research = false
+
+[map.dirs]
+crates = "Workspace members; velnorctl binary legal in crates/ per §3"
+config = "Repository and fleet configuration"
+docker = "Job-container build context and pinned mise inputs"
+docs = "Product, operator, and architecture documentation"
+fleet = "CI-producer product surface (§3 producer exception)"
+microvm = "MicroVM guest image and runtime assets"
+plans = "Velnor migration and operations plans"
+schemas = "Versioned action and protocol schemas"
+scripts = "Fixture, smoke, and repository verification tooling"
+tools = "Workspace tooling and unit-collector utility"

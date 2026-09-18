@@ -1,0 +1,69 @@
+::group::docs: mise run check
+[verify-release-test] $ scripts/test-verify-release.sh
+[actionlint] $ actionlint
+[shellcheck] $ shellcheck scripts/verify-release.sh scripts/test-verify-release…
+[package-update-test] $ ./scripts/test-package-update.sh
+[actionlint] Finished in 141.0ms
+[verify-release-test] ok - coherent release verifies and arms the sentinel
+[package-update-test] package-state.json: OK
+[package-update-test] true
+[package-update-test] true
+[package-update-test] package-state.json: OK
+[package-update-test] package-update: unknown channel: beta
+[package-update-test] package-update preview channel checks passed
+[package-update-test] Finished in 823.2ms
+[shellcheck] Finished in 854.4ms
+[verify-release-test] ok - live OCI index binds and verifies both platform configs
+[verify-release-test] ok - rejected: one OCI platform label differs from the release record
+[verify-release-test] ok - rejected: tampered record fails checksum
+[verify-release-test] ok - rejected: tampered deb fails hash
+[verify-release-test] ok - rejected: resolved commit disagrees with record
+[verify-release-test] ok - rejected: missing record fails closed
+[verify-release-test] ok - rejected: extra deb is rejected
+[verify-release-test] ok - rejected: manifest hash != record manifest hash
+[verify-release-test] ok - rejected: APT signer fingerprint mismatch
+[verify-release-test] ok - rejected: OCI ref not pinning the index digest
+[verify-release-test] ok - rejected: packaged identity inside the deb disagrees with the commit
+[verify-release-test] ok - rejected: extracted runner binary disagrees with record
+[verify-release-test] verify-release: publication staged in ./public and publication-record.json signed; live Pages untouched
+[verify-release-test] ok - publication signs candidate and exact rollback pair into both indexes
+[verify-release-test] ok - publication fails before staging mutation without a signer passphrase
+[verify-release-test] ok - coherent preview release verifies and arms the sentinel
+[verify-release-test] ok - preview rejected: no commit supplied (there is no tag to resolve)
+[verify-release-test] ok - preview rejected: version suffix does not abbreviate the supplied commit
+[verify-release-test] ok - preview rejected: version grammar (separator, v-prefix, short/absent commit)
+[verify-release-test] ok - preview rejected: release-manifest version != requested preview version
+[verify-release-test] ok - preview rejected: tampered preview deb fails its sidecar checksum
+[verify-release-test] ok - preview rejected: preview sidecar names a different deb than its own
+[verify-release-test] ok - preview accepted: named sidecar variant
+[verify-release-test] ok - preview rejected: extra preview deb is rejected
+[verify-release-test] ok - preview rejected: preview release-manifest source_ref is not refs/heads/main
+[verify-release-test] ok - preview rejected: preview release-manifest source_repository mismatch
+[verify-release-test] ok - preview rejected: preview release-manifest commit != supplied commit
+[verify-release-test] ok - preview rejected: preview deb build-identity source_sha disagrees with the commit
+[verify-release-test] ok - preview rejected: preview deb build-identity crate_version != preview base version
+[verify-release-test] ok - preview rejected: preview deb control architecture disagrees with the asset arch
+[verify-release-test] ok - preview rejected: SHA256SUMS carries more than the two preview deb lines
+[verify-release-test] verify-release: publication staged in ./public and publication-record.json signed; live Pages untouched
+[verify-release-test] verify-release: preview publication staged in ./public and publication-record-preview.json signed; live Pages untouched
+[verify-release-test] ok - preview publication stages into the shared tree without touching the stable suite
+[verify-release-test] ok - preview rejected: candidate is older than the retained rollback version
+[verify-release-test] ok - preview rejected: candidate equals the retained rollback version
+[verify-release-test] ok - preview rejected: previous pointer is not the JSON string "preview"
+[verify-release-test] ok - preview rejected: publication without the armed reprepro sentinel
+[verify-release-test] verify-release: preview publication staged in ./public and publication-record-preview.json signed; live Pages untouched
+[verify-release-test] ok - preview bootstrap initializes the suite from the candidate pair alone (null previous)
+[verify-release-test] verify-release: preview publication staged in ./public and publication-record-preview.json signed; live Pages untouched
+[verify-release-test] ok - preview bootstrap re-run stays idempotent on its own tree
+[verify-release-test] ok - preview rejected: bootstrap over a tree that already retains a rollback pair
+[verify-release-test] ok - preview rejected: --bootstrap is mutually exclusive with --prev-dir
+[verify-release-test] ok - preview rejected: --bootstrap does not apply to --suite stable
+[verify-release-test] ok - preview rejected: bootstrap previous pointer is not JSON null
+[verify-release-test] ok - publisher holds least authority for a public source image
+[verify-release-test] ok - public GHCR verification runs without registry authentication
+[verify-release-test] ok - same-version publication retry preserves signed rollback identity
+[verify-release-test] ----
+[verify-release-test] all 45 verify-release checks passed
+[verify-release-test] Finished in 11.05s
+Finished in 11.05s
+::endgroup::

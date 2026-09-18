@@ -1,0 +1,137 @@
+Repository tailrocks/parallax
+  source: static-filesystem-and-manifest-inspection
+  profile: generic
+  runners: github
+
+Detected
+
+  ✓ cargo deny policy
+  ✓ cargo lockfile
+  ✓ cargo nextest policy
+  ✓ mise present
+  ✓ bun package manager · ui
+  ✓ package.json script `build` · ui
+  ✓ package.json script `lint` · ui
+  ✓ package.json script `test` · ui
+  ✓ package.json script `typecheck` · ui
+  ✓ rust-binaries: parallax-cli:1
+  ✓ rust-binaries: parallax-mcp:1
+  ✓ rust-binaries: parallax-sentry-proxy:1
+  ✓ rust-build-script: parallax-cli
+  ✓ rust-build-script: parallax-server
+  ✓ rust-features: parallax-cli:2
+  ✓ rust-features: parallax-greptime:1
+  ✓ rust-features: parallax-server:2
+  ✓ rust-test-targets: parallax-api:1
+  ✓ rust-test-targets: parallax-cli:1
+  ✓ rust-test-targets: parallax-evidence:1
+  ✓ rust-test-targets: parallax-greptime:1
+  ✓ rust-test-targets: parallax-ingest:1
+  ✓ rust-test-targets: parallax-model:1
+  ✓ rust-test-targets: parallax-server:1
+  ✓ rust-test-targets: parallax-spool:1
+  ✓ rust-test-targets: parallax-xtask:1
+  ✓ Rust workspace · 19 packages
+
+Execution units
+
+  Rust: 20 jobs
+  Bun: 1 job
+  Docker: 2 jobs
+  - bun-ui [Bun] · root=ui · runners=github: ubuntu-26.04 · tool=1.3.14
+    PR: cd -- 'ui' && bun install --frozen-lockfile ; cd -- 'ui' && bun run lint ; cd -- 'ui' && bun run typecheck ; cd -- 'ui' && bun run build ; cd -- 'ui' && bun run test
+  - docker-bench-otlp-fanout-maple [Docker] · root=bench/otlp-fanout/maple · runners=github: ubuntu-26.04
+    PR: docker build --file 'bench/otlp-fanout/maple/Dockerfile' --tag local-ci:bench-otlp-fanout-maple-dockerfile 'bench/otlp-fanout/maple'
+  - docker-crates-parallax-sentry-proxy [Docker] · root=crates/parallax-sentry-proxy · runners=github: ubuntu-26.04
+    PR: docker build --file 'crates/parallax-sentry-proxy/Dockerfile' --tag local-ci:crates-parallax-sentry-proxy-dockerfile 'crates/parallax-sentry-proxy'
+  - rust-nextest-evidence-fixture [Rust] · root=scripts/fixtures/nextest-evidence · runners=github: ubuntu-26.04
+    PR: cd -- 'scripts/fixtures/nextest-evidence' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'scripts/fixtures/nextest-evidence' && mbx nextest run --locked --all-features --package 'nextest-evidence-fixture' --no-tests pass ; cd -- 'scripts/fixtures/nextest-evidence' && mbx clippy --locked --profile test --all-targets --all-features --package 'nextest-evidence-fixture' -- -D warnings
+  - rust-parallax-analysis [Rust] · root=crates/parallax-analysis · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/parallax-analysis' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/parallax-analysis' && mbx nextest run --locked --all-features --package 'parallax-analysis' --no-tests pass ; cd -- 'crates/parallax-analysis' && mbx clippy --locked --profile test --all-targets --all-features --package 'parallax-analysis' -- -D warnings
+    needs: rust-parallax-model, rust-parallax-proto, rust-parallax-semconv
+  - rust-parallax-api [Rust] · root=crates/parallax-api · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/parallax-api' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/parallax-api' && mbx nextest run --locked --all-features --package 'parallax-api' --no-tests pass ; cd -- 'crates/parallax-api' && mbx clippy --locked --profile test --all-targets --all-features --package 'parallax-api' -- -D warnings
+    needs: rust-parallax-analysis, rust-parallax-evidence, rust-parallax-metadata, rust-parallax-storage, rust-parallax-test-support
+  - rust-parallax-cli [Rust] · root=crates/parallax-cli · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/parallax-cli' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/parallax-cli' && mbx nextest run --locked --all-features --package 'parallax-cli' --no-tests pass ; cd -- 'crates/parallax-cli' && mbx clippy --locked --profile test --all-targets --all-features --package 'parallax-cli' -- -D warnings
+    needs: rust-parallax-evidence, rust-parallax-metadata, rust-parallax-model, rust-parallax-redaction, rust-parallax-semconv, rust-parallax-server, rust-parallax-spool, rust-parallax-storage
+  - rust-parallax-evidence [Rust] · root=crates/parallax-evidence · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/parallax-evidence' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/parallax-evidence' && mbx nextest run --locked --all-features --package 'parallax-evidence' --no-tests pass ; cd -- 'crates/parallax-evidence' && mbx clippy --locked --profile test --all-targets --all-features --package 'parallax-evidence' -- -D warnings
+    needs: rust-parallax-analysis, rust-parallax-model, rust-parallax-redaction
+  - rust-parallax-greptime [Rust] · root=crates/parallax-greptime · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/parallax-greptime' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/parallax-greptime' && mbx nextest run --locked --all-features --package 'parallax-greptime' --no-tests pass ; cd -- 'crates/parallax-greptime' && mbx clippy --locked --profile test --all-targets --all-features --package 'parallax-greptime' -- -D warnings
+    needs: rust-parallax-ingest, rust-parallax-model, rust-parallax-proto, rust-parallax-semconv, rust-parallax-storage
+  - rust-parallax-ingest [Rust] · root=crates/parallax-ingest · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/parallax-ingest' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/parallax-ingest' && mbx nextest run --locked --all-features --package 'parallax-ingest' --no-tests pass ; cd -- 'crates/parallax-ingest' && mbx clippy --locked --profile test --all-targets --all-features --package 'parallax-ingest' -- -D warnings
+    needs: rust-parallax-model, rust-parallax-proto, rust-parallax-semconv
+  - rust-parallax-mcp [Rust] · root=crates/parallax-mcp · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/parallax-mcp' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/parallax-mcp' && mbx nextest run --locked --all-features --package 'parallax-mcp' --no-tests pass ; cd -- 'crates/parallax-mcp' && mbx clippy --locked --profile test --all-targets --all-features --package 'parallax-mcp' -- -D warnings
+    needs: rust-parallax-evidence
+  - rust-parallax-metadata [Rust] · root=crates/parallax-metadata · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/parallax-metadata' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/parallax-metadata' && mbx nextest run --locked --all-features --package 'parallax-metadata' --no-tests pass ; cd -- 'crates/parallax-metadata' && mbx clippy --locked --profile test --all-targets --all-features --package 'parallax-metadata' -- -D warnings
+    needs: rust-parallax-model, rust-parallax-redaction, rust-parallax-semconv, rust-parallax-storage
+  - rust-parallax-model [Rust] · root=crates/parallax-model · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/parallax-model' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/parallax-model' && mbx nextest run --locked --all-features --package 'parallax-model' --no-tests pass ; cd -- 'crates/parallax-model' && mbx clippy --locked --profile test --all-targets --all-features --package 'parallax-model' -- -D warnings
+  - rust-parallax-proto [Rust] · root=crates/parallax-proto · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/parallax-proto' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/parallax-proto' && mbx nextest run --locked --all-features --package 'parallax-proto' --no-tests pass ; cd -- 'crates/parallax-proto' && mbx clippy --locked --profile test --all-targets --all-features --package 'parallax-proto' -- -D warnings
+    needs: rust-parallax-semconv
+  - rust-parallax-redaction [Rust] · root=crates/parallax-redaction · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/parallax-redaction' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/parallax-redaction' && mbx nextest run --locked --all-features --package 'parallax-redaction' --no-tests pass ; cd -- 'crates/parallax-redaction' && mbx clippy --locked --profile test --all-targets --all-features --package 'parallax-redaction' -- -D warnings
+  - rust-parallax-semconv [Rust] · root=crates/parallax-semconv · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/parallax-semconv' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/parallax-semconv' && mbx nextest run --locked --all-features --package 'parallax-semconv' --no-tests pass ; cd -- 'crates/parallax-semconv' && mbx clippy --locked --profile test --all-targets --all-features --package 'parallax-semconv' -- -D warnings
+  - rust-parallax-sentry-proxy [Rust] · root=crates/parallax-sentry-proxy · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/parallax-sentry-proxy' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/parallax-sentry-proxy' && mbx nextest run --locked --all-features --package 'parallax-sentry-proxy' --no-tests pass ; cd -- 'crates/parallax-sentry-proxy' && mbx clippy --locked --profile test --all-targets --all-features --package 'parallax-sentry-proxy' -- -D warnings
+    needs: rust-parallax-ingest
+  - rust-parallax-server [Rust] · root=crates/parallax-server · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/parallax-server' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/parallax-server' && mbx nextest run --locked --all-features --package 'parallax-server' --no-tests pass ; cd -- 'crates/parallax-server' && mbx clippy --locked --profile test --all-targets --all-features --package 'parallax-server' -- -D warnings
+    needs: rust-parallax-analysis, rust-parallax-api, rust-parallax-evidence, rust-parallax-greptime, rust-parallax-ingest, rust-parallax-metadata, rust-parallax-proto, rust-parallax-semconv, rust-parallax-spool, rust-parallax-storage, rust-parallax-test-support
+  - rust-parallax-spool [Rust] · root=crates/parallax-spool · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/parallax-spool' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/parallax-spool' && mbx nextest run --locked --all-features --package 'parallax-spool' --no-tests pass ; cd -- 'crates/parallax-spool' && mbx clippy --locked --profile test --all-targets --all-features --package 'parallax-spool' -- -D warnings
+  - rust-parallax-storage [Rust] · root=crates/parallax-storage · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/parallax-storage' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/parallax-storage' && mbx nextest run --locked --all-features --package 'parallax-storage' --no-tests pass ; cd -- 'crates/parallax-storage' && mbx clippy --locked --profile test --all-targets --all-features --package 'parallax-storage' -- -D warnings
+    needs: rust-parallax-model, rust-parallax-proto, rust-parallax-semconv
+  - rust-parallax-test-support [Rust] · root=crates/parallax-test-support · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/parallax-test-support' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/parallax-test-support' && mbx nextest run --locked --all-features --package 'parallax-test-support' --no-tests pass ; cd -- 'crates/parallax-test-support' && mbx clippy --locked --profile test --all-targets --all-features --package 'parallax-test-support' -- -D warnings
+    needs: rust-parallax-metadata, rust-parallax-model, rust-parallax-proto, rust-parallax-semconv, rust-parallax-storage
+  - rust-parallax-xtask [Rust] · root=crates/parallax-xtask · runners=github: ubuntu-26.04
+    PR: cd -- 'crates/parallax-xtask' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/parallax-xtask' && mbx nextest run --locked --all-features --package 'parallax-xtask' --no-tests pass ; cd -- 'crates/parallax-xtask' && mbx clippy --locked --profile test --all-targets --all-features --package 'parallax-xtask' -- -D warnings
+    needs: rust-parallax-api
+  - rust-policy [Rust] · root=. · runners=github: ubuntu-26.04
+    PR: mbx deny check
+  total: 23 units · 54 dependency edges
+
+Generated files
+
+  = unchanged .github/actionlint.yaml                    actionlint runner-label contract
+  = unchanged .github/ci/project.toml                    detected CI graph + binary runtime contract
+  = unchanged .github/workflows/ci-main.yml              trusted main verification
+  = unchanged .github/workflows/ci-policy.yml            base-owned pull-request policy gate
+  = unchanged .github/workflows/ci-pr.yml                parallel PR verification
+  = unchanged .github/workflows/ci-unit-bun.yml          generated CI support file
+  = unchanged .github/workflows/ci-unit-docker.yml       generated CI support file
+  = unchanged .github/workflows/ci-unit-rust.yml         generated CI support file
+  = unchanged .github/workflows/maintenance.yml          closed-PR cache cleanup
+  = unchanged .github/workflows/nightly.yml              scheduled full verification
+  = unchanged config/fleet/velnor-host.env               generated CI support file
+  = unchanged .github/ci/.github-actions-generator-state ownership and overwrite safety state
+
+Why
+
+  → Rust manifests become independently schedulable jobs per crate; Cargo resolves prerequisites inside each job while ci-required aggregates every selected result.
+  → package.json scripts and lockfiles select the native package manager, install mode, cache, and package job.
+  → Only checked-in, statically detected evidence controls generated commands; project code and task runners are never executed.
+  → Generated jobs invoke `velnor-workflow run` directly; the checked-in TOML remains the runtime contract for planning, execution, policy, and release commands.
+
+Boundaries
+
+  ! Project code, build scripts, task runners, and commands are never executed during analysis.
+  ! Release, signing, registry, deployment, branch-protection, and runner-capability contracts remain explicit manual inputs.
+  ! Rust build scripts are watched but their system dependencies and generated outputs are not inferred.
+
+Template memory (ceiling 5.00 MiB, GitHub limit 10 MiB)
+
+  → .github/workflows/ci-main.yml: 1.49 MiB expanded (own 209.7 KiB; 1×ci-unit-bun.yml @ 38.7 KiB, 2×ci-unit-docker.yml @ 36.0 KiB, 20×ci-unit-rust.yml @ 60.2 KiB)
+  → .github/workflows/ci-pr.yml: 1.47 MiB expanded (own 193.0 KiB; 1×ci-unit-bun.yml @ 38.7 KiB, 2×ci-unit-docker.yml @ 36.0 KiB, 20×ci-unit-rust.yml @ 60.2 KiB)
+
+Result Generated files are current in /private/tmp/parallax-ci.fNbV74/parallax-pr109-codex
+

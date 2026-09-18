@@ -1,0 +1,2878 @@
+      ┌─────────┐  mr boxington
+     ╱ ═══════ ╱│
+    ╱─────────╱ │
+    │ •    (◉)│≡│
+    │  ◟▄▄▄◞  │ ╱
+    │   ◀◆▶   │╱
+    └─────────┘
+   Compiling velnor-workflow v0.1.0 (/Users/donbeave/Projects/tailrocks/velnor-project/velnor3/.muse/worktrees/subagent-v2-01a0ac95-7322-7412-8f86-f69a41ff2453-01a0ad16-9c49-7d13-bfde-6b275b5dbb17/crates/velnor-workflow)
+warning: struct `ResultIdentity` is never constructed
+   --> crates/velnor-workflow/src/provider.rs:481:19
+    |
+481 | pub(crate) struct ResultIdentity {
+    |                   ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `ObservedResult` is never constructed
+   --> crates/velnor-workflow/src/provider.rs:495:19
+    |
+495 | pub(crate) struct ObservedResult {
+    |                   ^^^^^^^^^^^^^^
+
+warning: enum `ObservedOutcome` is never used
+   --> crates/velnor-workflow/src/provider.rs:502:17
+    |
+502 | pub(crate) enum ObservedOutcome {
+    |                 ^^^^^^^^^^^^^^^
+
+warning: enum `VerdictFailure` is never used
+   --> crates/velnor-workflow/src/provider.rs:512:17
+    |
+512 | pub(crate) enum VerdictFailure {
+    |                 ^^^^^^^^^^^^^^
+
+warning: method `class` is never used
+   --> crates/velnor-workflow/src/provider.rs:556:19
+    |
+554 | impl VerdictFailure {
+    | ------------------- method in this implementation
+555 |     #[must_use]
+556 |     pub(crate) fn class(&self) -> &'static str {
+    |                   ^^^^^
+
+warning: function `evaluate_verdict` is never used
+   --> crates/velnor-workflow/src/provider.rs:579:15
+    |
+579 | pub(crate) fn evaluate_verdict(
+    |               ^^^^^^^^^^^^^^^^
+
+warning: struct `RunIdentity` is never constructed
+   --> crates/velnor-workflow/src/provider.rs:703:19
+    |
+703 | pub(crate) struct RunIdentity {
+    |                   ^^^^^^^^^^^
+
+warning: method `command_digest_for` is never used
+   --> crates/velnor-workflow/src/provider.rs:713:8
+    |
+712 | impl RunIdentity {
+    | ---------------- method in this implementation
+713 |     fn command_digest_for(&self, unit_id: &str) -> String {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `cache_key` is never used
+   --> crates/velnor-workflow/src/provider.rs:737:15
+    |
+737 | pub(crate) fn cache_key(
+    |               ^^^^^^^^^
+
+warning: function `artifact_name` is never used
+   --> crates/velnor-workflow/src/provider.rs:758:15
+    |
+758 | pub(crate) fn artifact_name(
+    |               ^^^^^^^^^^^^^
+
+warning: `velnor-workflow` (lib test) generated 10 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.82s
+     Running unittests src/lib.rs (target/debug/deps/velnor_workflow-1d366257f802c6b0)
+
+running 580 tests
+test apt::tests::feed_urls_accept_https_hosts_only ... ok
+test apt::tests::keyring_paths_stay_relative_without_traversal ... ok
+test apt::tests::origins_descriptions_and_staging_dirs_reject_control_shapes ... ok
+test apt::tests::hex_and_fingerprint_shapes_match_the_runner ... ok
+test apt::tests::fetch_argv_is_fixed_and_slug_validated ... ok
+test apt::tests::contract_resolution_applies_documented_defaults ... ok
+test apt::tests::package_binary_and_identity_names_reject_shell_shapes ... ok
+test apt::tests::pool_naming_follows_the_debian_convention ... ok
+test apt::tests::deploy_guard_refuses_older_publications_only ... ok
+test apt::tests::contract_resolution_honors_explicit_values ... ok
+test apt::tests::fetch_patterns_are_fixed_allowists_per_suite ... ok
+test apt::tests::contract_resolution_rejects_every_malformed_field ... ok
+test apt::tests::preview_order_agrees_with_dpkg_when_dpkg_exists ... ok
+test apt::tests::preview_versions_compare_base_then_sequence_then_suffix ... ok
+test apt::tests::preview_versions_require_the_tilde_grammar ... ok
+test apt::tests::previous_pointer_derivation_implements_the_jq_rules ... ok
+test apt::tests::publication_records_parse_both_suite_shapes ... ok
+test apt::tests::repository_slugs_accept_owner_name_only ... ok
+test apt::tests::retention_accepts_the_implemented_policy_only ... ok
+test apt::tests::secret_refs_name_environment_secrets_never_values ... ok
+test apt::tests::preview_verify_rejects_a_truncated_sums_list ... ok
+test apt::tests::stable_tags_require_the_v_prefix_and_a_numeric_triple ... ok
+test apt::tests::channel_update_rejects_incoherent_heads ... ok
+test apt::tests::deb_control_fields_read_through_both_backends ... ok
+test apt::tests::stable_verify_rejects_a_malformed_commit_before_any_fetch ... ok
+test apt::tests::channel_update_emits_the_typed_channel_head ... ok
+test apt::tests::stable_verify_rejects_a_rotated_signer ... ok
+test apt::tests::stable_verify_accepts_a_coherent_release_and_arms_the_sentinel ... ok
+test apt::tests::preview_verify_rejects_sidecar_and_control_defects ... ok
+test apt::tests::renamed_fixtures_verify_identically ... ok
+test apt::tests::stable_versions_compare_numerically_per_component ... ok
+test apt::tests::suites_parse_the_locked_pair_only ... ok
+test closure::tests::build_script_mirrors_the_closure_spec ... ok
+test apt::tests::stable_verify_rejects_arch_and_packaged_identity_defects ... ok
+test closure::tests::canonical_digest_is_order_independent ... ok
+test closure::tests::canonical_digest_separates_features_profile_and_content ... ok
+test apt::tests::preview_verify_rejects_identity_and_grammar_defects ... ok
+test closure::tests::crate_inputs_stay_closure_complete ... ok
+test closure::tests::dev_features_pin_the_candidate_build ... ok
+test closure::tests::product_tag_carries_a_digest_locator ... ok
+test closure::tests::stamped_features_match_dev_features ... ok
+test config::tests::absent_config_digests_the_empty_canonical_form ... ok
+test config::tests::args_stay_opaque_but_reject_unstable_values ... ok
+test config::tests::cache_sections_parse_and_stay_generator_only ... ok
+test config::tests::canonical_form_preserves_declarations_and_sorts_table_keys ... ok
+test config::tests::declaration_order_is_part_of_the_digest ... ok
+test apt::tests::preview_verify_accepts_a_coherent_rolling_release ... ok
+test config::tests::declared_files_stay_bare_yml_names ... ok
+test config::tests::discovery_reads_the_repository_root_and_ignores_absence ... ok
+test config::tests::declared_mise_tools_match_lock_keys_by_exact_spelling ... ok
+test apt::tests::stable_verify_rejects_tampered_and_missing_inputs ... ok
+test config::tests::lock_key_parser_collects_bare_and_quoted_qualified_keys ... ok
+test config::tests::lock_key_reader_treats_a_missing_lock_as_unpinned ... ok
+test apt::tests::stable_verify_rejects_manifest_and_oci_incoherence ... ok
+test config::tests::full_config_validates_against_a_scanned_shape ... ok
+test config::tests::package_update_channel_grants_fail_closed ... ok
+test config::tests::empty_or_duplicate_mise_tools_fail ... ok
+test config::tests::renovate_unknown_field_fails_closed ... ok
+test apt::tests::stable_verify_rejects_bad_source_identity_before_mutation ... ok
+test config::tests::schema_must_be_exactly_two ... ok
+test config::tests::unit_trust_and_platform_are_typed ... ok
+test config::tests::misshapen_mise_tools_fail_regardless_of_lock ... ok
+test config::tests::unknown_fields_are_rejected ... ok
+test config::tests::workflow_automatic_providers_must_stay_inside_the_universe ... ok
+test config::tests::workflow_dispatch_and_automatic_provider_defaults_are_optional ... ok
+test config::tests::workflow_dispatch_providers_must_stay_inside_the_universe ... ok
+test config::tests::workflow_providers_accepts_strict_ids ... ok
+test config::tests::workflow_providers_is_optional_without_changing_canonical_shape ... ok
+test config::tests::workflow_providers_rejects_unknown_ids_and_repeats ... ok
+test config::tests::workflow_runners_keeps_unknown_fields_denied ... ok
+test config::tests::workflow_selectors_reject_shared_local_labels ... ok
+test config::tests::workflow_selectors_route_each_provider_and_reject_empty_labels ... ok
+test config::tests::missing_generator_section_is_a_config_error ... ok
+test config::tests::renovate_enabled_requires_declare_row_and_trusted_runners ... ok
+test config::tests::repository_must_be_an_owner_and_a_name ... ok
+test config::tests::unknown_declared_unit_names_the_available_units ... ok
+test closure::tests::closure_of_tree_agrees_with_git_on_a_fixture_repository ... ok
+test consumer_negatives::setup_action_declares_no_checksum_input ... ok
+test apt::tests::stable_verify_resolves_the_tag_commit_through_a_git_stub ... ok
+test closure::tests::candidate_closure_of_merge_matches_head_unless_main_touches_closure_paths ... ok
+test apt::tests::stable_publish_rejects_pool_collisions ... ok
+test consumer_negatives::setup_action_cached_bytes_are_reverified ... ok
+test consumer_negatives::setup_action_missing_product_fails_closed_naming_the_producer ... ok
+test consumer_negatives::setup_action_untrusted_signer_rejects ... ok
+test consumer_negatives::velnor_provisioner_fails_closed_when_pin_unresolvable ... ok
+test consumer_negatives::candidate_acquire_recomputes_the_digest ... ok
+test consumer_negatives::velnor_provisioner_missing_product_fails_closed ... ok
+test consumer_negatives::candidate_checksum_alone_confers_no_trust ... ok
+test consumer_negatives::setup_action_wrong_digest_rejects_before_install ... ok
+test consumer_negatives::candidate_acquire_exports_bound_product ... ok
+test consumer_negatives::setup_action_wrong_manifest_rejects ... ok
+test hosted_cargo_bin_toolchain_tests::save_follows_install_and_repairs_stale_cache_hits ... ok
+test policy::tests::a_second_pull_request_target_workflow_is_refused ... ok
+test consumer_negatives::cold_consumer_verifies_everything_with_zero_waivers ... ok
+test policy::tests::candidate_manifest_for_another_tree_is_rejected ... ok
+test policy::tests::candidate_manifest_source_prefers_flag_over_env ... ok
+test policy::tests::candidate_render_is_unavailable_without_git_history ... ok
+test consumer_negatives::setup_action_self_report_mismatch_rejects ... ok
+test consumer_negatives::velnor_provisioner_untrusted_signer_rejects ... ok
+test policy::tests::cli_requires_the_base_validator_revision ... ok
+test policy::tests::entrypoint_audit_names_each_escalation ... ok
+test consumer_negatives::velnor_provisioner_resolves_remote_pin_to_its_true_closure ... ok
+test policy::tests::from_env_consent_mapping_is_fail_closed ... ok
+test policy::tests::generated_entrypoint_satisfies_the_privilege_and_trigger_invariants ... ok
+test policy::tests::generated_tree_report_distinguishes_pin_candidate_and_stale_main ... ok
+test policy::tests::job_level_env_with_allowed_contexts_passes ... ok
+test policy::tests::job_level_env_with_runner_context_fails ... ok
+test policy::tests::job_level_env_with_steps_context_fails ... ok
+test policy::tests::lying_binary_whose_digest_misses_the_manifest_is_rejected ... ok
+test policy::tests::malformed_candidate_manifest_is_rejected ... ok
+test policy::tests::owner_entrypoint_pin_ignores_variable_references ... ok
+test policy::tests::bound_candidate_matching_head_tree_is_accepted ... ok
+test policy::tests::candidate_render_rejects_a_binary_claiming_another_closure ... ok
+test policy::tests::pin_reachable_fails_for_a_pin_outside_the_head_history ... ok
+test policy::tests::pin_monotonic_admits_an_unchanged_inherited_pin_and_refuses_a_regression ... ok
+test policy::tests::pin_reachable_names_a_shallow_checkout_as_the_cause ... ok
+test policy::tests::pin_rules_pass_when_the_declared_pin_descends_from_the_base_validator ... ok
+test policy::tests::pin_source_follows_the_declared_repository ... ok
+test policy::tests::pin_self_fetch_fails_loud_when_the_remote_lacks_the_pin ... ok
+test policy::tests::policy_sibling_setup_action_is_a_reviewed_local_path ... ok
+test policy::tests::provider_gate_admits_dispatch_on_any_ref ... ok
+test policy::tests::rendered_entrypoints_pass_the_legacy_space_marker_scan ... ok
+test policy::tests::checkout_arm_self_fetches_the_pin_in_a_shallow_clone ... ok
+test policy::tests::the_running_binary_is_the_pin_when_built_at_it ... ok
+test policy::tests::unbound_env_candidate_is_rejected_without_manifest ... ok
+test policy::tests::ungated_trusted_velnor_job_fails_the_trusted_runners_rule ... FAILED
+test policy::tests::velnor_entrypoint_is_gated_and_never_builds_the_pin ... ok
+test primitives::cache::tests::cache_is_local_host_persistent_requires_every_path ... ok
+test primitives::cache::tests::host_persistent_bypass_is_only_for_detected_backend_on_velnor ... ok
+test primitives::cache::tests::local_host_persistent_cache_path_matches_runner_contract ... ok
+test primitives::cache::tests::local_provider_skips_pinned_rust_toolchain ... ok
+test primitives::ir::tests::automatic_admission_follows_the_automatic_set_and_trust_adds_the_event_gate ... ok
+test primitives::ir::tests::candidate_publish_flags_only_the_hosted_owner_of_the_generator_crate ... ok
+test primitives::ir::tests::candidate_step_gates_sit_directly_after_their_name_lines ... ok
+test primitives::ir::tests::candidate_steps_match_the_policy_consumer_contract ... ok
+test primitives::ir::tests::dispatch_admission_matches_each_provider_by_comma_boundary ... ok
+test primitives::ir::tests::exactly_one_caller_per_run_passes_candidate_publish ... ok
+test primitives::ir::tests::foreign_trees_render_no_candidate_surface ... ok
+test primitives::ir::tests::no_lane_fetches_pin_history_the_tool_self_fetches ... ok
+test primitives::ir::tests::solo_kind_keeps_the_bare_event_gate ... ok
+test primitives::ir::tests::velnor_lane_check_implies_policy_runtime ... FAILED
+test consumer_negatives::velnor_provisioner_wrong_digest_rejects ... ok
+test primitives::release::tests::a_declared_apt_feed_is_generic_over_names ... ok
+test primitives::release::tests::a_declared_apt_feed_mutates_from_github_only ... ok
+test primitives::release::tests::a_declared_file_a_nested_unit_renderer_owns_is_rejected ... ok
+test primitives::release::tests::a_declared_homebrew_feed_mutates_from_github_only ... ok
+test primitives::release::tests::a_declared_native_release_admits_github_writer_only ... ok
+test primitives::release::tests::a_declared_release_row_adds_the_publisher ... ok
+test primitives::release::tests::a_declared_static_workflow_is_rejected ... ok
+test primitives::release::tests::apt_config_values_cannot_inject_shell_or_yaml ... ok
+test primitives::release::tests::an_incomplete_contract_omits_the_publisher_like_the_legacy_path ... ok
+test primitives::release::tests::dual_lane_release_publishers_stay_hosted_while_verification_stays_dual_lane ... FAILED
+test primitives::release::tests::default_rows_render_the_legacy_release_surface ... FAILED
+test primitives::release::tests::generated_cache_retention_job_has_actions_write ... ok
+test primitives::release::tests::github_release_unit_cache_restore_declares_cache_step_id ... ok
+test primitives::release::tests::identity_rows_render_the_pinned_native_surface ... FAILED
+test primitives::release::tests::incomplete_apt_declarations_name_the_missing_contract ... ok
+test primitives::release::tests::every_release_kind_renders_validator_jobs_with_full_history_and_bounded_stores ... ok
+test primitives::release::tests::maintenance_gh_api_steps_carry_gh_token ... ok
+test primitives::release::tests::maintenance_installs_pin_when_this_repository_owns_setup ... ok
+test primitives::release::tests::maintenance_keeps_github_runner_out_of_runs_on_when_runners_are_velnor ... FAILED
+test primitives::release::tests::maintenance_splits_prune_and_cache_when_runners_are_velnor ... FAILED
+test primitives::release::tests::maintenance_uses_configured_runners_for_github_hosted_modes ... ok
+test primitives::release::tests::incomplete_or_misdirected_release_rows_fail_closed ... ok
+test primitives::release::tests::native_debian_with_unmapped_target_fails_closed ... ok
+test primitives::release::tests::native_debian_without_manifest_schema_fails_closed ... ok
+test primitives::release::tests::native_guest_payload_uses_scanned_guest_bins ... ok
+test primitives::release::tests::native_identity_arms_from_scanned_release_build_feature ... ok
+test primitives::release::tests::native_identity_build_records_binary_digest_and_debian_reuses_it ... FAILED
+test primitives::release::tests::native_identity_image_admission_inspects_without_mutation ... ok
+test primitives::release::tests::native_identity_image_index_assembles_one_immutable_tag ... ok
+test primitives::release::tests::native_identity_image_platform_builds_per_arch_staging_tags ... ok
+test primitives::release::tests::native_identity_publish_assembles_and_binds_the_release_record ... ok
+test primitives::release::tests::native_identity_release_wires_release_build_and_deb_publishing ... ok
+test primitives::release::tests::native_image_lane_with_unmapped_target_fails_closed ... ok
+test primitives::release::tests::native_preview_identity_provisions_the_hosted_runtime_on_the_velnor_lane ... ok
+test primitives::release::tests::native_preview_produces_debs_with_rolling_identity ... ok
+test primitives::release::tests::native_without_detected_feature_keeps_plain_builds ... ok
+test primitives::release::tests::release_lanes_honor_the_configured_runner_labels ... ok
+test consumer_negatives::velnor_provisioner_wrong_manifest_rejects ... ok
+test primitives::release::tests::runtime_product_tags_are_disjoint_from_release_tags ... ok
+test primitives::release::tests::velnor_release_surfaces_have_no_hosted_runner_branch ... FAILED
+test primitives::renovate::tests::renovate_validate_uses_docker_validator_without_secrets ... ok
+test primitives::renovate::tests::renovate_writer_references_token_and_action_pin ... ok
+test primitives::renovate::tests::renovate_writer_uses_the_velnor_selector ... ok
+test primitives::runtime_products::tests::actions_are_sha_pinned_with_least_privilege ... ok
+test primitives::runtime_products::tests::all_consumers_pin_the_same_producer_ref ... ok
+test primitives::runtime_products::tests::attestation_covers_assets_and_manifest_in_the_pinned_workflow ... ok
+test primitives::runtime_products::tests::binary_closure_is_proven_before_upload ... ok
+test primitives::runtime_products::tests::build_is_a_locked_hermetic_release ... ok
+test primitives::runtime_products::tests::closure_shell_matches_the_canonical_form ... ok
+test primitives::runtime_products::tests::closure_shell_matches_the_setup_action ... ok
+test primitives::runtime_products::tests::conflicting_create_converges_instead_of_failing ... ok
+test primitives::release::tests::malformed_apt_declarations_fail_closed ... ok
+test primitives::runtime_products::tests::create_carries_no_target ... ok
+test primitives::release::tests::rendered_surfaces_never_select_latest ... ok
+test primitives::runtime_products::tests::default_branch_guard_accepts_only_the_default_ref ... ok
+test primitives::runtime_products::tests::existing_tags_skip_and_never_overwrite ... ok
+test consumer_negatives::velnor_provisioner_reuses_slot_only_on_digest_match ... ok
+test primitives::runtime_products::tests::manifest_shape_matches_the_consumer_contract ... ok
+test primitives::runtime_products::tests::non_owner_repositories_render_no_producer ... ok
+test primitives::runtime_products::tests::declared_row_renders_for_the_owner_and_fails_closed_elsewhere ... ok
+test primitives::runtime_products::tests::owner_renders_the_producer_on_default_branch_push_and_dispatch ... ok
+test primitives::runtime_products::tests::owner_auto_add_through_generated_files ... ok
+test primitives::runtime_products::tests::producer_runs_only_on_the_default_branch ... ok
+test primitives::runtime_products::tests::publish_serializes_on_the_tag_across_refs ... ok
+test primitives::runtime_products::tests::publish_verifies_before_creating_the_release ... ok
+test primitives::runtime_products::tests::publish_yields_to_a_fresher_same_closure_run ... ok
+test primitives::runtime_products::tests::registry_resolves_the_producer ... ok
+test primitives::runtime_products::tests::release_tags_come_from_product_tag ... ok
+test primitives::runtime_products::tests::rendered_bytes_are_pinned ... ok
+test primitives::runtime_products::tests::producer_builders_are_fixed_closure_covered_infrastructure ... ok
+test primitives::runtime_products::tests::smoke_test_installs_the_consumer_layout ... ok
+test primitives::runtime_products::tests::smoke_test_pins_the_producer_ref ... ok
+test primitives::runtime_products::tests::toolchain_fallback_stays_file_driven ... ok
+test primitives::runtime_products::tests::workflow_is_the_sole_tag_writer ... ok
+test primitives::snapshot::tests::a_class_inside_its_policy_evicts_nothing ... ok
+test primitives::snapshot::tests::an_exact_hit_repeats_one_key_and_new_state_mints_another ... ok
+test primitives::snapshot::tests::budget_report_exposes_per_class_totals_and_headroom ... ok
+test primitives::snapshot::tests::class_budgets_bound_each_class_without_touching_protected_space ... ok
+test primitives::snapshot::tests::compatibility_digest_changes_when_a_fact_changes ... ok
+test primitives::snapshot::tests::docker_seed_reservation_keeps_measured_evidence_headroom ... ok
+test primitives::snapshot::tests::emitted_key_families_classify_into_retention_classes ... ok
+test primitives::snapshot::tests::freshness_hashes_the_inputs_it_names ... ok
+test primitives::snapshot::tests::github_fractional_created_at_ages_mbx_generations ... ok
+test primitives::snapshot::tests::hash_segments_are_stripped_to_the_variant_class ... ok
+test primitives::snapshot::tests::planning_over_one_hundred_entries_is_one_correct_total ... ok
+test primitives::snapshot::tests::protected_seeds_are_never_planned_inside_or_outside_the_producer_window ... ok
+test primitives::snapshot::tests::purpose_is_the_retention_identity_and_markers_only_match_entries ... ok
+test primitives::snapshot::tests::restore_keys_never_name_a_complete_generation ... ok
+test primitives::snapshot::tests::retention_policy_from_config_overrides_github_budget ... ok
+test primitives::snapshot::tests::rust_cargo_source_matching_is_anchored_and_purpose_qualified ... ok
+test primitives::snapshot::tests::snapshot_keys_carry_compatibility_and_freshness_as_distinct_segments ... ok
+test primitives::snapshot::tests::superseded_in_window_generations_are_evicted_while_the_newest_is_not ... ok
+test primitives::snapshot::tests::the_bound_keeps_the_previous_generation_and_drops_the_rest ... ok
+test primitives::snapshot::tests::unreadable_ages_are_producer_active ... ok
+test primitives::tests::contract_updates_must_match_scanned_units ... ok
+test primitives::tests::contracts_and_file_rows_partition_the_registry ... ok
+test primitives::tests::registry_resolves_every_declared_family ... ok
+test primitives::tests::unknown_primitive_names_the_registry ... ok
+test primitives::watch::tests::opentofu_without_current_files_keeps_future_affected_selection ... ok
+test primitives::watch::tests::workspace_topology_gate_ignores_whole_crate_trees ... ok
+test promote::tests::stamp_fails_closed_on_missing_malformed_or_ambiguous_pins ... ok
+test promote::tests::stamp_ignores_revision_keys_outside_the_generator_section ... ok
+test promote::tests::stamp_replaces_the_generator_revision_and_nothing_else ... ok
+tick-1
+test primitives::runtime_products::tests::rendered_shell_parses ... ok
+test runtime::run_cmd_stall_tests::failing_command_keeps_original_error ... ok
+test primitives::runtime_products::tests::freshness_proof_yields_only_on_unchanged_closure ... ok
+test runtime::run_cmd_stall_tests::stall_limit_parses_override_and_falls_back ... ok
+test runtime::runner_lane_tests::affected_closure_does_not_follow_dependents_of_added_prerequisites ... ok
+test runtime::runner_lane_tests::crate_test_collection_matches_scanner_fixture_exclusions ... ok
+test runtime::runner_lane_tests::plan_providers_defaults_to_the_universe_and_dispatch_narrows ... ok
+test runtime::runner_lane_tests::scope_selects_the_matching_command_array ... ok
+test runtime::scope_event_tests::merge_group_is_a_trusted_full_scope_event ... ok
+test runtime::scope_event_tests::unknown_events_are_rejected_and_empty_keeps_local_passthrough ... ok
+test runtime::run_cmd_stall_tests::silent_command_past_stall_limit_fails_naming_the_stall ... ok
+test runtime::tests::affected_selection_expands_dependency_and_dependent_closure ... ok
+test runtime::tests::affected_selection_falls_back_to_full_for_a_stale_base ... ok
+test runtime::tests::affected_selection_includes_workspace_checks_for_each_changed_cargo_root ... ok
+test runtime::tests::affected_selection_falls_back_to_full_for_global_or_unmatched_changes ... ok
+test apt::tests::stable_publish_stages_signs_and_records ... ok
+test runtime::tests::affected_selection_scopes_contract_workspace_check_to_independent_cargo_project ... ok
+test runtime::tests::affected_selection_is_empty_for_an_empty_diff ... ok
+test runtime::tests::apt_fetch_and_resolve_reject_bad_inputs_before_any_effect ... ok
+test runtime::tests::apt_publish_pointer_channel_and_guard_reject_bad_inputs ... ok
+test runtime::tests::apt_publish_refuses_without_the_sentinel ... ok
+test runtime::tests::apt_verify_rejects_bad_inputs_before_any_effect ... ok
+test runtime::tests::affected_selection_scopes_root_workspace_check_to_root_cargo_project ... ok
+test policy::tests::pinned_binary_env_is_used_only_when_it_proves_the_pin ... ok
+test runtime::tests::cargo_version_bump_uses_the_explicit_allowlist_ids ... ok
+test runtime::tests::explicit_boolean_flags_parse_true_false_or_absent ... ok
+test runtime::tests::affected_selection_uses_merge_base_for_a_stale_branch_base ... ok
+test runtime::tests::current_project_cargo_lock_only_change_selects_exact_allowlist_units ... ok
+test runtime::tests::legacy_feed_commands_no_longer_accept_apt ... ok
+test runtime::tests::macos_platform_excludes_local_providers_but_keeps_hosted ... ok
+tick-2
+test policy::tests::forbidden_build_fails_closed_listing_every_candidate ... ok
+test runtime::tests::numeric_actions_cache_ids_become_lossless_internal_strings ... ok
+test runtime::tests::package_deb_rejects_bad_inputs_before_any_cargo_call ... ok
+test runtime::tests::package_deb_validates_packaging_options_before_any_cargo_call ... ok
+test runtime::tests::plan_output_without_swift_empties_its_matrix ... ok
+test runtime::tests::prerequisite_tier_rewrites_rust_clippy_to_check ... ok
+test runtime::tests::preview_versions_are_strictly_shaped ... ok
+test runtime::tests::selection_artifact_round_trips_scope_and_sha ... ok
+test runtime::tests::unselected_unit_fails_closed_instead_of_succeeding_as_a_noop ... ok
+test runtime::tests::hosted_selection_keeps_matching_workspace_checks ... ok
+test runtime::tests::current_project_leaf_change_selects_exact_dependency_closure ... ok
+test runtime::tests::mixed_workspace_roots_select_only_the_matching_checks_and_keep_closure ... ok
+test scan::docker::tests::paired_arch_dockerfiles_select_native_uname_and_fail_closed ... ok
+test scan::docker::tests::unpaired_dockerfile_stays_a_plain_build ... ok
+test runtime::tests::independent_manifest_and_lock_version_bump_selects_matching_workspace_check ... ok
+test scan::file_walk::tests::directories_outside_git_fall_back_to_the_physical_walk ... ok
+test scan::file_walk::tests::git_work_tree_does_not_filesystem_walk_when_ls_files_fails ... ok
+test scan::gradle::tests::include_ignores_comments_and_unrelated_strings ... ok
+test scan::gradle::tests::include_ignores_include_build ... ok
+test scan::gradle::tests::include_parses_multiline_kotlin_settings ... ok
+test scan::gradle::tests::jdbc_databases_collects_every_named_catalog ... ok
+test scan::gradle::tests::jooq_module_gets_postgres_service_and_schema_tasks ... ok
+test scan::gradle::tests::malformed_include_is_ignored ... ok
+test scan::gradle::tests::malformed_project_is_ignored ... ok
+test scan::gradle::tests::postgres_service_health_creates_workspace_jdbc_databases ... ok
+test scan::gradle::tests::project_deps_ignore_comments_and_unrelated_strings ... ok
+test scan::gradle::tests::project_deps_read_typesafe_and_colon_forms ... ok
+test scan::gradle::tests::qualified_include_is_not_a_settings_module_declaration ... ok
+test scan::gradle::tests::typesafe_accessors_match_kebab_case_modules ... ok
+test scan::file_walk::tests::untracked_files_stay_out_of_a_git_repository_scan ... ok
+test scan::gradle::tests::workspace_postgres_service_creates_sibling_flyway_catalogs ... ok
+test scan::rust::tests::include_str_through_external_symlink_is_rejected ... ok
+test scan::rust::tests::include_str_through_symlinked_directory_watches_resolved_tracked_file ... ok
+test scan::rust::tests::release_build_feature_is_detected_per_package ... ok
+test template_memory::tests::a_missing_local_callee_is_an_error ... ok
+test template_memory::tests::a_small_surface_passes_and_reports_each_aggregate ... ok
+test template_memory::tests::estimate_mirrors_runner_token_costs ... ok
+test runtime::tests::version_bump_selection_scopes_workspace_check_to_matching_cargo_root ... ok
+test scan::gradle::tests::workspace_scan_emits_wrapper_module_commands_and_depends_on ... ok
+test tests::actionlint_pin_coherence_refuses_a_drifted_lock ... ok
+test tests::adopted_templates_refresh_literal_velnor_source_pins_only ... ok
+test tests::adopted_templates_refresh_mr_boxington_pins_and_drop_retired_inputs ... ok
+test runtime::tests::version_bump_selects_workspace_check_for_the_allowlisted_root_only ... ok
+test tests::a_repository_without_a_config_gets_no_seeded_surface ... ok
+test tests::adopted_workflow_config_does_not_advertise_unrendered_unit_workflows ... ok
+test template_memory::tests::expanded_cost_counts_a_callee_once_per_caller ... ok
+test tests::adoption_snapshots_existing_workflows_and_reloads_them_from_templates ... ok
+test tests::apple_units_route_to_the_fixed_hosted_image ... ok
+test tests::apt_adopted_templates_migrate_legacy_velnor_selector ... ok
+test tests::apt_package_update_barrier_is_hosted_and_lane_neutral ... FAILED
+test tests::apt_package_updater_splits_lanes_into_static_runner_jobs ... ok
+test tests::both_runner_policy_entrypoint_stays_on_hosted_runner ... ok
+test tests::apt_release_contract_parses_and_validates_through_config ... ok
+test tests::canonical_docker_products_reject_runtime_target_consumption ... ok
+test tests::cargo_dependency_parser_normalizes_workspace_names_and_preserves_aliases ... ok
+test tests::cargo_fetch_roots_deduplicate_workspace_members_and_keep_independent_lockfiles ... ok
+test tests::cache_namespaces_partition_unit_lanes_from_the_docker_seed ... ok
+test tests::check_detects_absent_file_still_recorded_in_ownership_state ... ok
+test tests::cache_generation_config_does_not_change_github_lane_cache_keys ... ok
+test tests::cache_rendering_uses_only_detected_unit_cache_settings ... ok
+test tests::check_ownership_refresh_names_the_state_file ... ok
+test tests::ci_main_and_ci_pr_concurrency_groups_differ ... ok
+test tests::ci_pr_aggregate_omits_explicit_cache_mode_on_reusable_callers ... ok
+test policy::tests::path_binary_is_used_when_its_reported_closure_is_the_pin ... ok
+test tests::cli_accepts_generate_target_and_rejects_extra_positionals ... ok
+test tests::cli_accepts_optional_output_path_and_requires_value ... ok
+test tests::cli_defaults_to_github_and_accepts_documented_target_forms ... ok
+test tests::clap_provides_help_and_version_diagnostics ... ok
+test tests::cli_rejects_conflicting_write_modes ... ok
+test tests::cli_rejects_invalid_runner_and_multiple_targets ... ok
+test tests::collapsed_trust_gated_docker_renders_the_trusted_verify_job ... ok
+test tests::configured_pr_concurrency_group_isolates_by_pull_request_number ... ok
+test tests::declared_channel_drift_converges_back_to_the_declared_grant ... ok
+test tests::cli_report_explains_detection_topology_files_and_boundaries ... ok
+test tests::declared_package_update_channels_are_granted_per_owner_block ... ok
+test tests::declared_mise_tools_extend_the_unit_install_args ... ok
+test runtime::tests::workspace_checks_are_selected_only_for_matching_cargo_roots ... ok
+test tests::declared_renovate_contract_generates_pinned_workflows ... FAILED
+test tests::declared_templates_are_required_to_exist ... ok
+test tests::declared_repository_scans_and_adopts_its_own_workflows ... ok
+test tests::declared_templates_own_the_whole_surface ... ok
+test tests::default_aggregate_concurrency_keeps_main_runs_independent ... ok
+test tests::declared_tools_provision_mise_on_any_unit_kind ... ok
+test tests::dependency_bundle_saves_use_always_and_trusted_gate ... ok
+test tests::check_fails_when_config_inputs_change_but_output_does_not ... ok
+test consumer_negatives::velnor_provisioner_self_report_mismatch_rejects ... ok
+test tests::detected_cargo_source_caches_render_alongside_mr_boxington ... ok
+test tests::docker_release_stage_requires_canonical_checksummed_products ... ok
+test tests::check_fails_when_scan_inputs_change_but_output_does_not ... ok
+test tests::docker_mutable_mount_seed_renders_restore_seed_and_trusted_export ... ok
+test tests::direct_generation_refuses_workflows_owned_by_another_generator ... ok
+test tests::direct_generation_refuses_legacy_release_workflows_even_with_force ... ok
+test tests::declared_surface_rewrite_after_wipe_is_byte_identical ... ok
+test tests::docs_units_require_a_checked_in_lint_contract ... ok
+test tests::emitted_release_contract_parses_through_the_runtime_parser ... ok
+test tests::explicit_adoption_refreshes_modified_workflow_template ... ok
+test tests::emitted_release_table_carries_no_undeclared_keys ... ok
+test tests::emitted_project_toml_ignores_cache_generation_config ... ok
+test tests::failed_clone_cleanup_removes_partial_checkout ... ok
+test tests::fleet_caller_keeps_render_consumer_header ... ok
+test tests::emitted_install_args_pass_the_runner_lock_gate ... ok
+test tests::checked_in_workflows_match_the_generator_byte_for_byte ... FAILED
+test tests::full_automatic_runs_every_provider_on_automatic_events ... ok
+test tests::full_history_validator_refuses_a_shallow_policy_job ... ok
+test tests::explicit_provider_universes_select_exact_ci_jobs ... FAILED
+tick-3
+test tests::generated_actionlint_config_covers_apple_release_targets ... FAILED
+test tests::exact_pre_state_output_is_adopted_without_overwrite ... ok
+test tests::explicit_output_path_writes_generated_tree_outside_local_target ... ok
+test tests::generate_removes_absent_stale_entry_from_ownership_state ... ok
+test tests::force_refuses_to_replace_manually_modified_generated_file ... ok
+test tests::generated_actionlint_config_covers_selector_labels ... ok
+test tests::generated_actionlint_config_suppresses_nothing ... ok
+test tests::generated_cache_retention_job_has_actions_write ... ok
+test tests::force_generation_adopts_the_declared_surface_and_check_is_complete ... ok
+test tests::generated_maintenance_splits_prune_and_cache_when_runners_are_velnor ... FAILED
+test tests::generated_actionlint_config_covers_declared_runner_labels ... ok
+test tests::generated_github_content_is_excluded_from_repeated_scans ... ok
+test tests::generated_report_action_matches_authoritative_template ... ok
+test tests::generated_planning_stays_hosted_without_runtime_artifact ... ok
+test tests::generated_output_uses_binary_runtime_without_shell_helpers ... ok
+test tests::generated_project_config_is_stable_when_workflow_discovery_order_changes ... ok
+test tests::every_runtime_install_owns_a_revision_addressed_root ... FAILED
+test apt::tests::preview_bootstrap_refuses_an_existing_pool ... ok
+test tests::generated_workflows_keep_pr_affected_and_main_full_triggers_distinct ... ok
+test tests::generated_runner_rejects_affected_scope_on_trusted_events ... ok
+test tests::generation_config_scan_exclude_removes_files_from_scan_shape ... ok
+test tests::generation_config_selectors_reach_provider_routing ... ok
+test primitives::runtime_products::tests::conflicting_create_converges_when_the_release_appears ... ok
+test tests::generated_maintenance_keeps_hosted_lanes_for_github_and_both ... ok
+test tests::generation_refuses_an_unresolved_template_marker ... ok
+test tests::generated_pr_workflow_omits_merge_group ... ok
+test tests::generation_refuses_symlinked_output_root_ancestor ... ok
+test tests::generation_config_that_fails_validation_stops_generation ... ok
+test tests::generation_config_supported_overrides_reach_rendered_output ... ok
+test tests::generation_refuses_symlinked_owned_static_file_ancestor ... ok
+test tests::generation_refuses_symlinked_managed_directory ... ok
+test tests::generated_runner_parallelizes_independent_units_by_dependency_layer ... ok
+test tests::github_target_parser_accepts_canonical_forms_and_rejects_dot_segments ... ok
+test tests::guest_seed_lifecycle_requires_trusted_exact_miss_save ... ok
+test tests::generated_workflows_use_sidebar_supported_reusable_workflow_hierarchy ... FAILED
+test tests::generation_lock_serializes_mutating_writers ... ok
+test tests::generation_config_trusted_routing_gates_one_unit ... ok
+test tests::hosted_store_budget_validator_requires_the_export_before_the_action ... ok
+test tests::include_str_parser_ignores_comments_and_other_literals ... ok
+test tests::github_lane_cache_keys_unchanged_for_scanned_fixture ... ok
+test tests::github_lane_restores_before_checks_on_hosted_lane ... ok
+test tests::github_lane_save_gates_exclude_untrusted_events ... ok
+test tests::hosted_docker_full_build_reuses_the_pull_request_gha_layer_cache ... ok
+test tests::local_owner_repository_directory_beats_remote_shorthand ... ok
+test tests::hosted_runtime_artifact_carries_a_proven_policy_binary ... ok
+test tests::mbx_command_rewrite_routes_all_supported_cargo_commands ... ok
+test tests::hosted_runtime_setup_uses_the_versioned_setup_action ... ok
+test tests::install_rev_is_always_the_declared_pin ... ok
+test tests::invalid_renovate_generation_config_fails_closed ... ok
+test tests::kind_reusable_unions_member_tools_and_covers_every_fetch_unit ... ok
+test tests::macos_platform_units_run_on_the_fixed_hosted_image ... ok
+test tests::mise_action_cache_save_is_trusted_gated_on_github_lane ... ok
+test tests::mr_boxington_units_restore_their_declared_cargo_sources_on_both_lanes ... ok
+test tests::no_policy_job_builds_pull_request_code ... ok
+test policy::tests::revision_fallback_requires_the_pin_and_a_closure_report ... ok
+test tests::nextest_need_without_a_locked_runner_fails_the_scan ... ok
+test tests::mixed_lock_keys_drive_declared_and_detected_install_args ... ok
+test tests::owner_policy_job_checks_out_base_setup_action_before_setup ... ok
+test tests::owner_policy_job_never_checks_out_workspace_root ... ok
+test tests::non_main_default_branch_flows_into_generated_workflows ... ok
+test tests::plain_mode_never_selects_the_tui ... ok
+test tests::modified_legacy_guide_is_not_removed ... ok
+test tests::omitted_providers_flag_keeps_the_config_universe ... ok
+test tests::phase_report_step_renders_in_both_unit_paths ... ok
+test tests::planning_provisions_a_single_pinned_runtime ... ok
+test tests::policy_acquire_step_selects_same_repository_runs_by_object_id ... ok
+test tests::policy_candidate_closure_probe_holds_no_token ... ok
+test tests::policy_candidate_step_binds_manifest_to_pin_and_exports_it ... ok
+test tests::policy_job_acquires_validator_product_without_compiling ... ok
+test tests::policy_job_checks_out_full_history_and_the_audited_head ... ok
+test tests::policy_jobs_lint_caller_workflows_with_the_pinned_actionlint ... ok
+test tests::policy_lint_step_neutralizes_fork_mise_config ... ok
+test tests::lane_admission_validator_refuses_drift ... ok
+test tests::policy_trust_comment_states_candidate_execution ... ok
+test tests::plan_matrix_jq_compiles_and_defaults_a_missing_key ... ok
+test tests::preflight_reports_stale_deletion_and_ownership_update_without_writing ... ok
+test tests::owned_legacy_guide_is_removed ... ok
+test tests::mutable_mount_seed_validation_rejects_unconsumed_declarations ... ok
+test tests::provider_kind_label_uses_the_first_unit_group_segment ... ok
+test tests::providers_support_every_platform_but_local_only_linux ... ok
+test tests::generated_runner_tests_each_cargo_package_manifest ... ok
+test tests::plan_consumes_the_dispatch_or_automatic_providers ... ok
+test tests::planning_installs_head_so_runtime_toml_carries_providers ... ok
+test tests::remote_head_parser_requires_a_valid_head_branch ... ok
+test tests::raw_output_caches_alongside_mr_boxington_need_a_justification ... ok
+test tests::repo_declared_commands_decide_mise_provisioning ... ok
+test tests::qualified_declared_tool_missing_from_bare_lock_fails_the_scan ... ok
+test tests::provider_admits_workflow_dispatch_on_any_ref ... ok
+test tests::no_generated_file_passes_pin_build ... ok
+test tests::pull_request_runner_matches_every_selection ... ok
+test tests::github_backend_mr_boxington_jobs_export_the_hosted_store_budget ... FAILED
+test tests::reviewed_preimages_bind_file_identity_even_when_bytes_match ... ok
+test tests::report_action_classifies_cache_outcomes_for_github_and_velnor_lanes ... ok
+tick-4
+test tests::reviewed_preimages_reject_same_action_concurrent_replacement ... ok
+test tests::reviewed_update_keeps_live_path_present_until_atomic_replace ... ok
+test tests::runtime_install_root_validator_refuses_shared_copies_and_judges_actions ... ok
+test tests::runtime_install_root_validator_refuses_shared_destinations ... ok
+test tests::repository_without_renovate_contract_omits_renovate_workflows ... ok
+test tests::required_checks_bulk_load_needs_without_per_job_expressions ... FAILED
+test tests::reviewed_rust_workspace_uses_per_crate_test_fanout ... ok
+test tests::runtime_lane_consumes_platform_qualified_verified_products ... ok
+test tests::rust_units_fetch_sources_first_and_verify_offline_except_policy ... ok
+test tests::scan_skips_unresolvable_crates_but_keeps_detached_ones ... ok
+test tests::scanned_nextest_commands_tolerate_test_less_crates ... ok
+test tests::scanner_analyzes_rust_workspace_packages_and_local_dependencies ... FAILED
+test tests::required_check_expects_each_caller_by_its_lane_admission ... ok
+test tests::scanner_does_not_treat_generated_github_output_as_include_str_input ... ok
+test tests::scanner_detects_every_supported_fixture_shape ... ok
+test tests::repositories_without_config_keep_the_empty_config_input ... ok
+test tests::scanner_disambiguates_colliding_normalized_unit_ids ... ok
+test tests::scanner_extracts_package_json_manager_scripts_and_package_dependencies ... ok
+test tests::scanner_extracts_swiftpm_and_shared_xcode_scheme_units ... FAILED
+test tests::scanner_groups_dockerfiles_by_build_context ... ok
+test tests::scanner_ignores_manifests_nested_under_test_directories ... ok
+test tests::scanner_rejects_control_characters_in_configured_paths ... ok
+test tests::scanner_provisions_minimal_mise_tools_for_pinned_nextest_units ... FAILED
+test tests::setup_action_accept_filters_require_a_well_formed_manifest_revision ... ok
+test tests::setup_action_acquires_a_product_and_never_compiles ... ok
+test tests::setup_action_gates_both_paths_on_digest_and_self_report ... ok
+test tests::setup_action_runtime_save_is_trusted_gated ... ok
+test tests::setup_action_trust_does_not_depend_on_the_event ... ok
+test tests::setup_action_verifies_the_manifest_before_trusting_it ... ok
+test tests::preview_static_surface_saves_guest_seed_on_trusted_exact_miss ... FAILED
+test tests::shared_local_selector_labels_fail_closed ... ok
+test tests::policy_running_jobs_check_out_full_history ... FAILED
+test tests::scanner_skips_unsupported_package_manager_evidence ... ok
+test tests::static_templates_reject_local_mbx_without_declared_persistence ... ok
+test tests::scanner_tracks_static_github_include_str_inputs ... ok
+test tests::static_templates_route_rust_commands_through_mr_boxington ... ok
+test tests::prepare_cargo_caller_and_callee_select_the_same_restricted_units ... FAILED
+test tests::scanner_requires_a_pinned_toolchain_and_provisions_exactly_it ... FAILED
+test tests::this_binary_reports_its_own_source_closure ... ok
+test tests::this_binary_reports_its_own_source_revision ... ok
+test tests::report_action_prefers_fractional_queue_time_and_bounds_markers ... ok
+test tests::static_templates_render_automatic_lane_fallback_from_config ... ok
+test tests::trust_gated_velnor_docker_is_judged_by_the_trusted_class ... ok
+test tests::scanner_rejects_unusable_toolchain_pins ... ok
+test tests::trusted_gating_is_per_unit_and_never_a_label ... ok
+test tests::velnor_dependency_closure_adds_direct_depends_on_needs_edges ... ok
+test tests::units_without_a_root_lockfile_neither_fetch_nor_verify_offline ... ok
+test tests::swift_declared_mise_tools_render_mise_action ... ok
+test tests::velnor_lane_installs_only_unit_scoped_mise_tools ... FAILED
+test tests::velnor_lane_omits_redundant_rust_toolchain_steps ... ok
+test tests::rust_kind_reusable_size_is_independent_of_unit_count ... FAILED
+test tests::velnor_provisioner_reads_the_live_declared_pin ... ok
+test tests::velnor_provisioner_resolves_the_closure_from_the_product_repository ... ok
+test tests::velnor_provisioner_reuses_the_slot_only_on_manifest_digest_match ... ok
+test tests::velnor_recovery_concurrency_and_serial_stack_groups ... ok
+test tests::velnor_only_lane_omits_actions_cache_for_host_persistent_cargo_sources ... ok
+test tests::velnor_workspace_check_stays_coverage_not_an_ordering_barrier ... FAILED
+test tests::trusted_project_toml_round_trips_through_the_pinned_runtime ... ok
+test tests::stale_owned_workflows_are_removed_only_after_digest_verification ... ok
+test tests::velnor_runtime_does_not_publish_an_orphan_artifact ... ok
+test tui::tests::changed_preflight_returns_to_review_for_confirmation ... ok
+test tui::tests::check_drift_is_a_result_state_not_a_write_error ... ok
+test tests::workflow_event_runner_scope_matrix_is_explicit ... ok
+test tests::workflow_snapshot_enforces_security_shape ... FAILED
+test tui::tests::confirmation_rejects_filesystem_changes_after_review ... ok
+test tui::tests::details_overlay_owns_mouse_wheel ... ok
+test tui::tests::dependencies_block_disabling_required_units ... ok
+test tui::tests::failures_reset_scroll_and_jk_scroll_every_scroll_view ... ok
+test tui::tests::enabling_check_adds_full_dependency_closure ... ok
+test tui::tests::generation_cannot_exit_while_worker_may_be_writing ... ok
+test tui::tests::only_loading_phases_use_timed_polling ... ok
+test tui::tests::partial_selection_disables_release_outputs ... ok
+test tui::tests::release_and_repeat_activation_events_are_ignored ... ok
+test tests::symlinked_legacy_guide_is_not_removed ... ok
+test tui::tests::too_small_terminal_keeps_global_quit_available ... ok
+test tui::tests::write_error_preserves_review_and_help_traps_keys ... ok
+test tui::view::tests::centered_rect_stays_inside_frame ... ok
+test tui::tests::undocumented_g_does_not_advance_screens ... ok
+test tests::state_pins_config_scan_and_generator_inputs ... ok
+test tui::view::tests::details_overlay_scrolls_long_commands_at_minimum_size ... ok
+test tui::view::tests::details_overlay_shows_exact_selected_lane_and_scope_commands ... ok
+test tui::view::tests::contextual_help_only_shows_active_actions ... ok
+test tui::tests::configure_enter_opens_review_without_writing ... ok
+test tui::view::tests::minimum_supported_terminal_renders_main_screen ... ok
+test tests::unowned_legacy_guide_is_preserved ... ok
+test tui::view::tests::review_explains_when_preflight_changed_after_confirmation ... ok
+test tui::view::tests::long_errors_scroll_to_the_complete_recovery_detail ... ok
+test tui::view::tests::too_small_generating_screen_advertises_locked_running_state ... ok
+test tui::view::tests::too_small_screen_names_exact_requirement ... ok
+test tui::view::tests::wrapped_height_counts_display_rows ... ok
+test tests::workspace_check_metadata_round_trips_through_runtime_config ... ok
+test tui::view::tests::review_and_check_drift_show_delete_and_ownership_changes ... ok
+test tui::view::tests::every_workflow_state_has_intentional_copy ... ok
+test tui::view::tests::scanning_frame_is_calm_and_honest ... ok
+test tui::tests::too_small_terminal_blocks_hidden_actions_until_resize ... ok
+test tui::view::tests::primary_action_and_filter_are_visible_without_stale_text ... ok
+test tests::state_schema_one_is_rejected_with_the_schema_move ... ok
+test tests::velnor_lane_yaml_omits_actions_cache_for_every_supported_unit_kind ... ok
+mbx[progress]: 15s elapsed; 1 hits, 0 misses, 1 bypassed, 0 not looked up; ~4.3s compiler work saved
+tick-5
+test apt::tests::preview_publish_strict_keeps_the_shared_tree_and_enforces_order ... ok
+tick-6
+test tests::velnor_provisioner_executes_product_repo_resolution ... ok
+test runtime::run_cmd_stall_tests::chatty_slow_command_succeeds_past_wall_clock_limit ... ok
+test apt::tests::preview_publish_bootstrap_initializes_once ... ok
+test apt::tests::preview_publish_rejects_a_backward_candidate ... ok
+test apt::tests::stable_publish_refuses_before_any_signing ... ok
+test apt::tests::preview_publish_modes_are_mutually_exclusive ... ok
+test apt::tests::stable_publish_rejects_pointer_defects ... ok
+test apt::tests::stable_publish_rejects_pool_and_index_defects ... ok
+
+failures:
+
+---- policy::tests::ungated_trusted_velnor_job_fails_the_trusted_runners_rule stdout ----
+
+thread 'policy::tests::ungated_trusted_velnor_job_fails_the_trusted_runners_rule' (105775047) panicked at crates/velnor-workflow/src/policy/tests.rs:886:5:
+[".github/workflows/ci-pr.yml: job velnor-docker: local-provider jobs require a trusted-event gate"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- primitives::ir::tests::velnor_lane_check_implies_policy_runtime stdout ----
+
+thread 'primitives::ir::tests::velnor_lane_check_implies_policy_runtime' (105775100) panicked at crates/velnor-workflow/src/primitives/ir.rs:352:9:
+the hosted provider carries the pin in the Planning artifact instead: # Generated by velnor-workflow. Regenerate; do not hand-edit.
+name: Rust
+on:
+  workflow_call:
+    inputs:
+      unit:
+        required: true
+        type: string
+      selected_units:
+        required: true
+        type: string
+      scope:
+        required: true
+        type: string
+      full_units:
+        required: true
+        type: string
+      base_sha:
+        required: true
+        type: string
+      head_sha:
+        required: true
+        type: string
+      plan_digest:
+        required: true
+        type: string
+      provider:
+        required: true
+        type: string
+      mise_tools:
+        required: false
+        type: string
+        default: ""
+      mise_runner:
+        required: false
+        type: boolean
+        default: false
+      mbx_compat:
+        required: false
+        type: string
+        default: ""
+      mbx_dependency_files:
+        required: false
+        type: string
+        default: ""
+      mbx_freshness_files:
+        required: false
+        type: string
+        default: ""
+      cargo_bin_tools:
+        required: false
+        type: string
+        default: ""
+      tool_version:
+        required: false
+        type: string
+        default: ""
+      node_cache_dependency_path:
+        required: false
+        type: string
+        default: ""
+      cache_paths:
+        required: false
+        type: string
+        default: ""
+      cache_key_files:
+        required: false
+        type: string
+        default: ""
+      seed_compat:
+        required: false
+        type: string
+        default: ""
+      seed_dependency_files:
+        required: false
+        type: string
+        default: ""
+      seed_freshness_files:
+        required: false
+        type: string
+        default: ""
+      cargo_root:
+        required: false
+        type: string
+        default: ""
+      cargo_fetch_skip_when_warm:
+        required: false
+        type: boolean
+        default: false
+      cargo_net_offline:
+        required: false
+        type: boolean
+        default: false
+      host_warm_layers:
+        required: false
+        type: string
+        default: ""
+      policy_runtime:
+        required: false
+        type: boolean
+        default: false
+      candidate_publish:
+        required: false
+        type: boolean
+        default: false
+      unit_platform:
+        required: false
+        type: string
+        default: ""
+      unit_trust:
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  verify-github-hosted:
+    name: "GitHub · hosted"
+    if: ${{ inputs.provider == 'github-hosted' && contains(inputs.selected_units, format('"unit_id":"{0}"', inputs.unit)) && ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Mark CI job start
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/JOB_STARTED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.head_sha }}
+      - name: Download Velnor workflow runtime
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: velnor-workflow-runtime-0000000000000000000000000000000000000000-${{ runner.os }}-${{ runner.arch }}
+          path: .velnor-workflow-runtime
+      - name: Verify Velnor workflow runtime
+        shell: bash
+        env:
+          EXPECTED_REVISION: 0000000000000000000000000000000000000000
+        run: |
+          set -euo pipefail
+          manifest=.velnor-workflow-runtime/manifest.json
+          jq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$")) and (.policy_binary_sha256 | test("^[0-9a-f]{64}$")) and (.closure | test("^[0-9a-f]{64}$")) and (.policy_closure | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null
+          expected="$(jq -er '.binary_sha256' "$manifest")"
+          actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }
+          expected="$(jq -er '.policy_binary_sha256' "$manifest")"
+          actual="$(sha256sum .velnor-workflow-runtime/velnor-workflow-policy | awk '{print $1}')"
+          [[ "$actual" == "$expected" ]] || { echo "::error::policy runtime digest mismatch" >&2; exit 1; }
+      - name: Add Velnor workflow runtime to PATH
+        shell: bash
+        env:
+          EXPECTED_REVISION: 0000000000000000000000000000000000000000
+        run: |
+          set -euo pipefail
+          home="$RUNNER_TEMP/velnor-workflow-runtime-artifact"
+          install -Dm0755 .velnor-workflow-runtime/velnor-workflow "$home/bin/velnor-workflow"
+          install -Dm0755 .velnor-workflow-runtime/velnor-workflow-policy "$home/bin/velnor-workflow-policy"
+          expected_closure="$(jq -er '.policy_closure' .velnor-workflow-runtime/manifest.json)"
+          reported="$("$home/bin/velnor-workflow-policy" --closure)"
+          [[ "$reported" == "$expected_closure" ]] || { echo "::error::policy runtime reports closure $reported, expected $expected_closure" >&2; exit 1; }
+          echo "$home/bin" >> "$GITHUB_PATH"
+          echo "VELNOR_WORKFLOW_PINNED_BINARY=$home/bin/velnor-workflow-policy" >> "$GITHUB_ENV"
+      - name: Mark runner setup end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/RUNNER_SETUP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Materialize Velnor CI selection
+        shell: bash
+        env:
+          SELECTION_BASE_SHA: ${{ inputs.base_sha }}
+          SELECTION_HEAD_SHA: ${{ inputs.head_sha }}
+          SELECTION_SCOPE: ${{ inputs.scope }}
+          SELECTION_UNITS: ${{ inputs.selected_units }}
+          SELECTION_FULL_UNITS: ${{ inputs.full_units }}
+          SELECTION_PLAN_DIGEST: ${{ inputs.plan_digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          {
+            printf 'version=2\n'
+            printf 'base_sha=%s\n' "$SELECTION_BASE_SHA"
+            printf 'head_sha=%s\n' "$SELECTION_HEAD_SHA"
+            printf 'scope=%s\n' "$SELECTION_SCOPE"
+            printf 'units=%s\n' "$SELECTION_UNITS"
+            printf 'full_units=%s\n' "$SELECTION_FULL_UNITS"
+            printf 'plan_digest=%s\n' "$SELECTION_PLAN_DIGEST"
+          } > .velnor-ci-selection/velnor-ci-selection
+      - name: Mark selection transport end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/SELECTION_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+      - name: Restore mold 2.42.0 cache
+        id: mold-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/velnor/mold/2.42.0
+          key: velnor-mold-2.42.0-${{ runner.os }}-${{ runner.arch }}
+      - name: Set up mold 2.42.0
+        shell: bash
+        env:
+          MOLD_VERSION: 2.42.0
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) mold_arch=x86_64; expected='f5ed2f6e31d1ada4f07fe766fe0de7a73104d1c5cdc59086fcecc16a43720b6d' ;;
+            aarch64) mold_arch=aarch64; expected='3c9a0a3624aac8a2007569ae50c33b3129a0f0ae8bcc974aeee2f8939d295190' ;;
+            *) echo "unsupported mold architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          cache_dir="$HOME/.cache/velnor/mold/$MOLD_VERSION"
+          archive="$cache_dir/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz"
+          mkdir -p "$cache_dir"
+          if [[ ! -s "$archive" ]]; then
+            temporary="$archive.download"
+            trap 'rm -f "$temporary"' EXIT
+            curl --fail --silent --show-error --location --retry 3 --retry-delay 2 \
+              --output "$temporary" \
+              "https://github.com/rui314/mold/releases/download/v$MOLD_VERSION/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz"
+            printf '%s  %s\n' "$expected" "$temporary" | sha256sum --check --strict
+            mv "$temporary" "$archive"
+            trap - EXIT
+          fi
+          printf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict
+          if [[ "$(id -u)" -eq 0 ]]; then
+            tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+          else
+            sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"
+          fi
+          command -v mold >/dev/null
+          mold --version | grep -F "$MOLD_VERSION"
+      - name: Save mold 2.42.0 cache
+        if: ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && steps.mold-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/velnor/mold/2.42.0
+          key: velnor-mold-2.42.0-${{ runner.os }}-${{ runner.arch }}
+      - name: Mark tool bootstrap end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/TOOL_BOOTSTRAP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Mark cache prep end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CACHE_PREP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Mark cargo fetch end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CARGO_FETCH_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Run unit checks
+        env:
+          CI_SCOPE: ${{ inputs.scope }}
+          CI_UNIT_ID: ${{ inputs.unit }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -o pipefail
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CHECKS_STARTED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+          rc=0
+          velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CHECKS_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+          exit $rc
+      - name: Mark cleanup end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CLEANUP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Report phase timings and cache outcomes
+        if: always()
+        uses: ./.github/actions/report-velnor-ci-outcomes
+        with:
+          job_label: ${{ inputs.unit }}
+          ci_provider: github-hosted
+          cache_mold_primary: ${{ steps.mold-cache.outputs.cache-primary-key }}
+          cache_mold_matched: ${{ steps.mold-cache.outputs.cache-matched-key }}
+
+  verify-github-self-hosted:
+    name: github-self-hosted
+    if: ${{ inputs.provider == 'github-self-hosted' && contains(inputs.selected_units, format('"unit_id":"{0}"', inputs.unit)) && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-self-hosted,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    runs-on: bastion-scale-set
+    timeout-minutes: 45
+    steps:
+      - name: Mark CI job start
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/JOB_STARTED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.head_sha }}
+      - name: Mark runner setup end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/RUNNER_SETUP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Materialize Velnor CI selection
+        shell: bash
+        env:
+          SELECTION_BASE_SHA: ${{ inputs.base_sha }}
+          SELECTION_HEAD_SHA: ${{ inputs.head_sha }}
+          SELECTION_SCOPE: ${{ inputs.scope }}
+          SELECTION_UNITS: ${{ inputs.selected_units }}
+          SELECTION_FULL_UNITS: ${{ inputs.full_units }}
+          SELECTION_PLAN_DIGEST: ${{ inputs.plan_digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          {
+            printf 'version=2\n'
+            printf 'base_sha=%s\n' "$SELECTION_BASE_SHA"
+            printf 'head_sha=%s\n' "$SELECTION_HEAD_SHA"
+            printf 'scope=%s\n' "$SELECTION_SCOPE"
+            printf 'units=%s\n' "$SELECTION_UNITS"
+            printf 'full_units=%s\n' "$SELECTION_FULL_UNITS"
+            printf 'plan_digest=%s\n' "$SELECTION_PLAN_DIGEST"
+          } > .velnor-ci-selection/velnor-ci-selection
+      - name: Mark selection transport end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/SELECTION_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Provision pinned Velnor workflow policy runtime
+        if: ${{ inputs.policy_runtime }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECKOUT_PATH: ${{ github.workspace }}
+          PRODUCT_REPOSITORY: tailrocks/velnor
+        run: |
+          set -euo pipefail
+          PINNED_REVISION="$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' "$CHECKOUT_PATH/.github-gen/velnor-workflow.toml" | head -n 1)"
+          test "$PINNED_REVISION" != '' || { echo "::error::D19 pin missing from .github-gen/velnor-workflow.toml" >&2; exit 1; }
+          listing=""
+          if git -C "$CHECKOUT_PATH" cat-file -e "$PINNED_REVISION^{commit}" 2>/dev/null; then
+            listing="$(git -C "$CHECKOUT_PATH" ls-tree -r "$PINNED_REVISION" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)"
+          else
+            tree="$(gh api "repos/$PRODUCT_REPOSITORY/git/trees/$PINNED_REVISION?recursive=1")" || { echo "::error::unknown generator revision $PINNED_REVISION" >&2; exit 1; }
+            [[ "$(jq -r '.truncated // false' <<<"$tree")" != "true" ]] || { echo "::error::tree API response is truncated; the closure cannot be proven" >&2; exit 1; }
+            listing="$(jq -r '[.tree[] | select(.type != "tree") | select(.path == "Cargo.toml" or .path == "Cargo.lock" or .path == "rust-toolchain.toml" or .path == "rust-toolchain" or (.path | startswith("crates/velnor-workflow/")) or (.path | startswith(".cargo/"))) | "\(.mode) \(.type) \(.sha)\t\(.path)"] | sort | join("\n")' <<<"$tree")"
+          fi
+          test "$listing" != '' || { echo "::error::revision $PINNED_REVISION has no closure inputs" >&2; exit 1; }
+          if command -v sha256sum >/dev/null 2>&1; then
+            closure="$(printf '%s\nclosure-version:1\nfeatures:\nprofile:release\n' "$(LC_ALL=C sort <<<"$listing")" | sha256sum | awk '{print $1}')"
+          else
+            closure="$(printf '%s\nclosure-version:1\nfeatures:\nprofile:release\n' "$(LC_ALL=C sort <<<"$listing")" | shasum -a 256 | awk '{print $1}')"
+          fi
+          binary="${CARGO_HOME:-$HOME/.cargo}/bin/velnor-workflow-policy"
+          tag="velnor-workflow-runtime-v1-${closure:0:16}"
+          asset="velnor-workflow-${RUNNER_OS}-${RUNNER_ARCH}"
+          temporary="$(mktemp -d)"
+          trap 'rm -rf "$temporary"' EXIT
+          if ! gh release download "$tag" --repo tailrocks/velnor --pattern manifest.json --dir "$temporary"; then
+            echo "::error::no policy runtime product for revision $PINNED_REVISION (closure ${closure:0:16}); the mainline runtime-product publisher builds it after merge" >&2
+            exit 1
+          fi
+          gh attestation verify "$temporary/manifest.json" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref refs/heads/main
+          jq -e --arg closure "$closure" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg asset "$asset" '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' "$temporary/manifest.json" >/dev/null
+          expected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "$temporary/manifest.json")"
+          existing=""
+          if [[ -x "$binary" ]]; then
+            if command -v sha256sum >/dev/null 2>&1; then
+              existing="$(sha256sum "$binary" | awk '{print $1}')"
+            else
+              existing="$(shasum -a 256 "$binary" | awk '{print $1}')"
+            fi
+          fi
+          if [[ "$existing" != "$expected" ]]; then
+            gh release download "$tag" --repo tailrocks/velnor --pattern "$asset" --dir "$temporary"
+            gh attestation verify "$temporary/$asset" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref refs/heads/main
+            if command -v sha256sum >/dev/null 2>&1; then
+              actual="$(sha256sum "$temporary/$asset" | awk '{print $1}')"
+            else
+              actual="$(shasum -a 256 "$temporary/$asset" | awk '{print $1}')"
+            fi
+            [[ "$actual" == "$expected" ]] || { echo "::error::policy runtime digest mismatch" >&2; exit 1; }
+            install -Dm0755 "$temporary/$asset" "$binary"
+          fi
+          reported="$("$binary" --closure)"
+          [[ "$reported" == "$closure" ]] || { echo "::error::pinned workflow policy runtime reports closure $reported, expected $closure" >&2; exit 1; }
+          manifest_revision="$(jq -er '.revision' "$temporary/manifest.json")"
+          reported_revision="$("$binary" --revision)"
+          [[ "$reported_revision" == "$manifest_revision" ]] || { echo "::error::pinned workflow policy runtime reports revision $reported_revision, expected $manifest_revision" >&2; exit 1; }
+          echo "VELNOR_WORKFLOW_PINNED_BINARY=$binary" >> "$GITHUB_ENV"
+      - name: Mark tool bootstrap end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/TOOL_BOOTSTRAP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Mark cache prep end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CACHE_PREP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Mark cargo fetch end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CARGO_FETCH_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Run unit checks
+        env:
+          CI_SCOPE: ${{ inputs.scope }}
+          CI_UNIT_ID: ${{ inputs.unit }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+          MISE_AUTO_INSTALL: "false"
+          MISE_EXEC_AUTO_INSTALL: "false"
+          MISE_NOT_FOUND_AUTO_INSTALL: "false"
+        run: |
+          set -o pipefail
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CHECKS_STARTED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+          rc=0
+          velnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CHECKS_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+          exit $rc
+      - name: Mark cleanup end
+        if: always()
+        run: |
+          timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+          umask 077
+          mkdir -p "$timing_dir"
+          marker="$timing_dir/CLEANUP_ENDED"
+          if [[ ! -e "$marker" ]]; then
+            if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then
+              chmod 0444 "$marker" 2>/dev/null || true
+            fi
+          fi
+      - name: Report phase timings and cache outcomes
+        if: always()
+        uses: ./.github/actions/report-velnor-ci-outcomes
+        with:
+          job_label: ${{ inputs.unit }}
+          ci_provider: github-self-hosted
+
+
+---- primitives::release::tests::dual_lane_release_publishers_stay_hosted_while_verification_stays_dual_lane stdout ----
+
+thread 'primitives::release::tests::dual_lane_release_publishers_stay_hosted_while_verification_stays_dual_lane' (105775602) panicked at crates/velnor-workflow/src/primitives/release.rs:3690:13:
+# Generated by velnor-workflow. Regenerate; do not hand-edit.
+name: Preview
+run-name: Preview · ${{ github.event_name }} · ${{ github.ref_name }}
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/ci/**"
+      - ".github/workflows/preview.yml"
+      - Cargo.toml
+  workflow_dispatch:
+
+concurrency:
+  group: preview-${{ github.repository }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    name: Preview / ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            provider: github-hosted
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            provider: github-hosted
+            runner: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Velnor workflow runtime
+        id: runtime
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@0123456789abcdef0123456789abcdef01234567
+        with:
+          rev: 0123456789abcdef0123456789abcdef01234567
+      - name: Set trusted workflow policy revision
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=0123456789abcdef0123456789abcdef01234567" >> "$GITHUB_ENV"
+      - name: Enforce workflow policy
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: velnor-workflow policy --workflow-root "$GITHUB_WORKSPACE"
+      - name: Restore Rust toolchain
+        id: rustup-toolchain
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup
+          key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Provision Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install
+          rustup target add 'x86_64-unknown-linux-gnu' 'aarch64-unknown-linux-gnu'
+      - name: Save Rust toolchain
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.rustup-toolchain.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.rustup
+          key: velnor-rustup-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rust-toolchain') }}
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+      - name: Add Rust target
+        run: rustup target add "${{ matrix.target }}"
+      - name: Build preview binary
+        env:
+          CARGO_INCREMENTAL: "0"
+          RUSTC_WRAPPER: sccache
+        run: mbx build --locked --release --package example --bin example --target "${{ matrix.target }}"
+      - name: Package preview binary
+        run: velnor-workflow release package-binary --target "${{ matrix.target }}" --version preview --package example --binary example
+      - name: Attest preview artifact
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+      - name: Upload preview artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.provider }}-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish rolling preview
+    needs: build
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: github-preview
+    permissions:
+      contents: write
+    steps:
+      - name: Download preview artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          pattern: github-hosted-*
+          merge-multiple: true
+      - name: Verify preview provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for artifact in dist/*.tar.gz; do gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY"; done
+      - name: Replace rolling preview
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release view preview >/dev/null 2>&1 || gh release create preview --prerelease --title "Rolling preview"
+          gh release edit preview --target "${{ github.sha }}" --prerelease
+          gh release upload preview dist/* --clobber
+
+
+---- primitives::release::tests::default_rows_render_the_legacy_release_surface stdout ----
+
+thread 'primitives::release::tests::default_rows_render_the_legacy_release_surface' (105775585) panicked at crates/velnor-workflow/src/primitives/release.rs:3325:9:
+pinned renders diverged:
+  release.yml: 5708736f97991acaae501abb9d7429ed9124975092078c9c1914013388e12a55
+  preview.yml: 4c47335678cafe07eeb3dfd7f2aacdc8e57535f80fec2a1a9f8fcea7a1336afc
+  maintenance.yml: 2ba0fdb66f7fd0b79822275c06323d76766727e697da07ea45fd67c54ac7e23c
+
+---- primitives::release::tests::identity_rows_render_the_pinned_native_surface stdout ----
+
+thread 'primitives::release::tests::identity_rows_render_the_pinned_native_surface' (105775763) panicked at crates/velnor-workflow/src/primitives/release.rs:3435:9:
+pinned identity renders diverged:
+  release.yml: 71c8ac517d793d93a4f93771d0f795dbed9ae393122957e1cfa8518a576c773b
+  preview.yml: 928edd5ec0e90b2c88eb7c4433948a4a25bf84d271607d650b0a818449b35422
+
+---- primitives::release::tests::maintenance_keeps_github_runner_out_of_runs_on_when_runners_are_velnor stdout ----
+
+thread 'primitives::release::tests::maintenance_keeps_github_runner_out_of_runs_on_when_runners_are_velnor' (105776219) panicked at crates/velnor-workflow/src/primitives/release.rs:3028:9:
+assertion `left == right` failed: velnor-only maintenance must not emit a hosted runs-on: name: Maintenance
+run-name: Maintenance · ${{ github.event_name }}
+
+on:
+  pull_request:
+    types: [closed]
+  schedule:
+    - cron: '31 3 * * *'
+  workflow_dispatch:
+    inputs:
+      pull_request_number:
+        description: Optional closed PR number whose merge cache should be removed
+        required: false
+        type: string
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: maintenance-${{ github.repository }}-${{ github.event.pull_request.number || inputs.pull_request_number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  prune-pr-cache:
+    name: Prune closed-PR cache
+    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/trunk' && inputs.pull_request_number != '') }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Delete merge-ref cache namespace
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pull_request_number }}
+        run: |
+          set -euo pipefail
+          ref="refs/pull/$PR_NUMBER/merge"
+          encoded="$(printf '%s' "$ref" | jq -sRr @uri)"
+          cache_ids="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?ref=$encoded" --jq '.actions_caches[].id')"
+          if [[ -z "$cache_ids" ]]; then
+            echo "No merge-ref cache entries found for $ref"
+            exit 0
+          fi
+          failed=0
+          while IFS= read -r id; do
+            [[ -z "$id" ]] && continue
+            deleted=false
+            for delay in 1 2 4 8; do
+              if gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" >/dev/null 2>&1; then
+                deleted=true
+                break
+              fi
+              sleep "$delay"
+            done
+            if [[ "$deleted" != true ]]; then
+              failed=$((failed + 1))
+              echo "::error::failed to delete cache id $id after retries" >&2
+            fi
+          done <<< "$cache_ids"
+          if (( failed > 0 )); then
+            echo "::error::$failed closed-PR cache entries could not be deleted; rerun maintenance" >&2
+            exit 1
+          fi
+  cache-budget:
+    name: Cache retention
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write
+      pull-requests: read
+    steps:
+      - name: Skip while CI producers are running
+        id: retention-gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for workflow in ci-main.yml nightly.yml; do
+            if [[ "$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" --status in_progress --limit 1 --json databaseId --jq 'length')" != "0" ]]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "$workflow is in_progress; skipping cache retention" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          done
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+      - name: Set up Velnor workflow runtime
+        id: runtime
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@0123456789abcdef0123456789abcdef01234567
+        with:
+          rev: 0123456789abcdef0123456789abcdef01234567
+      - name: Set trusted workflow policy revision
+        if: steps.retention-gate.outputs.skip != 'true'
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=0123456789abcdef0123456789abcdef01234567" >> "$GITHUB_ENV"
+      - name: Sweep closed-PR merge-ref caches
+        if: steps.retention-gate.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          failed=0
+          mapfile -t refs < <(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
+            --jq '.actions_caches[].ref' | grep -E '^refs/pull/[0-9]+/merge$' | sort -u)
+          if ((${#refs[@]} == 0)); then
+            echo "No merge-ref cache scopes found"
+            exit 0
+          fi
+          for ref in "${refs[@]}"; do
+            pr="${ref#refs/pull/}"
+            pr="${pr%/merge}"
+            state="$(gh pr view "$pr" --json state --jq .state 2>/dev/null || echo unknown)"
+            if [[ "$state" != "CLOSED" ]]; then
+              continue
+            fi
+            encoded="$(printf '%s' "$ref" | jq -sRr @uri)"
+            mapfile -t cache_ids < <(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?ref=$encoded" \
+              --jq '.actions_caches[].id')
+            if ((${#cache_ids[@]} == 0)); then
+              continue
+            fi
+            echo "Sweeping $ref ($pr): ${#cache_ids[@]} entries"
+            for id in "${cache_ids[@]}"; do
+              deleted=false
+              for delay in 1 2 4 8; do
+                if gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" >/dev/null 2>&1; then
+                  deleted=true
+                  break
+                fi
+                sleep "$delay"
+              done
+              if [[ "$deleted" != true ]]; then
+                failed=$((failed + 1))
+                echo "::error::failed to delete cache id $id for $ref after retries" >&2
+              fi
+            done
+          done
+          if (( failed > 0 )); then
+            echo "::error::$failed closed-PR merge-ref cache entries could not be deleted; rerun maintenance" >&2
+            exit 1
+          fi
+      - name: Collect Actions cache account
+        if: steps.retention-gate.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cache-retention"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | {id, key, size_in_bytes, created_at, last_accessed_at}' \
+            > "$RUNNER_TEMP/cache-retention/entries.jsonl"
+          jq -s '.' "$RUNNER_TEMP/cache-retention/entries.jsonl" \
+            > "$RUNNER_TEMP/cache-retention/entries.json"
+          velnor-workflow cache-plan --mode=budget --entries "$RUNNER_TEMP/cache-retention/entries.json" \
+            > "$RUNNER_TEMP/cache-retention/budget.json"
+          # `gh api --paginate --jq` runs the filter once per page and
+          # concatenates the outputs: summing inside the filter prints one
+          # number per page, and the total silently understates the account.
+          # Slurp the page stream first, then take one total over every entry.
+          total="$(jq '.total_held_bytes' "$RUNNER_TEMP/cache-retention/budget.json")"
+          count="$(jq 'length' "$RUNNER_TEMP/cache-retention/entries.json")"
+          headroom="$(jq '.headroom_bytes' "$RUNNER_TEMP/cache-retention/budget.json")"
+          if (( headroom >= 0 && headroom < 536870912 )); then
+            echo "::warning::Actions cache headroom below 512 MiB ($headroom bytes remaining)" >&2
+          fi
+          jq -n --argjson total "$total" --argjson count "$count" --argjson headroom "$headroom" \
+            --slurpfile budget "$RUNNER_TEMP/cache-retention/budget.json" \
+            --arg captured_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{captured_at: $captured_at, cache_count: $count, total_bytes: $total, headroom_bytes: $headroom, classes: $budget[0].classes}' \
+            > "$RUNNER_TEMP/cache-retention/summary.json"
+          {
+            cat "$RUNNER_TEMP/cache-retention/summary.json"
+            echo "Per-class totals:"
+            jq -r '.classes[] | "  \(.id): \(.entry_count) entries, \(.held_bytes) bytes (budget \(.budget_bytes))"' \
+              "$RUNNER_TEMP/cache-retention/budget.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Plan retention evictions
+        if: steps.retention-gate.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          # The plan is the generator's own retention policy, executed - never
+          # a shell copy of it: per-class budgets, bounded generations per
+          # variant class, and the protected classes (toolchain seeds, Cargo
+          # source bundles, the Docker seed baseline) reserved before rolling
+          # compiler snapshots are touched. An access timestamp is not a
+          # lease. The newest generation of a variant stays out of reach
+          # inside the producer window; a superseded generation of the same
+          # variant is eligible, because the newer save is the producer
+          # signal that the older entry is no longer being written.
+          velnor-workflow cache-plan \
+            --now "$(date -u +%s)" \
+            --entries "$RUNNER_TEMP/cache-retention/entries.json" \
+            > "$RUNNER_TEMP/cache-retention/plan.json"
+          if jq -e 'length > 0' "$RUNNER_TEMP/cache-retention/plan.json" > /dev/null; then
+            {
+              echo "Retention plan (evict oldest first: bound, class budget, global budget):"
+              jq -r 'sort_by(.class, .reason) | group_by(.class, .reason)[] | "  \(.[0].class) / \(.[0].reason): \(length) entries, \(map(.size_in_bytes) | add) bytes"' \
+                "$RUNNER_TEMP/cache-retention/plan.json"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Retention plan: nothing to evict" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Apply retention evictions
+        if: steps.retention-gate.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          evicted=0
+          freed=0
+          failed=0
+          # The plan is applied verbatim, in its own order: generations beyond
+          # their class bound first, then classes over budget, then the global
+          # sweep - which never touches a protected class.
+          while IFS=$'\t' read -r class reason id size key; do
+            if gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" >/dev/null; then
+              evicted=$((evicted + 1))
+              freed=$((freed + size))
+              echo "evicted id=$id class=$class reason=$reason size=$size key=$key"
+            else
+              failed=$((failed + 1))
+              echo "::warning::failed to evict cache id $id (class $class, key $key)" >&2
+            fi
+          done < <(jq -r '.[] | [.class, .reason, .id, .size_in_bytes, .key] | @tsv' \
+            "$RUNNER_TEMP/cache-retention/plan.json")
+          # Every eviction is recorded under its cache class and its reason,
+          # so a later cold run can be correlated with the eviction that
+          # caused it.
+          {
+            echo "Evictions by cache class:"
+            jq -r 'group_by(.class)[] | "  \(.[0].class): \(length) evictions, \(map(.size_in_bytes) | add) bytes"' \
+              "$RUNNER_TEMP/cache-retention/plan.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+          jq -n --argjson evicted "$evicted" --argjson freed "$freed" --argjson failed "$failed" \
+            '{evicted_caches: $evicted, failed_evictions: $failed, freed_bytes: $freed}' \
+            >> "$GITHUB_STEP_SUMMARY"
+          # A failed eviction is a loud failure, never a swallowed warning:
+          # silent DELETE failures leave the account over budget while the
+          # run reports success.
+          if (( failed > 0 )); then
+            echo "::error::$failed retention evictions failed; rerun maintenance" >&2
+            exit 1
+          fi
+      - name: Publish retention evidence
+        if: steps.retention-gate.outputs.skip != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cache-retention-${{ github.run_id }}
+          path: ${{ runner.temp }}/cache-retention
+          if-no-files-found: error
+          retention-days: 14
+      - name: Enforce cache budget
+        if: steps.retention-gate.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Re-query live state: the enforcement decision must reflect what the
+          # account actually holds after eviction, not the pre-eviction
+          # snapshot. The same page-streaming rule as collection applies: the
+          # sum is taken after slurping every page.
+          total="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
+            --jq '.actions_caches[].size_in_bytes' | jq -s 'add // 0')"
+          budget="$(velnor-workflow cache-plan --mode=budget)"
+          if (( total > budget )); then
+            echo "::error::Actions cache account exceeds budget: $total > $budget bytes" >&2
+            exit 1
+          fi
+
+  left: ["runs-on: ubuntu-22.04", "runs-on: ubuntu-22.04"]
+ right: ["runs-on: velnor-native", "runs-on: velnor-native"]
+
+---- primitives::release::tests::maintenance_splits_prune_and_cache_when_runners_are_velnor stdout ----
+
+thread 'primitives::release::tests::maintenance_splits_prune_and_cache_when_runners_are_velnor' (105776227) panicked at crates/velnor-workflow/src/primitives/release.rs:3028:9:
+assertion `left == right` failed: velnor-only maintenance must not emit a hosted runs-on: name: Maintenance
+run-name: Maintenance · ${{ github.event_name }}
+
+on:
+  pull_request:
+    types: [closed]
+  schedule:
+    - cron: '31 3 * * *'
+  workflow_dispatch:
+    inputs:
+      pull_request_number:
+        description: Optional closed PR number whose merge cache should be removed
+        required: false
+        type: string
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: maintenance-${{ github.repository }}-${{ github.event.pull_request.number || inputs.pull_request_number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  prune-pr-cache:
+    name: Prune closed-PR cache
+    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.pull_request_number != '') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Delete merge-ref cache namespace
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pull_request_number }}
+        run: |
+          set -euo pipefail
+          ref="refs/pull/$PR_NUMBER/merge"
+          encoded="$(printf '%s' "$ref" | jq -sRr @uri)"
+          cache_ids="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?ref=$encoded" --jq '.actions_caches[].id')"
+          if [[ -z "$cache_ids" ]]; then
+            echo "No merge-ref cache entries found for $ref"
+            exit 0
+          fi
+          failed=0
+          while IFS= read -r id; do
+            [[ -z "$id" ]] && continue
+            deleted=false
+            for delay in 1 2 4 8; do
+              if gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" >/dev/null 2>&1; then
+                deleted=true
+                break
+              fi
+              sleep "$delay"
+            done
+            if [[ "$deleted" != true ]]; then
+              failed=$((failed + 1))
+              echo "::error::failed to delete cache id $id after retries" >&2
+            fi
+          done <<< "$cache_ids"
+          if (( failed > 0 )); then
+            echo "::error::$failed closed-PR cache entries could not be deleted; rerun maintenance" >&2
+            exit 1
+          fi
+  cache-budget:
+    name: Cache retention
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write
+      pull-requests: read
+    steps:
+      - name: Skip while CI producers are running
+        id: retention-gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for workflow in ci-main.yml nightly.yml; do
+            if [[ "$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" --status in_progress --limit 1 --json databaseId --jq 'length')" != "0" ]]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "$workflow is in_progress; skipping cache retention" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          done
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+      - name: Set up Velnor workflow runtime
+        id: runtime
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@0123456789abcdef0123456789abcdef01234567
+        with:
+          rev: 0123456789abcdef0123456789abcdef01234567
+      - name: Set trusted workflow policy revision
+        if: steps.retention-gate.outputs.skip != 'true'
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=0123456789abcdef0123456789abcdef01234567" >> "$GITHUB_ENV"
+      - name: Sweep closed-PR merge-ref caches
+        if: steps.retention-gate.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          failed=0
+          mapfile -t refs < <(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
+            --jq '.actions_caches[].ref' | grep -E '^refs/pull/[0-9]+/merge$' | sort -u)
+          if ((${#refs[@]} == 0)); then
+            echo "No merge-ref cache scopes found"
+            exit 0
+          fi
+          for ref in "${refs[@]}"; do
+            pr="${ref#refs/pull/}"
+            pr="${pr%/merge}"
+            state="$(gh pr view "$pr" --json state --jq .state 2>/dev/null || echo unknown)"
+            if [[ "$state" != "CLOSED" ]]; then
+              continue
+            fi
+            encoded="$(printf '%s' "$ref" | jq -sRr @uri)"
+            mapfile -t cache_ids < <(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?ref=$encoded" \
+              --jq '.actions_caches[].id')
+            if ((${#cache_ids[@]} == 0)); then
+              continue
+            fi
+            echo "Sweeping $ref ($pr): ${#cache_ids[@]} entries"
+            for id in "${cache_ids[@]}"; do
+              deleted=false
+              for delay in 1 2 4 8; do
+                if gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" >/dev/null 2>&1; then
+                  deleted=true
+                  break
+                fi
+                sleep "$delay"
+              done
+              if [[ "$deleted" != true ]]; then
+                failed=$((failed + 1))
+                echo "::error::failed to delete cache id $id for $ref after retries" >&2
+              fi
+            done
+          done
+          if (( failed > 0 )); then
+            echo "::error::$failed closed-PR merge-ref cache entries could not be deleted; rerun maintenance" >&2
+            exit 1
+          fi
+      - name: Collect Actions cache account
+        if: steps.retention-gate.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cache-retention"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | {id, key, size_in_bytes, created_at, last_accessed_at}' \
+            > "$RUNNER_TEMP/cache-retention/entries.jsonl"
+          jq -s '.' "$RUNNER_TEMP/cache-retention/entries.jsonl" \
+            > "$RUNNER_TEMP/cache-retention/entries.json"
+          velnor-workflow cache-plan --mode=budget --entries "$RUNNER_TEMP/cache-retention/entries.json" \
+            > "$RUNNER_TEMP/cache-retention/budget.json"
+          # `gh api --paginate --jq` runs the filter once per page and
+          # concatenates the outputs: summing inside the filter prints one
+          # number per page, and the total silently understates the account.
+          # Slurp the page stream first, then take one total over every entry.
+          total="$(jq '.total_held_bytes' "$RUNNER_TEMP/cache-retention/budget.json")"
+          count="$(jq 'length' "$RUNNER_TEMP/cache-retention/entries.json")"
+          headroom="$(jq '.headroom_bytes' "$RUNNER_TEMP/cache-retention/budget.json")"
+          if (( headroom >= 0 && headroom < 536870912 )); then
+            echo "::warning::Actions cache headroom below 512 MiB ($headroom bytes remaining)" >&2
+          fi
+          jq -n --argjson total "$total" --argjson count "$count" --argjson headroom "$headroom" \
+            --slurpfile budget "$RUNNER_TEMP/cache-retention/budget.json" \
+            --arg captured_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{captured_at: $captured_at, cache_count: $count, total_bytes: $total, headroom_bytes: $headroom, classes: $budget[0].classes}' \
+            > "$RUNNER_TEMP/cache-retention/summary.json"
+          {
+            cat "$RUNNER_TEMP/cache-retention/summary.json"
+            echo "Per-class totals:"
+            jq -r '.classes[] | "  \(.id): \(.entry_count) entries, \(.held_bytes) bytes (budget \(.budget_bytes))"' \
+              "$RUNNER_TEMP/cache-retention/budget.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Plan retention evictions
+        if: steps.retention-gate.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          # The plan is the generator's own retention policy, executed - never
+          # a shell copy of it: per-class budgets, bounded generations per
+          # variant class, and the protected classes (toolchain seeds, Cargo
+          # source bundles, the Docker seed baseline) reserved before rolling
+          # compiler snapshots are touched. An access timestamp is not a
+          # lease. The newest generation of a variant stays out of reach
+          # inside the producer window; a superseded generation of the same
+          # variant is eligible, because the newer save is the producer
+          # signal that the older entry is no longer being written.
+          velnor-workflow cache-plan \
+            --now "$(date -u +%s)" \
+            --entries "$RUNNER_TEMP/cache-retention/entries.json" \
+            > "$RUNNER_TEMP/cache-retention/plan.json"
+          if jq -e 'length > 0' "$RUNNER_TEMP/cache-retention/plan.json" > /dev/null; then
+            {
+              echo "Retention plan (evict oldest first: bound, class budget, global budget):"
+              jq -r 'sort_by(.class, .reason) | group_by(.class, .reason)[] | "  \(.[0].class) / \(.[0].reason): \(length) entries, \(map(.size_in_bytes) | add) bytes"' \
+                "$RUNNER_TEMP/cache-retention/plan.json"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Retention plan: nothing to evict" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Apply retention evictions
+        if: steps.retention-gate.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          evicted=0
+          freed=0
+          failed=0
+          # The plan is applied verbatim, in its own order: generations beyond
+          # their class bound first, then classes over budget, then the global
+          # sweep - which never touches a protected class.
+          while IFS=$'\t' read -r class reason id size key; do
+            if gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" >/dev/null; then
+              evicted=$((evicted + 1))
+              freed=$((freed + size))
+              echo "evicted id=$id class=$class reason=$reason size=$size key=$key"
+            else
+              failed=$((failed + 1))
+              echo "::warning::failed to evict cache id $id (class $class, key $key)" >&2
+            fi
+          done < <(jq -r '.[] | [.class, .reason, .id, .size_in_bytes, .key] | @tsv' \
+            "$RUNNER_TEMP/cache-retention/plan.json")
+          # Every eviction is recorded under its cache class and its reason,
+          # so a later cold run can be correlated with the eviction that
+          # caused it.
+          {
+            echo "Evictions by cache class:"
+            jq -r 'group_by(.class)[] | "  \(.[0].class): \(length) evictions, \(map(.size_in_bytes) | add) bytes"' \
+              "$RUNNER_TEMP/cache-retention/plan.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+          jq -n --argjson evicted "$evicted" --argjson freed "$freed" --argjson failed "$failed" \
+            '{evicted_caches: $evicted, failed_evictions: $failed, freed_bytes: $freed}' \
+            >> "$GITHUB_STEP_SUMMARY"
+          # A failed eviction is a loud failure, never a swallowed warning:
+          # silent DELETE failures leave the account over budget while the
+          # run reports success.
+          if (( failed > 0 )); then
+            echo "::error::$failed retention evictions failed; rerun maintenance" >&2
+            exit 1
+          fi
+      - name: Publish retention evidence
+        if: steps.retention-gate.outputs.skip != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cache-retention-${{ github.run_id }}
+          path: ${{ runner.temp }}/cache-retention
+          if-no-files-found: error
+          retention-days: 14
+      - name: Enforce cache budget
+        if: steps.retention-gate.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Re-query live state: the enforcement decision must reflect what the
+          # account actually holds after eviction, not the pre-eviction
+          # snapshot. The same page-streaming rule as collection applies: the
+          # sum is taken after slurping every page.
+          total="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
+            --jq '.actions_caches[].size_in_bytes' | jq -s 'add // 0')"
+          budget="$(velnor-workflow cache-plan --mode=budget)"
+          if (( total > budget )); then
+            echo "::error::Actions cache account exceeds budget: $total > $budget bytes" >&2
+            exit 1
+          fi
+
+  left: ["runs-on: ubuntu-24.04", "runs-on: ubuntu-24.04"]
+ right: ["runs-on: velnor-native", "runs-on: velnor-native"]
+
+---- primitives::release::tests::native_identity_build_records_binary_digest_and_debian_reuses_it stdout ----
+
+thread 'primitives::release::tests::native_identity_build_records_binary_digest_and_debian_reuses_it' (105776875) panicked at crates/velnor-workflow/src/primitives/release.rs:4405:9:
+  debian:
+    name: Build ${{ matrix.arch }} deb (release-build)
+    needs: [admit-provider, verify, build, metadata]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - arch: arm64
+            target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.verify.outputs.version }}
+      VELNOR_RELEASE_BUILD: "1"
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Velnor workflow runtime
+        id: runtime
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@0123456789abcdef0123456789abcdef01234567
+        with:
+          rev: 0123456789abcdef0123456789abcdef01234567
+      - name: Set trusted workflow policy revision
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=0123456789abcdef0123456789abcdef01234567" >> "$GITHUB_ENV"
+      - name: Add Rust target
+        run: rustup target add "$TARGET"
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+      - name: Install cargo-deb
+        env:
+          CARGO_INCREMENTAL: "0"
+          RUSTC_WRAPPER: sccache
+        run: |
+          set -euo pipefail
+          cargo install cargo-deb --version 3.7.0 --locked
+          cargo-deb --version
+      - name: Download release metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-metadata
+          path: metadata
+      - name: Download release binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: github-hosted-${{ matrix.target }}
+          path: build-artifacts
+      - name: Reuse the build job's release binary
+        run: |
+          set -euo pipefail
+          tarball="build-artifacts/example-$VERSION-${{ matrix.target }}.tar.gz"
+          bin_sidecar="build-artifacts/example-${{ matrix.arch }}.bin.sha256"
+          test -f "$tarball" || { echo "::error::missing build tarball $tarball" >&2; exit 1; }
+          test -f "$tarball.sha256" || { echo "::error::missing tarball checksum $tarball.sha256" >&2; exit 1; }
+          test -f "$bin_sidecar" || { echo "::error::missing binary checksum $bin_sidecar" >&2; exit 1; }
+          digest="$(sha256sum "$tarball" | awk '{print $1}')"
+          sidecar="$(awk 'NF {print $1; exit}' "$tarball.sha256")"
+          [ "$digest" = "$sidecar" ] || { echo "::error::build tarball fails its sidecar checksum" >&2; exit 1; }
+          recorded="$(awk 'NF {print $1; exit}' "$bin_sidecar")"
+          case "$recorded" in
+            ''|*[!0-9a-f]*) echo "::error::recorded binary digest is not lowercase hex" >&2; exit 1 ;;
+          esac
+          [ "${#recorded}" -eq 64 ] || { echo "::error::recorded binary digest has invalid length" >&2; exit 1; }
+          mkdir -p "target/$TARGET/release"
+          tar -xzf "$tarball" -C "target/$TARGET/release" "example"
+          reused="target/$TARGET/release/example"
+          chmod 0755 "$reused"
+          test -x "$reused"
+          actual="$(sha256sum "$reused" | awk '{print $1}')"
+          [ "$actual" = "$recorded" ] || { echo "::error::reused runner binary does not match the recorded digest" >&2; exit 1; }
+      - name: Build sibling binaries for the deb
+        env:
+          CARGO_INCREMENTAL: "0"
+          RUSTC_WRAPPER: sccache
+        run: |
+          set -euo pipefail
+          metadata="$(cargo metadata --locked --no-deps --format-version 1)"
+          while IFS= read -r sibling; do
+            [ -n "$sibling" ] || continue
+            if jq -e --arg p "$sibling" '.packages[] | select(.name == $p) | .features | has("release-build")' <<<"$metadata" >/dev/null; then
+              features="--features release-build"
+            else
+              features=""
+            fi
+            # shellcheck disable=SC2086
+            cargo build --locked --release --package "$sibling" $features --target "$TARGET"
+          done < <(jq -r --arg release 'example' '.packages[] | select(.name != $release) | select(.targets | map(.kind[]) | flatten | any(. == "bin")) | .name' <<<"$metadata" | sort -u)
+      - name: Stage acyclic identity files packaged into the deb
+        run: |
+          set -euo pipefail
+          test -s metadata/build-identity.json || { echo "::error::release metadata missing build-identity.json" >&2; exit 1; }
+          test -s metadata/manifest.json || { echo "::error::release metadata missing manifest.json" >&2; exit 1; }
+          jq -e '.source_sha and .crate_version' metadata/build-identity.json >/dev/null
+          jq -e 'type == "object"' metadata/manifest.json >/dev/null
+          mkdir -p 'release'
+          cp metadata/build-identity.json metadata/manifest.json 'release'/
+      - name: Stage the deb's own package record
+        run: |
+          set -euo pipefail
+          chmod +x metadata/example-release-tool
+          binary="target/$TARGET/release/example"
+          test -s "$binary" || { echo "::error::missing cross-built runner binary" >&2; exit 1; }
+          binary_sha256="$(sha256sum "$binary" | awk '{print $1}')"
+          manifest_sha256="$(sha256sum metadata/manifest.json | awk '{print $1}')"
+          manifest_version="$(jq -er '.version | numbers' metadata/manifest.json)"
+          source_sha=$(jq -er '.source_sha' metadata/build-identity.json)
+          jq -n \
+            --arg schema "velnor.package-record/v1" \
+            --arg repo '' \
+            --arg kind "stable" \
+            --arg commit "$source_sha" \
+            --arg crate "$VERSION" \
+            --arg debian "$VERSION" \
+            --argjson mv "$manifest_version" \
+            --arg mhash "$manifest_sha256" \
+            --arg arch "${{ matrix.arch }}" \
+            --arg target "$TARGET" \
+            --arg binary "$binary_sha256" \
+            '{
+              schema: $schema,
+              build: { repository: $repo, kind: $kind, commit: $commit,
+                       crate_version: $crate, debian_version: $debian,
+                       manifest_version: $mv, manifest_sha256: $mhash },
+              architecture: { arch: $arch, target: $target, binary_sha256: $binary }
+            }' > package-record.candidate.json
+          metadata/example-release-tool release emit \
+            --record package-record.candidate.json \
+            --binary "$binary" \
+            --out 'release'/package-record.json
+      - name: Build Debian packages
+        run: |
+          set -euo pipefail
+          velnor-workflow release package-deb --package example --version "$VERSION" --no-build true --asset-name "example-${{ needs.verify.outputs.version }}-${{ matrix.arch }}.deb" --target "$TARGET"
+      - name: Guard the deb with the empty-deb-incident checks
+        run: |
+          set -euo pipefail
+          deb="dist/example-${{ needs.verify.outputs.version }}-${{ matrix.arch }}.deb"
+          test -f "$deb" || { echo "::error::missing expected deb $deb" >&2; exit 1; }
+          [ "$(dpkg-deb -f "$deb" Version)" = "$VERSION" ] || { echo "::error::deb version != lane version" >&2; exit 1; }
+          [ "$(dpkg-deb -f "$deb" Architecture)" = "${{ matrix.arch }}" ] || { echo "::error::deb arch != ${{ matrix.arch }}" >&2; exit 1; }
+          manifest="$(mktemp)"
+          dpkg-deb -c "$deb" > "$manifest"
+          awk '$NF == "./usr/bin/example" { count++; if (substr($1, 1, 1) != "-") type_ok=0; else if (count == 1) type_ok=1 } END { exit !(count == 1 && type_ok == 1) }' "$manifest" \
+            || { echo "::error::deb must contain exactly one regular usr/bin/example" >&2; exit 1; }
+          [ "$(stat -c%s "$deb")" -gt 1000000 ] || { echo "::error::deb suspiciously small: $(stat -c%s "$deb") bytes" >&2; exit 1; }
+          record_path="$(awk '$NF ~ /(^|\/)package-record\.json$/ { print $NF }' "$manifest")"
+          [ -n "$record_path" ] || { echo "::error::deb missing its package record" >&2; exit 1; }
+          [ "$(printf '%s\n' "$record_path" | wc -l | tr -d ' ')" -eq 1 ] || { echo "::error::deb carries more than one package record" >&2; exit 1; }
+          dpkg-deb --fsys-tarfile "$deb" | tar -xOf - "$record_path" \
+            | cmp - 'release'/package-record.json \
+            || { echo "::error::packaged package-record.json differs from the emitted record" >&2; exit 1; }
+          record_sha256="$(dpkg-deb --fsys-tarfile "$deb" | tar -xOf - "$record_path" | sha256sum | awk '{print $1}')"
+          [ "$record_sha256" = "$(awk 'NF {print $1; exit}' 'release'/package-record.json.sha256)" ] \
+            || { echo "::error::packaged package-record.json digest != emitted sidecar" >&2; exit 1; }
+          packaged_binary_sha256="$(dpkg-deb --fsys-tarfile "$deb" | tar -xOf - ./usr/bin/example | sha256sum | awk '{print $1}')"
+          [ "$packaged_binary_sha256" = "$(dpkg-deb --fsys-tarfile "$deb" | tar -xOf - "$record_path" | jq -r '.architecture.binary_sha256')" ] \
+            || { echo "::error::deb runner binary does not match the package record" >&2; exit 1; }
+      - name: Upload Debian packages
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: debian-packages
+          path: |
+            dist/*.deb
+            dist/*.deb.sha256
+          if-no-files-found: error
+          retention-days: 2
+
+
+---- primitives::release::tests::velnor_release_surfaces_have_no_hosted_runner_branch stdout ----
+
+thread 'primitives::release::tests::velnor_release_surfaces_have_no_hosted_runner_branch' (105777036) panicked at crates/velnor-workflow/src/primitives/release.rs:3632:13:
+assertion failed: workflow.contains("runs-on: [self-hosted, example-runner]")
+
+---- tests::apt_package_update_barrier_is_hosted_and_lane_neutral stdout ----
+
+thread 'tests::apt_package_update_barrier_is_hosted_and_lane_neutral' (105781965) panicked at crates/velnor-workflow/src/lib.rs:14692:9:
+assertion failed: rendered.contains("runs-on: ubuntu-24.04")
+
+---- tests::declared_renovate_contract_generates_pinned_workflows stdout ----
+
+thread 'tests::declared_renovate_contract_generates_pinned_workflows' (105783418) panicked at crates/velnor-workflow/src/lib.rs:17838:9:
+assertion failed: renovate.contains("example-trusted")
+
+---- tests::checked_in_workflows_match_the_generator_byte_for_byte stdout ----
+
+thread 'tests::checked_in_workflows_match_the_generator_byte_for_byte' (105782870) panicked at crates/velnor-workflow/src/lib.rs:7026:27:
+render this repository's generated files: .github/workflows/ci-main.yml would expand to 6.75 MiB of GitHub template memory, over the generator ceiling of 5.00 MiB (GitHub fails the run at 10 MiB with `Maximum object size exceeded`); largest contributors:
+  .github/workflows/ci-unit-rust.yml × 40 callers: 5.49 MiB
+  .github/workflows/ci-main.yml (own): 430.4 KiB
+  .github/workflows/ci-unit-docker.yml × 3 callers: 229.3 KiB
+  .github/workflows/ci-unit-opentofu.yml × 3 callers: 211.2 KiB
+  .github/workflows/ci-unit-bun.yml × 3 callers: 210.2 KiB
+
+---- tests::explicit_provider_universes_select_exact_ci_jobs stdout ----
+
+thread 'tests::explicit_provider_universes_select_exact_ci_jobs' (105785206) panicked at crates/velnor-workflow/src/lib.rs:14471:9:
+assertion failed: velnor_pr.contains("runs-on: [self-hosted, example-runner-label]")
+
+---- tests::generated_actionlint_config_covers_apple_release_targets stdout ----
+
+thread 'tests::generated_actionlint_config_covers_apple_release_targets' (105785819) panicked at crates/velnor-workflow/src/lib.rs:13272:9:
+an apple release target needs the macos label: # Generated by velnor-workflow. Regenerate; do not hand-edit.
+# Runner labels are derived from the generated workflow contract.
+# The actionlint catalog can lag GitHub-hosted labels; keep this allowlist generated.
+
+self-hosted-runner:
+  labels:
+    - bastion-scale-set
+    - example-runner-label
+    - self-hosted
+    - ubuntu-24.04
+
+
+---- tests::generated_maintenance_splits_prune_and_cache_when_runners_are_velnor stdout ----
+
+thread 'tests::generated_maintenance_splits_prune_and_cache_when_runners_are_velnor' (105786404) panicked at crates/velnor-workflow/src/lib.rs:12864:9:
+assertion `left == right` failed: velnor-only maintenance must not emit a hosted runs-on: # Generated by velnor-workflow. Regenerate; do not hand-edit.
+name: Maintenance
+run-name: Maintenance · ${{ github.event_name }}
+
+on:
+  pull_request:
+    types: [closed]
+  schedule:
+    - cron: '31 3 * * *'
+  workflow_dispatch:
+    inputs:
+      pull_request_number:
+        description: Optional closed PR number whose merge cache should be removed
+        required: false
+        type: string
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: maintenance-${{ github.repository }}-${{ github.event.pull_request.number || inputs.pull_request_number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  prune-pr-cache:
+    name: Prune closed-PR cache
+    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.pull_request_number != '') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Delete merge-ref cache namespace
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pull_request_number }}
+        run: |
+          set -euo pipefail
+          ref="refs/pull/$PR_NUMBER/merge"
+          encoded="$(printf '%s' "$ref" | jq -sRr @uri)"
+          cache_ids="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?ref=$encoded" --jq '.actions_caches[].id')"
+          if [[ -z "$cache_ids" ]]; then
+            echo "No merge-ref cache entries found for $ref"
+            exit 0
+          fi
+          failed=0
+          while IFS= read -r id; do
+            [[ -z "$id" ]] && continue
+            deleted=false
+            for delay in 1 2 4 8; do
+              if gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" >/dev/null 2>&1; then
+                deleted=true
+                break
+              fi
+              sleep "$delay"
+            done
+            if [[ "$deleted" != true ]]; then
+              failed=$((failed + 1))
+              echo "::error::failed to delete cache id $id after retries" >&2
+            fi
+          done <<< "$cache_ids"
+          if (( failed > 0 )); then
+            echo "::error::$failed closed-PR cache entries could not be deleted; rerun maintenance" >&2
+            exit 1
+          fi
+  cache-budget:
+    name: Cache retention
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write
+      pull-requests: read
+    steps:
+      - name: Skip while CI producers are running
+        id: retention-gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for workflow in ci-main.yml nightly.yml; do
+            if [[ "$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" --status in_progress --limit 1 --json databaseId --jq 'length')" != "0" ]]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "$workflow is in_progress; skipping cache retention" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          done
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+      - name: Set up Velnor workflow runtime
+        id: runtime
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d
+        with:
+          rev: bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d
+      - name: Set trusted workflow policy revision
+        if: steps.retention-gate.outputs.skip != 'true'
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d" >> "$GITHUB_ENV"
+      - name: Sweep closed-PR merge-ref caches
+        if: steps.retention-gate.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          failed=0
+          mapfile -t refs < <(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
+            --jq '.actions_caches[].ref' | grep -E '^refs/pull/[0-9]+/merge$' | sort -u)
+          if ((${#refs[@]} == 0)); then
+            echo "No merge-ref cache scopes found"
+            exit 0
+          fi
+          for ref in "${refs[@]}"; do
+            pr="${ref#refs/pull/}"
+            pr="${pr%/merge}"
+            state="$(gh pr view "$pr" --json state --jq .state 2>/dev/null || echo unknown)"
+            if [[ "$state" != "CLOSED" ]]; then
+              continue
+            fi
+            encoded="$(printf '%s' "$ref" | jq -sRr @uri)"
+            mapfile -t cache_ids < <(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?ref=$encoded" \
+              --jq '.actions_caches[].id')
+            if ((${#cache_ids[@]} == 0)); then
+              continue
+            fi
+            echo "Sweeping $ref ($pr): ${#cache_ids[@]} entries"
+            for id in "${cache_ids[@]}"; do
+              deleted=false
+              for delay in 1 2 4 8; do
+                if gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" >/dev/null 2>&1; then
+                  deleted=true
+                  break
+                fi
+                sleep "$delay"
+              done
+              if [[ "$deleted" != true ]]; then
+                failed=$((failed + 1))
+                echo "::error::failed to delete cache id $id for $ref after retries" >&2
+              fi
+            done
+          done
+          if (( failed > 0 )); then
+            echo "::error::$failed closed-PR merge-ref cache entries could not be deleted; rerun maintenance" >&2
+            exit 1
+          fi
+      - name: Collect Actions cache account
+        if: steps.retention-gate.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cache-retention"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | {id, key, size_in_bytes, created_at, last_accessed_at}' \
+            > "$RUNNER_TEMP/cache-retention/entries.jsonl"
+          jq -s '.' "$RUNNER_TEMP/cache-retention/entries.jsonl" \
+            > "$RUNNER_TEMP/cache-retention/entries.json"
+          velnor-workflow cache-plan --mode=budget --entries "$RUNNER_TEMP/cache-retention/entries.json" \
+            > "$RUNNER_TEMP/cache-retention/budget.json"
+          # `gh api --paginate --jq` runs the filter once per page and
+          # concatenates the outputs: summing inside the filter prints one
+          # number per page, and the total silently understates the account.
+          # Slurp the page stream first, then take one total over every entry.
+          total="$(jq '.total_held_bytes' "$RUNNER_TEMP/cache-retention/budget.json")"
+          count="$(jq 'length' "$RUNNER_TEMP/cache-retention/entries.json")"
+          headroom="$(jq '.headroom_bytes' "$RUNNER_TEMP/cache-retention/budget.json")"
+          if (( headroom >= 0 && headroom < 536870912 )); then
+            echo "::warning::Actions cache headroom below 512 MiB ($headroom bytes remaining)" >&2
+          fi
+          jq -n --argjson total "$total" --argjson count "$count" --argjson headroom "$headroom" \
+            --slurpfile budget "$RUNNER_TEMP/cache-retention/budget.json" \
+            --arg captured_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{captured_at: $captured_at, cache_count: $count, total_bytes: $total, headroom_bytes: $headroom, classes: $budget[0].classes}' \
+            > "$RUNNER_TEMP/cache-retention/summary.json"
+          {
+            cat "$RUNNER_TEMP/cache-retention/summary.json"
+            echo "Per-class totals:"
+            jq -r '.classes[] | "  \(.id): \(.entry_count) entries, \(.held_bytes) bytes (budget \(.budget_bytes))"' \
+              "$RUNNER_TEMP/cache-retention/budget.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Plan retention evictions
+        if: steps.retention-gate.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          # The plan is the generator's own retention policy, executed - never
+          # a shell copy of it: per-class budgets, bounded generations per
+          # variant class, and the protected classes (toolchain seeds, Cargo
+          # source bundles, the Docker seed baseline) reserved before rolling
+          # compiler snapshots are touched. An access timestamp is not a
+          # lease. The newest generation of a variant stays out of reach
+          # inside the producer window; a superseded generation of the same
+          # variant is eligible, because the newer save is the producer
+          # signal that the older entry is no longer being written.
+          velnor-workflow cache-plan \
+            --now "$(date -u +%s)" \
+            --entries "$RUNNER_TEMP/cache-retention/entries.json" \
+            > "$RUNNER_TEMP/cache-retention/plan.json"
+          if jq -e 'length > 0' "$RUNNER_TEMP/cache-retention/plan.json" > /dev/null; then
+            {
+              echo "Retention plan (evict oldest first: bound, class budget, global budget):"
+              jq -r 'sort_by(.class, .reason) | group_by(.class, .reason)[] | "  \(.[0].class) / \(.[0].reason): \(length) entries, \(map(.size_in_bytes) | add) bytes"' \
+                "$RUNNER_TEMP/cache-retention/plan.json"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Retention plan: nothing to evict" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Apply retention evictions
+        if: steps.retention-gate.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          evicted=0
+          freed=0
+          failed=0
+          # The plan is applied verbatim, in its own order: generations beyond
+          # their class bound first, then classes over budget, then the global
+          # sweep - which never touches a protected class.
+          while IFS=$'\t' read -r class reason id size key; do
+            if gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/caches/$id" >/dev/null; then
+              evicted=$((evicted + 1))
+              freed=$((freed + size))
+              echo "evicted id=$id class=$class reason=$reason size=$size key=$key"
+            else
+              failed=$((failed + 1))
+              echo "::warning::failed to evict cache id $id (class $class, key $key)" >&2
+            fi
+          done < <(jq -r '.[] | [.class, .reason, .id, .size_in_bytes, .key] | @tsv' \
+            "$RUNNER_TEMP/cache-retention/plan.json")
+          # Every eviction is recorded under its cache class and its reason,
+          # so a later cold run can be correlated with the eviction that
+          # caused it.
+          {
+            echo "Evictions by cache class:"
+            jq -r 'group_by(.class)[] | "  \(.[0].class): \(length) evictions, \(map(.size_in_bytes) | add) bytes"' \
+              "$RUNNER_TEMP/cache-retention/plan.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+          jq -n --argjson evicted "$evicted" --argjson freed "$freed" --argjson failed "$failed" \
+            '{evicted_caches: $evicted, failed_evictions: $failed, freed_bytes: $freed}' \
+            >> "$GITHUB_STEP_SUMMARY"
+          # A failed eviction is a loud failure, never a swallowed warning:
+          # silent DELETE failures leave the account over budget while the
+          # run reports success.
+          if (( failed > 0 )); then
+            echo "::error::$failed retention evictions failed; rerun maintenance" >&2
+            exit 1
+          fi
+      - name: Publish retention evidence
+        if: steps.retention-gate.outputs.skip != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cache-retention-${{ github.run_id }}
+          path: ${{ runner.temp }}/cache-retention
+          if-no-files-found: error
+          retention-days: 14
+      - name: Enforce cache budget
+        if: steps.retention-gate.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Re-query live state: the enforcement decision must reflect what the
+          # account actually holds after eviction, not the pre-eviction
+          # snapshot. The same page-streaming rule as collection applies: the
+          # sum is taken after slurping every page.
+          total="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/caches?per_page=100" \
+            --jq '.actions_caches[].size_in_bytes' | jq -s 'add // 0')"
+          budget="$(velnor-workflow cache-plan --mode=budget)"
+          if (( total > budget )); then
+            echo "::error::Actions cache account exceeds budget: $total > $budget bytes" >&2
+            exit 1
+          fi
+
+  left: ["runs-on: ubuntu-24.04", "runs-on: ubuntu-24.04"]
+ right: ["runs-on: [self-hosted, example-runner-label]", "runs-on: [self-hosted, example-runner-label]"]
+
+---- tests::every_runtime_install_owns_a_revision_addressed_root stdout ----
+
+thread 'tests::every_runtime_install_owns_a_revision_addressed_root' (105784967) panicked at crates/velnor-workflow/src/lib.rs:7026:27:
+render this repository's generated files: .github/workflows/ci-main.yml would expand to 6.75 MiB of GitHub template memory, over the generator ceiling of 5.00 MiB (GitHub fails the run at 10 MiB with `Maximum object size exceeded`); largest contributors:
+  .github/workflows/ci-unit-rust.yml × 40 callers: 5.49 MiB
+  .github/workflows/ci-main.yml (own): 430.4 KiB
+  .github/workflows/ci-unit-docker.yml × 3 callers: 229.3 KiB
+  .github/workflows/ci-unit-opentofu.yml × 3 callers: 211.2 KiB
+  .github/workflows/ci-unit-bun.yml × 3 callers: 210.2 KiB
+
+---- tests::generated_workflows_use_sidebar_supported_reusable_workflow_hierarchy stdout ----
+
+thread 'tests::generated_workflows_use_sidebar_supported_reusable_workflow_hierarchy' (105787572) panicked at crates/velnor-workflow/src/lib.rs:13309:9:
+assertion failed: root.contains(&format!("contains(needs.plan.outputs.units, '\"unit_id\":\"{}\"')",
+            rust_unit.id))
+
+---- tests::github_backend_mr_boxington_jobs_export_the_hosted_store_budget stdout ----
+
+thread 'tests::github_backend_mr_boxington_jobs_export_the_hosted_store_budget' (105788257) panicked at crates/velnor-workflow/src/lib.rs:7026:27:
+render this repository's generated files: .github/workflows/ci-main.yml would expand to 6.75 MiB of GitHub template memory, over the generator ceiling of 5.00 MiB (GitHub fails the run at 10 MiB with `Maximum object size exceeded`); largest contributors:
+  .github/workflows/ci-unit-rust.yml × 40 callers: 5.49 MiB
+  .github/workflows/ci-main.yml (own): 430.4 KiB
+  .github/workflows/ci-unit-docker.yml × 3 callers: 229.3 KiB
+  .github/workflows/ci-unit-opentofu.yml × 3 callers: 211.2 KiB
+  .github/workflows/ci-unit-bun.yml × 3 callers: 210.2 KiB
+
+---- tests::required_checks_bulk_load_needs_without_per_job_expressions stdout ----
+
+thread 'tests::required_checks_bulk_load_needs_without_per_job_expressions' (105791850) panicked at crates/velnor-workflow/src/lib.rs:12645:13:
+assertion failed: workflow.contains("success|skipped")
+
+---- tests::scanner_analyzes_rust_workspace_packages_and_local_dependencies stdout ----
+
+thread 'tests::scanner_analyzes_rust_workspace_packages_and_local_dependencies' (105792587) panicked at crates/velnor-workflow/src/lib.rs:9748:9:
+assertion failed: workflow.contains("name: Set up cargo bin tools")
+
+---- tests::scanner_extracts_swiftpm_and_shared_xcode_scheme_units stdout ----
+
+thread 'tests::scanner_extracts_swiftpm_and_shared_xcode_scheme_units' (105793032) panicked at crates/velnor-workflow/src/lib.rs:8666:9:
+assertion failed: workflow.contains("runs-on: macos-15")
+
+---- tests::scanner_provisions_minimal_mise_tools_for_pinned_nextest_units stdout ----
+
+thread 'tests::scanner_provisions_minimal_mise_tools_for_pinned_nextest_units' (105793152) panicked at crates/velnor-workflow/src/lib.rs:10040:9:
+assertion failed: workflow.contains("          rustup toolchain install\n")
+
+---- tests::preview_static_surface_saves_guest_seed_on_trusted_exact_miss stdout ----
+
+thread 'tests::preview_static_surface_saves_guest_seed_on_trusted_exact_miss' (105790608) panicked at crates/velnor-workflow/src/lib.rs:7026:27:
+generate workflow files: .github/workflows/ci-main.yml would expand to 6.01 MiB of GitHub template memory, over the generator ceiling of 5.00 MiB (GitHub fails the run at 10 MiB with `Maximum object size exceeded`); largest contributors:
+  .github/workflows/ci-unit-rust.yml × 40 callers: 4.75 MiB
+  .github/workflows/ci-main.yml (own): 429.5 KiB
+  .github/workflows/ci-unit-docker.yml × 3 callers: 229.3 KiB
+  .github/workflows/ci-unit-opentofu.yml × 3 callers: 211.2 KiB
+  .github/workflows/ci-unit-bun.yml × 3 callers: 210.2 KiB
+
+---- tests::policy_running_jobs_check_out_full_history stdout ----
+
+thread 'tests::policy_running_jobs_check_out_full_history' (105790386) panicked at crates/velnor-workflow/src/lib.rs:7026:27:
+render this repository's generated files: .github/workflows/ci-main.yml would expand to 6.75 MiB of GitHub template memory, over the generator ceiling of 5.00 MiB (GitHub fails the run at 10 MiB with `Maximum object size exceeded`); largest contributors:
+  .github/workflows/ci-unit-rust.yml × 40 callers: 5.49 MiB
+  .github/workflows/ci-main.yml (own): 430.4 KiB
+  .github/workflows/ci-unit-docker.yml × 3 callers: 229.3 KiB
+  .github/workflows/ci-unit-opentofu.yml × 3 callers: 211.2 KiB
+  .github/workflows/ci-unit-bun.yml × 3 callers: 210.2 KiB
+
+---- tests::prepare_cargo_caller_and_callee_select_the_same_restricted_units stdout ----
+
+thread 'tests::prepare_cargo_caller_and_callee_select_the_same_restricted_units' (105790507) panicked at crates/velnor-workflow/src/lib.rs:7026:27:
+render this repository's generated files: .github/workflows/ci-main.yml would expand to 6.75 MiB of GitHub template memory, over the generator ceiling of 5.00 MiB (GitHub fails the run at 10 MiB with `Maximum object size exceeded`); largest contributors:
+  .github/workflows/ci-unit-rust.yml × 40 callers: 5.49 MiB
+  .github/workflows/ci-main.yml (own): 430.4 KiB
+  .github/workflows/ci-unit-docker.yml × 3 callers: 229.3 KiB
+  .github/workflows/ci-unit-opentofu.yml × 3 callers: 211.2 KiB
+  .github/workflows/ci-unit-bun.yml × 3 callers: 210.2 KiB
+
+---- tests::scanner_requires_a_pinned_toolchain_and_provisions_exactly_it stdout ----
+
+thread 'tests::scanner_requires_a_pinned_toolchain_and_provisions_exactly_it' (105793541) panicked at crates/velnor-workflow/src/lib.rs:9838:9:
+assertion failed: workflow.contains("name: Restore Rust toolchain")
+
+---- tests::velnor_lane_installs_only_unit_scoped_mise_tools stdout ----
+
+thread 'tests::velnor_lane_installs_only_unit_scoped_mise_tools' (105795050) panicked at crates/velnor-workflow/src/lib.rs:10092:9:
+Velnor lane must install only nextest for crate units: # Generated by velnor-workflow. Regenerate; do not hand-edit.
+name: CI / Main
+run-name: CI / main · ${{ github.event_name }} · ${{ github.ref_name }}
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      providers:
+        description: Comma-separated provider subset of [velnor]
+        required: false
+        default: github-hosted
+        type: string
+      scope:
+        description: Verification scope
+        required: true
+        default: full
+        type: choice
+        options:
+          - affected
+          - full
+      base_sha:
+        description: Git ref or SHA used as the affected-selection base
+        required: false
+        default: refs/heads/main
+        type: string
+
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  plan:
+    name: "Control / Planning"
+    runs-on: ubuntu-24.04
+    outputs:
+      scope: ${{ steps.plan.outputs.scope }}
+      base_sha: ${{ steps.plan.outputs.base_sha }}
+      head_sha: ${{ steps.plan.outputs.head_sha }}
+      units: ${{ steps.plan.outputs.units }}
+      full_units: ${{ steps.plan.outputs.full_units }}
+      plan_digest: ${{ steps.plan.outputs.plan_digest }}
+      excluded: ${{ steps.plan.outputs.excluded }}
+      rust_matrix: ${{ steps.plan.outputs.rust_matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Velnor workflow runtime
+        id: runtime
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d
+        with:
+          rev: bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d
+      - name: Set trusted workflow policy revision
+        run: echo "VELNOR_WORKFLOW_POLICY_REVISION=bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d" >> "$GITHUB_ENV"
+      - name: Select affected units
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          CI_SCOPE_OVERRIDE: ${{ github.event.inputs.scope || '' }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.inputs.base_sha || github.event.before || 'refs/heads/main' }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_PROVIDERS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.providers || 'github-hosted' }}
+          VELNOR_EVENT_TRUSTED: ${{ (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))) && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CI_SCOPE_OVERRIDE:-}" ]]; then unset CI_SCOPE_OVERRIDE; fi
+          velnor-workflow plan --config .github/ci/project.toml
+
+  policy:
+    name: Policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # Trust invariant: this job runs the base branch's Stage-0 validator
+    # product against the audited tree under pull_request_target. It holds
+    # `contents: read` only, references no secrets, persists no credentials,
+    # and never compiles. When the audited pin's closure differs from the
+    # base validator's, it additionally EXECUTES the PR run's prebuilt
+    # candidate generator — PR-built code, same-repository runs only, bound
+    # to the audited tree by manifest closure plus binary digest before
+    # execution — with no secret references, no persisted credentials, the
+    # read-only github.token confined to the Acquire/Ruleset API steps,
+    # and both candidate exec points tokenless.
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: policy-checkout
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check out audited head
+        working-directory: policy-checkout
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+        run: |
+          set -euo pipefail
+          if ! git cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null; then
+            git fetch --no-tags "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$HEAD_SHA"
+          fi
+          git checkout --quiet --detach "$HEAD_SHA"
+      - name: Set up Velnor workflow runtime
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d
+        with:
+          rev: bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d
+          checkout-path: ${{ github.workspace }}/policy-checkout
+      - name: Read declared generator pin
+        id: pin
+        working-directory: policy-checkout
+        run: |
+          set -euo pipefail
+          pin="$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' .github-gen/velnor-workflow.toml | head -n 1)"
+          test "$pin" != '' || pin="$(sed -n -E 's/^.*VELNOR_WORKFLOW_POLICY_REVISION:[[:space:]]*([0-9a-f]{40}).*/\1/p' .github/workflows/ci-policy.yml | head -n 1)"
+          test "$pin" != '' || { echo "::error::audited tree declares no generator pin" >&2; exit 1; }
+          echo "value=$pin" >> "$GITHUB_OUTPUT"
+      - name: Set up declared generator product
+        id: renderer
+        if: steps.pin.outputs.value != 'bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d'
+        uses: tailrocks/velnor/.github/actions/setup-velnor-workflow@bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d
+        with:
+          rev: ${{ steps.pin.outputs.value }}
+          checkout-path: ${{ github.workspace }}/policy-checkout
+      - name: Resolve declared generator product
+        if: steps.pin.outputs.value != 'bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d'
+        run: |
+          set -euo pipefail
+          binary="$HOME/.cache/velnor/workflow-runtime/${{ steps.renderer.outputs.closure }}/bin/velnor-workflow"
+          test -x "$binary"
+          echo "VELNOR_WORKFLOW_PINNED_BINARY=$binary" >> "$GITHUB_ENV"
+      - name: Resolve required status checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: main
+          DECLARED_RULESET_CONTEXTS: Policy,ci-required
+        run: |
+          set -euo pipefail
+          stderr="$(mktemp)"
+          trap 'rm -f "$stderr"' EXIT
+          if contexts="$(gh api "repos/$GITHUB_REPOSITORY/rulesets?includes_parents=true" 2>"$stderr" \
+            | jq -r '.[] | select(.target == "branch" and .enforcement == "active") | .id' \
+            | while read -r id; do gh api "repos/$GITHUB_REPOSITORY/rulesets/$id"; done \
+            | jq -r --arg branch "refs/heads/$DEFAULT_BRANCH" 'select(.conditions.ref_name.include | any(. == "~DEFAULT_BRANCH" or . == "~ALL" or . == $branch)) | .rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context' \
+            | sort -u | paste -sd, -)"; then
+            :
+          elif grep -qE '(HTTP 403|Upgrade to GitHub Team)' "$stderr"; then
+            echo "::warning::rulesets API returned 403; falling back to declared contexts [$DECLARED_RULESET_CONTEXTS]"
+            contexts="$DECLARED_RULESET_CONTEXTS"
+          else
+            cat "$stderr" >&2
+            exit 1
+          fi
+          echo "RULESET_CONTEXTS=$contexts" >> "$GITHUB_ENV"
+      - name: Enforce workflow policy
+        env:
+          WORKFLOW_ROOT: ${{ github.workspace }}/policy-checkout
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+          VELNOR_WORKFLOW_POLICY_REVISION: bde4d4ecb1e4ddc40c6426b93e2c19e9d927a70d
+        run: |
+          set -euo pipefail
+          velnor-workflow policy \
+            --workflow-root "$WORKFLOW_ROOT" \
+            --head-sha "$HEAD_SHA" \
+            --base-sha "$BASE_SHA" \
+            --candidate-manifest "${VELNOR_WORKFLOW_CANDIDATE_MANIFEST:-}" \
+            --ruleset-contexts "$RULESET_CONTEXTS"
+
+      - name: Set up actionlint
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          install_args: actionlint@1.7.12
+          cache: false
+      - name: Lint caller workflows
+        working-directory: policy-checkout
+        env:
+          MISE_NO_CONFIG: "1"
+        run: mise exec actionlint@1.7.12 -- actionlint
+  velnor-rust-fixture:
+    name: "Rust · fixture · velnor — rust-fixture"
+    if: ${{ always() && needs.plan.result == 'success' && needs.policy.result == 'success' && contains(needs.plan.outputs.units, '\"unit_id\":\"rust-fixture\"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    needs: [plan, policy]
+    uses: ./.github/workflows/ci-unit-rust.yml
+    with:
+      unit: rust-fixture
+      provider: velnor
+      selected_units: ${{ needs.plan.outputs.units }}
+      scope: ${{ needs.plan.outputs.scope }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      plan_digest: ${{ needs.plan.outputs.plan_digest }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
+      mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      host_warm_layers: "rustup,mold,mbx,cargo"
+      unit_platform: linux-x64
+      unit_trust: untrusted-ok
+  ci-required:
+    name: ci-required
+    if: ${{ always() }}
+    needs: [plan, policy, velnor-rust-fixture]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Validate generated stack results
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          SELECTED_UNITS: ${{ needs.plan.outputs.units }}
+          PLAN_DIGEST: ${{ needs.plan.outputs.plan_digest }}
+          EXCLUDED: ${{ needs.plan.outputs.excluded }}
+          PROVIDER_ADMITTED_VELNOR_TRUSTED: ${{ ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$PLAN_DIGEST" ]]; then
+            echo "plan did not freeze a plan digest: the expected set has no identity" >&2
+            exit 1
+          fi
+          echo "verdict binds plan digest $PLAN_DIGEST"
+          result_for_job() {
+            jq -r --arg job "$1" '.[$job].result // empty' <<<"$NEEDS_JSON"
+          }
+          plan_expects() {
+            [[ "$(jq -r --arg unit "$1" --arg provider "$2" '[.[] | select(.unit_id == $unit) | .providers[] | select(. == $provider)] | length' <<<"$SELECTED_UNITS")" -gt 0 ]]
+          }
+          result="$(result_for_job plan)"
+          if [[ "$result" != success ]]; then
+            echo "required CI prerequisite plan did not pass: $result" >&2
+            exit 1
+          fi
+          result="$(result_for_job policy)"
+          if [[ "$result" != success ]]; then
+            echo "required CI prerequisite policy did not pass: $result" >&2
+            exit 1
+          fi
+          if plan_expects "rust-fixture" "velnor"; then
+            result="$(result_for_job velnor-rust-fixture)"
+            if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then
+              case "$result" in
+                success) ;;
+                skipped) echo "expected CI job velnor-rust-fixture was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;
+                cancelled) echo "expected CI job velnor-rust-fixture was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;
+                *) echo "expected CI job velnor-rust-fixture did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job velnor-rust-fixture ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;
+              esac
+            fi
+          else
+            result="$(result_for_job velnor-rust-fixture)"
+            case "$result" in
+              skipped) ;;
+              success) echo "unexpected CI job velnor-rust-fixture succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;
+              *) echo "unexpected CI job velnor-rust-fixture ran outside the expected set: $result" >&2; exit 1 ;;
+            esac
+          fi
+  required:
+    name: "Control / Required"
+    if: ${{ always() }}
+    needs: [ci-required]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Mirror CI / Required
+        if: ${{ needs.ci-required.result != 'success' }}
+        run: exit 1
+
+
+---- tests::rust_kind_reusable_size_is_independent_of_unit_count stdout ----
+
+thread 'tests::rust_kind_reusable_size_is_independent_of_unit_count' (105792217) panicked at crates/velnor-workflow/src/lib.rs:7026:27:
+generate the padded surface: .github/workflows/ci-main.yml would expand to 8.00 MiB of GitHub template memory, over the generator ceiling of 5.00 MiB (GitHub fails the run at 10 MiB with `Maximum object size exceeded`); largest contributors:
+  .github/workflows/ci-unit-rust.yml × 75 callers: 6.18 MiB
+  .github/workflows/ci-main.yml (own): 603.4 KiB
+  .github/workflows/ci-unit-gradle.yml × 3 callers: 220.0 KiB
+  .github/workflows/ci-unit-node.yml × 3 callers: 212.8 KiB
+  .github/workflows/ci-unit-opentofu.yml × 3 callers: 212.2 KiB
+
+---- tests::velnor_workspace_check_stays_coverage_not_an_ordering_barrier stdout ----
+
+thread 'tests::velnor_workspace_check_stays_coverage_not_an_ordering_barrier' (105795614) panicked at crates/velnor-workflow/src/lib.rs:16063:9:
+assertion `left == right` failed
+  left: Some("[plan, policy, github-hosted-rust-model]")
+ right: Some("[plan, policy]")
+
+---- tests::workflow_snapshot_enforces_security_shape stdout ----
+
+thread 'tests::workflow_snapshot_enforces_security_shape' (105795683) panicked at crates/velnor-workflow/src/lib.rs:12578:9:
+assertion failed: workflow.contains("github.ref == 'refs/heads/main'")
+
+
+failures:
+    policy::tests::ungated_trusted_velnor_job_fails_the_trusted_runners_rule
+    primitives::ir::tests::velnor_lane_check_implies_policy_runtime
+    primitives::release::tests::default_rows_render_the_legacy_release_surface
+    primitives::release::tests::dual_lane_release_publishers_stay_hosted_while_verification_stays_dual_lane
+    primitives::release::tests::identity_rows_render_the_pinned_native_surface
+    primitives::release::tests::maintenance_keeps_github_runner_out_of_runs_on_when_runners_are_velnor
+    primitives::release::tests::maintenance_splits_prune_and_cache_when_runners_are_velnor
+    primitives::release::tests::native_identity_build_records_binary_digest_and_debian_reuses_it
+    primitives::release::tests::velnor_release_surfaces_have_no_hosted_runner_branch
+    tests::apt_package_update_barrier_is_hosted_and_lane_neutral
+    tests::checked_in_workflows_match_the_generator_byte_for_byte
+    tests::declared_renovate_contract_generates_pinned_workflows
+    tests::every_runtime_install_owns_a_revision_addressed_root
+    tests::explicit_provider_universes_select_exact_ci_jobs
+    tests::generated_actionlint_config_covers_apple_release_targets
+    tests::generated_maintenance_splits_prune_and_cache_when_runners_are_velnor
+    tests::generated_workflows_use_sidebar_supported_reusable_workflow_hierarchy
+    tests::github_backend_mr_boxington_jobs_export_the_hosted_store_budget
+    tests::policy_running_jobs_check_out_full_history
+    tests::prepare_cargo_caller_and_callee_select_the_same_restricted_units
+    tests::preview_static_surface_saves_guest_seed_on_trusted_exact_miss
+    tests::required_checks_bulk_load_needs_without_per_job_expressions
+    tests::rust_kind_reusable_size_is_independent_of_unit_count
+    tests::scanner_analyzes_rust_workspace_packages_and_local_dependencies
+    tests::scanner_extracts_swiftpm_and_shared_xcode_scheme_units
+    tests::scanner_provisions_minimal_mise_tools_for_pinned_nextest_units
+    tests::scanner_requires_a_pinned_toolchain_and_provisions_exactly_it
+    tests::velnor_lane_installs_only_unit_scoped_mise_tools
+    tests::velnor_workspace_check_stays_coverage_not_an_ordering_barrier
+    tests::workflow_snapshot_enforces_security_shape
+
+test result: FAILED. 550 passed; 30 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.69s
+
+error: test failed, to rerun pass `-p velnor-workflow --lib`
+mbx[cache]: 1 hits, 0 misses, 1 bypassed; 0 B downloaded, 0 B uploaded, 0 B stored locally
+mbx[savings]: 146.6 GiB in every checkout, 146.6 GiB on disk. arithmetic declined to comment.

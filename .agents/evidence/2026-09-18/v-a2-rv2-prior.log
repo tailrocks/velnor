@@ -1,0 +1,70 @@
+Repository example/synthetic-workspace
+  source: static-filesystem-and-manifest-inspection
+  profile: generic
+  runners: both
+
+Detected
+
+  ✓ bun package manager · .
+  ✓ package.json script `build` · .
+  ✓ package.json script `lint` · .
+  ✓ package.json script `test` · .
+  ✓ rust-test-targets: beta:1
+  ✓ Rust workspace · 3 packages
+
+Execution units
+
+  Rust: 3 jobs
+  Bun: 1 job
+  Docker: 1 job
+  Documentation: 1 job
+  - bun-synthetic-app [Bun] · root=. · runners=github: ubuntu-24.04; velnor: [self-hosted, example-lane]
+    PR: bun install --frozen-lockfile ; bun run lint ; bun run build ; bun run test
+  - docker [Docker] · root=. · runners=github: ubuntu-24.04; velnor: [self-hosted, example-lane]
+    PR: docker build --file 'Dockerfile' --tag local-ci:dockerfile '.'
+  - docs [Documentation] · root=. · runners=github: ubuntu-24.04; velnor: [self-hosted, example-lane]
+    PR: npx --yes markdownlint-cli2@0.20.0 "**/*.md" "#node_modules" "#**/AGENTS.md" "#**/CLAUDE.md" "#target" "#**/target/**" "#dist" "#coverage" "#**/.cache/**" "#migrations/**"
+  - rust-alpha [Rust] · root=crates/alpha · runners=github: ubuntu-24.04; velnor: [self-hosted, example-lane]
+    PR: cd -- 'crates/alpha' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/alpha' && mbx test  --all-features --package 'alpha' ; cd -- 'crates/alpha' && mbx clippy  --profile test --all-targets --all-features --package 'alpha' -- -D warnings
+  - rust-beta [Rust] · root=crates/beta · runners=github: ubuntu-24.04; velnor: [self-hosted, example-lane]
+    PR: cd -- 'crates/beta' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/beta' && mbx test  --all-features --package 'beta' ; cd -- 'crates/beta' && mbx clippy  --profile test --all-targets --all-features --package 'beta' -- -D warnings
+    needs: rust-alpha
+  - rust-gamma [Rust] · root=crates/gamma · runners=github: ubuntu-24.04; velnor: [self-hosted, example-lane]
+    PR: cd -- 'crates/gamma' && mbx fmt --manifest-path 'Cargo.toml' -- --check ; cd -- 'crates/gamma' && mbx test  --all-features --package 'gamma' ; cd -- 'crates/gamma' && mbx clippy  --profile test --all-targets --all-features --package 'gamma' -- -D warnings
+  total: 6 units · 1 dependency edge
+
+Generated files
+
+  + create    .github/actionlint.yaml                    actionlint runner-label contract
+  + create    .github/ci/project.toml                    detected CI graph + binary runtime contract
+  + create    .github/workflows/ci-main.yml              trusted main verification
+  + create    .github/workflows/ci-policy.yml            base-owned pull-request policy gate
+  + create    .github/workflows/ci-pr.yml                parallel PR verification
+  + create    .github/workflows/ci-unit-bun.yml          generated CI support file
+  + create    .github/workflows/ci-unit-docker.yml       generated CI support file
+  + create    .github/workflows/ci-unit-docs.yml         generated CI support file
+  + create    .github/workflows/ci-unit-rust.yml         generated CI support file
+  + create    .github/workflows/maintenance.yml          closed-PR cache cleanup
+  + create    .github/workflows/nightly.yml              scheduled full verification
+  + create    config/fleet/velnor-host.env               generated CI support file
+  + create    .github/ci/.github-actions-generator-state ownership and overwrite safety state
+
+Why
+
+  → Rust manifests become independently schedulable jobs per crate; Cargo resolves prerequisites inside each job while ci-required aggregates every selected result.
+  → package.json scripts and lockfiles select the native package manager, install mode, cache, and package job.
+  → Only checked-in, statically detected evidence controls generated commands; project code and task runners are never executed.
+  → Generated jobs invoke `velnor-workflow run` directly; the checked-in TOML remains the runtime contract for planning, execution, policy, and release commands.
+
+Boundaries
+
+  ! Project code, build scripts, task runners, and commands are never executed during analysis.
+  ! Release, signing, registry, deployment, branch-protection, and runner-capability contracts remain explicit manual inputs.
+
+Template memory (ceiling 5.00 MiB, GitHub limit 10 MiB)
+
+  → .github/workflows/ci-main.yml: 797.0 KiB expanded (own 90.2 KiB; 2×ci-unit-bun.yml @ 53.0 KiB, 2×ci-unit-docker.yml @ 50.3 KiB, 2×ci-unit-docs.yml @ 52.7 KiB, 6×ci-unit-rust.yml @ 65.8 KiB)
+  → .github/workflows/ci-pr.yml: 781.9 KiB expanded (own 75.1 KiB; 2×ci-unit-bun.yml @ 53.0 KiB, 2×ci-unit-docker.yml @ 50.3 KiB, 2×ci-unit-docs.yml @ 52.7 KiB, 6×ci-unit-rust.yml @ 65.8 KiB)
+
+Result Generated 13 files in /private/tmp/v-a2-rv2-consumer
+

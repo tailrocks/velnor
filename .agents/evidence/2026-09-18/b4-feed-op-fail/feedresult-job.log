@@ -1,0 +1,49 @@
+Feed result	Set up job	﻿2026-09-18T10:27:14.0395628Z Current runner version: '2.337.0'
+Feed result	Set up job	2026-09-18T10:27:14.0420780Z ##[group]Runner Image Provisioner
+Feed result	Set up job	2026-09-18T10:27:14.0421707Z Hosted Compute Agent
+Feed result	Set up job	2026-09-18T10:27:14.0422415Z Version: 20260828.587
+Feed result	Set up job	2026-09-18T10:27:14.0423061Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+Feed result	Set up job	2026-09-18T10:27:14.0423806Z Build Date: 2026-08-28T16:44:25Z
+Feed result	Set up job	2026-09-18T10:27:14.0424577Z Worker ID: {1b50618d-fd20-46f1-a99c-c3bc5a40a87c}
+Feed result	Set up job	2026-09-18T10:27:14.0425547Z Azure Region: westus
+Feed result	Set up job	2026-09-18T10:27:14.0426193Z ##[endgroup]
+Feed result	Set up job	2026-09-18T10:27:14.0428104Z ##[group]Operating System
+Feed result	Set up job	2026-09-18T10:27:14.0428761Z Ubuntu
+Feed result	Set up job	2026-09-18T10:27:14.0429394Z 24.04.5
+Feed result	Set up job	2026-09-18T10:27:14.0429939Z LTS
+Feed result	Set up job	2026-09-18T10:27:14.0430568Z ##[endgroup]
+Feed result	Set up job	2026-09-18T10:27:14.0431137Z ##[group]Runner Image
+Feed result	Set up job	2026-09-18T10:27:14.0431721Z Image: ubuntu-24.04
+Feed result	Set up job	2026-09-18T10:27:14.0432383Z Version: 20260907.300.1
+Feed result	Set up job	2026-09-18T10:27:14.0433439Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260907.300/images/ubuntu/Ubuntu2404-Readme.md
+Feed result	Set up job	2026-09-18T10:27:14.0435468Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260907.300
+Feed result	Set up job	2026-09-18T10:27:14.0436462Z ##[endgroup]
+Feed result	Set up job	2026-09-18T10:27:14.0437631Z ##[group]GITHUB_TOKEN Permissions
+Feed result	Set up job	2026-09-18T10:27:14.0439738Z Contents: read
+Feed result	Set up job	2026-09-18T10:27:14.0440469Z Metadata: read
+Feed result	Set up job	2026-09-18T10:27:14.0441031Z ##[endgroup]
+Feed result	Set up job	2026-09-18T10:27:14.0442998Z Secret source: Actions
+Feed result	Set up job	2026-09-18T10:27:14.0444087Z Cache mode: write
+Feed result	Set up job	2026-09-18T10:27:14.0444991Z Prepare workflow directory
+Feed result	Set up job	2026-09-18T10:27:14.0773121Z Prepare all required actions
+Feed result	Set up job	2026-09-18T10:27:14.0879414Z Complete job name: Feed result
+Feed result	Fail closed unless the feed verified and published	﻿2026-09-18T10:27:14.1655393Z ##[group]Run set -euo pipefail
+Feed result	Fail closed unless the feed verified and published	2026-09-18T10:27:14.1656205Z ^[[36;1mset -euo pipefail^[[0m
+Feed result	Fail closed unless the feed verified and published	2026-09-18T10:27:14.1657154Z ^[[36;1m[ "$VERIFY" = success ] || { echo "::error::feed verification did not succeed: $VERIFY" >&2; exit 1; }^[[0m
+Feed result	Fail closed unless the feed verified and published	2026-09-18T10:27:14.1658239Z ^[[36;1mif [ "$REF" = "refs/heads/main" ]; then^[[0m
+Feed result	Fail closed unless the feed verified and published	2026-09-18T10:27:14.1659413Z ^[[36;1m  [ "$PUBLISH" = success ] || { echo "::error::feed publication did not succeed: $PUBLISH" >&2; exit 1; }^[[0m
+Feed result	Fail closed unless the feed verified and published	2026-09-18T10:27:14.1660824Z ^[[36;1m  [ "$DEPLOY" = success ] || { echo "::error::feed deployment did not succeed: $DEPLOY" >&2; exit 1; }^[[0m
+Feed result	Fail closed unless the feed verified and published	2026-09-18T10:27:14.1661775Z ^[[36;1melse^[[0m
+Feed result	Fail closed unless the feed verified and published	2026-09-18T10:27:14.1662798Z ^[[36;1m  [ "$PUBLISH" = skipped ] || { echo "::error::unexpected publication state off the default branch: $PUBLISH" >&2; exit 1; }^[[0m
+Feed result	Fail closed unless the feed verified and published	2026-09-18T10:27:14.1664379Z ^[[36;1m  [ "$DEPLOY" = skipped ] || { echo "::error::unexpected deployment state off the default branch: $DEPLOY" >&2; exit 1; }^[[0m
+Feed result	Fail closed unless the feed verified and published	2026-09-18T10:27:14.1665657Z ^[[36;1mfi^[[0m
+Feed result	Fail closed unless the feed verified and published	2026-09-18T10:27:14.2164022Z shell: /usr/bin/bash -e {0}
+Feed result	Fail closed unless the feed verified and published	2026-09-18T10:27:14.2165023Z env:
+Feed result	Fail closed unless the feed verified and published	2026-09-18T10:27:14.2166159Z   REF: refs/heads/main
+Feed result	Fail closed unless the feed verified and published	2026-09-18T10:27:14.2166878Z   VERIFY: success
+Feed result	Fail closed unless the feed verified and published	2026-09-18T10:27:14.2167479Z   PUBLISH: failure
+Feed result	Fail closed unless the feed verified and published	2026-09-18T10:27:14.2168142Z   DEPLOY: skipped
+Feed result	Fail closed unless the feed verified and published	2026-09-18T10:27:14.2168754Z ##[endgroup]
+Feed result	Fail closed unless the feed verified and published	2026-09-18T10:27:14.2396848Z ##[error]feed publication did not succeed: failure
+Feed result	Fail closed unless the feed verified and published	2026-09-18T10:27:14.2421679Z ##[error]Process completed with exit code 1.
+Feed result	Complete job	﻿2026-09-18T10:27:14.2591525Z Cleaning up orphan processes

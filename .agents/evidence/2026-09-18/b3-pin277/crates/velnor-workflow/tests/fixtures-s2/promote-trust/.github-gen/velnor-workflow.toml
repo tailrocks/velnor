@@ -1,0 +1,14 @@
+schema = 2
+
+[generator]
+repository = "example/promote-trust"
+
+[workflow]
+
+[workflow.selectors.velnor]
+runs_on = ["self-hosted", "example-runner-label"]
+
+[[units]]
+id = "promote-trust-probe"
+kind = "docs"
+trust = "trusted-only"

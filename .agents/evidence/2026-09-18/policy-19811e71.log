@@ -1,0 +1,28 @@
+PASS pin-declared           .github-gen/velnor-workflow.toml [generator] revision = 19811e71c2a365f3fa93286fdff7dbc298fb37c2
+PASS pin-reachable          not applicable: tailrocks/velnor-apt consumes the generator from tailrocks/velnor; the pin is a commit of that repository, proven when the pinned generator is obtained
+PASS pin-monotonic          not applicable: tailrocks/velnor-apt consumes the generator from tailrocks/velnor; the pin is a commit of that repository, proven when the pinned generator is obtained
+PASS entrypoint-pin         .github/workflows/ci-policy.yml acquires and exports the declared pin (4 literals)
+FAIL generated-tree         could not regenerate the tree with velnor-workflow at 19811e71c2a365f3fa93286fdff7dbc298fb37c2
+       - no velnor-workflow renderer for the declared pin 19811e71c2a365f3fa93286fdff7dbc298fb37c2 is provisioned and building one is forbidden here (/Users/donbeave/.cargo/bin/velnor-workflow: /Users/donbeave/.cargo/bin/velnor-workflow: `--closure` failed (exit status: 1): error: unexpected argument '--closure' found
+
+  tip: to pass '--closure' as a value, use '-- --closure'
+
+Usage: velnor-workflow [OPTIONS] [TARGET] [TARGET]
+
+For more information, try '--help'.; /Users/donbeave/.local/share/mise/shims/velnor-workflow: /Users/donbeave/.local/share/mise/shims/velnor-workflow: `--closure` failed (exit status: 1): error: unexpected argument '--closure' found
+
+  tip: to pass '--closure' as a value, use '-- --closure'
+
+Usage: velnor-workflow [OPTIONS] [TARGET] [TARGET]
+
+For more information, try '--help'.); export VELNOR_WORKFLOW_PINNED_BINARY=<binary for 19811e71c2a365f3fa93286fdff7dbc298fb37c2>, put one on PATH, or rerun with --pin-build to compile the pin from source (local development only; never emitted into CI)
+PASS pull-request-target    only .github/workflows/ci-policy.yml runs on pull_request_target, with the reviewed trigger set
+PASS entrypoint-privileges  .github/workflows/ci-policy.yml holds contents: read only, references no secrets, and persists no credentials
+FAIL trusted-runners        1 finding
+       - .github/workflows/ci-unit-docs.yml: job verify-velnor: self-hosted jobs require a default-branch trusted-event gate
+PASS action-pins            every action reference is a full-SHA pin or a reviewed local path
+PASS workflow-structure     every workflow parses as GitHub would run it
+FAIL required-checks        1 finding
+       - the live ruleset does not require the policy entrypoint context `Policy`; the gate is advisory until the ruleset requires it
+policy: 11 rules, 3 failed
+error: workflow policy failed: generated-tree, trusted-runners, required-checks

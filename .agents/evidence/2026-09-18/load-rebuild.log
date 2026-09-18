@@ -1,0 +1,3 @@
+telemetry: invocation a3b4e969-a032-4a66-a91a-224fc5f9c605 - OpenTelemetry export disabled
+
+  [38;2;210;100;100merror:[39m [1m[38;2;210;100;100mjackin load requires a rich terminal: stdin/stdout/stderr must be TTYs, TERM must not be dumb, CI must be unset, and the terminal must be at least 80x24[39m[0m

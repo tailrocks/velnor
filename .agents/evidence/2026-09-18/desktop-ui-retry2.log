@@ -1,0 +1,19 @@
+[desktop-test-ui] $ native/Scripts/run-ui-tests.sh
+
+----- xcbeautify -----
+Version: 3.2.1
+----------------------
+
+Test Suite 'Selected tests' started at 2026-09-18 11:37:20.712.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 11:37:20.712.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 11:37:20.712.
+    [31m✖[0m testEmptyUsageStateIsDistinct, Failed to activate application 'com.jackin-project.desktop at /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktop.app' (current state: Running Background)
+Executed 1 test, with 1 failure (0 unexpected) in 61.032 (61.032) seconds
+Test Suite 'JackinDesktopUITests.xctest' failed at 2026-09-18 11:38:21.745.
+Executed 1 test, with 1 failure (0 unexpected) in 61.032 (61.033) seconds
+Executed 1 test, with 1 failure (0 unexpected) in 61.032 (61.033) seconds
+[1mTest session results:[0m /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/UITests-20260918T043718Z-29115/testEmptyUsageStateIsDistinct.xcresult
+[36;1mTesting started[0m
+xcodebuild failed for testEmptyUsageStateIsDistinct: status 65
+[desktop-test-ui] ERROR task failed
+UI2_EXIT=65

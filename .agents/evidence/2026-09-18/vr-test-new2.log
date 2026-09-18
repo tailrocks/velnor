@@ -1,0 +1,52 @@
+ok - coherent release verifies and arms the sentinel
+ok - live OCI index binds and verifies both platform configs
+ok - rejected: one OCI platform label differs from the release record
+ok - rejected: tampered record fails checksum
+ok - rejected: tampered deb fails hash
+ok - rejected: resolved commit disagrees with record
+ok - rejected: missing record fails closed
+ok - rejected: extra deb is rejected
+ok - rejected: manifest hash != record manifest hash
+ok - rejected: APT signer fingerprint mismatch
+ok - rejected: OCI ref not pinning the index digest
+ok - rejected: packaged identity inside the deb disagrees with the commit
+ok - rejected: extracted runner binary disagrees with record
+verify-release: publication staged in ./public and publication-record.json signed; live Pages untouched
+ok - publication signs candidate and exact rollback pair into both indexes
+ok - publication fails before staging mutation without a signer passphrase
+ok - coherent preview release verifies and arms the sentinel
+ok - preview rejected: no commit supplied (there is no tag to resolve)
+ok - preview rejected: version suffix does not abbreviate the supplied commit
+ok - preview rejected: version grammar (separator, v-prefix, short/absent commit)
+ok - preview rejected: release-manifest version != requested preview version
+ok - preview rejected: tampered preview deb fails its sidecar checksum
+ok - preview rejected: preview sidecar names a different deb than its own
+ok - preview accepted: named sidecar variant
+ok - preview rejected: extra preview deb is rejected
+ok - preview rejected: preview release-manifest source_ref is not refs/heads/main
+ok - preview rejected: preview release-manifest source_repository mismatch
+ok - preview rejected: preview release-manifest commit != supplied commit
+ok - preview rejected: preview deb build-identity source_sha disagrees with the commit
+ok - preview rejected: preview deb build-identity crate_version != preview base version
+ok - preview rejected: preview deb control architecture disagrees with the asset arch
+ok - preview rejected: SHA256SUMS carries more than the two preview deb lines
+verify-release: publication staged in ./public and publication-record.json signed; live Pages untouched
+verify-release: preview publication staged in ./public and publication-record-preview.json signed; live Pages untouched
+ok - preview publication stages into the shared tree without touching the stable suite
+ok - preview rejected: candidate is older than the retained rollback version
+ok - preview rejected: candidate equals the retained rollback version
+ok - preview rejected: previous pointer is not the JSON string "preview"
+ok - preview rejected: publication without the armed reprepro sentinel
+verify-release: preview publication staged in ./public and publication-record-preview.json signed; live Pages untouched
+ok - preview bootstrap initializes the suite from the candidate pair alone (null previous)
+verify-release: preview publication staged in ./public and publication-record-preview.json signed; live Pages untouched
+ok - preview bootstrap re-run stays idempotent on its own tree
+ok - preview rejected: bootstrap over a tree that already retains a rollback pair
+ok - preview rejected: --bootstrap is mutually exclusive with --prev-dir
+ok - preview rejected: --bootstrap does not apply to --suite stable
+ok - preview rejected: bootstrap previous pointer is not JSON null
+ok - publisher holds least authority for a public source image
+ok - public GHCR verification runs without registry authentication
+ok - same-version publication retry preserves signed rollback identity
+----
+all 45 verify-release checks passed

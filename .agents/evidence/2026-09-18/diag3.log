@@ -1,0 +1,427 @@
+Command line invocation:
+    /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -project native/JackinDesktop.xcodeproj -scheme JackinDesktop -destination platform=macOS -parallel-testing-enabled NO "-only-testing:JackinDesktopUITests/JackinDesktopUITests/testOverviewPassesAccessibilityAudit" -derivedDataPath native/DerivedData -resultBundlePath /tmp/diag3.xcresult
+
+Writing result bundle at path:
+	/tmp/diag3.xcresult
+
+ComputePackagePrebuildTargetDependencyGraph
+
+Prepare packages
+
+CreateBuildRequest
+
+SendProjectDescription
+
+CreateBuildOperation
+
+ComputeTargetDependencyGraph
+note: Building targets in dependency order
+note: Target dependency graph (6 targets)
+    Target 'JackinDesktopUITests' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinDesktop' in project 'JackinDesktop'
+    Target 'JackinDesktopTests' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinDesktopUI' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBridge' in project 'JackinDesktop'
+    Target 'JackinDesktop' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinDesktopUI' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBridge' in project 'JackinDesktop'
+    Target 'JackinDesktopUI' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBridge' in project 'JackinDesktop'
+    Target 'JackinUsageBridge' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+    Target 'JackinUsageBindings' in project 'JackinDesktop' (no dependencies)
+
+GatherProvisioningInputs
+
+CreateBuildDescription
+
+ExecuteExternalTool /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc --version
+
+ExecuteExternalTool /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang -v -E -dM -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk -x c -c /dev/null
+
+ExecuteExternalTool /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld -version_details
+
+ExecuteExternalTool /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/libtool -V
+
+Build description signature: 24bebab505d3e08a72fec6bbfe966e8c
+Build description path: /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/XCBuildData/24bebab505d3e08a72fec6bbfe966e8c.xcbuilddata
+ClangStatCache /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang-stat-cache /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKStatCaches.noindex/macosx27.0-26A425-7231f6df4def33e022ae2eb8f782df1a.sdkstatcache
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/JackinDesktop.xcodeproj
+    /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang-stat-cache /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk -o /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKStatCaches.noindex/macosx27.0-26A425-7231f6df4def33e022ae2eb8f782df1a.sdkstatcache
+
+ProcessInfoPlistFile /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktop.app/Contents/Info.plist /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/Support/JackinDesktop-Info.plist (in target 'JackinDesktop' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    builtin-infoPlistUtility /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/Support/JackinDesktop-Info.plist -producttype com.apple.product-type.application -genpkginfo /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktop.app/Contents/PkgInfo -expandbuildsettings -platform macosx -o /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktop.app/Contents/Info.plist
+
+SwiftDriver JackinDesktopUITests normal arm64 com.apple.xcode.tools.swift.compiler (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    builtin-SwiftDriver -- /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc -module-name JackinDesktopUITests -Onone @/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.SwiftFileList -DDEBUG -module-alias Testing\=_Testing_Unavailable -plugin-path /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing -enable-experimental-feature DebugDescriptionMacro -sdk /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk -target arm64-apple-macos26.0 -g -module-cache-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/ModuleCache.noindex -Xfrontend -serialize-debugging-options -profile-coverage-mapping -profile-generate -enable-testing -warnings-as-errors -index-store-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Index.noindex/DataStore -Xcc -D_LIBCPP_HARDENING_MODE\=_LIBCPP_HARDENING_MODE_DEBUG -swift-version 6 -I /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug -Isystem /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib -F /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug -F /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks -parse-as-library -c -j18 -enable-batch-mode -incremental -Xcc -ivfsstatcache -Xcc /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKStatCaches.noindex/macosx27.0-26A425-7231f6df4def33e022ae2eb8f782df1a.sdkstatcache -output-file-map /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests-OutputFileMap.json -save-temps -no-color-diagnostics -explicit-module-build -module-cache-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/SwiftExplicitPrecompiledModules -clang-scanner-module-cache-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/ModuleCache.noindex -sdk-module-cache-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKExplicitPrecompiledModules -emit-dependencies -emit-module -emit-module-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.swiftmodule -serialize-diagnostics -dependency-scan-serialize-diagnostics-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests-dependency-scan.dia -validate-clang-modules-once -clang-build-session-file /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/ModuleCache.noindex/Session.modulevalidation -Xcc -fmodules-prune-interval\=86400 -Xcc -fmodules-prune-after\=345600 -emit-const-values -const-gather-protocols-list /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests_const_extract_protocols.json -Xcc -iquote -Xcc /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests-generated-files.hmap -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests-own-target-headers.hmap -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests-all-non-framework-target-headers.hmap -Xcc -ivfsoverlay -Xcc /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktop-9195fc9352869b57ac7a60bcaac88bf1-VFS/all-product-headers.yaml -Xcc -iquote -Xcc /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests-project-headers.hmap -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/include -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/DerivedSources-normal/arm64 -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/DerivedSources/arm64 -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/DerivedSources -Xcc -DDEBUG\=1 -emit-objc-header -emit-objc-header-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests-Swift.h -working-directory /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native -experimental-emit-module-separately -disable-cmo
+
+CopySwiftLibs /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktop.app (in target 'JackinDesktop' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    builtin-swiftStdLibTool --copy --verbose --sign - --scan-executable /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktop.app/Contents/MacOS/JackinDesktop.debug.dylib --scan-folder /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktop.app/Contents/Frameworks --scan-folder /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktop.app/Contents/PlugIns --scan-folder /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktop.app/Contents/Library/SystemExtensions --scan-folder /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktop.app/Contents/Extensions --platform macosx --toolchain /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain --destination /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktop.app/Contents/Frameworks --strip-bitcode --strip-bitcode-tool /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/bitcode_strip --emit-dependency-info /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktop.build/SwiftStdLibToolInputDependencies.dep --filter-for-swift-os
+
+SwiftCompile normal arm64 Compiling\ JackinDesktopUITests.swift /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+
+SwiftCompile normal arm64 /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    builtin-SwiftPerFileCompile JackinDesktopUITests.swift
+
+SwiftEmitModule normal arm64 Emitting\ module\ for\ JackinDesktopUITests (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+
+SwiftCompile normal arm64 (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    
+
+SwiftDriverJobDiscovery normal arm64 Compiling JackinDesktopUITests.swift (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+
+SwiftDriver\ Compilation JackinDesktopUITests normal arm64 com.apple.xcode.tools.swift.compiler (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    builtin-Swift-Compilation -- /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc -module-name JackinDesktopUITests -Onone @/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.SwiftFileList -DDEBUG -module-alias Testing\=_Testing_Unavailable -plugin-path /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing -enable-experimental-feature DebugDescriptionMacro -sdk /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk -target arm64-apple-macos26.0 -g -module-cache-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/ModuleCache.noindex -Xfrontend -serialize-debugging-options -profile-coverage-mapping -profile-generate -enable-testing -warnings-as-errors -index-store-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Index.noindex/DataStore -Xcc -D_LIBCPP_HARDENING_MODE\=_LIBCPP_HARDENING_MODE_DEBUG -swift-version 6 -I /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug -Isystem /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib -F /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug -F /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks -parse-as-library -c -j18 -enable-batch-mode -incremental -Xcc -ivfsstatcache -Xcc /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKStatCaches.noindex/macosx27.0-26A425-7231f6df4def33e022ae2eb8f782df1a.sdkstatcache -output-file-map /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests-OutputFileMap.json -save-temps -no-color-diagnostics -explicit-module-build -module-cache-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/SwiftExplicitPrecompiledModules -clang-scanner-module-cache-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/ModuleCache.noindex -sdk-module-cache-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKExplicitPrecompiledModules -emit-dependencies -emit-module -emit-module-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.swiftmodule -serialize-diagnostics -dependency-scan-serialize-diagnostics-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests-dependency-scan.dia -validate-clang-modules-once -clang-build-session-file /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/ModuleCache.noindex/Session.modulevalidation -Xcc -fmodules-prune-interval\=86400 -Xcc -fmodules-prune-after\=345600 -emit-const-values -const-gather-protocols-list /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests_const_extract_protocols.json -Xcc -iquote -Xcc /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests-generated-files.hmap -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests-own-target-headers.hmap -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests-all-non-framework-target-headers.hmap -Xcc -ivfsoverlay -Xcc /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktop-9195fc9352869b57ac7a60bcaac88bf1-VFS/all-product-headers.yaml -Xcc -iquote -Xcc /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests-project-headers.hmap -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/include -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/DerivedSources-normal/arm64 -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/DerivedSources/arm64 -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/DerivedSources -Xcc -DDEBUG\=1 -emit-objc-header -emit-objc-header-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests-Swift.h -working-directory /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native -experimental-emit-module-separately -disable-cmo
+
+SwiftDriverJobDiscovery normal arm64 Emitting module for JackinDesktopUITests (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+
+SwiftDriver\ Compilation\ Requirements JackinDesktopUITests normal arm64 com.apple.xcode.tools.swift.compiler (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    builtin-Swift-Compilation-Requirements -- /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc -module-name JackinDesktopUITests -Onone @/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.SwiftFileList -DDEBUG -module-alias Testing\=_Testing_Unavailable -plugin-path /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing -enable-experimental-feature DebugDescriptionMacro -sdk /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk -target arm64-apple-macos26.0 -g -module-cache-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/ModuleCache.noindex -Xfrontend -serialize-debugging-options -profile-coverage-mapping -profile-generate -enable-testing -warnings-as-errors -index-store-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Index.noindex/DataStore -Xcc -D_LIBCPP_HARDENING_MODE\=_LIBCPP_HARDENING_MODE_DEBUG -swift-version 6 -I /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug -Isystem /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib -F /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug -F /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks -parse-as-library -c -j18 -enable-batch-mode -incremental -Xcc -ivfsstatcache -Xcc /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKStatCaches.noindex/macosx27.0-26A425-7231f6df4def33e022ae2eb8f782df1a.sdkstatcache -output-file-map /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests-OutputFileMap.json -save-temps -no-color-diagnostics -explicit-module-build -module-cache-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/SwiftExplicitPrecompiledModules -clang-scanner-module-cache-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/ModuleCache.noindex -sdk-module-cache-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKExplicitPrecompiledModules -emit-dependencies -emit-module -emit-module-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.swiftmodule -serialize-diagnostics -dependency-scan-serialize-diagnostics-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests-dependency-scan.dia -validate-clang-modules-once -clang-build-session-file /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/ModuleCache.noindex/Session.modulevalidation -Xcc -fmodules-prune-interval\=86400 -Xcc -fmodules-prune-after\=345600 -emit-const-values -const-gather-protocols-list /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests_const_extract_protocols.json -Xcc -iquote -Xcc /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests-generated-files.hmap -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests-own-target-headers.hmap -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests-all-non-framework-target-headers.hmap -Xcc -ivfsoverlay -Xcc /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktop-9195fc9352869b57ac7a60bcaac88bf1-VFS/all-product-headers.yaml -Xcc -iquote -Xcc /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests-project-headers.hmap -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/include -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/DerivedSources-normal/arm64 -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/DerivedSources/arm64 -Xcc -I/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/DerivedSources -Xcc -DDEBUG\=1 -emit-objc-header -emit-objc-header-path /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests-Swift.h -working-directory /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native -experimental-emit-module-separately -disable-cmo
+
+Copy /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests.swiftmodule/arm64-apple-macos.abi.json /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.abi.json (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    builtin-copy -exclude .DS_Store -exclude CVS -exclude .svn -exclude .git -exclude .hg -resolve-src-symlinks -rename /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.abi.json /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests.swiftmodule/arm64-apple-macos.abi.json
+
+Copy /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests.swiftmodule/Project/arm64-apple-macos.swiftsourceinfo /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.swiftsourceinfo (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    builtin-copy -exclude .DS_Store -exclude CVS -exclude .svn -exclude .git -exclude .hg -resolve-src-symlinks -rename /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.swiftsourceinfo /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests.swiftmodule/Project/arm64-apple-macos.swiftsourceinfo
+
+Ld /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest/Contents/MacOS/JackinDesktopUITests normal (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang -Xlinker -reproducible -target arm64-apple-macos26.0 -bundle -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk -O0 -Xlinker -no_warn_duplicate_libraries -L/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/EagerLinkingTBDs/Debug -L/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug -L/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib -F/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/EagerLinkingTBDs/Debug -F/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug -iframework /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks -filelist /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.LinkFileList -Xlinker -rpath -Xlinker @loader_path/../Frameworks -Xlinker -rpath -Xlinker @executable_path/Frameworks -Xlinker -rpath -Xlinker @loader_path/Frameworks -Xlinker -dead_strip -Xlinker -object_path_lto -Xlinker /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests_lto.o -rdynamic -Xlinker -no_deduplicate -Xlinker -debug_variant -Xlinker -dependency_info -Xlinker /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests_dependency_info.dat -fobjc-link-runtime -fprofile-instr-generate -L/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx -L/usr/lib/swift -Xlinker -add_ast_path -Xlinker /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.swiftmodule -Xlinker -needed_framework -Xlinker XCTest -framework XCTest -Xlinker -needed-lXCTestSwiftSupport -lXCTestSwiftSupport -Xlinker -no_adhoc_codesign -o /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest/Contents/MacOS/JackinDesktopUITests
+
+ExtractAppIntentsMetadata (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/appintentsmetadataprocessor --toolchain-dir /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain --module-name JackinDesktopUITests --sdk-root /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk --xcode-version 27A266a --platform-family macOS --deployment-target 26.0 --output /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest/Contents/Resources --target-triple arm64-apple-macos26.0 --binary-file /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest/Contents/MacOS/JackinDesktopUITests --dependency-file /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests_dependency_info.dat --stringsdata-file /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/ExtractedAppShortcutsMetadata.stringsdata --source-file-list /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.SwiftFileList --metadata-file-list /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests.DependencyMetadataFileList --static-metadata-file-list /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests.DependencyStaticMetadataFileList --swift-const-vals-list /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/Objects-normal/arm64/JackinDesktopUITests.SwiftConstValuesFileList --force --quiet-warnings --compile-time-extraction --deployment-aware-processing --no-app-shortcuts-localization
+2026-09-18 04:53:14.652 appintentsmetadataprocessor[40876:131632442] Starting appintentsmetadataprocessor export
+2026-09-18 04:53:14.686 appintentsmetadataprocessor[40876:131632442] Extracted no relevant App Intents symbols, skipping writing output
+
+ProcessInfoPlistFile /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest/Contents/Info.plist /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/empty-JackinDesktopUITests.plist (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    builtin-infoPlistUtility /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/empty-JackinDesktopUITests.plist -producttype com.apple.product-type.bundle.ui-testing -expandbuildsettings -platform macosx -additionalcontentfile /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/ProductTypeInfoPlistAdditions.plist -o /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest/Contents/Info.plist
+
+ProcessInfoPlistFile /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopTests.xctest/Contents/Info.plist /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopTests.build/empty-JackinDesktopTests.plist (in target 'JackinDesktopTests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    builtin-infoPlistUtility /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopTests.build/empty-JackinDesktopTests.plist -producttype com.apple.product-type.bundle.unit-test -expandbuildsettings -platform macosx -o /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopTests.xctest/Contents/Info.plist
+
+CopySwiftLibs /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    builtin-swiftStdLibTool --copy --verbose --sign - --scan-executable /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest/Contents/MacOS/JackinDesktopUITests --scan-folder /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest/Contents/Frameworks --scan-folder /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest/Contents/PlugIns --scan-folder /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest/Contents/Library/SystemExtensions --scan-folder /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest/Contents/Extensions --platform macosx --toolchain /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain --destination /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest/Contents/Frameworks --strip-bitcode --scan-executable /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib/libXCTestSwiftSupport.dylib --strip-bitcode-tool /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/bitcode_strip --emit-dependency-info /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/SwiftStdLibToolInputDependencies.dep --filter-for-swift-os
+
+CodeSign /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    
+    Signing Identity:     "Sign to Run Locally"
+    
+    /usr/bin/codesign --force --sign - --entitlements /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests.xctest.xcent --timestamp\=none --generate-entitlement-der /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app/Contents/PlugIns/JackinDesktopUITests.xctest
+
+CodeSign /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app (in target 'JackinDesktopUITests' from project 'JackinDesktop')
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native
+    
+    Signing Identity:     "Sign to Run Locally"
+    
+    /usr/bin/codesign --force --sign - --entitlements /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/JackinDesktop.build/Debug/JackinDesktopUITests.build/JackinDesktopUITests.xctest.xcent --timestamp\=none --generate-entitlement-der /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Products/Debug/JackinDesktopUITests-Runner.app: replacing existing signature
+
+PruneExplicitPrecompiledModules /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/SwiftExplicitPrecompiledModules
+
+PruneExplicitPrecompiledModules /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKExplicitPrecompiledModules
+
+PruneExplicitPrecompiledModules /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/ExplicitPrecompiledModules
+
+2026-09-18 04:53:15.042865+0700 JackinDesktopUITests-Runner[40879:131632506] [Default] Running tests...
+Test Suite 'Selected tests' started at 2026-09-18 04:53:15.082.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 04:53:15.082.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 04:53:15.082.
+Test Case '-[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit]' started.
+    t =     0.00s Start Test at 2026-09-18 04:53:15.082
+    t =     0.12s Set Up
+    t =     0.13s Open com.jackin-project.desktop
+    t =     0.13s     Launch com.jackin-project.desktop
+2026-09-18 04:53:15.245 xcodebuild[40819:131631827] [MT] IDELaunchParametersSnapshot: debugger version lookup failed for path '<nil>': noURL
+2026-09-18 04:53:15.245 xcodebuild[40819:131631827] [MT] IDELaunchParametersSnapshot: no debugger version
+    t =     0.38s         Wait for accessibility to load
+    t =     0.59s         Setting up automation session
+    t =     0.60s         Wait for com.jackin-project.desktop to idle
+    t =     0.65s Open com.jackin-project.desktop
+    t =     0.66s     Activate com.jackin-project.desktop
+    t =     0.67s         Wait for com.jackin-project.desktop to idle
+    t =     0.68s Waiting 8.0s for "usage-window" Window to exist
+    t =     1.71s     Checking `Expect predicate `existsNoRetry == 1` for object "usage-window" Window`
+    t =     1.71s         Checking existence of `"usage-window" Window`
+    t =     1.85s Open com.jackin-project.desktop
+    t =     1.85s     Activate com.jackin-project.desktop
+    t =     1.85s         Wait for com.jackin-project.desktop to idle
+    t =     1.86s Waiting 5.0s for "usage.overview.table" Any to exist
+    t =     2.89s     Checking `Expect predicate `existsNoRetry == 1` for object "usage.overview.table" Any`
+    t =     2.90s         Checking existence of `"usage.overview.table" Any`
+    t =     2.99s Find the "usage.overview.table" Any
+    t =     3.06s Find the "usage.sidebar" Any
+    t =     3.14s Requesting snapshot of accessibility hierarchy for app with pid 40884
+    t =     3.24s Requesting snapshot of accessibility hierarchy for app with pid 40884
+    t =     3.33s Added attachment named 'TEMP-AX-DUMP.txt'
+    t =     3.68s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jcQAAAAAAAAA=)
+    t =     4.73s     Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jcQAAAAAAAAA=) (retry 1)
+    t =     5.80s     Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jcQAAAAAAAAA=) (retry 2)
+    t =     5.85s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jSAAAAAAAAAD+/////////1gAAAAAAAAAAAAAAAAAAAA=)
+    t =     5.90s Find the Group
+    t =     5.95s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jYAAAAAAAAAA=)
+    t =     6.00s Find the "usage.sidebar.provider.amp" StaticText
+    t =     6.05s Find the "usage.sidebar.provider.amp" StaticText
+    t =     6.11s Find the "usage.sidebar.provider.amp" StaticText
+    t =     6.16s Unhandled AX audit: XCUIAccessibilityAuditType(rawValue: 1); type=48; id=usage.sidebar.provider.amp; Contrast failed
+    t =     6.16s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jYAAAAAAAAAA=)
+    t =     6.21s Checking existence of `"usage.sidebar.provider.amp" StaticText`
+    t =     6.26s Find the "usage.sidebar.provider.amp" StaticText
+2026-09-18 04:53:21.401868+0700 JackinDesktopUITests-Runner[40879:131632506] [DisplayManager] Found 1 displays containing rect (428.0, 453.0, 58.0, 26.0): [1]
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:482: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Contrast failed
+    t =     6.38s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jXQAAAAAAAAA=)
+    t =     6.43s Find the "usage.sidebar.provider.zai" StaticText
+    t =     6.48s Find the "usage.sidebar.provider.zai" StaticText
+    t =     6.54s Find the "usage.sidebar.provider.zai" StaticText
+    t =     6.59s Unhandled AX audit: XCUIAccessibilityAuditType(rawValue: 1); type=48; id=usage.sidebar.provider.zai; Contrast failed
+    t =     6.59s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jXQAAAAAAAAA=)
+    t =     6.64s Checking existence of `"usage.sidebar.provider.zai" StaticText`
+    t =     6.69s Find the "usage.sidebar.provider.zai" StaticText
+2026-09-18 04:53:21.822790+0700 JackinDesktopUITests-Runner[40879:131632506] [DisplayManager] Found 1 displays containing rect (428.0, 521.0, 54.5, 26.0): [1]
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:482: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Contrast failed
+    t =     6.75s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jWwAAAAAAAAA=)
+    t =     6.80s Find the "usage.sidebar.provider.kimi" StaticText
+    t =     6.86s Find the "usage.sidebar.provider.kimi" StaticText
+    t =     6.91s Find the "usage.sidebar.provider.kimi" StaticText
+    t =     6.96s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jOQAAAAAAAAA=)
+    t =     7.01s Find the Group
+    t =     7.06s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD//////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =     7.12s Find the Group
+    t =     7.17s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD//////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =     7.23s Find the Group
+    t =     7.28s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD//////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =     7.34s Find the Group
+    t =     7.38s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD//////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =     7.43s Find the Group
+    t =     7.48s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD//////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =     7.53s Find the Group
+    t =     7.57s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD+/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =     7.62s Find the Group
+    t =     7.67s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jZQAAAAAAAAA=)
+    t =     7.72s Find the "usage.overview.account.codex.codex-personal" StaticText
+    t =     7.77s Find the "usage.overview.account.codex.codex-personal" StaticText
+    t =     7.82s Find the "usage.overview.account.codex.codex-personal" StaticText
+    t =     7.87s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD+/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =     7.92s Find the Group
+    t =     7.97s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD+/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =     8.02s Find the Group
+    t =     8.07s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD+/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =     8.12s Find the Group
+    t =     8.17s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD+/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =     8.23s Find the Group
+    t =     8.28s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD9/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =     8.34s Find the Group
+    t =     8.38s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jYQAAAAAAAAA=)
+    t =     8.43s Find the "usage.overview.account.codex.codex-plus" StaticText
+    t =     8.48s Find the "usage.overview.account.codex.codex-plus" StaticText
+    t =     8.54s Find the "usage.overview.account.codex.codex-plus" StaticText
+    t =     8.58s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD9/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =     8.64s Find the Group
+    t =     8.68s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD9/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =     8.73s Find the Group
+    t =     8.78s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD9/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =     8.83s Find the Group
+    t =     8.88s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD9/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =     8.93s Find the Group
+    t =     8.98s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD8/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =     9.03s Find the Group
+    t =     9.08s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD8/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =     9.13s Find the Group
+    t =     9.19s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD8/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =     9.24s Find the Group
+    t =     9.29s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD8/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =     9.34s Find the Group
+    t =     9.39s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD8/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =     9.44s Find the Group
+    t =     9.48s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD7/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =     9.53s Find the Group
+    t =     9.58s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jYwAAAAAAAAA=)
+    t =     9.63s Find the "usage.overview.account.claude.claude-personal" StaticText
+    t =     9.68s Find the "usage.overview.account.claude.claude-personal" StaticText
+    t =     9.73s Find the "usage.overview.account.claude.claude-personal" StaticText
+    t =     9.78s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD7/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =     9.83s Find the Group
+    t =     9.88s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD7/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =     9.93s Find the Group
+    t =     9.98s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD7/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    10.03s Find the Group
+    t =    10.08s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD7/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    10.13s Find the Group
+    t =    10.18s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD6/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    10.24s Find the Group
+    t =    10.29s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jagAAAAAAAAA=)
+    t =    10.34s Find the "usage.overview.account.claude.claude-work" StaticText
+    t =    10.39s Find the "usage.overview.account.claude.claude-work" StaticText
+    t =    10.44s Find the "usage.overview.account.claude.claude-work" StaticText
+    t =    10.49s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD6/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    10.54s Find the Group
+    t =    10.59s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD6/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    10.64s Find the Group
+    t =    10.69s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD6/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    10.74s Find the Group
+    t =    10.79s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD6/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    10.84s Find the Group
+    t =    10.89s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD5/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    10.94s Find the Group
+    t =    10.99s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD5/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    11.04s Find the Group
+    t =    11.09s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD5/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    11.15s Find the Group
+    t =    11.20s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD5/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    11.26s Find the Group
+    t =    11.31s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD5/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    11.36s Find the Group
+    t =    11.41s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD4/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    11.46s Find the Group
+    t =    11.51s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD4/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    11.56s Find the Group
+    t =    11.61s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD4/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    11.66s Find the Group
+    t =    11.71s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD4/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    11.76s Find the Group
+    t =    11.81s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD4/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    11.97s Find the Group
+    t =    12.02s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD3/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    12.07s Find the Group
+    t =    12.12s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jaQAAAAAAAAA=)
+    t =    12.17s Find the "usage.overview.account.grok.grok-default" StaticText
+    t =    12.23s Find the "usage.overview.account.grok.grok-default" StaticText
+    t =    12.28s Find the "usage.overview.account.grok.grok-default" StaticText
+    t =    12.33s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD3/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    12.39s Find the Group
+    t =    12.43s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD3/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    12.48s Find the Group
+    t =    12.53s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD3/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    12.58s Find the Group
+    t =    12.63s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD3/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    12.68s Find the Group
+    t =    12.73s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD2/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    12.78s Find the Group
+    t =    12.83s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD2/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    12.88s Find the Group
+    t =    12.93s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD2/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    12.98s Find the Group
+    t =    13.02s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD2/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    13.07s Find the Group
+    t =    13.12s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD2/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    13.18s Find the Group
+    t =    13.23s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD1/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    13.29s Find the Group
+    t =    13.34s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jawAAAAAAAAA=)
+    t =    13.39s Find the "usage.overview.account.zai.zai-default" StaticText
+    t =    13.44s Find the "usage.overview.account.zai.zai-default" StaticText
+    t =    13.49s Find the "usage.overview.account.zai.zai-default" StaticText
+    t =    13.54s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD1/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    13.59s Find the Group
+    t =    13.64s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD1/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    13.69s Find the Group
+    t =    13.74s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD1/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    13.79s Find the Group
+    t =    13.84s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD1/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    13.89s Find the Group
+    t =    13.94s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD0/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    13.99s Find the Group
+    t =    14.04s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD0/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    14.09s Find the Group
+    t =    14.14s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD0/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    14.20s Find the Group
+    t =    14.25s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD0/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    14.30s Find the Group
+    t =    14.35s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAAD0/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    14.41s Find the Group
+    t =    14.45s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAADz/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    14.50s Find the Group
+    t =    14.55s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jbwAAAAAAAAA=)
+    t =    14.60s Find the "usage.overview.account.kimi.kimi-default" StaticText
+    t =    14.65s Find the "usage.overview.account.kimi.kimi-default" StaticText
+    t =    14.70s Find the "usage.overview.account.kimi.kimi-default" StaticText
+    t =    14.75s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAADz/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    14.80s Find the Group
+    t =    14.85s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAADz/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    14.90s Find the Group
+    t =    14.95s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAADz/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    15.00s Find the Group
+    t =    15.05s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAADz/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    15.10s Find the Group
+    t =    15.15s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAADy/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    15.20s Find the Group
+    t =    15.25s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAADy/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    15.31s Find the Group
+    t =    15.36s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAADy/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    15.52s Find the Group
+    t =    15.57s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAADy/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    15.62s Find the Group
+    t =    15.67s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAADy/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    15.72s Find the Group
+    t =    15.77s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAADx/////////1IAAAAAAAAAAAAAAAAAAAA=)
+    t =    15.82s Find the Group
+    t =    15.86s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jZAAAAAAAAAA=)
+    t =    15.92s Find the "usage.overview.account.minimax.minimax-default" StaticText
+    t =    15.97s Find the "usage.overview.account.minimax.minimax-default" StaticText
+    t =    16.02s Find the "usage.overview.account.minimax.minimax-default" StaticText
+    t =    16.07s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAADx/////////1MAAAAAAAAAAAAAAAAAAAA=)
+    t =    16.12s Find the Group
+    t =    16.17s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAADx/////////1QAAAAAAAAAAAAAAAAAAAA=)
+    t =    16.23s Find the Group
+    t =    16.28s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAADx/////////1UAAAAAAAAAAAAAAAAAAAA=)
+    t =    16.34s Find the Group
+    t =    16.39s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jUAAAAAAAAADx/////////1YAAAAAAAAAAAAAAAAAAAA=)
+    t =    16.55s Find the Group
+    t =    16.60s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jRQAAAAAAAAA=)
+    t =    16.65s Find the Group
+    t =    16.70s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jTgAAAAAAAAA=)
+    t =    16.75s Find the "usage.fixture-badge" StaticText
+    t =    16.81s Find the "usage.fixture-badge" StaticText
+    t =    16.86s Find the "usage.fixture-badge" StaticText
+    t =    16.91s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jPgAAAAAAAAA=)
+    t =    17.07s Find the Group
+    t =    17.13s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jQgAAAAAAAAA=)
+    t =    17.18s Find the Group
+    t =    17.24s Find the Group
+    t =    17.29s Get all elements bound by index for: Descendants matching type Button
+    t =    17.35s Find the Button (Element at index 0)
+    t =    17.40s Find the "_XCUI:CloseWindow" Button
+    t =    17.46s Find the Group
+    t =    17.52s Find the Button (Element at index 1)
+    t =    17.57s Find the "_XCUI:ZoomWindow" Button
+    t =    17.63s Find the Group at {{469.0, 284.0}, {14.0, 14.0}}
+    t =    17.68s Find the Any (Descendant with identity binding to AX element pid: 40884, token: tJ8AAAAAAABvY29jLwAAAAAAAAA=)
+    t =    17.74s Find the TouchBar
+    t =    17.79s Terminate com.jackin-project.desktop:40884
+    t =    18.86s Tear Down
+Test Case '-[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit]' failed (18.908 seconds).
+Test Suite 'JackinDesktopUITests' failed at 2026-09-18 04:53:33.991.
+	 Executed 1 test, with 2 failures (0 unexpected) in 18.908 (18.909) seconds
+Test Suite 'JackinDesktopUITests.xctest' failed at 2026-09-18 04:53:33.992.
+	 Executed 1 test, with 2 failures (0 unexpected) in 18.908 (18.910) seconds
+Test Suite 'Selected tests' failed at 2026-09-18 04:53:33.992.
+	 Executed 1 test, with 2 failures (0 unexpected) in 18.908 (18.910) seconds
+2026-09-18 04:53:38.293 xcodebuild[40819:131631827] [MT] IDETestOperationsObserverDebug: 23.562 elapsed -- Testing started completed.
+2026-09-18 04:53:38.293 xcodebuild[40819:131631827] [MT] IDETestOperationsObserverDebug: 0.000 sec, +0.000 sec -- start
+2026-09-18 04:53:38.293 xcodebuild[40819:131631827] [MT] IDETestOperationsObserverDebug: 23.562 sec, +23.562 sec -- end
+
+Test session results, code coverage, and logs:
+	/tmp/diag3.xcresult
+
+Failing tests:
+	JackinDesktopUITests.testOverviewPassesAccessibilityAudit()
+
+** TEST FAILED **
+
+Testing started

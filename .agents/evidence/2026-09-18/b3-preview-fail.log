@@ -1,0 +1,26 @@
+Resolve preview identity	Enforce workflow policy	﻿2026-09-18T01:25:14.1619671Z ##[group]Run velnor-workflow policy --workflow-root "$GITHUB_WORKSPACE"
+Resolve preview identity	Enforce workflow policy	2026-09-18T01:25:14.1620187Z ^[[36;1mvelnor-workflow policy --workflow-root "$GITHUB_WORKSPACE"^[[0m
+Resolve preview identity	Enforce workflow policy	2026-09-18T01:25:14.1644634Z shell: /usr/bin/bash -e {0}
+Resolve preview identity	Enforce workflow policy	2026-09-18T01:25:14.1644929Z env:
+Resolve preview identity	Enforce workflow policy	2026-09-18T01:25:14.1645248Z   VELNOR_WORKFLOW_POLICY_REVISION: ec3995277f82473777f18969e58ea76f63e54cfd
+Resolve preview identity	Enforce workflow policy	2026-09-18T01:25:14.1645638Z   EVENT_NAME: push
+Resolve preview identity	Enforce workflow policy	2026-09-18T01:25:14.1645859Z ##[endgroup]
+Resolve preview identity	Enforce workflow policy	2026-09-18T01:25:14.3543494Z error: workflow policy failed: generated-tree
+Resolve preview identity	Enforce workflow policy	2026-09-18T01:25:14.3544747Z PASS pin-declared           .github-gen/velnor-workflow.toml [generator] revision = ec3995277f82473777f18969e58ea76f63e54cfd
+Resolve preview identity	Enforce workflow policy	2026-09-18T01:25:14.3546965Z PASS pin-reachable          ec3995277f82473777f18969e58ea76f63e54cfd is an ancestor of head 15c6bc2edc60055065cf732485fbbe16c1047216 (inherited from the base branch)
+Resolve preview identity	Enforce workflow policy	2026-09-18T01:25:14.3548823Z PASS pin-monotonic          the declared pin is the base validator ec3995277f82473777f18969e58ea76f63e54cfd
+Resolve preview identity	Enforce workflow policy	2026-09-18T01:25:14.3550367Z PASS entrypoint-pin         .github/workflows/ci-policy.yml acquires and exports the declared pin (2 literals)
+Resolve preview identity	Enforce workflow policy	2026-09-18T01:25:14.3552056Z FAIL generated-tree         the tree differs from the render of velnor-workflow at ec3995277f82473777f18969e58ea76f63e54cfd
+Resolve preview identity	Enforce workflow policy	2026-09-18T01:25:14.3553411Z        - .github/ci/.github-actions-generator-state: differs from the pinned render
+Resolve preview identity	Enforce workflow policy	2026-09-18T01:25:14.3554563Z        - .github/workflows/ci-runtime-products.yml: differs from the pinned render
+Resolve preview identity	Enforce workflow policy	2026-09-18T01:25:14.3555616Z        - .github/workflows/ci-unit-rust.yml: differs from the pinned render
+Resolve preview identity	Enforce workflow policy	2026-09-18T01:25:14.3556639Z        - .github/workflows/preview.yml: differs from the pinned render
+Resolve preview identity	Enforce workflow policy	2026-09-18T01:25:14.3557338Z        - .github/workflows/release.yml: differs from the pinned render
+Resolve preview identity	Enforce workflow policy	2026-09-18T01:25:14.3558099Z PASS pull-request-target    only .github/workflows/ci-policy.yml runs on pull_request_target, with the reviewed trigger set
+Resolve preview identity	Enforce workflow policy	2026-09-18T01:25:14.3559062Z PASS entrypoint-privileges  .github/workflows/ci-policy.yml holds contents: read only, references no secrets, and persists no credentials
+Resolve preview identity	Enforce workflow policy	2026-09-18T01:25:14.3559951Z PASS trusted-runners        every self-hosted job is gated on a trusted event and an approved runner
+Resolve preview identity	Enforce workflow policy	2026-09-18T01:25:14.3560638Z PASS action-pins            every action reference is a full-SHA pin or a reviewed local path
+Resolve preview identity	Enforce workflow policy	2026-09-18T01:25:14.3561631Z PASS workflow-structure     every workflow parses as GitHub would run it
+Resolve preview identity	Enforce workflow policy	2026-09-18T01:25:14.3562758Z PASS required-checks        .github/workflows/ci-pr.yml emits [ci-required]; no live ruleset supplied (--ruleset-contexts)
+Resolve preview identity	Enforce workflow policy	2026-09-18T01:25:14.3563294Z policy: 11 rules, 1 failed
+Resolve preview identity	Enforce workflow policy	2026-09-18T01:25:14.3572399Z ##[error]Process completed with exit code 1.

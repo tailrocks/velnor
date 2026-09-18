@@ -1,0 +1,36 @@
+﻿2026-09-17T13:37:47.8480869Z Current runner version: '2.337.0'
+2026-09-17T13:37:47.8512046Z ##[group]Runner Image Provisioner
+2026-09-17T13:37:47.8513062Z Hosted Compute Agent
+2026-09-17T13:37:47.8513787Z Version: 20260828.587
+2026-09-17T13:37:47.8514587Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+2026-09-17T13:37:47.8515496Z Build Date: 2026-08-28T16:44:25Z
+2026-09-17T13:37:47.8516322Z Worker ID: {1b99de8b-9da5-485a-a61d-d04527136fcd}
+2026-09-17T13:37:47.8517187Z Azure Region: westcentralus
+2026-09-17T13:37:47.8517929Z ##[endgroup]
+2026-09-17T13:37:47.8519540Z ##[group]Operating System
+2026-09-17T13:37:47.8520575Z Ubuntu
+2026-09-17T13:37:47.8521175Z 24.04.5
+2026-09-17T13:37:47.8521909Z LTS
+2026-09-17T13:37:47.8522577Z ##[endgroup]
+2026-09-17T13:37:47.8523274Z ##[group]Runner Image
+2026-09-17T13:37:47.8524048Z Image: ubuntu-24.04
+2026-09-17T13:37:47.8524684Z Version: 20260907.300.1
+2026-09-17T13:37:47.8526239Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260907.300/images/ubuntu/Ubuntu2404-Readme.md
+2026-09-17T13:37:47.8528122Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260907.300
+2026-09-17T13:37:47.8529171Z ##[endgroup]
+2026-09-17T13:37:47.8531054Z ##[group]GITHUB_TOKEN Permissions
+2026-09-17T13:37:47.8533551Z Actions: read
+2026-09-17T13:37:47.8534203Z Contents: read
+2026-09-17T13:37:47.8534978Z Metadata: read
+2026-09-17T13:37:47.8535630Z ##[endgroup]
+2026-09-17T13:37:47.8538123Z Secret source: Actions
+2026-09-17T13:37:47.8539269Z Cache mode: write
+2026-09-17T13:37:47.8540450Z Prepare workflow directory
+2026-09-17T13:37:47.8967205Z Prepare all required actions
+2026-09-17T13:37:47.9080235Z Complete job name: Control / Required
+2026-09-17T13:37:48.0202433Z ##[group]Run exit 1
+2026-09-17T13:37:48.0203463Z [36;1mexit 1[0m
+2026-09-17T13:37:48.0722489Z shell: /usr/bin/bash -e {0}
+2026-09-17T13:37:48.0724185Z ##[endgroup]
+2026-09-17T13:37:48.1162003Z ##[error]Process completed with exit code 1.
+2026-09-17T13:37:48.1411814Z Cleaning up orphan processes

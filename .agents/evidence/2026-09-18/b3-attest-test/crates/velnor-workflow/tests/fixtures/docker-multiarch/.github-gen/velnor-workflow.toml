@@ -1,0 +1,16 @@
+schema = 1
+
+[generator]
+repository = "example/app"
+
+[workflow]
+files = ["release.yml"]
+
+[release]
+enabled = true
+reason = "multi-arch container publication for the service image"
+kind = "docker"
+image = "ghcr.io/example/app"
+dockerfile = "Dockerfile"
+context = "."
+platforms = ["linux/amd64", "linux/arm64"]

@@ -1,0 +1,106 @@
+      ┌─────────┐  mr boxington
+     ╱ ═══════ ╱│
+    ╱─────────╱ │
+    │ •    (◉)│≡│
+    │  ◟▄▄▄◞  │ ╱
+    │   ◀◆▶   │╱
+    └─────────┘
+   Compiling velnor-workflow v0.1.0 (/private/tmp/d2a-verify/crates/velnor-workflow)
+warning: function `scan_repository` is never used
+    --> crates/velnor-workflow/src/lib.rs:1083:15
+     |
+1083 | pub(crate) fn scan_repository(
+     |               ^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scan_repository_with_default_branch` is never used
+    --> crates/velnor-workflow/src/lib.rs:1090:4
+     |
+1090 | fn scan_repository_with_default_branch(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `control_plane_trusted_gate` is never used
+    --> crates/velnor-workflow/src/lib.rs:4106:15
+     |
+4106 | pub(crate) fn control_plane_trusted_gate(default_branch: &str) -> String {
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `ResultIdentity` is never constructed
+   --> crates/velnor-workflow/src/provider.rs:487:19
+    |
+487 | pub(crate) struct ResultIdentity {
+    |                   ^^^^^^^^^^^^^^
+
+warning: struct `ObservedResult` is never constructed
+   --> crates/velnor-workflow/src/provider.rs:501:19
+    |
+501 | pub(crate) struct ObservedResult {
+    |                   ^^^^^^^^^^^^^^
+
+warning: enum `ObservedOutcome` is never used
+   --> crates/velnor-workflow/src/provider.rs:508:17
+    |
+508 | pub(crate) enum ObservedOutcome {
+    |                 ^^^^^^^^^^^^^^^
+
+warning: enum `VerdictFailure` is never used
+   --> crates/velnor-workflow/src/provider.rs:518:17
+    |
+518 | pub(crate) enum VerdictFailure {
+    |                 ^^^^^^^^^^^^^^
+
+warning: method `class` is never used
+   --> crates/velnor-workflow/src/provider.rs:562:19
+    |
+560 | impl VerdictFailure {
+    | ------------------- method in this implementation
+561 |     #[must_use]
+562 |     pub(crate) fn class(&self) -> &'static str {
+    |                   ^^^^^
+
+warning: function `evaluate_verdict` is never used
+   --> crates/velnor-workflow/src/provider.rs:585:15
+    |
+585 | pub(crate) fn evaluate_verdict(
+    |               ^^^^^^^^^^^^^^^^
+
+warning: struct `RunIdentity` is never constructed
+   --> crates/velnor-workflow/src/provider.rs:707:19
+    |
+707 | pub(crate) struct RunIdentity {
+    |                   ^^^^^^^^^^^
+
+warning: method `command_digest_for` is never used
+   --> crates/velnor-workflow/src/provider.rs:717:8
+    |
+716 | impl RunIdentity {
+    | ---------------- method in this implementation
+717 |     fn command_digest_for(&self, unit_id: &str) -> String {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `cache_key` is never used
+   --> crates/velnor-workflow/src/provider.rs:748:15
+    |
+748 | pub(crate) fn cache_key(
+    |               ^^^^^^^^^
+
+warning: function `artifact_name` is never used
+   --> crates/velnor-workflow/src/provider.rs:769:15
+    |
+769 | pub(crate) fn artifact_name(
+    |               ^^^^^^^^^^^^^
+
+warning: `velnor-workflow` (lib) generated 13 warnings
+warning: struct `ResultIdentity` is never constructed
+   --> crates/velnor-workflow/src/provider.rs:487:19
+    |
+487 | pub(crate) struct ResultIdentity {
+    |                   ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `velnor-workflow` (lib test) generated 10 warnings (9 duplicates)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.52s
+mbx[cache]: 10 hits, 0 misses, 1 bypassed; 0 B downloaded, 0 B uploaded, 0 B stored locally
+mbx[savings]: 9h 51m of compiling skipped across 3980 builds. rustc suspects nothing.

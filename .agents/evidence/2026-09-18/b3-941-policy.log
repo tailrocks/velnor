@@ -1,0 +1,49 @@
+Policy	Enforce workflow policy	﻿2026-09-18T02:58:28.2741642Z ##[group]Run set -euo pipefail
+Policy	Enforce workflow policy	2026-09-18T02:58:28.2741971Z ^[[36;1mset -euo pipefail^[[0m
+Policy	Enforce workflow policy	2026-09-18T02:58:28.2742233Z ^[[36;1mvelnor-workflow policy \^[[0m
+Policy	Enforce workflow policy	2026-09-18T02:58:28.2743054Z ^[[36;1m  --workflow-root "$WORKFLOW_ROOT" \^[[0m
+Policy	Enforce workflow policy	2026-09-18T02:58:28.2743377Z ^[[36;1m  --head-sha "$HEAD_SHA" \^[[0m
+Policy	Enforce workflow policy	2026-09-18T02:58:28.2743641Z ^[[36;1m  --base-sha "$BASE_SHA" \^[[0m
+Policy	Enforce workflow policy	2026-09-18T02:58:28.2744018Z ^[[36;1m  --candidate-manifest "${VELNOR_WORKFLOW_CANDIDATE_MANIFEST:-}" \^[[0m
+Policy	Enforce workflow policy	2026-09-18T02:58:28.2744445Z ^[[36;1m  --ruleset-contexts "$RULESET_CONTEXTS"^[[0m
+Policy	Enforce workflow policy	2026-09-18T02:58:28.2780506Z shell: /usr/bin/bash -e {0}
+Policy	Enforce workflow policy	2026-09-18T02:58:28.2780756Z env:
+Policy	Enforce workflow policy	2026-09-18T02:58:28.2781171Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-candidate/velnor-workflow
+Policy	Enforce workflow policy	2026-09-18T02:58:28.2781910Z   VELNOR_WORKFLOW_CANDIDATE_MANIFEST: /home/runner/work/_temp/velnor-workflow-candidate/candidate-manifest.json
+Policy	Enforce workflow policy	2026-09-18T02:58:28.2782755Z   RULESET_CONTEXTS: DCO,Policy,ci-required
+Policy	Enforce workflow policy	2026-09-18T02:58:28.2783128Z   WORKFLOW_ROOT: /home/runner/work/velnor/velnor/policy-checkout
+Policy	Enforce workflow policy	2026-09-18T02:58:28.2783582Z   HEAD_SHA: ceaffa3d5e1cffcbdc049297ecb397a0695e6d48
+Policy	Enforce workflow policy	2026-09-18T02:58:28.2783925Z   BASE_SHA: ac8a74c10bf0d76e12a69ded1251fd4373ff9496
+Policy	Enforce workflow policy	2026-09-18T02:58:28.2784341Z   VELNOR_WORKFLOW_POLICY_REVISION: 15c6bc2edc60055065cf732485fbbe16c1047216
+Policy	Enforce workflow policy	2026-09-18T02:58:28.2784720Z ##[endgroup]
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8369911Z error: workflow policy failed: trusted-runners
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8370659Z PASS pin-declared           .github-gen/velnor-workflow.toml [generator] revision = 15c6bc2edc60055065cf732485fbbe16c1047216
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8372192Z PASS pin-reachable          15c6bc2edc60055065cf732485fbbe16c1047216 is an ancestor of head ceaffa3d5e1cffcbdc049297ecb397a0695e6d48 (inherited from the base branch)
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8373745Z PASS pin-monotonic          the declared pin is the base validator 15c6bc2edc60055065cf732485fbbe16c1047216
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8374962Z PASS entrypoint-pin         .github/workflows/ci-policy.yml acquires and exports the declared pin (2 literals)
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8377370Z PASS generated-tree         the tree matches the candidate render (62f830a9171d704c2d7e0a750829dfadb9be631cc21ee9a2ab100f720e08eccb), not the render of velnor-workflow at 15c6bc2edc60055065cf732485fbbe16c1047216: a generator change in flight; bump [generator] revision after merge
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8379808Z PASS pull-request-target    only .github/workflows/ci-policy.yml runs on pull_request_target, with the reviewed trigger set
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8381426Z PASS entrypoint-privileges  .github/workflows/ci-policy.yml holds contents: read only, references no secrets, and persists no credentials
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8382844Z FAIL trusted-runners        17 findings
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8383901Z        - .github/workflows/release.yml: job release-velnor-bun-velnor: local-provider jobs require a trusted-event gate
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8385398Z        - .github/workflows/release.yml: job release-velnor-docker: local-provider jobs require a trusted-event gate
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8386855Z        - .github/workflows/release.yml: job release-velnor-docs: local-provider jobs require a trusted-event gate
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8388309Z        - .github/workflows/release.yml: job release-velnor-opentofu: local-provider jobs require a trusted-event gate
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8389858Z        - .github/workflows/release.yml: job release-velnor-rust-policy: local-provider jobs require a trusted-event gate
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8391486Z        - .github/workflows/release.yml: job release-velnor-rust-unit-collector: local-provider jobs require a trusted-event gate
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8394382Z        - .github/workflows/release.yml: job release-velnor-rust-velnor-bench: local-provider jobs require a trusted-event gate
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8395964Z        - .github/workflows/release.yml: job release-velnor-rust-velnor-client: local-provider jobs require a trusted-event gate
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8397538Z        - .github/workflows/release.yml: job release-velnor-rust-velnor-control: local-provider jobs require a trusted-event gate
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8399437Z        - .github/workflows/release.yml: job release-velnor-rust-velnor-model: local-provider jobs require a trusted-event gate
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8400582Z        - .github/workflows/release.yml: job release-velnor-rust-velnor-render: local-provider jobs require a trusted-event gate
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8401461Z        - .github/workflows/release.yml: job release-velnor-rust-velnor-runner: local-provider jobs require a trusted-event gate
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8402314Z        - .github/workflows/release.yml: job release-velnor-rust-velnor-tools: local-provider jobs require a trusted-event gate
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8403885Z        - .github/workflows/release.yml: job release-velnor-rust-velnor-workflow: local-provider jobs require a trusted-event gate
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8404823Z        - .github/workflows/release.yml: job release-velnor-rust-velnor-workflow-contract: local-provider jobs require a trusted-event gate
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8405741Z        - .github/workflows/release.yml: job release-velnor-rust-velnorctl: local-provider jobs require a trusted-event gate
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8406618Z        - .github/workflows/release.yml: job release-velnor-rust-production-topology: local-provider jobs require a trusted-event gate
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8407589Z PASS action-pins            every action reference is a full-SHA pin or a reviewed local path
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8408153Z PASS workflow-structure     every workflow parses as GitHub would run it
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8408813Z PASS required-checks        .github/workflows/ci-pr.yml emits [ci-required]; live ruleset requires [DCO, Policy, ci-required]
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8409376Z policy: 11 rules, 1 failed
+Policy	Enforce workflow policy	2026-09-18T02:58:29.8418992Z ##[error]Process completed with exit code 1.

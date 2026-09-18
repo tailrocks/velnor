@@ -1,0 +1,504 @@
+      ┌─────────┐  mr boxington
+     ╱ ═══════ ╱│
+    ╱─────────╱ │
+    │ •    (◉)│≡│
+    │  ◟▄▄▄◞  │ ╱
+    │   ◀◆▶   │╱
+    └─────────┘
+   Compiling velnor-workflow v0.1.0 (/private/tmp/d2a-verify/crates/velnor-workflow)
+warning: empty lines after outer attribute
+    --> crates/velnor-workflow/src/primitives/ir.rs:4591:5
+     |
+4591 | /     #[expect(
+4592 | |         clippy::too_many_lines,
+4593 | |         reason = "the provider renderer emits one complete, inspectable verification job"
+4594 | |     )]
+...    |
+4598 | |     /// [`Self::provider_admission_expression`] for the trusted class.
+4599 | |
+     | |_^
+4600 |       pub(crate) fn uses_mr_boxington(&self, unit: &Unit) -> bool {
+     |       ------------------------------- the attribute applies to this function
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#empty_line_after_outer_attr
+     = note: `-W clippy::empty-line-after-outer-attr` implied by `-W clippy::all`
+     = help: to override `-W clippy::all` add `#[allow(clippy::empty_line_after_outer_attr)]`
+     = help: if the empty lines are unintentional, remove them
+
+warning: function `scan_repository` is never used
+    --> crates/velnor-workflow/src/lib.rs:1083:15
+     |
+1083 | pub(crate) fn scan_repository(
+     |               ^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `scan_repository_with_default_branch` is never used
+    --> crates/velnor-workflow/src/lib.rs:1090:4
+     |
+1090 | fn scan_repository_with_default_branch(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `control_plane_trusted_gate` is never used
+    --> crates/velnor-workflow/src/lib.rs:4106:15
+     |
+4106 | pub(crate) fn control_plane_trusted_gate(default_branch: &str) -> String {
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `ResultIdentity` is never constructed
+   --> crates/velnor-workflow/src/provider.rs:487:19
+    |
+487 | pub(crate) struct ResultIdentity {
+    |                   ^^^^^^^^^^^^^^
+
+warning: struct `ObservedResult` is never constructed
+   --> crates/velnor-workflow/src/provider.rs:501:19
+    |
+501 | pub(crate) struct ObservedResult {
+    |                   ^^^^^^^^^^^^^^
+
+warning: enum `ObservedOutcome` is never used
+   --> crates/velnor-workflow/src/provider.rs:508:17
+    |
+508 | pub(crate) enum ObservedOutcome {
+    |                 ^^^^^^^^^^^^^^^
+
+warning: enum `VerdictFailure` is never used
+   --> crates/velnor-workflow/src/provider.rs:518:17
+    |
+518 | pub(crate) enum VerdictFailure {
+    |                 ^^^^^^^^^^^^^^
+
+warning: method `class` is never used
+   --> crates/velnor-workflow/src/provider.rs:562:19
+    |
+560 | impl VerdictFailure {
+    | ------------------- method in this implementation
+561 |     #[must_use]
+562 |     pub(crate) fn class(&self) -> &'static str {
+    |                   ^^^^^
+
+warning: function `evaluate_verdict` is never used
+   --> crates/velnor-workflow/src/provider.rs:585:15
+    |
+585 | pub(crate) fn evaluate_verdict(
+    |               ^^^^^^^^^^^^^^^^
+
+warning: struct `RunIdentity` is never constructed
+   --> crates/velnor-workflow/src/provider.rs:707:19
+    |
+707 | pub(crate) struct RunIdentity {
+    |                   ^^^^^^^^^^^
+
+warning: method `command_digest_for` is never used
+   --> crates/velnor-workflow/src/provider.rs:717:8
+    |
+716 | impl RunIdentity {
+    | ---------------- method in this implementation
+717 |     fn command_digest_for(&self, unit_id: &str) -> String {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `cache_key` is never used
+   --> crates/velnor-workflow/src/provider.rs:748:15
+    |
+748 | pub(crate) fn cache_key(
+    |               ^^^^^^^^^
+
+warning: function `artifact_name` is never used
+   --> crates/velnor-workflow/src/provider.rs:769:15
+    |
+769 | pub(crate) fn artifact_name(
+    |               ^^^^^^^^^^^^^
+
+warning: `format!(..)` appended to existing `String`
+   --> crates/velnor-workflow/src/estate.rs:207:17
+    |
+207 |                 output.push_str(&format!("[{labels}]"));
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: you may need to import the `std::fmt::Write` trait
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#format_push_string
+    = note: `-W clippy::format-push-string` implied by `-W clippy::pedantic`
+    = help: to override `-W clippy::pedantic` add `#[allow(clippy::format_push_string)]`
+help: consider using `write!` to avoid the extra allocation
+    |
+207 -                 output.push_str(&format!("[{labels}]"));
+207 +                 let _ = write!(output, "[{labels}]");
+    |
+
+warning: unnecessary closure used with `bool::then`
+    --> crates/velnor-workflow/src/policy.rs:2263:13
+     |
+2263 |             (expected == sorted).then(|| provider.as_str())
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#unnecessary_lazy_evaluations
+     = note: `-W clippy::unnecessary-lazy-evaluations` implied by `-W clippy::all`
+     = help: to override `-W clippy::all` add `#[allow(clippy::unnecessary_lazy_evaluations)]`
+help: use `then_some` instead
+     |
+2263 -             (expected == sorted).then(|| provider.as_str())
+2263 +             (expected == sorted).then_some(provider.as_str())
+     |
+
+warning: unused `self` argument
+    --> crates/velnor-workflow/src/policy.rs:2267:26
+     |
+2267 |     fn is_local_provider(&self, provider: &str) -> bool {
+     |                          ^^^^^
+     |
+     = help: consider refactoring to an associated function
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#unused_self
+     = note: `-W clippy::unused-self` implied by `-W clippy::pedantic`
+     = help: to override `-W clippy::pedantic` add `#[allow(clippy::unused_self)]`
+
+warning: more than 3 bools in a struct
+    --> crates/velnor-workflow/src/policy.rs:2723:1
+     |
+2723 | / struct RunnerAnalysis {
+2724 | |     /// Resolves to a local provider's declared selector.
+2725 | |     local_provider: bool,
+2726 | |     /// Static labels that match no declared selector and no GitHub-owned
+...    |
+2730 | |     invalid: bool,
+2731 | | }
+     | |_^
+     |
+     = help: consider using a state machine or refactoring bools into two-variant enums
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#struct_excessive_bools
+     = note: `-W clippy::struct-excessive-bools` implied by `-W clippy::pedantic`
+     = help: to override `-W clippy::pedantic` add `#[allow(clippy::struct_excessive_bools)]`
+
+warning: consider adding a `;` to the last statement for consistent formatting
+    --> crates/velnor-workflow/src/policy.rs:2919:25
+     |
+2919 |                         result.merge(analyze_runner(value, matrix, resolving, velnor_policy))
+     |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: add a `;` here: `result.merge(analyze_runner(value, matrix, resolving, velnor_policy));`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#semicolon_if_nothing_returned
+     = note: `-W clippy::semicolon-if-nothing-returned` implied by `-W clippy::pedantic`
+     = help: to override `-W clippy::pedantic` add `#[allow(clippy::semicolon_if_nothing_returned)]`
+
+warning: item in documentation is missing backticks
+    --> crates/velnor-workflow/src/primitives/ir.rs:4467:19
+     |
+4467 |     /// schedule, merge_group, dispatch — dispatch requires write access) is
+     |                   ^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#doc_markdown
+     = note: `-W clippy::doc-markdown` implied by `-W clippy::pedantic`
+     = help: to override `-W clippy::pedantic` add `#[allow(clippy::doc_markdown)]`
+help: try
+     |
+4467 -     /// schedule, merge_group, dispatch — dispatch requires write access) is
+4467 +     /// schedule, `merge_group`, dispatch — dispatch requires write access) is
+     |
+
+warning: redundant redefinition of a binding `verify`
+    --> crates/velnor-workflow/src/primitives/release.rs:2457:5
+     |
+2457 |     let verify = verify;
+     |     ^^^^^^^^^^^^^^^^^^^^
+     |
+help: `verify` is initially defined here
+    --> crates/velnor-workflow/src/primitives/release.rs:2451:9
+     |
+2451 |     let verify = format!(
+     |         ^^^^^^
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#redundant_locals
+     = note: `-W clippy::redundant-locals` implied by `-W clippy::all`
+     = help: to override `-W clippy::all` add `#[allow(clippy::redundant_locals)]`
+
+warning: this argument (1 byte) is passed by reference, but would be more efficient if passed by value (limit: 8 byte)
+  --> crates/velnor-workflow/src/provider.rs:36:26
+   |
+36 |     pub(crate) fn as_str(&self) -> &'static str {
+   |                          ^^^^^ help: consider passing by value instead: `self`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#trivially_copy_pass_by_ref
+   = note: `-W clippy::trivially-copy-pass-by-ref` implied by `-W clippy::pedantic`
+   = help: to override `-W clippy::pedantic` add `#[allow(clippy::trivially_copy_pass_by_ref)]`
+
+warning: this argument (1 byte) is passed by reference, but would be more efficient if passed by value (limit: 8 byte)
+   --> crates/velnor-workflow/src/provider.rs:228:26
+    |
+228 |     pub(crate) fn as_str(&self) -> &'static str {
+    |                          ^^^^^ help: consider passing by value instead: `self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#trivially_copy_pass_by_ref
+
+warning: this argument (1 byte) is passed by reference, but would be more efficient if passed by value (limit: 8 byte)
+   --> crates/velnor-workflow/src/provider.rs:269:26
+    |
+269 |     pub(crate) fn as_str(&self) -> &'static str {
+    |                          ^^^^^ help: consider passing by value instead: `self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#trivially_copy_pass_by_ref
+
+warning: more than 3 bools in a struct
+   --> crates/velnor-workflow/src/provider.rs:290:1
+    |
+290 | / pub(crate) struct Capabilities {
+291 | |     pub(crate) docker: bool,
+292 | |     pub(crate) nested_privileged_docker: bool,
+293 | |     pub(crate) buildx_compose: bool,
+...   |
+297 | |     pub(crate) native_macos_arm64: bool,
+298 | | }
+    | |_^
+    |
+    = help: consider using a state machine or refactoring bools into two-variant enums
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#struct_excessive_bools
+
+warning: this argument (7 byte) is passed by reference, but would be more efficient if passed by value (limit: 8 byte)
+   --> crates/velnor-workflow/src/provider.rs:302:30
+    |
+302 |     pub(crate) fn missing_in(&self, offered: &Self) -> Vec<&'static str> {
+    |                              ^^^^^ help: consider passing by value instead: `self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#trivially_copy_pass_by_ref
+
+warning: this argument (7 byte) is passed by reference, but would be more efficient if passed by value (limit: 8 byte)
+   --> crates/velnor-workflow/src/provider.rs:302:46
+    |
+302 |     pub(crate) fn missing_in(&self, offered: &Self) -> Vec<&'static str> {
+    |                                              ^^^^^ help: consider passing by value instead: `Self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#trivially_copy_pass_by_ref
+
+warning: these match arms have identical bodies
+   --> crates/velnor-workflow/src/provider.rs:356:9
+    |
+356 | /         ProviderId::GithubSelfHosted => ProviderCaps {
+357 | |             platforms: BTreeSet::from([Platform::LinuxX64]),
+358 | |             trusted: true,
+359 | |             caps: Capabilities {
+...   |
+367 | |             },
+368 | |         },
+    | |_________^
+369 | /         ProviderId::Velnor => ProviderCaps {
+370 | |             platforms: BTreeSet::from([Platform::LinuxX64]),
+371 | |             trusted: true,
+372 | |             caps: Capabilities {
+...   |
+380 | |             },
+381 | |         },
+    | |_________^
+    |
+    = help: if this is unintentional make the arms return different values
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#match_same_arms
+    = note: `-W clippy::match-same-arms` implied by `-W clippy::pedantic`
+    = help: to override `-W clippy::pedantic` add `#[allow(clippy::match_same_arms)]`
+help: otherwise merge the patterns into a single arm
+    |
+356 ~         ProviderId::GithubSelfHosted | ProviderId::Velnor => ProviderCaps {
+357 |             platforms: BTreeSet::from([Platform::LinuxX64]),
+...
+368 |         },
+369 ~         }
+    |
+
+warning: this argument (1 byte) is passed by reference, but would be more efficient if passed by value (limit: 8 byte)
+   --> crates/velnor-workflow/src/provider.rs:398:26
+    |
+398 |     pub(crate) fn as_str(&self) -> &'static str {
+    |                          ^^^^^ help: consider passing by value instead: `self`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#trivially_copy_pass_by_ref
+
+warning: this argument (7 byte) is passed by reference, but would be more efficient if passed by value (limit: 8 byte)
+   --> crates/velnor-workflow/src/provider.rs:441:15
+    |
+441 |     required: &Capabilities,
+    |               ^^^^^^^^^^^^^ help: consider passing by value instead: `Capabilities`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#trivially_copy_pass_by_ref
+
+warning: using `write!()` with a format string that ends in a single newline
+   --> crates/velnor-workflow/src/provider.rs:471:17
+    |
+471 |         let _ = write!(digest_input, ":{command_digest}\n");
+    |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#write_with_newline
+    = note: `-W clippy::write-with-newline` implied by `-W clippy::all`
+    = help: to override `-W clippy::all` add `#[allow(clippy::write_with_newline)]`
+help: use `writeln!` instead
+    |
+471 -         let _ = write!(digest_input, ":{command_digest}\n");
+471 +         let _ = writeln!(digest_input, ":{command_digest}");
+    |
+
+warning: this function has too many lines (111/100)
+   --> crates/velnor-workflow/src/provider.rs:585:1
+    |
+585 | / pub(crate) fn evaluate_verdict(
+586 | |     expected: &BTreeSet<(String, ProviderId)>,
+587 | |     observed: &[ObservedResult],
+588 | |     run: &RunIdentity,
+589 | | ) -> Vec<VerdictFailure> {
+    | |________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#too_many_lines
+    = note: `-W clippy::too-many-lines` implied by `-W clippy::pedantic`
+    = help: to override `-W clippy::pedantic` add `#[allow(clippy::too_many_lines)]`
+
+warning: called `map(<f>).unwrap_or(<a>)` on an `Option` value
+   --> crates/velnor-workflow/src/provider.rs:635:41
+    |
+635 |                   let expected_provider = expected
+    |  _________________________________________^
+636 | |                     .iter()
+637 | |                     .find(|(unit, _)| unit == &identity.unit_id)
+638 | |                     .map(|(_, provider)| *provider)
+639 | |                     .unwrap_or(identity.provider);
+    | |_________________________________________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#map_unwrap_or
+    = note: `-W clippy::map-unwrap-or` implied by `-W clippy::pedantic`
+    = help: to override `-W clippy::pedantic` add `#[allow(clippy::map_unwrap_or)]`
+help: use `map_or(<a>, <f>)` instead
+    |
+638 -                     .map(|(_, provider)| *provider)
+639 -                     .unwrap_or(identity.provider);
+638 +                     .map_or(identity.provider, |(_, provider)| *provider);
+    |
+
+warning: more than 3 bools in a struct
+   --> crates/velnor-workflow/src/runtime.rs:149:1
+    |
+149 | / struct RuntimeCapabilities {
+150 | |     docker: bool,
+151 | |     nested_privileged_docker: bool,
+152 | |     buildx_compose: bool,
+...   |
+156 | |     native_macos_arm64: bool,
+157 | | }
+    | |_^
+    |
+    = help: consider using a state machine or refactoring bools into two-variant enums
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#struct_excessive_bools
+
+warning: this function has too many lines (168/100)
+   --> crates/velnor-workflow/src/runtime.rs:838:1
+    |
+838 | fn plan(config_path: &Path) -> Result<(), GeneratorError> {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#too_many_lines
+
+warning: called `map(<f>).unwrap_or(<a>)` on a `Result` value
+    --> crates/velnor-workflow/src/runtime.rs:1140:5
+     |
+1140 | /     env::var("VELNOR_EVENT_TRUSTED")
+1141 | |         .map(|value| value.trim() != "false")
+1142 | |         .unwrap_or(true)
+     | |________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#map_unwrap_or
+help: use `map_or(<a>, <f>)` instead
+     |
+1141 -         .map(|value| value.trim() != "false")
+1142 -         .unwrap_or(true)
+1141 +         .map_or(true, |value| value.trim() != "false")
+     |
+
+warning: this function has too many lines (124/100)
+    --> crates/velnor-workflow/src/lib.rs:3008:1
+     |
+3008 | / pub(crate) fn validate_provider_admission_single_source(
+3009 | |     files: &BTreeMap<PathBuf, String>,
+3010 | | ) -> Result<(), GeneratorError> {
+     | |_______________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#too_many_lines
+
+warning: redundant closure
+    --> crates/velnor-workflow/src/lib.rs:3126:66
+     |
+3126 |                         admission_env_provider(name).is_some_and(|member| member.is_local())
+     |                                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: replace the closure with the method itself: `provider::ProviderId::is_local`
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#redundant_closure_for_method_calls
+     = note: `-W clippy::redundant-closure-for-method-calls` implied by `-W clippy::pedantic`
+     = help: to override `-W clippy::pedantic` add `#[allow(clippy::redundant_closure_for_method_calls)]`
+
+warning: called `map(<f>).unwrap_or_else(<g>)` on an `Option` value
+    --> crates/velnor-workflow/src/lib.rs:4099:5
+     |
+4099 | /     config
+4100 | |         .selectors
+4101 | |         .get(&provider::ProviderId::GithubHosted)
+4102 | |         .map(selector_runs_on_yaml)
+4103 | |         .unwrap_or_else(|| yaml_scalar("ubuntu-24.04"))
+     | |_______________________________________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#map_unwrap_or
+help: try
+     |
+4099 ~     config
+4100 +         .selectors
+4101 +         .get(&provider::ProviderId::GithubHosted).map_or_else(|| yaml_scalar("ubuntu-24.04"), selector_runs_on_yaml)
+     |
+
+warning: called `map(<f>).unwrap_or_else(<g>)` on an `Option` value
+    --> crates/velnor-workflow/src/lib.rs:5382:32
+     |
+5382 |                   let selector = config
+     |  ________________________________^
+5383 | |                     .selectors
+5384 | |                     .get(provider)
+5385 | |                     .map(selector_runs_on_yaml)
+5386 | |                     .unwrap_or_else(|| "(no selector)".to_owned());
+     | |__________________________________________________________________^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#map_unwrap_or
+help: try
+     |
+5382 ~                 let selector = config
+5383 +                     .selectors
+5384 ~                     .get(provider).map_or_else(|| "(no selector)".to_owned(), selector_runs_on_yaml);
+     |
+
+warning: this lint expectation is unfulfilled
+    --> crates/velnor-workflow/src/primitives/ir.rs:4592:9
+     |
+4592 |         clippy::too_many_lines,
+     |         ^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: the provider renderer emits one complete, inspectable verification job
+     = note: `#[warn(unfulfilled_lint_expectations)]` on by default
+
+warning: `velnor-workflow` (lib) generated 41 warnings (run `cargo clippy --fix --lib -p velnor-workflow -- ` to apply 9 suggestions)
+warning: struct `ResultIdentity` is never constructed
+   --> crates/velnor-workflow/src/provider.rs:487:19
+    |
+487 | pub(crate) struct ResultIdentity {
+    |                   ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: this function has too many lines (105/100)
+     --> crates/velnor-workflow/src/lib.rs:16170:5
+      |
+16170 |     fn rust_units_fetch_sources_first_and_verify_offline_except_policy() {
+      |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#too_many_lines
+
+warning: `velnor-workflow` (lib test) generated 39 warnings (37 duplicates)
+warning: this function has too many lines (106/100)
+   --> crates/velnor-workflow/tests/provider_pairing.rs:184:1
+    |
+184 | fn all_providers_emit_one_caller_per_unit_per_provider() {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#too_many_lines
+    = note: `-W clippy::too-many-lines` implied by `-W clippy::pedantic`
+    = help: to override `-W clippy::pedantic` add `#[allow(clippy::too_many_lines)]`
+
+warning: `velnor-workflow` (test "provider_pairing") generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.61s
+mbx[cache]: 3 hits, 7 misses, 1 bypassed; 0 B downloaded, 0 B uploaded, 0 B stored locally
+mbx[savings]: swept up 296.5 GiB logical so far. the broom is content-addressed.

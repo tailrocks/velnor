@@ -1,0 +1,7 @@
+Bun · Bun package (velnor) · velnor — bun-velnor / velnor	UNKNOWN STEP	2026-09-17T18:20:49.8209215Z ##[group]Velnor rejected job (operational_store)
+Bun · Bun package (velnor) · velnor — bun-velnor / velnor	UNKNOWN STEP	2026-09-17T18:20:49.8209215Z ##[error]Velnor rejected this job before workflow execution.
+Bun · Bun package (velnor) · velnor — bun-velnor / velnor	UNKNOWN STEP	2026-09-17T18:20:49.8209215Z phase: operational_store
+Bun · Bun package (velnor) · velnor — bun-velnor / velnor	UNKNOWN STEP	2026-09-17T18:20:49.8209215Z reason: operational store rejected the sanitized admission row; job failed closed before execution
+Bun · Bun package (velnor) · velnor — bun-velnor / velnor	UNKNOWN STEP	2026-09-17T18:20:49.8209215Z effect: no declared workflow command was executed
+Bun · Bun package (velnor) · velnor — bun-velnor / velnor	UNKNOWN STEP	2026-09-17T18:20:49.8209215Z remediation: correct the rejected workflow field/action/ref or add the exact reviewed capability to Velnor, publish and deploy that Velnor release, then rerun
+Bun · Bun package (velnor) · velnor — bun-velnor / velnor	UNKNOWN STEP	2026-09-17T18:20:49.8209215Z ##[endgroup]

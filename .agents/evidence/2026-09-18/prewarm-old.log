@@ -1,0 +1,19 @@
+
+  [1m[48;2;0;255;65m[38;2;0;0;0m jackin[38;2;255;255;255m❯[38;2;0;0;0m [0m
+prewarm
+
+  [32m✓[39m  capsule  /Users/donbeave/.jackin/cache/jackin-capsule/0.6.4/linux-arm64/jackin-capsule
+  [32m✓[39m  claude   2.1.273  /Users/donbeave/.jackin/cache/agent-binaries/claude/2.1.273/linux-arm64/claude
+  [32m✓[39m  codex    0.154.0  /Users/donbeave/.jackin/cache/agent-binaries/codex/0.154.0/linux-arm64/codex
+  [32m✓[39m  amp      0.0.1789588847-gf375db  /Users/donbeave/.jackin/cache/agent-binaries/amp/0.0.1789588847-gf375db/linux-arm64/amp
+  [32m✓[39m  kimi     0.43.1  /Users/donbeave/.jackin/cache/agent-binaries/kimi/0.43.1/linux-arm64/kimi
+  [32m✓[39m  opencode 1.18.31  /Users/donbeave/.jackin/cache/agent-binaries/opencode/1.18.31/linux-arm64/opencode
+  [32m✓[39m  grok     1.0.34  /Users/donbeave/.jackin/cache/agent-binaries/grok/1.0.34/linux-arm64/grok
+
+sidecar
+  [32m✓[39m  docker:29-dind present
+
+images for agent-smith
+telemetry: invocation 6d08e2d3-cc6f-431f-bc78-c57fe7bbd91f - OpenTelemetry export disabled
+
+  [38;2;210;100;100merror:[39m [1m[38;2;210;100;100minvalid role repo: derived build context does not support symlinks: /Users/donbeave/.jackin/roles/agent-smith/default/CLAUDE.md[39m[0m

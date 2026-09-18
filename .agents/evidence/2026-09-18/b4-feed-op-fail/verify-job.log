@@ -1,0 +1,526 @@
+Verify apt feed	Set up job	﻿2026-09-18T10:26:10.3933387Z Current runner version: '2.337.0'
+Verify apt feed	Set up job	2026-09-18T10:26:10.3976840Z ##[group]Runner Image Provisioner
+Verify apt feed	Set up job	2026-09-18T10:26:10.3978291Z Hosted Compute Agent
+Verify apt feed	Set up job	2026-09-18T10:26:10.3979559Z Version: 20260828.587
+Verify apt feed	Set up job	2026-09-18T10:26:10.3981065Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+Verify apt feed	Set up job	2026-09-18T10:26:10.3982510Z Build Date: 2026-08-28T16:44:25Z
+Verify apt feed	Set up job	2026-09-18T10:26:10.3983705Z Worker ID: {98cebf31-4e73-4dee-9dab-ecf7c2132151}
+Verify apt feed	Set up job	2026-09-18T10:26:10.3985181Z Azure Region: eastus
+Verify apt feed	Set up job	2026-09-18T10:26:10.3986324Z ##[endgroup]
+Verify apt feed	Set up job	2026-09-18T10:26:10.3988616Z ##[group]Operating System
+Verify apt feed	Set up job	2026-09-18T10:26:10.3989860Z Ubuntu
+Verify apt feed	Set up job	2026-09-18T10:26:10.3991073Z 24.04.5
+Verify apt feed	Set up job	2026-09-18T10:26:10.3992011Z LTS
+Verify apt feed	Set up job	2026-09-18T10:26:10.3992937Z ##[endgroup]
+Verify apt feed	Set up job	2026-09-18T10:26:10.3993867Z ##[group]Runner Image
+Verify apt feed	Set up job	2026-09-18T10:26:10.3995149Z Image: ubuntu-24.04
+Verify apt feed	Set up job	2026-09-18T10:26:10.3996180Z Version: 20260907.300.1
+Verify apt feed	Set up job	2026-09-18T10:26:10.3998076Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260907.300/images/ubuntu/Ubuntu2404-Readme.md
+Verify apt feed	Set up job	2026-09-18T10:26:10.4001739Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260907.300
+Verify apt feed	Set up job	2026-09-18T10:26:10.4003579Z ##[endgroup]
+Verify apt feed	Set up job	2026-09-18T10:26:10.4005777Z ##[group]GITHUB_TOKEN Permissions
+Verify apt feed	Set up job	2026-09-18T10:26:10.4008565Z Contents: read
+Verify apt feed	Set up job	2026-09-18T10:26:10.4009912Z Metadata: read
+Verify apt feed	Set up job	2026-09-18T10:26:10.4011227Z ##[endgroup]
+Verify apt feed	Set up job	2026-09-18T10:26:10.4014614Z Secret source: Actions
+Verify apt feed	Set up job	2026-09-18T10:26:10.4016248Z Cache mode: write
+Verify apt feed	Set up job	2026-09-18T10:26:10.4017518Z Prepare workflow directory
+Verify apt feed	Set up job	2026-09-18T10:26:10.4479468Z Prepare all required actions
+Verify apt feed	Set up job	2026-09-18T10:26:10.4530065Z Getting action download info
+Verify apt feed	Set up job	2026-09-18T10:26:10.6361498Z Download action repository 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' (SHA:3d3c42e5aac5ba805825da76410c181273ba90b1)
+Verify apt feed	Set up job	2026-09-18T10:26:10.7634311Z Download action repository 'tailrocks/velnor@fdeed261bd2247a38db6922a7726cd45d3d6f31e' (SHA:fdeed261bd2247a38db6922a7726cd45d3d6f31e)
+Verify apt feed	Set up job	2026-09-18T10:26:11.1315212Z Download action repository 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' (SHA:043fb46d1a93c77aae656e7c1c64a875d1fc6a0a)
+Verify apt feed	Set up job	2026-09-18T10:26:11.3106291Z Getting action download info
+Verify apt feed	Set up job	2026-09-18T10:26:11.3988743Z Download action repository 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9' (SHA:55cc8345863c7cc4c66a329aec7e433d2d1c52a9)
+Verify apt feed	Set up job	2026-09-18T10:26:11.5520813Z Complete job name: Verify apt feed
+Verify apt feed	Checkout	﻿2026-09-18T10:26:11.6422603Z ##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+Verify apt feed	Checkout	2026-09-18T10:26:11.6423724Z with:
+Verify apt feed	Checkout	2026-09-18T10:26:11.6424151Z   fetch-depth: 0
+Verify apt feed	Checkout	2026-09-18T10:26:11.6424616Z   persist-credentials: false
+Verify apt feed	Checkout	2026-09-18T10:26:11.6425142Z   repository: tailrocks/velnor-apt
+Verify apt feed	Checkout	2026-09-18T10:26:11.6428987Z   token: ***
+Verify apt feed	Checkout	2026-09-18T10:26:11.6429422Z   ssh-strict: true
+Verify apt feed	Checkout	2026-09-18T10:26:11.6429863Z   ssh-user: git
+Verify apt feed	Checkout	2026-09-18T10:26:11.6430274Z   clean: true
+Verify apt feed	Checkout	2026-09-18T10:26:11.6430935Z   sparse-checkout-cone-mode: true
+Verify apt feed	Checkout	2026-09-18T10:26:11.6431469Z   fetch-tags: false
+Verify apt feed	Checkout	2026-09-18T10:26:11.6431926Z   show-progress: true
+Verify apt feed	Checkout	2026-09-18T10:26:11.6432398Z   lfs: false
+Verify apt feed	Checkout	2026-09-18T10:26:11.6432803Z   submodules: false
+Verify apt feed	Checkout	2026-09-18T10:26:11.6433242Z   set-safe-directory: true
+Verify apt feed	Checkout	2026-09-18T10:26:11.6433741Z   allow-unsafe-pr-checkout: false
+Verify apt feed	Checkout	2026-09-18T10:26:11.6434517Z ##[endgroup]
+Verify apt feed	Checkout	2026-09-18T10:26:11.7463261Z Syncing repository: tailrocks/velnor-apt
+Verify apt feed	Checkout	2026-09-18T10:26:11.7466647Z ##[group]Getting Git version info
+Verify apt feed	Checkout	2026-09-18T10:26:11.7468193Z Working directory is '/home/runner/work/velnor-apt/velnor-apt'
+Verify apt feed	Checkout	2026-09-18T10:26:11.7470700Z [command]/usr/bin/git version
+Verify apt feed	Checkout	2026-09-18T10:26:11.7593850Z git version 2.55.0
+Verify apt feed	Checkout	2026-09-18T10:26:11.7617964Z ##[endgroup]
+Verify apt feed	Checkout	2026-09-18T10:26:11.7631332Z Temporarily overriding HOME='/home/runner/work/_temp/99307c3c-2bd4-4c31-a8e0-d5fa329a12bc' before making global git config changes
+Verify apt feed	Checkout	2026-09-18T10:26:11.7633762Z Adding repository directory to the temporary git global config as a safe directory
+Verify apt feed	Checkout	2026-09-18T10:26:11.7637691Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor-apt/velnor-apt
+Verify apt feed	Checkout	2026-09-18T10:26:11.7695446Z Deleting the contents of '/home/runner/work/velnor-apt/velnor-apt'
+Verify apt feed	Checkout	2026-09-18T10:26:11.7698780Z ##[group]Determining repository object format
+Verify apt feed	Checkout	2026-09-18T10:26:11.7701073Z ##[endgroup]
+Verify apt feed	Checkout	2026-09-18T10:26:11.7702267Z ##[group]Initializing the repository
+Verify apt feed	Checkout	2026-09-18T10:26:11.7706962Z [command]/usr/bin/git init /home/runner/work/velnor-apt/velnor-apt
+Verify apt feed	Checkout	2026-09-18T10:26:11.7848802Z hint: Using 'master' as the name for the initial branch. This default branch name
+Verify apt feed	Checkout	2026-09-18T10:26:11.7856342Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+Verify apt feed	Checkout	2026-09-18T10:26:11.7858905Z hint: to use in all of your new repositories, which will suppress this warning,
+Verify apt feed	Checkout	2026-09-18T10:26:11.7951703Z hint: call:
+Verify apt feed	Checkout	2026-09-18T10:26:11.7956983Z hint:
+Verify apt feed	Checkout	2026-09-18T10:26:11.7958244Z hint: 	git config --global init.defaultBranch <name>
+Verify apt feed	Checkout	2026-09-18T10:26:11.7959532Z hint:
+Verify apt feed	Checkout	2026-09-18T10:26:11.7961004Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+Verify apt feed	Checkout	2026-09-18T10:26:11.7962938Z hint: 'development'. The just-created branch can be renamed via this command:
+Verify apt feed	Checkout	2026-09-18T10:26:11.7964505Z hint:
+Verify apt feed	Checkout	2026-09-18T10:26:11.7965403Z hint: 	git branch -m <name>
+Verify apt feed	Checkout	2026-09-18T10:26:11.7966402Z hint:
+Verify apt feed	Checkout	2026-09-18T10:26:11.7967638Z hint: Disable this message with "git config set advice.defaultBranchName false"
+Verify apt feed	Checkout	2026-09-18T10:26:11.7969721Z Initialized empty Git repository in /home/runner/work/velnor-apt/velnor-apt/.git/
+Verify apt feed	Checkout	2026-09-18T10:26:11.7973866Z [command]/usr/bin/git remote add origin https://github.com/tailrocks/velnor-apt
+Verify apt feed	Checkout	2026-09-18T10:26:11.7977190Z ##[endgroup]
+Verify apt feed	Checkout	2026-09-18T10:26:11.7978612Z ##[group]Disabling automatic garbage collection
+Verify apt feed	Checkout	2026-09-18T10:26:11.7979890Z [command]/usr/bin/git config --local gc.auto 0
+Verify apt feed	Checkout	2026-09-18T10:26:11.7983100Z ##[endgroup]
+Verify apt feed	Checkout	2026-09-18T10:26:11.7984516Z ##[group]Setting up auth
+Verify apt feed	Checkout	2026-09-18T10:26:11.7985633Z Removing SSH command configuration
+Verify apt feed	Checkout	2026-09-18T10:26:11.7987123Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Verify apt feed	Checkout	2026-09-18T10:26:11.8020214Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Verify apt feed	Checkout	2026-09-18T10:26:11.8436779Z Removing HTTP extra header
+Verify apt feed	Checkout	2026-09-18T10:26:11.8443055Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Verify apt feed	Checkout	2026-09-18T10:26:11.8478640Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Verify apt feed	Checkout	2026-09-18T10:26:11.8707569Z Removing includeIf entries pointing to credentials config files
+Verify apt feed	Checkout	2026-09-18T10:26:11.8712249Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Verify apt feed	Checkout	2026-09-18T10:26:11.8754985Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Verify apt feed	Checkout	2026-09-18T10:26:11.8988220Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-c599fbc1-cb34-410b-87fe-6df0b4da4f1e.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+Verify apt feed	Checkout	2026-09-18T10:26:11.9029076Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor-apt/velnor-apt/.git.path /home/runner/work/_temp/git-credentials-c599fbc1-cb34-410b-87fe-6df0b4da4f1e.config
+Verify apt feed	Checkout	2026-09-18T10:26:11.9063477Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor-apt/velnor-apt/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-c599fbc1-cb34-410b-87fe-6df0b4da4f1e.config
+Verify apt feed	Checkout	2026-09-18T10:26:11.9103257Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-c599fbc1-cb34-410b-87fe-6df0b4da4f1e.config
+Verify apt feed	Checkout	2026-09-18T10:26:11.9139551Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-c599fbc1-cb34-410b-87fe-6df0b4da4f1e.config
+Verify apt feed	Checkout	2026-09-18T10:26:11.9171637Z ##[endgroup]
+Verify apt feed	Checkout	2026-09-18T10:26:11.9172881Z ##[group]Fetching the repository
+Verify apt feed	Checkout	2026-09-18T10:26:11.9178045Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules origin +refs/heads/*:refs/remotes/origin/* +refs/tags/*:refs/tags/*
+Verify apt feed	Checkout	2026-09-18T10:26:12.3145300Z From https://github.com/tailrocks/velnor-apt
+Verify apt feed	Checkout	2026-09-18T10:26:12.3148288Z  * [new branch]      main            -> origin/main
+Verify apt feed	Checkout	2026-09-18T10:26:12.3150000Z  * [new branch]      renovate/gh-2.x -> origin/renovate/gh-2.x
+Verify apt feed	Checkout	2026-09-18T10:26:12.3152518Z  * [new branch]      renovate/jdx-mr-boxington-action-1.x -> origin/renovate/jdx-mr-boxington-action-1.x
+Verify apt feed	Checkout	2026-09-18T10:26:12.3154663Z  * [new branch]      renovate/renovatebot-github-action-46.x -> origin/renovate/renovatebot-github-action-46.x
+Verify apt feed	Checkout	2026-09-18T10:26:12.3156259Z  * [new tag]         v0.1.10         -> v0.1.10
+Verify apt feed	Checkout	2026-09-18T10:26:12.3157633Z  * [new tag]         v0.1.100        -> v0.1.100
+Verify apt feed	Checkout	2026-09-18T10:26:12.3158728Z  * [new tag]         v0.1.101        -> v0.1.101
+Verify apt feed	Checkout	2026-09-18T10:26:12.3159839Z  * [new tag]         v0.1.102        -> v0.1.102
+Verify apt feed	Checkout	2026-09-18T10:26:12.3161210Z  * [new tag]         v0.1.103        -> v0.1.103
+Verify apt feed	Checkout	2026-09-18T10:26:12.3162320Z  * [new tag]         v0.1.104        -> v0.1.104
+Verify apt feed	Checkout	2026-09-18T10:26:12.3163419Z  * [new tag]         v0.1.105        -> v0.1.105
+Verify apt feed	Checkout	2026-09-18T10:26:12.3164532Z  * [new tag]         v0.1.106        -> v0.1.106
+Verify apt feed	Checkout	2026-09-18T10:26:12.3165898Z  * [new tag]         v0.1.107        -> v0.1.107
+Verify apt feed	Checkout	2026-09-18T10:26:12.3167101Z  * [new tag]         v0.1.108        -> v0.1.108
+Verify apt feed	Checkout	2026-09-18T10:26:12.3168324Z  * [new tag]         v0.1.109        -> v0.1.109
+Verify apt feed	Checkout	2026-09-18T10:26:12.3169452Z  * [new tag]         v0.1.11         -> v0.1.11
+Verify apt feed	Checkout	2026-09-18T10:26:12.3170854Z  * [new tag]         v0.1.110        -> v0.1.110
+Verify apt feed	Checkout	2026-09-18T10:26:12.3172012Z  * [new tag]         v0.1.111        -> v0.1.111
+Verify apt feed	Checkout	2026-09-18T10:26:12.3173111Z  * [new tag]         v0.1.112        -> v0.1.112
+Verify apt feed	Checkout	2026-09-18T10:26:12.3174227Z  * [new tag]         v0.1.113        -> v0.1.113
+Verify apt feed	Checkout	2026-09-18T10:26:12.3175429Z  * [new tag]         v0.1.114        -> v0.1.114
+Verify apt feed	Checkout	2026-09-18T10:26:12.3176873Z  * [new tag]         v0.1.115        -> v0.1.115
+Verify apt feed	Checkout	2026-09-18T10:26:12.3178359Z  * [new tag]         v0.1.116        -> v0.1.116
+Verify apt feed	Checkout	2026-09-18T10:26:12.3179895Z  * [new tag]         v0.1.117        -> v0.1.117
+Verify apt feed	Checkout	2026-09-18T10:26:12.3181824Z  * [new tag]         v0.1.119        -> v0.1.119
+Verify apt feed	Checkout	2026-09-18T10:26:12.3183717Z  * [new tag]         v0.1.12         -> v0.1.12
+Verify apt feed	Checkout	2026-09-18T10:26:12.3185294Z  * [new tag]         v0.1.120        -> v0.1.120
+Verify apt feed	Checkout	2026-09-18T10:26:12.3186848Z  * [new tag]         v0.1.121        -> v0.1.121
+Verify apt feed	Checkout	2026-09-18T10:26:12.3188476Z  * [new tag]         v0.1.13         -> v0.1.13
+Verify apt feed	Checkout	2026-09-18T10:26:12.3190108Z  * [new tag]         v0.1.14         -> v0.1.14
+Verify apt feed	Checkout	2026-09-18T10:26:12.3191934Z  * [new tag]         v0.1.15         -> v0.1.15
+Verify apt feed	Checkout	2026-09-18T10:26:12.3193499Z  * [new tag]         v0.1.16         -> v0.1.16
+Verify apt feed	Checkout	2026-09-18T10:26:12.3195067Z  * [new tag]         v0.1.17         -> v0.1.17
+Verify apt feed	Checkout	2026-09-18T10:26:12.3196631Z  * [new tag]         v0.1.18         -> v0.1.18
+Verify apt feed	Checkout	2026-09-18T10:26:12.3198658Z  * [new tag]         v0.1.19         -> v0.1.19
+Verify apt feed	Checkout	2026-09-18T10:26:12.3201199Z  * [new tag]         v0.1.2          -> v0.1.2
+Verify apt feed	Checkout	2026-09-18T10:26:12.3203510Z  * [new tag]         v0.1.20         -> v0.1.20
+Verify apt feed	Checkout	2026-09-18T10:26:12.3205223Z  * [new tag]         v0.1.21         -> v0.1.21
+Verify apt feed	Checkout	2026-09-18T10:26:12.3207425Z  * [new tag]         v0.1.22         -> v0.1.22
+Verify apt feed	Checkout	2026-09-18T10:26:12.3209208Z  * [new tag]         v0.1.23         -> v0.1.23
+Verify apt feed	Checkout	2026-09-18T10:26:12.3211094Z  * [new tag]         v0.1.24         -> v0.1.24
+Verify apt feed	Checkout	2026-09-18T10:26:12.3212757Z  * [new tag]         v0.1.26         -> v0.1.26
+Verify apt feed	Checkout	2026-09-18T10:26:12.3214505Z  * [new tag]         v0.1.27         -> v0.1.27
+Verify apt feed	Checkout	2026-09-18T10:26:12.3216045Z  * [new tag]         v0.1.28         -> v0.1.28
+Verify apt feed	Checkout	2026-09-18T10:26:12.3217543Z  * [new tag]         v0.1.29         -> v0.1.29
+Verify apt feed	Checkout	2026-09-18T10:26:12.3219930Z  * [new tag]         v0.1.29+trustscope.20260623.220000.28a7ef7 -> v0.1.29+trustscope.20260623.220000.28a7ef7
+Verify apt feed	Checkout	2026-09-18T10:26:12.3223737Z  * [new tag]         v0.1.29+trustscope.20260623.230000.d603e1e -> v0.1.29+trustscope.20260623.230000.d603e1e
+Verify apt feed	Checkout	2026-09-18T10:26:12.3227157Z  * [new tag]         v0.1.29+trustscope.20260623.235000.08672f1 -> v0.1.29+trustscope.20260623.235000.08672f1
+Verify apt feed	Checkout	2026-09-18T10:26:12.3229588Z  * [new tag]         v0.1.3          -> v0.1.3
+Verify apt feed	Checkout	2026-09-18T10:26:12.3231237Z  * [new tag]         v0.1.30         -> v0.1.30
+Verify apt feed	Checkout	2026-09-18T10:26:12.3232728Z  * [new tag]         v0.1.31         -> v0.1.31
+Verify apt feed	Checkout	2026-09-18T10:26:12.3234481Z  * [new tag]         v0.1.32         -> v0.1.32
+Verify apt feed	Checkout	2026-09-18T10:26:12.3236364Z  * [new tag]         v0.1.33         -> v0.1.33
+Verify apt feed	Checkout	2026-09-18T10:26:12.3238225Z  * [new tag]         v0.1.34         -> v0.1.34
+Verify apt feed	Checkout	2026-09-18T10:26:12.3240152Z  * [new tag]         v0.1.35         -> v0.1.35
+Verify apt feed	Checkout	2026-09-18T10:26:12.3241976Z  * [new tag]         v0.1.36         -> v0.1.36
+Verify apt feed	Checkout	2026-09-18T10:26:12.3243540Z  * [new tag]         v0.1.37         -> v0.1.37
+Verify apt feed	Checkout	2026-09-18T10:26:12.3245663Z  * [new tag]         v0.1.38         -> v0.1.38
+Verify apt feed	Checkout	2026-09-18T10:26:12.3247554Z  * [new tag]         v0.1.39         -> v0.1.39
+Verify apt feed	Checkout	2026-09-18T10:26:12.3249034Z  * [new tag]         v0.1.4          -> v0.1.4
+Verify apt feed	Checkout	2026-09-18T10:26:12.3250761Z  * [new tag]         v0.1.40         -> v0.1.40
+Verify apt feed	Checkout	2026-09-18T10:26:12.3252279Z  * [new tag]         v0.1.41         -> v0.1.41
+Verify apt feed	Checkout	2026-09-18T10:26:12.3254514Z  * [new tag]         v0.1.42         -> v0.1.42
+Verify apt feed	Checkout	2026-09-18T10:26:12.3256505Z  * [new tag]         v0.1.49         -> v0.1.49
+Verify apt feed	Checkout	2026-09-18T10:26:12.3258038Z  * [new tag]         v0.1.5          -> v0.1.5
+Verify apt feed	Checkout	2026-09-18T10:26:12.3259503Z  * [new tag]         v0.1.51         -> v0.1.51
+Verify apt feed	Checkout	2026-09-18T10:26:12.3261272Z  * [new tag]         v0.1.52         -> v0.1.52
+Verify apt feed	Checkout	2026-09-18T10:26:12.3262860Z  * [new tag]         v0.1.53         -> v0.1.53
+Verify apt feed	Checkout	2026-09-18T10:26:12.3265297Z  * [new tag]         v0.1.54         -> v0.1.54
+Verify apt feed	Checkout	2026-09-18T10:26:12.3267031Z  * [new tag]         v0.1.55         -> v0.1.55
+Verify apt feed	Checkout	2026-09-18T10:26:12.3268541Z  * [new tag]         v0.1.56         -> v0.1.56
+Verify apt feed	Checkout	2026-09-18T10:26:12.3270055Z  * [new tag]         v0.1.57         -> v0.1.57
+Verify apt feed	Checkout	2026-09-18T10:26:12.3271852Z  * [new tag]         v0.1.58         -> v0.1.58
+Verify apt feed	Checkout	2026-09-18T10:26:12.3273329Z  * [new tag]         v0.1.6          -> v0.1.6
+Verify apt feed	Checkout	2026-09-18T10:26:12.3274794Z  * [new tag]         v0.1.60         -> v0.1.60
+Verify apt feed	Checkout	2026-09-18T10:26:12.3276262Z  * [new tag]         v0.1.61         -> v0.1.61
+Verify apt feed	Checkout	2026-09-18T10:26:12.3278158Z  * [new tag]         v0.1.62         -> v0.1.62
+Verify apt feed	Checkout	2026-09-18T10:26:12.3279630Z  * [new tag]         v0.1.63         -> v0.1.63
+Verify apt feed	Checkout	2026-09-18T10:26:12.3281459Z  * [new tag]         v0.1.65         -> v0.1.65
+Verify apt feed	Checkout	2026-09-18T10:26:12.3282929Z  * [new tag]         v0.1.66         -> v0.1.66
+Verify apt feed	Checkout	2026-09-18T10:26:12.3284458Z  * [new tag]         v0.1.67         -> v0.1.67
+Verify apt feed	Checkout	2026-09-18T10:26:12.3285929Z  * [new tag]         v0.1.68         -> v0.1.68
+Verify apt feed	Checkout	2026-09-18T10:26:12.3287509Z  * [new tag]         v0.1.69         -> v0.1.69
+Verify apt feed	Checkout	2026-09-18T10:26:12.3288977Z  * [new tag]         v0.1.7          -> v0.1.7
+Verify apt feed	Checkout	2026-09-18T10:26:12.3290734Z  * [new tag]         v0.1.70         -> v0.1.70
+Verify apt feed	Checkout	2026-09-18T10:26:12.3292332Z  * [new tag]         v0.1.71         -> v0.1.71
+Verify apt feed	Checkout	2026-09-18T10:26:12.3293867Z  * [new tag]         v0.1.72         -> v0.1.72
+Verify apt feed	Checkout	2026-09-18T10:26:12.3295770Z  * [new tag]         v0.1.73         -> v0.1.73
+Verify apt feed	Checkout	2026-09-18T10:26:12.3298294Z  * [new tag]         v0.1.74         -> v0.1.74
+Verify apt feed	Checkout	2026-09-18T10:26:12.3301269Z  * [new tag]         v0.1.75         -> v0.1.75
+Verify apt feed	Checkout	2026-09-18T10:26:12.3303781Z  * [new tag]         v0.1.76         -> v0.1.76
+Verify apt feed	Checkout	2026-09-18T10:26:12.3306403Z  * [new tag]         v0.1.77         -> v0.1.77
+Verify apt feed	Checkout	2026-09-18T10:26:12.3308931Z  * [new tag]         v0.1.78         -> v0.1.78
+Verify apt feed	Checkout	2026-09-18T10:26:12.3311435Z  * [new tag]         v0.1.79         -> v0.1.79
+Verify apt feed	Checkout	2026-09-18T10:26:12.3313635Z  * [new tag]         v0.1.8          -> v0.1.8
+Verify apt feed	Checkout	2026-09-18T10:26:12.3315956Z  * [new tag]         v0.1.80         -> v0.1.80
+Verify apt feed	Checkout	2026-09-18T10:26:12.3317762Z  * [new tag]         v0.1.81         -> v0.1.81
+Verify apt feed	Checkout	2026-09-18T10:26:12.3319423Z  * [new tag]         v0.1.82         -> v0.1.82
+Verify apt feed	Checkout	2026-09-18T10:26:12.3321134Z  * [new tag]         v0.1.83         -> v0.1.83
+Verify apt feed	Checkout	2026-09-18T10:26:12.3322544Z  * [new tag]         v0.1.84         -> v0.1.84
+Verify apt feed	Checkout	2026-09-18T10:26:12.3323966Z  * [new tag]         v0.1.85         -> v0.1.85
+Verify apt feed	Checkout	2026-09-18T10:26:12.3325913Z  * [new tag]         v0.1.86         -> v0.1.86
+Verify apt feed	Checkout	2026-09-18T10:26:12.3328012Z  * [new tag]         v0.1.87         -> v0.1.87
+Verify apt feed	Checkout	2026-09-18T10:26:12.3329495Z  * [new tag]         v0.1.88         -> v0.1.88
+Verify apt feed	Checkout	2026-09-18T10:26:12.3331247Z  * [new tag]         v0.1.89         -> v0.1.89
+Verify apt feed	Checkout	2026-09-18T10:26:12.3332653Z  * [new tag]         v0.1.9          -> v0.1.9
+Verify apt feed	Checkout	2026-09-18T10:26:12.3334024Z  * [new tag]         v0.1.90         -> v0.1.90
+Verify apt feed	Checkout	2026-09-18T10:26:12.3335404Z  * [new tag]         v0.1.91         -> v0.1.91
+Verify apt feed	Checkout	2026-09-18T10:26:12.3336929Z  * [new tag]         v0.1.92         -> v0.1.92
+Verify apt feed	Checkout	2026-09-18T10:26:12.3339303Z  * [new tag]         v0.1.93         -> v0.1.93
+Verify apt feed	Checkout	2026-09-18T10:26:12.3342012Z  * [new tag]         v0.1.94         -> v0.1.94
+Verify apt feed	Checkout	2026-09-18T10:26:12.3344523Z  * [new tag]         v0.1.95         -> v0.1.95
+Verify apt feed	Checkout	2026-09-18T10:26:12.3346993Z  * [new tag]         v0.1.96         -> v0.1.96
+Verify apt feed	Checkout	2026-09-18T10:26:12.3349641Z  * [new tag]         v0.1.97         -> v0.1.97
+Verify apt feed	Checkout	2026-09-18T10:26:12.3352163Z  * [new tag]         v0.1.98         -> v0.1.98
+Verify apt feed	Checkout	2026-09-18T10:26:12.3354361Z  * [new tag]         v0.1.99         -> v0.1.99
+Verify apt feed	Checkout	2026-09-18T10:26:12.3359261Z [command]/usr/bin/git branch --list --remote origin/main
+Verify apt feed	Checkout	2026-09-18T10:26:12.3361128Z   origin/main
+Verify apt feed	Checkout	2026-09-18T10:26:12.3363588Z [command]/usr/bin/git rev-parse refs/remotes/origin/main
+Verify apt feed	Checkout	2026-09-18T10:26:12.3365131Z b24d7d4370001119cd5ddcb6f9e07aa9007051e7
+Verify apt feed	Checkout	2026-09-18T10:26:12.3369256Z ##[endgroup]
+Verify apt feed	Checkout	2026-09-18T10:26:12.3371206Z ##[group]Determining the checkout info
+Verify apt feed	Checkout	2026-09-18T10:26:12.3373049Z ##[endgroup]
+Verify apt feed	Checkout	2026-09-18T10:26:12.3374109Z [command]/usr/bin/git sparse-checkout disable
+Verify apt feed	Checkout	2026-09-18T10:26:12.3377261Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+Verify apt feed	Checkout	2026-09-18T10:26:12.3381119Z ##[group]Checking out the ref
+Verify apt feed	Checkout	2026-09-18T10:26:12.3383080Z [command]/usr/bin/git checkout --progress --force -B main refs/remotes/origin/main
+Verify apt feed	Checkout	2026-09-18T10:26:12.3436235Z Switched to a new branch 'main'
+Verify apt feed	Checkout	2026-09-18T10:26:12.3445408Z branch 'main' set up to track 'origin/main'.
+Verify apt feed	Checkout	2026-09-18T10:26:12.3462989Z ##[endgroup]
+Verify apt feed	Checkout	2026-09-18T10:26:12.3511415Z [command]/usr/bin/git log -1 --format=%H
+Verify apt feed	Checkout	2026-09-18T10:26:12.3542524Z b24d7d4370001119cd5ddcb6f9e07aa9007051e7
+Verify apt feed	Checkout	2026-09-18T10:26:12.3552913Z ##[group]Removing auth
+Verify apt feed	Checkout	2026-09-18T10:26:12.3554118Z Removing SSH command configuration
+Verify apt feed	Checkout	2026-09-18T10:26:12.3556696Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Verify apt feed	Checkout	2026-09-18T10:26:12.3595771Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Verify apt feed	Checkout	2026-09-18T10:26:12.3854099Z Removing HTTP extra header
+Verify apt feed	Checkout	2026-09-18T10:26:12.3858064Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Verify apt feed	Checkout	2026-09-18T10:26:12.3899360Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Verify apt feed	Checkout	2026-09-18T10:26:12.4151022Z Removing includeIf entries pointing to credentials config files
+Verify apt feed	Checkout	2026-09-18T10:26:12.4155187Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Verify apt feed	Checkout	2026-09-18T10:26:12.4193105Z includeif.gitdir:/home/runner/work/velnor-apt/velnor-apt/.git.path
+Verify apt feed	Checkout	2026-09-18T10:26:12.4195805Z includeif.gitdir:/home/runner/work/velnor-apt/velnor-apt/.git/worktrees/*.path
+Verify apt feed	Checkout	2026-09-18T10:26:12.4198511Z includeif.gitdir:/github/workspace/.git.path
+Verify apt feed	Checkout	2026-09-18T10:26:12.4200831Z includeif.gitdir:/github/workspace/.git/worktrees/*.path
+Verify apt feed	Checkout	2026-09-18T10:26:12.4207639Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor-apt/velnor-apt/.git.path
+Verify apt feed	Checkout	2026-09-18T10:26:12.4236538Z /home/runner/work/_temp/git-credentials-c599fbc1-cb34-410b-87fe-6df0b4da4f1e.config
+Verify apt feed	Checkout	2026-09-18T10:26:12.4252749Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor-apt/velnor-apt/.git.path \/home\/runner\/work\/_temp\/git\-credentials\-c599fbc1\-cb34\-410b\-87fe\-6df0b4da4f1e\.config
+Verify apt feed	Checkout	2026-09-18T10:26:12.4311435Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor-apt/velnor-apt/.git/worktrees/*.path
+Verify apt feed	Checkout	2026-09-18T10:26:12.4338598Z /home/runner/work/_temp/git-credentials-c599fbc1-cb34-410b-87fe-6df0b4da4f1e.config
+Verify apt feed	Checkout	2026-09-18T10:26:12.4351990Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor-apt/velnor-apt/.git/worktrees/*.path \/home\/runner\/work\/_temp\/git\-credentials\-c599fbc1\-cb34\-410b\-87fe\-6df0b4da4f1e\.config
+Verify apt feed	Checkout	2026-09-18T10:26:12.4398985Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git.path
+Verify apt feed	Checkout	2026-09-18T10:26:12.4440971Z /github/runner_temp/git-credentials-c599fbc1-cb34-410b-87fe-6df0b4da4f1e.config
+Verify apt feed	Checkout	2026-09-18T10:26:12.4449418Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git.path \/github\/runner_temp\/git\-credentials\-c599fbc1\-cb34\-410b\-87fe\-6df0b4da4f1e\.config
+Verify apt feed	Checkout	2026-09-18T10:26:12.4484751Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git/worktrees/*.path
+Verify apt feed	Checkout	2026-09-18T10:26:12.4549681Z /github/runner_temp/git-credentials-c599fbc1-cb34-410b-87fe-6df0b4da4f1e.config
+Verify apt feed	Checkout	2026-09-18T10:26:12.4556399Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git/worktrees/*.path \/github\/runner_temp\/git\-credentials\-c599fbc1\-cb34\-410b\-87fe\-6df0b4da4f1e\.config
+Verify apt feed	Checkout	2026-09-18T10:26:12.4601585Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Verify apt feed	Checkout	2026-09-18T10:26:12.4833349Z Removing credentials config '/home/runner/work/_temp/git-credentials-c599fbc1-cb34-410b-87fe-6df0b4da4f1e.config'
+Verify apt feed	Checkout	2026-09-18T10:26:12.4842921Z ##[endgroup]
+Verify apt feed	Set up Velnor workflow runtime	﻿2026-09-18T10:26:12.5548053Z ##[group]Run tailrocks/velnor/.github/actions/setup-velnor-workflow@fdeed261bd2247a38db6922a7726cd45d3d6f31e
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5550141Z with:
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5551282Z   rev: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5552716Z   checkout-path: /home/runner/work/velnor-apt/velnor-apt
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5554013Z   cache: true
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5554942Z   cache-key-prefix: velnor-workflow-v3
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5564389Z   github-token: ***
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5565326Z ##[endgroup]
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5645247Z ##[start-action display=Resolve source closure;id=runtime.closure]
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5705958Z ##[group]Run set -euo pipefail
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5707202Z ^[[36;1mset -euo pipefail^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5708241Z ^[[36;1msha256_digest() {^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5709417Z ^[[36;1m  if command -v sha256sum >/dev/null 2>&1; then^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5710980Z ^[[36;1m    sha256sum | awk '{print $1}'^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5712293Z ^[[36;1m  elif command -v shasum >/dev/null 2>&1; then^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5713680Z ^[[36;1m    shasum -a 256 | awk '{print $1}'^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5714836Z ^[[36;1m  else^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5716170Z ^[[36;1m    echo "::error::no SHA-256 checksum tool available (sha256sum or shasum)" >&2^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5717775Z ^[[36;1m    return 1^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5718690Z ^[[36;1m  fi^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5719538Z ^[[36;1m}^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5721019Z ^[[36;1mtest "$INSTALL_REV" != '' || { echo "::error::runtime revision is empty" >&2; exit 1; }^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5723630Z ^[[36;1m[[ "$INSTALL_REV" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::runtime revision must be a full commit SHA, got $INSTALL_REV" >&2; exit 1; }^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5725718Z ^[[36;1mlisting=""^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5727138Z ^[[36;1mif git -C "$CHECKOUT_PATH" cat-file -e "$INSTALL_REV^{commit}" 2>/dev/null; then^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5730143Z ^[[36;1m  listing="$(git -C "$CHECKOUT_PATH" ls-tree -r "$INSTALL_REV" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)"^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5733083Z ^[[36;1melse^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5735300Z ^[[36;1m  tree="$(gh api "repos/$PRODUCT_REPOSITORY/git/trees/$INSTALL_REV?recursive=1")" || { echo "::error::unknown generator revision $INSTALL_REV" >&2; exit 1; }^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5738941Z ^[[36;1m  [[ "$(jq -r '.truncated // false' <<<"$tree")" != "true" ]] || { echo "::error::tree API response is truncated; the closure cannot be proven" >&2; exit 1; }^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5744364Z ^[[36;1m  listing="$(jq -r '[.tree[] | select(.type != "tree") | select(.path == "Cargo.toml" or .path == "Cargo.lock" or .path == "rust-toolchain.toml" or .path == "rust-toolchain" or (.path | startswith("crates/velnor-workflow/")) or (.path | startswith(".cargo/"))) | "\(.mode) \(.type) \(.sha)\t\(.path)"] | sort | join("\n")' <<<"$tree")"^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5748464Z ^[[36;1mfi^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5750002Z ^[[36;1mtest "$listing" != '' || { echo "::error::revision $INSTALL_REV has no closure inputs" >&2; exit 1; }^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5752941Z ^[[36;1mclosure="$(printf '%s\nclosure-version:1\nfeatures:\nprofile:release\n' "$(LC_ALL=C sort <<<"$listing")" | sha256_digest)"^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5755581Z ^[[36;1m[[ "$closure" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::closure resolution failed" >&2; exit 1; }^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5757367Z ^[[36;1mecho "value=$closure" >> "$GITHUB_OUTPUT"^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5802515Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5803900Z env:
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5812866Z   GH_TOKEN: ***
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5813958Z   INSTALL_REV: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5815430Z   CHECKOUT_PATH: /home/runner/work/velnor-apt/velnor-apt
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5816789Z   PRODUCT_REPOSITORY: tailrocks/velnor
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:12.5817903Z ##[endgroup]
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.1779681Z ##[end-action id=runtime.closure;outcome=success;conclusion=success;duration_ms=613]
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.1789211Z ##[start-action display=Restore runtime cache;id=runtime.cache]
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.1915132Z ##[group]Run actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.1916614Z with:
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.1917471Z   path: ~/.cache/velnor/workflow-runtime
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.1919429Z   key: velnor-workflow-v3-Linux-X64-81ba31f87a699c4e24e68baa1cf7cd0b5d765e5970934ec72c38b83772b274dc
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.1921639Z   enableCrossOsArchive: false
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.1922685Z   fail-on-cache-miss: false
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.1923661Z   lookup-only: false
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.1924545Z ##[endgroup]
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.3725775Z Cache hit for: velnor-workflow-v3-Linux-X64-81ba31f87a699c4e24e68baa1cf7cd0b5d765e5970934ec72c38b83772b274dc
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5112763Z Received 3728075 of 3728075 (100.0%), 41.8 MBs/sec
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5115824Z Cache Size: ~4 MB (3728075 B)
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5147993Z [command]/usr/bin/tar -xf /home/runner/work/_temp/b7286045-0f3b-428f-b69d-85248ca90779/cache.tzst -P -C /home/runner/work/velnor-apt/velnor-apt --use-compress-program unzstd
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5432034Z Cache restored successfully
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5521743Z Cache restored from key: velnor-workflow-v3-Linux-X64-81ba31f87a699c4e24e68baa1cf7cd0b5d765e5970934ec72c38b83772b274dc
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5604832Z ##[end-action id=runtime.cache;outcome=success;conclusion=success;duration_ms=381]
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5614239Z ##[start-action display=Download runtime product;id=runtime.__run]
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5635455Z ##[end-action id=runtime.__run;outcome=skipped;conclusion=skipped;duration_ms=0]
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5642783Z ##[start-action display=Verify runtime product;id=runtime.__run_2]
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5706318Z ##[group]Run set -euo pipefail
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5707456Z ^[[36;1mset -euo pipefail^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5708741Z ^[[36;1mruntime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5710086Z ^[[36;1mjq -e \^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5711575Z ^[[36;1m  --arg closure "$CLOSURE" \^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5712846Z ^[[36;1m  --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5715412Z ^[[36;1m  '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$"))' \^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5717954Z ^[[36;1m  "$runtime/manifest.json" >/dev/null^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5719261Z ^[[36;1mif command -v sha256sum >/dev/null 2>&1; then^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5721147Z ^[[36;1m  actual="$(sha256sum "$runtime/bin/velnor-workflow" | awk '{print $1}')"^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5722649Z ^[[36;1melse^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5723933Z ^[[36;1m  actual="$(shasum -a 256 "$runtime/bin/velnor-workflow" | awk '{print $1}')"^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5725447Z ^[[36;1mfi^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5727195Z ^[[36;1mexpected="$(jq -er --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" '.products[$platform].binary' "$runtime/manifest.json")"^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5729761Z ^[[36;1m[[ "$actual" == "$expected" ]] || { echo "::error::cached runtime digest mismatch" >&2; exit 1; }^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5772639Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5773940Z env:
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5775173Z   CLOSURE: 81ba31f87a699c4e24e68baa1cf7cd0b5d765e5970934ec72c38b83772b274dc
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.5776702Z ##[endgroup]
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.6025233Z ##[end-action id=runtime.__run_2;outcome=success;conclusion=success;duration_ms=38]
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.6033760Z ##[start-action display=Add runtime to PATH;id=runtime.__run_3]
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.6072748Z ##[group]Run set -euo pipefail
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.6073853Z ^[[36;1mset -euo pipefail^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.6075130Z ^[[36;1mruntime="$HOME/.cache/velnor/workflow-runtime/$CLOSURE"^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.6076602Z ^[[36;1mtest -x "$runtime/bin/velnor-workflow"^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.6077857Z ^[[36;1mtest -s "$runtime/manifest.json"^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.6079242Z ^[[36;1mreported="$("$runtime/bin/velnor-workflow" --closure)"^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.6081817Z ^[[36;1m[[ "$reported" == "$CLOSURE" ]] || { echo "::error::runtime at $runtime reports closure $reported, expected $CLOSURE" >&2; exit 1; }^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.6084438Z ^[[36;1mmanifest_revision="$(jq -er '.revision' "$runtime/manifest.json")"^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.6086256Z ^[[36;1mreported_revision="$("$runtime/bin/velnor-workflow" --revision)"^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.6089117Z ^[[36;1m[[ "$reported_revision" == "$manifest_revision" ]] || { echo "::error::runtime at $runtime reports revision $reported_revision, expected $manifest_revision" >&2; exit 1; }^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.6091999Z ^[[36;1mecho "$runtime/bin" >> "$GITHUB_PATH"^[[0m
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.6131357Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.6132655Z env:
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.6133870Z   CLOSURE: 81ba31f87a699c4e24e68baa1cf7cd0b5d765e5970934ec72c38b83772b274dc
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.6135360Z ##[endgroup]
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.6280099Z ##[end-action id=runtime.__run_3;outcome=success;conclusion=success;duration_ms=24]
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.6287017Z ##[start-action display=Save runtime cache;id=runtime.__actions_cache]
+Verify apt feed	Set up Velnor workflow runtime	2026-09-18T10:26:13.6320024Z ##[end-action id=runtime.__actions_cache;outcome=skipped;conclusion=skipped;duration_ms=0]
+Verify apt feed	Set trusted workflow policy revision	﻿2026-09-18T10:26:13.6414900Z ##[group]Run echo "VELNOR_WORKFLOW_POLICY_REVISION=fdeed261bd2247a38db6922a7726cd45d3d6f31e" >> "$GITHUB_ENV"
+Verify apt feed	Set trusted workflow policy revision	2026-09-18T10:26:13.6417672Z ^[[36;1mecho "VELNOR_WORKFLOW_POLICY_REVISION=fdeed261bd2247a38db6922a7726cd45d3d6f31e" >> "$GITHUB_ENV"^[[0m
+Verify apt feed	Set trusted workflow policy revision	2026-09-18T10:26:13.6463481Z shell: /usr/bin/bash -e {0}
+Verify apt feed	Set trusted workflow policy revision	2026-09-18T10:26:13.6464532Z ##[endgroup]
+Verify apt feed	Enforce workflow policy	﻿2026-09-18T10:26:13.6616275Z ##[group]Run velnor-workflow policy --workflow-root "$GITHUB_WORKSPACE"
+Verify apt feed	Enforce workflow policy	2026-09-18T10:26:13.6618151Z ^[[36;1mvelnor-workflow policy --workflow-root "$GITHUB_WORKSPACE"^[[0m
+Verify apt feed	Enforce workflow policy	2026-09-18T10:26:13.6659052Z shell: /usr/bin/bash -e {0}
+Verify apt feed	Enforce workflow policy	2026-09-18T10:26:13.6660074Z env:
+Verify apt feed	Enforce workflow policy	2026-09-18T10:26:13.6661489Z   VELNOR_WORKFLOW_POLICY_REVISION: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+Verify apt feed	Enforce workflow policy	2026-09-18T10:26:13.6663230Z   EVENT_NAME: workflow_dispatch
+Verify apt feed	Enforce workflow policy	2026-09-18T10:26:13.6664239Z ##[endgroup]
+Verify apt feed	Enforce workflow policy	2026-09-18T10:26:13.7043284Z PASS pin-declared           .github-gen/velnor-workflow.toml [generator] revision = fdeed261bd2247a38db6922a7726cd45d3d6f31e
+Verify apt feed	Enforce workflow policy	2026-09-18T10:26:13.7048707Z PASS pin-reachable          not applicable: tailrocks/velnor-apt consumes the generator from tailrocks/velnor; the pin is a commit of that repository, proven when the pinned generator is obtained
+Verify apt feed	Enforce workflow policy	2026-09-18T10:26:13.7053820Z PASS pin-monotonic          not applicable: tailrocks/velnor-apt consumes the generator from tailrocks/velnor; the pin is a commit of that repository, proven when the pinned generator is obtained
+Verify apt feed	Enforce workflow policy	2026-09-18T10:26:13.7057643Z PASS entrypoint-pin         .github/workflows/ci-policy.yml acquires and exports the declared pin (4 literals)
+Verify apt feed	Enforce workflow policy	2026-09-18T10:26:13.7061066Z PASS generated-tree         every generated file is byte-identical to the render of velnor-workflow at fdeed261bd2247a38db6922a7726cd45d3d6f31e
+Verify apt feed	Enforce workflow policy	2026-09-18T10:26:13.7064451Z PASS pull-request-target    only .github/workflows/ci-policy.yml runs on pull_request_target, with the reviewed trigger set
+Verify apt feed	Enforce workflow policy	2026-09-18T10:26:13.7067806Z PASS entrypoint-privileges  .github/workflows/ci-policy.yml holds contents: read only, references no secrets, and persists no credentials
+Verify apt feed	Enforce workflow policy	2026-09-18T10:26:13.7071137Z PASS trusted-runners        every self-hosted job is gated on a trusted event and an approved runner
+Verify apt feed	Enforce workflow policy	2026-09-18T10:26:13.7073588Z PASS action-pins            every action reference is a full-SHA pin or a reviewed local path
+Verify apt feed	Enforce workflow policy	2026-09-18T10:26:13.7075783Z PASS workflow-structure     every workflow parses as GitHub would run it
+Verify apt feed	Enforce workflow policy	2026-09-18T10:26:13.7078321Z PASS required-checks        .github/workflows/ci-pr.yml emits [ci-required]; no live ruleset supplied (--ruleset-contexts)
+Verify apt feed	Enforce workflow policy	2026-09-18T10:26:13.7080694Z policy: 11 rules, 0 failed
+Verify apt feed	Fetch and verify feed inputs	﻿2026-09-18T10:26:13.7155322Z ##[group]Run set -euo pipefail
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7156528Z ^[[36;1mset -euo pipefail^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7157553Z ^[[36;1mchannel="$CHANNEL"^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7159198Z ^[[36;1mcase "$channel" in stable|preview) ;; *) echo "::error::unknown channel $channel" >&2; exit 1 ;; esac^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7161317Z ^[[36;1mversion="$INPUT_VERSION"^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7162411Z ^[[36;1mcommit="$INPUT_COMMIT"^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7163501Z ^[[36;1mif [ "$channel" = stable ]; then^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7164640Z ^[[36;1m  if [ -z "$version" ]; then^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7166933Z ^[[36;1m    version="$(gh release list --repo 'tailrocks/velnor' --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName')"^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7169246Z ^[[36;1m  fi^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7170136Z ^[[36;1m  if [ -z "$commit" ]; then^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7172240Z ^[[36;1m    commit="$(velnor-workflow release apt-resolve-commit --source-repo 'tailrocks/velnor' --version "$version")"^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7174249Z ^[[36;1m  fi^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7175101Z ^[[36;1melse^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7176006Z ^[[36;1m  rm -rf discover^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7177801Z ^[[36;1m  gh release download preview --repo 'tailrocks/velnor' --pattern 'release-manifest.json' --dir discover^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7180114Z ^[[36;1m  manifest_version="$(jq -er .version discover/release-manifest.json)"^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7181942Z ^[[36;1m  if [ -z "$version" ]; then^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7183075Z ^[[36;1m    version="$manifest_version"^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7184335Z ^[[36;1m  elif [ "$version" != "$manifest_version" ]; then^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7186232Z ^[[36;1m    echo "::error::requested $version disagrees with the rolling manifest $manifest_version" >&2^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7187967Z ^[[36;1m    exit 1^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7188847Z ^[[36;1m  fi^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7189728Z ^[[36;1m  if [ -z "$commit" ]; then^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7191918Z ^[[36;1m    commit="$(gh release view preview --repo 'tailrocks/velnor' --json targetCommitish --jq .targetCommitish)"^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7194056Z ^[[36;1m  fi^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7194892Z ^[[36;1mfi^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7195747Z ^[[36;1mrm -rf incoming^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7198024Z ^[[36;1mvelnor-workflow release apt-fetch --suite "$channel" --source-repo 'tailrocks/velnor' --package 'velnor-runner' --version "$version" --dir incoming^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7200741Z ^[[36;1mif [ "$channel" = stable ]; then^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7201961Z ^[[36;1m  source_ref="refs/tags/$version"^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7203079Z ^[[36;1melse^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7203987Z ^[[36;1m  source_ref="refs/heads/main"^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7205068Z ^[[36;1mfi^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7205949Z ^[[36;1mshopt -s nullglob^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7207006Z ^[[36;1mattest_subjects=(incoming/*.deb)^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7208648Z ^[[36;1m[ "${#attest_subjects[@]}" -gt 0 ] || { echo "::error::no fetched debs to attest" >&2; exit 1; }^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7210523Z ^[[36;1mfor subject in "${attest_subjects[@]}"; do^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7213648Z ^[[36;1m  gh attestation verify "$subject" --repo 'tailrocks/velnor' --signer-workflow "tailrocks/velnor/.github/workflows/ci-release-package-signer.yml" --source-ref "$source_ref" --source-digest "$commit"^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7216651Z ^[[36;1mdone^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7218139Z ^[[36;1mlive_fpr="$(gpg --show-keys --with-colons 'velnor.gpg' | awk -F: '/^fpr:/{print $10; exit}')"^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7219906Z ^[[36;1mif [ "$channel" = stable ]; then^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7225062Z ^[[36;1m  velnor-workflow release apt-verify --suite "$channel" --source-repo 'tailrocks/velnor' --package 'velnor-runner' --binary 'velnor-runner' --identity-dir 'velnor' --manifest-schema 'velnor.package-release.v1' --version "$version" --incoming incoming --commit "$commit" --signer "$live_fpr" --expect-signer '7E66E3A53F9B3B5CA61D0F53261EDAC957DEB801' --verify-oci true^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7229955Z ^[[36;1melse^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7234590Z ^[[36;1m  velnor-workflow release apt-verify --suite "$channel" --source-repo 'tailrocks/velnor' --package 'velnor-runner' --binary 'velnor-runner' --identity-dir 'velnor' --manifest-schema 'velnor.package-release.v1' --version "$version" --incoming incoming --commit "$commit" --signer "$live_fpr" --expect-signer '7E66E3A53F9B3B5CA61D0F53261EDAC957DEB801'^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7239437Z ^[[36;1mfi^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7240255Z ^[[36;1m{^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7241383Z ^[[36;1m  echo "version=$version"^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7242481Z ^[[36;1m  echo "commit=$commit"^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7243548Z ^[[36;1m  echo "channel=$channel"^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7244620Z ^[[36;1m} >> "$GITHUB_OUTPUT"^[[0m
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7287247Z shell: /usr/bin/bash -e {0}
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7288232Z env:
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7289439Z   VELNOR_WORKFLOW_POLICY_REVISION: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7291072Z   CHANNEL: stable
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7291958Z   INPUT_VERSION: v0.1.274
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7293080Z   INPUT_COMMIT: 120f223655587ab0bcf2530cd4b203e0375a9dca
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7302250Z   GH_TOKEN: ***
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:13.7303145Z ##[endgroup]
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:14.9413268Z fetched stable coherence inputs for v0.1.274
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:21.6637584Z gpg: directory '/home/runner/.gnupg' created
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:21.6638964Z gpg: keybox '/home/runner/.gnupg/pubring.kbx' created
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:21.6826128Z gpg: /home/runner/.gnupg/trustdb.gpg: trustdb created
+Verify apt feed	Fetch and verify feed inputs	2026-09-18T10:26:31.0546543Z stable feed inputs are coherent
+Verify apt feed	Upload verified feed inputs	﻿2026-09-18T10:26:31.0608988Z ##[group]Run actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:31.0609483Z with:
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:31.0609686Z   name: apt-incoming
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:31.0609907Z   path: incoming
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:31.0610123Z   if-no-files-found: error
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:31.0610676Z   retention-days: 2
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:31.0611041Z   compression-level: 6
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:31.0611410Z   overwrite: false
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:31.0611655Z   include-hidden-files: false
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:31.0611908Z   archive: true
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:31.0612133Z env:
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:31.0612654Z   VELNOR_WORKFLOW_POLICY_REVISION: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:31.0613047Z ##[endgroup]
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:31.2089865Z With the provided path, there will be 8 files uploaded
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:31.2094739Z Artifact name is valid!
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:31.2095685Z Root directory input is valid!
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:31.4028112Z Uploading artifact: apt-incoming.zip
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:31.4079779Z Beginning upload of artifact content to blob storage
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:31.8978812Z Uploaded bytes 8388608
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:32.1051004Z Uploaded bytes 16777216
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:32.4188801Z Uploaded bytes 25165824
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:32.5822398Z Uploaded bytes 33554432
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:32.8317767Z Uploaded bytes 41943040
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:33.1540641Z Uploaded bytes 50331648
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:33.5119170Z Uploaded bytes 58720256
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:33.6200375Z Uploaded bytes 67108864
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:33.9284758Z Uploaded bytes 75497472
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:34.1393703Z Uploaded bytes 83886080
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:34.4724819Z Uploaded bytes 92274688
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:34.7041623Z Uploaded bytes 100663296
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:35.0385602Z Uploaded bytes 109051904
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:35.1604023Z Uploaded bytes 117440512
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:35.4130012Z Uploaded bytes 125829120
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:35.6163779Z Uploaded bytes 134217728
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:36.0059402Z Uploaded bytes 142606336
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:36.0837920Z Uploaded bytes 150994944
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:36.3291985Z Uploaded bytes 159383552
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:36.6411871Z Uploaded bytes 167772160
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:36.8821071Z Uploaded bytes 176160768
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:37.1554607Z Uploaded bytes 184549376
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:37.3796638Z Uploaded bytes 192937984
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:37.6985052Z Uploaded bytes 201326592
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:38.2129644Z Uploaded bytes 209715200
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:38.2147305Z Uploaded bytes 218103808
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:38.5838371Z Uploaded bytes 226492416
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:38.9024328Z Uploaded bytes 234881024
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:39.1668611Z Uploaded bytes 243269632
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:39.2191447Z Uploaded bytes 243915053
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:39.2358560Z Finished uploading artifact content to blob storage!
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:39.2362436Z SHA256 digest of uploaded artifact is 77f2e0430d8f29b69983c90bf0583cd7111f2f3d45327267bb72c84d705a867b
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:39.2364713Z Finalizing artifact upload
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:39.4636630Z Artifact apt-incoming successfully finalized. Artifact ID 10542975411
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:39.4637872Z Artifact apt-incoming has been successfully uploaded! Final size is 243915053 bytes. Artifact ID is 10542975411
+Verify apt feed	Upload verified feed inputs	2026-09-18T10:26:39.4643778Z Artifact download URL: https://github.com/tailrocks/velnor-apt/actions/runs/35334663704/artifacts/10542975411
+Verify apt feed	Post Checkout	﻿2026-09-18T10:26:39.4856286Z Post job cleanup.
+Verify apt feed	Post Checkout	2026-09-18T10:26:39.5758834Z [command]/usr/bin/git version
+Verify apt feed	Post Checkout	2026-09-18T10:26:39.5810809Z git version 2.55.0
+Verify apt feed	Post Checkout	2026-09-18T10:26:39.5868431Z Temporarily overriding HOME='/home/runner/work/_temp/4ebf9a48-a085-489a-af3c-0a29bdbe4b28' before making global git config changes
+Verify apt feed	Post Checkout	2026-09-18T10:26:39.5870116Z Adding repository directory to the temporary git global config as a safe directory
+Verify apt feed	Post Checkout	2026-09-18T10:26:39.5876043Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor-apt/velnor-apt
+Verify apt feed	Post Checkout	2026-09-18T10:26:39.5930083Z Removing SSH command configuration
+Verify apt feed	Post Checkout	2026-09-18T10:26:39.5938273Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Verify apt feed	Post Checkout	2026-09-18T10:26:39.5982546Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Verify apt feed	Post Checkout	2026-09-18T10:26:39.6243835Z Removing HTTP extra header
+Verify apt feed	Post Checkout	2026-09-18T10:26:39.6252042Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Verify apt feed	Post Checkout	2026-09-18T10:26:39.6303580Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Verify apt feed	Post Checkout	2026-09-18T10:26:39.6630541Z Removing includeIf entries pointing to credentials config files
+Verify apt feed	Post Checkout	2026-09-18T10:26:39.6649688Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Verify apt feed	Post Checkout	2026-09-18T10:26:39.6702396Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Verify apt feed	Complete job	﻿2026-09-18T10:26:39.7301278Z Evaluate and set job outputs
+Verify apt feed	Complete job	2026-09-18T10:26:39.7307495Z Set output 'version'
+Verify apt feed	Complete job	2026-09-18T10:26:39.7309172Z Set output 'commit'
+Verify apt feed	Complete job	2026-09-18T10:26:39.7309981Z Set output 'channel'
+Verify apt feed	Complete job	2026-09-18T10:26:39.7311047Z Cleaning up orphan processes

@@ -1,0 +1,242 @@
+- name: Base setup for each new server
+  hosts: all
+  become: yes
+  vars:
+    ansible_python_interpreter: auto_silent
+    zshrc_file: "./config/zshrc"
+
+  tasks:
+    - name: Set timezone to UTC
+      community.general.timezone:
+        name: UTC
+
+    - name: Install required packages
+      apt:
+        name:
+          - gpg
+          - sudo
+          - wget
+          - curl
+          - zsh
+          - git
+          - git-lfs
+          - unzip
+          - tmux
+          - iotop
+          - bat
+          - ncurses-term
+          - build-essential
+          - pkg-config
+          - libssl-dev
+        state: present
+        update_cache: yes
+
+    - name: Check whether xterm-ghostty terminfo already exists
+      command: infocmp xterm-ghostty
+      register: has_xterm_ghostty_terminfo
+      changed_when: false
+      failed_when: false
+
+    - name: Read xterm-ghostty terminfo from control host
+      become: false
+      delegate_to: localhost
+      command: infocmp -x xterm-ghostty
+      register: xterm_ghostty_terminfo
+      changed_when: false
+      failed_when: false
+      when: has_xterm_ghostty_terminfo.rc != 0
+
+    - name: Fallback terminfo source from xterm-256color when xterm-ghostty is not available locally
+      become: false
+      delegate_to: localhost
+      shell: infocmp -x xterm-256color | awk 'NR==1 { sub(/^xterm-256color\\|/, "xterm-ghostty|"); } { print }'
+      register: xterm_ghostty_fallback_terminfo
+      changed_when: false
+      when:
+        - has_xterm_ghostty_terminfo.rc != 0
+        - xterm_ghostty_terminfo is failed
+
+    - name: Abort when xterm-ghostty terminfo source cannot be generated
+      fail:
+        msg: "Cannot install xterm-ghostty terminfo: neither control-node xterm-ghostty nor local xterm-256color entries were found."
+      when:
+        - has_xterm_ghostty_terminfo.rc != 0
+        - xterm_ghostty_terminfo is failed
+        - xterm_ghostty_fallback_terminfo is failed
+
+    - name: Build terminfo payload for xterm-ghostty
+      set_fact:
+        xterm_ghostty_terminfo_source: "{{ xterm_ghostty_terminfo.stdout if (xterm_ghostty_terminfo is succeeded) else xterm_ghostty_fallback_terminfo.stdout }}"
+      when: has_xterm_ghostty_terminfo.rc != 0
+
+    - name: Deploy xterm-ghostty terminfo source
+      copy:
+        content: "{{ xterm_ghostty_terminfo_source }}"
+        dest: /tmp/xterm-ghostty.terminfo
+        mode: "0644"
+      when: has_xterm_ghostty_terminfo.rc != 0
+
+    - name: Compile xterm-ghostty terminfo on host
+      command: tic -x /tmp/xterm-ghostty.terminfo
+      args:
+        creates: /usr/share/terminfo/x/xterm-ghostty
+      when: has_xterm_ghostty_terminfo.rc != 0
+
+    - name: Remove temporary xterm-ghostty terminfo source file
+      file:
+        path: /tmp/xterm-ghostty.terminfo
+        state: absent
+      when: has_xterm_ghostty_terminfo.rc != 0
+
+    - name: Initialize Git LFS
+      command: git lfs install
+      changed_when: false
+
+    - name: Symlink batcat → bat
+      file:
+        src: /usr/bin/batcat
+        dest: /usr/local/bin/bat
+        state: link
+
+    - name: Add Nushell GPG key
+      get_url:
+        url: https://apt.fury.io/nushell/gpg.key
+        dest: /etc/apt/trusted.gpg.d/fury-nushell.asc
+
+    - name: Add Nushell repository
+      apt_repository:
+        repo: "deb https://apt.fury.io/nushell/ /"
+        state: present
+        filename: fury
+        update_cache: yes
+
+    - name: Install Nushell
+      apt:
+        name:
+          - nushell
+        state: present
+        update_cache: yes
+
+    - name: Check if Mise keyring already exists
+      stat:
+        path: /etc/apt/keyrings/mise.asc
+      register: mise_keyring
+
+    - name: Add GPG key
+      get_url:
+        url: https://mise.jdx.dev/gpg-key.pub
+        dest: /etc/apt/keyrings/mise.asc
+
+    - name: Add repository
+      apt_repository:
+        repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/mise.asc] https://mise.jdx.dev/deb stable main"
+        state: present
+        filename: mise
+        update_cache: yes
+
+    - name: Install packages
+      apt:
+        name:
+          - mise
+        state: present
+        update_cache: yes
+
+    - name: Install Oh My Zsh
+      shell: |
+        sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
+      args:
+        creates: "/root/.oh-my-zsh"
+
+    - name: Install zsh-autosuggestions plugin
+      git:
+        repo: https://github.com/zsh-users/zsh-autosuggestions
+        dest: /root/.oh-my-zsh/custom/plugins/zsh-autosuggestions
+        version: master
+        update: yes
+
+    - name: Ensure root shell is /bin/zsh
+      user:
+        name: root
+        shell: /bin/zsh
+
+    - name: Download and execute Starship install script
+      shell: |
+        curl -sS https://starship.rs/install.sh | sh -s -- -y
+      args:
+        creates: /usr/local/bin/starship
+
+    - name: Copy .zshrc
+      copy:
+        src: "{{ zshrc_file }}"
+        dest: /root/.zshrc
+        owner: root
+        group: root
+        mode: "644"
+
+    - name: Install GraalVM
+      command: mise install java@oracle-graalvm-25.0.1
+
+    - name: Setup GraalVM
+      command: mise use -g java@oracle-graalvm-25.0.1
+
+    - name: Setup Rust
+      command: mise use -g rust@stable
+
+    - name: Setup Cargo
+      command: mise use -g cargo-binstall
+
+    - name: Setup rust-script
+      command: mise use -g cargo:rust-script
+
+    - name: Setup Just
+      command: mise use -g cargo:just
+
+    - name: Setup shellfirm
+      command: mise use -g cargo:shellfirm
+
+    - name: Setup tirith
+      command: mise use -g cargo:tirith
+
+    - name: Setup bottom
+      command: mise use -g cargo:bottom
+
+    - name: Setup zellij
+      command: mise use -g cargo:zellij
+
+    # Install holla (adaptive CLI replacing custom zsh functions for git/docker/gradle/idea/upgrade tasks).
+    # Installed via the holla-apt repository (hosted at holla-apt.tailrocks.com),
+    # following the exact same standard Debian apt pattern used for velnor-runner
+    # (see setup-sentry.yml for Velnor on sentry, and tailrocks/holla-apt for publishing).
+    # The *-apt repos must be published first (GitHub Actions for Pages, custom domain,
+    # GPG secrets configured).
+    - name: Ensure holla apt signing key is present
+      shell: |
+        install -m 0755 -d /etc/apt/keyrings
+        if [ ! -f /etc/apt/keyrings/holla.gpg ]; then
+          curl -fsSL https://holla-apt.tailrocks.com/holla.gpg \
+            | tee /etc/apt/keyrings/holla.gpg > /dev/null
+          echo "installed"
+        else
+          echo "exists"
+        fi
+      args:
+        executable: /bin/bash
+      register: holla_gpg_result
+      changed_when: "'installed' in holla_gpg_result.stdout"
+
+    - name: Ensure holla apt source is configured
+      copy:
+        dest: /etc/apt/sources.list.d/holla.list
+        content: "deb [signed-by=/etc/apt/keyrings/holla.gpg] https://holla-apt.tailrocks.com stable main\n"
+        mode: "0644"
+      register: holla_apt_source
+
+    - name: Refresh apt cache
+      apt:
+        update_cache: yes
+      when: holla_apt_source.changed
+
+    - name: Install or upgrade holla
+      apt:
+        name: holla
+        state: latest

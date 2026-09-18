@@ -1,0 +1,1183 @@
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	﻿2026-09-17T09:53:07.8514309Z Current runner version: '2.337.0'
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8537207Z ##[group]Runner Image Provisioner
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8538301Z Hosted Compute Agent
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8539024Z Version: 20260828.587
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8539620Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8540379Z Build Date: 2026-08-28T16:44:25Z
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8541057Z Worker ID: {46fcbe07-cbe7-4d91-b580-07e22af70965}
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8541757Z Azure Region: westcentralus
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8542318Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8543647Z ##[group]Operating System
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8544327Z Ubuntu
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8544873Z 24.04.5
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8545352Z LTS
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8545841Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8546355Z ##[group]Runner Image
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8546941Z Image: ubuntu-24.04
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8547503Z Version: 20260907.300.1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8548781Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260907.300/images/ubuntu/Ubuntu2404-Readme.md
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8550211Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260907.300
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8551167Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8552242Z ##[group]GITHUB_TOKEN Permissions
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8554211Z Actions: read
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8554740Z Contents: read
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8555296Z Metadata: read
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8555820Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8557655Z Secret source: Actions
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8558723Z Cache mode: write
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8559496Z Prepare workflow directory
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8910362Z Prepare all required actions
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:07.8961946Z Getting action download info
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:08.2383940Z Download action repository 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' (SHA:3d3c42e5aac5ba805825da76410c181273ba90b1)
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:08.3593382Z Download action repository 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' (SHA:3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c)
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:09.0863334Z Download action repository 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9' (SHA:55cc8345863c7cc4c66a329aec7e433d2d1c52a9)
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:09.2686920Z Download action repository 'jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c' (SHA:c2a87611a18de5b3828c5652fe268e992400cb5c)
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:10.0572446Z Download action repository 'jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777' (SHA:7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777)
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:10.5892124Z Download action repository 'taiki-e/install-action@0758d235715de2f3551eacc980d9ae8fce9342c3' (SHA:0758d235715de2f3551eacc980d9ae8fce9342c3)
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.1961441Z Download action repository 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' (SHA:043fb46d1a93c77aae656e7c1c64a875d1fc6a0a)
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5035033Z Uses: tailrocks/velnor/.github/workflows/ci-unit-rust.yml@refs/pull/927/merge (b6f5d865acdff9fa3e30481af3893e32dcdcffb5)
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5038948Z ##[group] Inputs
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5039430Z   unit: rust-velnor-workflow-contract
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5041206Z   selected_units: bun-velnor,docker,docs,opentofu,rust-policy,rust-unit-collector,rust-velnor-model,rust-velnor-render,rust-velnor-workflow-contract,rust-production-topology,rust-velnor-client,rust-velnor-control,rust-velnor-runner,rust-velnor-tools,rust-velnor-workflow,rust-velnorctl,rust-velnor-bench
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5042958Z   scope: affected
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5044548Z   full_units: bun-velnor,docker,docs,opentofu,rust-policy,rust-production-topology,rust-unit-collector,rust-velnor-bench,rust-velnor-client,rust-velnor-control,rust-velnor-model,rust-velnor-render,rust-velnor-runner,rust-velnor-tools,rust-velnor-workflow,rust-velnor-workflow-contract,rust-velnorctl
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5046212Z   base_sha: 52c424b1d1ed2529275ae2d153f2eab8a8ded046
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5046657Z   head_sha: b6f5d865acdff9fa3e30481af3893e32dcdcffb5
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5047055Z   lane: github
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5047615Z   mise_tools: aqua:nextest-rs/nextest/cargo-nextest
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5048563Z   mise_runner: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5048912Z   mbx_compat: 2544c2ae90ab
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5049540Z   mbx_dependency_files: .cargo/**
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	crates/velnor-workflow-contract/Cargo.lock
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	rust-toolchain
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	rust-toolchain.toml
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5050832Z   mbx_freshness_files: crates/velnor-workflow-contract/**/*.rs
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	crates/velnor-workflow-contract/Cargo.lock
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	crates/velnor-workflow-contract/benches/**
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	crates/velnor-workflow-contract/examples/**
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	crates/velnor-workflow-contract/src/**
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	crates/velnor-workflow-contract/tests/**
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	mise.lock
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5051892Z   cargo_bin_tools: 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5052199Z   tool_version: 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5052507Z   node_cache_dependency_path: 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5052945Z   cache_paths: ~/.cargo/registry
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	~/.cargo/git
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5053523Z   cache_key_files: .cargo/**
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	crates/velnor-workflow-contract/Cargo.lock
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	rust-toolchain.toml
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	rust-toolchain
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5054071Z   seed_compat: 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5054380Z   seed_dependency_files: 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5054691Z   seed_freshness_files: 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5055079Z   cargo_root: crates/velnor-workflow-contract
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5055469Z   cargo_fetch_skip_when_warm: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5055789Z   cargo_net_offline: true
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5056117Z   host_warm_layers: 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5056451Z   policy_runtime: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5056796Z   candidate_publish: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5057112Z   apple_executor: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5057401Z   unit_dependencies: 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5057729Z   unit_admission: github
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5058037Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5058559Z Complete job name: Rust · velnor-workflow-contract / GitHub
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5665392Z ##[group]Run timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5666511Z ^[[36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5667147Z ^[[36;1mumask 077^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5667540Z ^[[36;1mmkdir -p "$timing_dir"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5667900Z ^[[36;1mmarker="$timing_dir/JOB_STARTED"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5668274Z ^[[36;1mif [[ ! -e "$marker" ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5668887Z ^[[36;1m  if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5669359Z ^[[36;1m    chmod 0444 "$marker" 2>/dev/null || true^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5669725Z ^[[36;1m  fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5670029Z ^[[36;1mfi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5695963Z shell: /usr/bin/bash -e {0}
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.5696594Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.6033588Z ##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.6034079Z with:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.6034428Z   persist-credentials: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.6034814Z   ref: b6f5d865acdff9fa3e30481af3893e32dcdcffb5
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.6035196Z   repository: tailrocks/velnor
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.6037803Z   token: ***
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.6038122Z   ssh-strict: true
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.6038701Z   ssh-user: git
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.6039023Z   clean: true
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.6039327Z   sparse-checkout-cone-mode: true
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.6039690Z   fetch-depth: 1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.6039977Z   fetch-tags: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.6040279Z   show-progress: true
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.6040604Z   lfs: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.6040883Z   submodules: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.6041238Z   set-safe-directory: true
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.6041574Z   allow-unsafe-pr-checkout: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.6041912Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.6962503Z Syncing repository: tailrocks/velnor
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.6964120Z ##[group]Getting Git version info
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.6964539Z Working directory is '/home/runner/work/velnor/velnor'
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.6965255Z [command]/usr/bin/git version
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7086265Z git version 2.55.0
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7105780Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7115921Z Temporarily overriding HOME='/home/runner/work/_temp/ce5d1f1f-8b64-4e50-bfbf-5fd1356efa60' before making global git config changes
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7117291Z Adding repository directory to the temporary git global config as a safe directory
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7121639Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7180011Z Deleting the contents of '/home/runner/work/velnor/velnor'
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7183107Z ##[group]Determining repository object format
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7184558Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7185152Z ##[group]Initializing the repository
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7189407Z [command]/usr/bin/git init /home/runner/work/velnor/velnor
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7325195Z hint: Using 'master' as the name for the initial branch. This default branch name
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7329101Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7330448Z hint: to use in all of your new repositories, which will suppress this warning,
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7331542Z hint: call:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7332436Z hint:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7333077Z hint: 	git config --global init.defaultBranch <name>
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7333793Z hint:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7334339Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7335208Z hint: 'development'. The just-created branch can be renamed via this command:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7335915Z hint:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7336309Z hint: 	git branch -m <name>
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7336775Z hint:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7337302Z hint: Disable this message with "git config set advice.defaultBranchName false"
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7338190Z Initialized empty Git repository in /home/runner/work/velnor/velnor/.git/
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7339973Z [command]/usr/bin/git remote add origin https://github.com/tailrocks/velnor
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7393564Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7394420Z ##[group]Disabling automatic garbage collection
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7398768Z [command]/usr/bin/git config --local gc.auto 0
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7429246Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7429815Z ##[group]Setting up auth
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7430230Z Removing SSH command configuration
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7435006Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.7464740Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.8007916Z Removing HTTP extra header
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.8014169Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.8043158Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.8223456Z Removing includeIf entries pointing to credentials config files
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.8229882Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.8261770Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.8448348Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-35c7ffa7-8e07-4381-bb07-6f61a336d2cf.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.8479526Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/.git.path /home/runner/work/_temp/git-credentials-35c7ffa7-8e07-4381-bb07-6f61a336d2cf.config
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.8506170Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-35c7ffa7-8e07-4381-bb07-6f61a336d2cf.config
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.8535474Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-35c7ffa7-8e07-4381-bb07-6f61a336d2cf.config
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.8562580Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-35c7ffa7-8e07-4381-bb07-6f61a336d2cf.config
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.8586564Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.8587358Z ##[group]Fetching the repository
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:11.8593705Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin b6f5d865acdff9fa3e30481af3893e32dcdcffb5
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.7639061Z From https://github.com/tailrocks/velnor
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.7639962Z  * branch            b6f5d865acdff9fa3e30481af3893e32dcdcffb5 -> FETCH_HEAD
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.7650015Z [command]/usr/bin/git rev-parse --verify --quiet b6f5d865acdff9fa3e30481af3893e32dcdcffb5^{object}
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.7676748Z b6f5d865acdff9fa3e30481af3893e32dcdcffb5
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.7679403Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.7680518Z ##[group]Determining the checkout info
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.7682154Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.7686202Z [command]/usr/bin/git sparse-checkout disable
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.7871914Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.7897666Z ##[group]Checking out the ref
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.7903633Z [command]/usr/bin/git checkout --progress --force b6f5d865acdff9fa3e30481af3893e32dcdcffb5
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.8737094Z Note: switching to 'b6f5d865acdff9fa3e30481af3893e32dcdcffb5'.
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.8737408Z 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.8737695Z You are in 'detached HEAD' state. You can look around, make experimental
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.8738760Z changes and commit them, and you can discard any commits you make in this
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.8739517Z state without impacting any branches by switching back to a branch.
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.8739918Z 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.8740247Z If you want to create a new branch to retain commits you create, you may
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.8740924Z do so (now or later) by using -c with the switch command. Example:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.8741272Z 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.8741459Z   git switch -c <new-branch-name>
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.8741744Z 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.8741920Z Or undo this operation with:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.8742154Z 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.8742294Z   git switch -
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.8742471Z 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.8742809Z Turn off this advice by setting config variable advice.detachedHead to false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.8743242Z 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.8743887Z HEAD is now at b6f5d86 Merge f66356eb418f7643c4526f18a7675c427f846eb9 into 52c424b1d1ed2529275ae2d153f2eab8a8ded046
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.8750047Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.8789163Z [command]/usr/bin/git log -1 --format=%H
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.8811852Z b6f5d865acdff9fa3e30481af3893e32dcdcffb5
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.8820361Z ##[group]Removing auth
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.8820876Z Removing SSH command configuration
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.8823834Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.8851057Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9031083Z Removing HTTP extra header
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9033952Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9069057Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9242352Z Removing includeIf entries pointing to credentials config files
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9247069Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9270279Z includeif.gitdir:/home/runner/work/velnor/velnor/.git.path
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9271153Z includeif.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9272103Z includeif.gitdir:/github/workspace/.git.path
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9272661Z includeif.gitdir:/github/workspace/.git/worktrees/*.path
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9279134Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/.git.path
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9298989Z /home/runner/work/_temp/git-credentials-35c7ffa7-8e07-4381-bb07-6f61a336d2cf.config
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9307346Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/.git.path \/home\/runner\/work\/_temp\/git\-credentials\-35c7ffa7\-8e07\-4381\-bb07\-6f61a336d2cf\.config
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9337167Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9356956Z /home/runner/work/_temp/git-credentials-35c7ffa7-8e07-4381-bb07-6f61a336d2cf.config
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9369614Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path \/home\/runner\/work\/_temp\/git\-credentials\-35c7ffa7\-8e07\-4381\-bb07\-6f61a336d2cf\.config
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9392061Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git.path
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9413783Z /github/runner_temp/git-credentials-35c7ffa7-8e07-4381-bb07-6f61a336d2cf.config
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9421580Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git.path \/github\/runner_temp\/git\-credentials\-35c7ffa7\-8e07\-4381\-bb07\-6f61a336d2cf\.config
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9494390Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git/worktrees/*.path
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9530152Z /github/runner_temp/git-credentials-35c7ffa7-8e07-4381-bb07-6f61a336d2cf.config
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9537116Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git/worktrees/*.path \/github\/runner_temp\/git\-credentials\-35c7ffa7\-8e07\-4381\-bb07\-6f61a336d2cf\.config
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9564691Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9736560Z Removing credentials config '/home/runner/work/_temp/git-credentials-35c7ffa7-8e07-4381-bb07-6f61a336d2cf.config'
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9743584Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9850979Z ##[group]Run {
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9851248Z ^[[36;1m{^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9851482Z ^[[36;1m  echo '## Unit dependencies'^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9851756Z ^[[36;1m  echo^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9852040Z ^[[36;1m  echo "- Unit: $UNIT_ID"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9852325Z ^[[36;1m  echo "- Lane: $UNIT_LANE"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9852630Z ^[[36;1m  echo "- Admission: $UNIT_ADMISSION"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9852973Z ^[[36;1m  if [[ -z "$UNIT_DEPENDENCIES" ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9853341Z ^[[36;1m    echo '- Dependencies: none'^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9853664Z ^[[36;1m  else^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9853968Z ^[[36;1m    echo "- Dependencies: $UNIT_DEPENDENCIES"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9854276Z ^[[36;1m  fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9854496Z ^[[36;1m} >> "$GITHUB_STEP_SUMMARY"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9877761Z shell: /usr/bin/bash -e {0}
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9878071Z env:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9878321Z   UNIT_ID: rust-velnor-workflow-contract
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9878861Z   UNIT_DEPENDENCIES: 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9879107Z   UNIT_ADMISSION: github
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9879340Z   UNIT_LANE: github
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:12.9879558Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:13.0009239Z ##[group]Run actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:13.0009667Z with:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:13.0010051Z   name: velnor-workflow-runtime-a6fa8d4a5096e6df37250b59a8105abfebdb9013-Linux-X64
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:13.0010595Z   path: .velnor-workflow-runtime
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:13.0010877Z   merge-multiple: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:13.0011137Z   repository: tailrocks/velnor
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:13.0011386Z   run-id: 35207507480
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:13.0011610Z   skip-decompress: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:13.0011969Z   digest-mismatch: error
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:13.0012200Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:13.1280312Z Downloading single artifact
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:13.3338384Z Preparing to download the following artifacts:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:13.3340257Z - velnor-workflow-runtime-a6fa8d4a5096e6df37250b59a8105abfebdb9013-Linux-X64 (ID: 10490219297, Size: 5519720, Expected Digest: sha256:6dc7f3691d6f26abfe209b5d37a303ae1c86be3ef7e103b7d392a7e0f5f817cf)
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:13.7490272Z Redirecting to blob download url: https://productionresultssa18.blob.core.windows.net/actions-results/ecb85486-f089-4303-8b7a-417889729e39/workflow-job-run-4ecaddc4-5909-5582-ac71-20fcfd2652bd/artifacts/bfc3f7c7ad109a853a534c4ca1c497ec1271da8f3f825a5fe369cc80bda11000.zip
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:13.7492157Z Starting download of artifact to: /home/runner/work/velnor/velnor/.velnor-workflow-runtime
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:13.9943338Z (node:2421) [DEP0005] DeprecationWarning: Buffer() is deprecated due to security and usability issues. Please use the Buffer.alloc(), Buffer.allocUnsafe(), or Buffer.from() methods instead.
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:13.9944736Z (Use `node --trace-deprecation ...` to show where the warning was created)
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.6588974Z SHA256 digest of downloaded artifact is 6dc7f3691d6f26abfe209b5d37a303ae1c86be3ef7e103b7d392a7e0f5f817cf
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.6589543Z Artifact download completed successfully.
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.6589843Z Total of 1 artifact(s) downloaded
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.6595196Z Download artifact has finished successfully
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.6671726Z ##[group]Run set -euo pipefail
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.6672056Z ^[[36;1mset -euo pipefail^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.6672377Z ^[[36;1mmanifest=.velnor-workflow-runtime/manifest.json^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.6673887Z ^[[36;1mjq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$")) and (.policy_binary_sha256 | test("^[0-9a-f]{64}$")) and (.closure | test("^[0-9a-f]{64}$")) and (.policy_closure | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.6675378Z ^[[36;1mexpected="$(jq -er '.binary_sha256' "$manifest")"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.6675834Z ^[[36;1mactual="$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{print $1}')"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.6676427Z ^[[36;1m[[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.6676881Z ^[[36;1mexpected="$(jq -er '.policy_binary_sha256' "$manifest")"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.6677362Z ^[[36;1mactual="$(sha256sum .velnor-workflow-runtime/velnor-workflow-policy | awk '{print $1}')"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.6677930Z ^[[36;1m[[ "$actual" == "$expected" ]] || { echo "::error::policy runtime digest mismatch" >&2; exit 1; }^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.6705447Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.6705813Z env:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.6706121Z   EXPECTED_REVISION: a6fa8d4a5096e6df37250b59a8105abfebdb9013
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.6706464Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7028980Z ##[group]Run set -euo pipefail
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7029312Z ^[[36;1mset -euo pipefail^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7029646Z ^[[36;1mhome="$RUNNER_TEMP/velnor-workflow-runtime-artifact"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7030145Z ^[[36;1minstall -Dm0755 .velnor-workflow-runtime/velnor-workflow "$home/bin/velnor-workflow"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7030773Z ^[[36;1minstall -Dm0755 .velnor-workflow-runtime/velnor-workflow-policy "$home/bin/velnor-workflow-policy"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7031382Z ^[[36;1mexpected_closure="$(jq -er '.policy_closure' .velnor-workflow-runtime/manifest.json)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7031862Z ^[[36;1mreported="$("$home/bin/velnor-workflow-policy" --closure)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7032487Z ^[[36;1m[[ "$reported" == "$expected_closure" ]] || { echo "::error::policy runtime reports closure $reported, expected $expected_closure" >&2; exit 1; }^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7033194Z ^[[36;1mecho "$home/bin" >> "$GITHUB_PATH"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7033689Z ^[[36;1mecho "VELNOR_WORKFLOW_PINNED_BINARY=$home/bin/velnor-workflow-policy" >> "$GITHUB_ENV"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7053429Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7053771Z env:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7054056Z   EXPECTED_REVISION: a6fa8d4a5096e6df37250b59a8105abfebdb9013
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7054383Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7235351Z ##[group]Run timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7236149Z ^[[36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7236630Z ^[[36;1mumask 077^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7236877Z ^[[36;1mmkdir -p "$timing_dir"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7237163Z ^[[36;1mmarker="$timing_dir/RUNNER_SETUP_ENDED"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7237470Z ^[[36;1mif [[ ! -e "$marker" ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7237818Z ^[[36;1m  if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7238203Z ^[[36;1m    chmod 0444 "$marker" 2>/dev/null || true^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7238674Z ^[[36;1m  fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7238886Z ^[[36;1mfi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7260361Z shell: /usr/bin/bash -e {0}
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7260664Z env:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7261217Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7261751Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7359048Z ##[group]Run set -euo pipefail
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7359386Z ^[[36;1mset -euo pipefail^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7359665Z ^[[36;1mmkdir -p .velnor-ci-selection^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7359940Z ^[[36;1m{^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7360156Z ^[[36;1m  printf 'version=1\n'^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7360474Z ^[[36;1m  printf 'base_sha=%s\n' "$SELECTION_BASE_SHA"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7360837Z ^[[36;1m  printf 'head_sha=%s\n' "$SELECTION_HEAD_SHA"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7361169Z ^[[36;1m  printf 'scope=%s\n' "$SELECTION_SCOPE"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7361506Z ^[[36;1m  printf 'units=%s\n' "$SELECTION_UNITS"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7361848Z ^[[36;1m  printf 'full_units=%s\n' "$SELECTION_FULL_UNITS"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7362210Z ^[[36;1m} > .velnor-ci-selection/velnor-ci-selection^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7381070Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7381426Z env:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7381935Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7382526Z   SELECTION_BASE_SHA: 52c424b1d1ed2529275ae2d153f2eab8a8ded046
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7382932Z   SELECTION_HEAD_SHA: b6f5d865acdff9fa3e30481af3893e32dcdcffb5
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7383267Z   SELECTION_SCOPE: affected
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7384971Z   SELECTION_UNITS: bun-velnor,docker,docs,opentofu,rust-policy,rust-unit-collector,rust-velnor-model,rust-velnor-render,rust-velnor-workflow-contract,rust-production-topology,rust-velnor-client,rust-velnor-control,rust-velnor-runner,rust-velnor-tools,rust-velnor-workflow,rust-velnorctl,rust-velnor-bench
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7388104Z   SELECTION_FULL_UNITS: bun-velnor,docker,docs,opentofu,rust-policy,rust-production-topology,rust-unit-collector,rust-velnor-bench,rust-velnor-client,rust-velnor-control,rust-velnor-model,rust-velnor-render,rust-velnor-runner,rust-velnor-tools,rust-velnor-workflow,rust-velnor-workflow-contract,rust-velnorctl
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7389967Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7462820Z ##[group]Run timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7463628Z ^[[36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7464141Z ^[[36;1mumask 077^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7464492Z ^[[36;1mmkdir -p "$timing_dir"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7464784Z ^[[36;1mmarker="$timing_dir/SELECTION_ENDED"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7465088Z ^[[36;1mif [[ ! -e "$marker" ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7465454Z ^[[36;1m  if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7465853Z ^[[36;1m    chmod 0444 "$marker" 2>/dev/null || true^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7466140Z ^[[36;1m  fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7466357Z ^[[36;1mfi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7484659Z shell: /usr/bin/bash -e {0}
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7484951Z env:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7485474Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.7485992Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.8140286Z ##[group]Run actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.8140686Z with:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.8140907Z   path: ~/.rustup
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.8141353Z   key: velnor-rustup-Linux-X64-01ca15e1b24a13a2533dc81d701f5db1ad9bd6bd978dbd566dac8f8bf1d492dd
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.8141873Z   enableCrossOsArchive: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.8142139Z   fail-on-cache-miss: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.8142404Z   lookup-only: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.8142630Z env:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.8143084Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:14.8143589Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:15.1373130Z Cache hit for: velnor-rustup-Linux-X64-01ca15e1b24a13a2533dc81d701f5db1ad9bd6bd978dbd566dac8f8bf1d492dd
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:16.3724359Z Received 50331648 of 595466735 (8.5%), 48.0 MBs/sec
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:17.3731375Z Received 230686720 of 595466735 (38.7%), 110.0 MBs/sec
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:18.3810119Z Received 457179136 of 595466735 (76.8%), 145.0 MBs/sec
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:18.8741120Z Received 595466735 of 595466735 (100.0%), 162.2 MBs/sec
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:18.8743295Z Cache Size: ~568 MB (595466735 B)
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:18.8808012Z [command]/usr/bin/tar -xf /home/runner/work/_temp/4ca453b7-1ac3-4175-a2c3-0c055dbd29b2/cache.tzst -P -C /home/runner/work/velnor/velnor --use-compress-program unzstd
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:21.6649889Z Cache restored successfully
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:21.6932579Z Cache restored from key: velnor-rustup-Linux-X64-01ca15e1b24a13a2533dc81d701f5db1ad9bd6bd978dbd566dac8f8bf1d492dd
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:21.7056477Z ##[group]Run set -euo pipefail
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:21.7056808Z ^[[36;1mset -euo pipefail^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:21.7057105Z ^[[36;1mrustup toolchain install^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:21.7057753Z ^[[36;1mrustup target add 'aarch64-apple-darwin' 'aarch64-unknown-linux-gnu' 'x86_64-apple-darwin' 'x86_64-unknown-linux-gnu' 'x86_64-unknown-linux-musl'^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:21.7082171Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:21.7082560Z env:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:21.7083030Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:21.7083549Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:21.8339517Z info: using existing install for 1.98.1-x86_64-unknown-linux-gnu
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:21.8512923Z info: the active toolchain `1.98.1-x86_64-unknown-linux-gnu` has been installed
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:21.8513613Z info: it's active because: overridden by '/home/runner/work/velnor/velnor/rust-toolchain.toml'
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:21.9046865Z info: component rust-std for target aarch64-apple-darwin is up to date
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:21.9047604Z info: component rust-std for target aarch64-unknown-linux-gnu is up to date
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:21.9048107Z info: component rust-std for target x86_64-apple-darwin is up to date
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:21.9048640Z info: component rust-std is up to date
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:21.9049031Z info: component rust-std for target x86_64-unknown-linux-musl is up to date
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.0493435Z ##[group]Run jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.0493951Z with:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.0494297Z   install_args: aqua:nextest-rs/nextest/cargo-nextest
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.0494833Z   cache: true
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.0495147Z   cache_save: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.0495514Z   install: true
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.0495823Z   bootstrap: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.0496187Z   cache_key_prefix: mise-v1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.0496522Z   experimental: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.0496865Z   log_level: info
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.0497196Z   reshim: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.0497495Z   add_shims_to_path: true
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.0500271Z   github_token: ***
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.0500622Z   fetch_from_github: true
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.0500982Z   env: true
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.0501267Z   export_path: true
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.0501622Z   wings_enabled: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.0501937Z env:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.0502614Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.0503213Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.1682765Z ##[group]Restoring mise cache
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.1718609Z [command]/usr/bin/ldd --version
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.1770931Z ldd (Ubuntu GLIBC 2.39-0ubuntu8.8) 2.39
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.1772403Z Copyright (C) 2024 Free Software Foundation, Inc.
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.1773327Z This is free software; see the source for copying conditions.  There is NO
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.1774484Z warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.1775443Z Written by Roland McGrath and Ulrich Drepper.
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:22.5647718Z Cache hit for: mise-v1-linux-x64-ubuntu24-a5063e727332d1c9af8b487f9cdc11a46fc36896710ec0340e7016cefd70dc92-7fe30dd76815c63a947a5b04a9e97984435f7e4d72d81e30db0f42a038cbb013
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:23.7804223Z Received 33554432 of 51565988 (65.1%), 31.9 MBs/sec
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:23.9026031Z Received 51565988 of 51565988 (100.0%), 43.8 MBs/sec
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:23.9026979Z Cache Size: ~49 MB (51565988 B)
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:23.9062251Z [command]/usr/bin/tar -xf /home/runner/work/_temp/1c71a1fd-4cbd-4c65-a60d-4582ad89d04a/cache.tzst -P -C /home/runner/work/velnor/velnor --use-compress-program unzstd
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:24.1491404Z Cache restored successfully
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:24.1518032Z mise cache restored from key: mise-v1-linux-x64-ubuntu24-a5063e727332d1c9af8b487f9cdc11a46fc36896710ec0340e7016cefd70dc92-7fe30dd76815c63a947a5b04a9e97984435f7e4d72d81e30db0f42a038cbb013
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:24.1525019Z ##[group]Setting env vars
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:24.1525576Z Setting MISE_LOG_LEVEL=info
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:24.1530026Z Setting MISE_GITHUB_TOKEN=***
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:24.1530613Z Setting MISE_TRUSTED_CONFIG_PATHS=/home/runner/work/velnor/velnor
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:24.1531237Z Setting MISE_YES=1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:24.1531781Z Adding /home/runner/.local/share/mise/shims to PATH
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:24.1532831Z ##[group]Running mise --version
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:24.1547032Z [command]/home/runner/.local/share/mise/bin/mise --version
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:24.1628082Z 2026.9.10 linux-x64 (2026-09-16)
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:24.1644454Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:24.1757535Z Detected a mise lock file, running `mise install --locked`
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:24.1758798Z ##[group]Running mise install --locked aqua:nextest-rs/nextest/cargo-nextest
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:24.1772863Z [command]/home/runner/.local/share/mise/bin/mise install --locked aqua:nextest-rs/nextest/cargo-nextest
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:24.1889246Z ^[[2mmise^[[0m ^[[2mby @jdx^[[0m – installing 1 tool
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.6552194Z ^[[2mmise^[[0m ^[[38;5;11m⇢^[[0m ^[[34maqua:nextest-rs/nextest/cargo-nextest^[[0m@0.9.143  1.5s · already installed
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.6553170Z ^[[2mmise^[[0m ^[[36m████████████████^[[0m^[[31m^[[0m^[[2m^[[0m 1/1 · installed 0 tools · 1 already installed in 1.5s
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.6683817Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.6684675Z ##[group]Running mise ls
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.6698386Z [command]/home/runner/.local/share/mise/bin/mise ls
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.6837316Z actionlint                             1.7.12 (missing)  ~/work/velnor/velnor/mise.toml  1.7.12
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.6838380Z aqua:EmbarkStudios/cargo-deny          0.20.2 (missing)  ~/work/velnor/velnor/mise.toml  0.20.2
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.6839694Z aqua:nextest-rs/nextest/cargo-nextest  0.9.143           ~/work/velnor/velnor/mise.toml  0.9.143
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.6840587Z aqua:oven-sh/bun                       1.4.0 (missing)   ~/work/velnor/velnor/mise.toml  1.4.0
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.6841235Z aqua:rust-cross/cargo-zigbuild         0.23.3 (missing)  ~/work/velnor/velnor/mise.toml  0.23.3
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.6841859Z cargo-binstall                         1.22.0 (missing)  ~/work/velnor/velnor/mise.toml  1.22.0
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.6842445Z zig                                    0.16.0 (missing)  ~/work/velnor/velnor/mise.toml  0.16.0
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.6854732Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.6857078Z ##[group]Exporting mise environment variables
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.7036797Z [command]/home/runner/.local/share/mise/bin/mise env --json
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.7177318Z {
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.7180611Z   "PATH": "/home/runner/.local/share/mise/installs/aqua-nextest-rs-nextest-cargo-nextest/0.9.143/.mise-bins:/home/runner/.local/share/mise/shims:/home/runner/.local/share/mise/bin:/home/runner/work/_temp/velnor-workflow-runtime-artifact/bin:/snap/bin:/home/runner/.local/bin:/opt/pipx_bin:/home/runner/.cargo/bin:/home/runner/.config/composer/vendor/bin:/usr/local/.ghcup/bin:/home/runner/.dotnet/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games"
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.7183680Z }
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.7193011Z Adding /home/runner/.local/share/mise/installs/aqua-nextest-rs-nextest-cargo-nextest/0.9.143/.mise-bins to PATH
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.7194978Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.7318568Z ##[group]Run echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.7319117Z ^[[36;1mecho "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.7342882Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.7343310Z env:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.7344002Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.7344627Z   MISE_LOG_LEVEL: info
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.7347332Z   MISE_GITHUB_TOKEN: ***
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.7347774Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor/velnor
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.7348228Z   MISE_YES: 1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.7348873Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.9701330Z ##[group]Run jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.9701825Z with:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.9702157Z   backend: github
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.9702512Z   github-cache-mode: objects
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.9702860Z   version: 1.11.1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.9703875Z   cache-key: velnor-mbx-v3-2544c2ae90ab-Linux-X64-rust-velnor-workflow-contract-c28bd7098d2f3885f2e6aeeea8b58b17d6a51724e661580fc2d922476d09eb5c-5ec48d3f5f1501edb7ba8ace1c25078374088eef2fa20f303e61dafe642bd66c
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.9705553Z   restore-keys: velnor-mbx-v3-2544c2ae90ab-Linux-X64-rust-velnor-workflow-contract-c28bd7098d2f3885f2e6aeeea8b58b17d6a51724e661580fc2d922476d09eb5c-
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	velnor-mbx-v3-2544c2ae90ab-Linux-X64-rust-velnor-workflow-contract-
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.9706666Z   save-on-workflow-dispatch: true
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.9709531Z   github-token: ***
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.9709875Z   cache-generation: v1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.9710224Z   cache-links: auto
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.9710676Z   server-mode: read-write
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.9711000Z env:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.9711586Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.9712197Z   MISE_LOG_LEVEL: info
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.9714703Z   MISE_GITHUB_TOKEN: ***
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.9715084Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor/velnor
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.9715517Z   MISE_YES: 1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.9715829Z   MBX_GC_MAX_SIZE: 12GiB
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:25.9716183Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:26.9354199Z [command]/usr/bin/tar xz --warning=no-unknown-keyword --overwrite -C /home/runner/work/_temp/afce0ad1-35b4-49f1-9c73-58829a306192 -f /home/runner/work/_temp/118db3c2-2fe1-4d2b-97c5-c71198b717fb
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:27.3321128Z Cache hit for: velnor-mbx-v3-2544c2ae90ab-Linux-X64-rust-velnor-workflow-contract-c28bd7098d2f3885f2e6aeeea8b58b17d6a51724e661580fc2d922476d09eb5c-5ec48d3f5f1501edb7ba8ace1c25078374088eef2fa20f303e61dafe642bd66c
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:28.4933264Z Received 4010992 of 4010992 (100.0%), 4.1 MBs/sec
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:28.4933860Z Cache Size: ~4 MB (4010992 B)
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:28.4957828Z [command]/usr/bin/tar -xf /home/runner/work/_temp/8fd605c9-2fbd-441d-9d5c-604dfd3566bf/cache.tzst -P -C /home/runner/work/velnor/velnor --use-compress-program unzstd
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:28.5263834Z Cache restored successfully
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:28.5265779Z Set up mbx 1.11.1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:28.5299757Z [command]/opt/hostedtoolcache/mbx-3075b697c4475ee8ddc24c97a58342252f166f293d57c7546d274021b29af14f/1.11.1/x64/mbx cache import /home/runner/.cache/mbx/actions/github-actions-cache-v1.tar
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:28.6051279Z imported 4 actions and 25 objects from /home/runner/.cache/mbx/actions/github-actions-cache-v1.tar (15.5 MiB)
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:28.6057000Z Restored mbx cache from velnor-mbx-v3-2544c2ae90ab-Linux-X64-rust-velnor-workflow-contract-c28bd7098d2f3885f2e6aeeea8b58b17d6a51724e661580fc2d922476d09eb5c-5ec48d3f5f1501edb7ba8ace1c25078374088eef2fa20f303e61dafe642bd66c
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:28.6211891Z ##[group]Run actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:28.6212289Z with:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:28.6212545Z   path: ~/.cache/velnor/mold/2.42.0
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:28.6212861Z   key: velnor-mold-2.42.0-Linux-X64
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:28.6213157Z   enableCrossOsArchive: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:28.6213458Z   fail-on-cache-miss: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:28.6213733Z   lookup-only: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:28.6213968Z env:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:28.6214449Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:28.6215016Z   MISE_LOG_LEVEL: info
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:28.6217557Z   MISE_GITHUB_TOKEN: ***
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:28.6217891Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor/velnor
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:28.6218251Z   MISE_YES: 1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:28.6218713Z   MBX_GC_MAX_SIZE: 12GiB
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:28.6219062Z   MBX_CACHE_LINKS: 1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:28.6219530Z   MBX_CACHE_EXPORT_GROUP: github-actions-35207507480-1-75a69228-79ae-4fd9-b1a6-d3e1a96ed8eb
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:28.6219973Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:28.9446331Z Cache hit for: velnor-mold-2.42.0-Linux-X64
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1081264Z Received 6002288 of 6002288 (100.0%), 6.2 MBs/sec
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1081844Z Cache Size: ~6 MB (6002288 B)
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1109264Z [command]/usr/bin/tar -xf /home/runner/work/_temp/4f510104-ff21-4661-b5f8-c273ac5f01c1/cache.tzst -P -C /home/runner/work/velnor/velnor --use-compress-program unzstd
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1226330Z Cache restored successfully
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1301978Z Cache restored from key: velnor-mold-2.42.0-Linux-X64
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1375087Z ##[group]Run set -euo pipefail
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1375485Z ^[[36;1mset -euo pipefail^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1375789Z ^[[36;1mcase "$(uname -m)" in^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1376317Z ^[[36;1m  x86_64) mold_arch=x86_64; expected='f5ed2f6e31d1ada4f07fe766fe0de7a73104d1c5cdc59086fcecc16a43720b6d' ;;^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1377074Z ^[[36;1m  aarch64) mold_arch=aarch64; expected='3c9a0a3624aac8a2007569ae50c33b3129a0f0ae8bcc974aeee2f8939d295190' ;;^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1377703Z ^[[36;1m  *) echo "unsupported mold architecture: $(uname -m)" >&2; exit 1 ;;^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1378091Z ^[[36;1mesac^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1378395Z ^[[36;1mcache_dir="$HOME/.cache/velnor/mold/$MOLD_VERSION"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1379167Z ^[[36;1marchive="$cache_dir/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1379696Z ^[[36;1mmkdir -p "$cache_dir"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1379993Z ^[[36;1mif [[ ! -s "$archive" ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1380336Z ^[[36;1m  temporary="$archive.download"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1380647Z ^[[36;1m  trap 'rm -f "$temporary"' EXIT^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1381538Z ^[[36;1m  curl --fail --show-error --silent --location --http1.1 --continue-at - --retry 20 --retry-all-errors --retry-delay 5 --retry-max-time 1800 --connect-timeout 30 --max-time 900 \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1382266Z ^[[36;1m    --output "$temporary" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1382827Z ^[[36;1m    "https://github.com/rui314/mold/releases/download/v$MOLD_VERSION/mold-$MOLD_VERSION-$mold_arch-linux.tar.gz"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1383467Z ^[[36;1m  printf '%s  %s\n' "$expected" "$temporary" | sha256sum --check --strict^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1383872Z ^[[36;1m  mv "$temporary" "$archive"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1384171Z ^[[36;1m  trap - EXIT^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1384419Z ^[[36;1mfi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1384752Z ^[[36;1mprintf '%s  %s\n' "$expected" "$archive" | sha256sum --check --strict^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1385146Z ^[[36;1mif [[ "$(id -u)" -eq 0 ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1385602Z ^[[36;1m  tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1386041Z ^[[36;1melse^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1386428Z ^[[36;1m  sudo tar --directory /usr/local --strip-components=1 --no-overwrite-dir -xzf "$archive"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1386863Z ^[[36;1mfi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1387106Z ^[[36;1mcommand -v mold >/dev/null^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1387432Z ^[[36;1mmold --version | grep -F "$MOLD_VERSION"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1411809Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1412178Z env:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1412674Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1413202Z   MISE_LOG_LEVEL: info
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1415721Z   MISE_GITHUB_TOKEN: ***
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1416063Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor/velnor
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1416416Z   MISE_YES: 1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1416657Z   MBX_GC_MAX_SIZE: 12GiB
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1416933Z   MBX_CACHE_LINKS: 1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1417361Z   MBX_CACHE_EXPORT_GROUP: github-actions-35207507480-1-75a69228-79ae-4fd9-b1a6-d3e1a96ed8eb
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1417817Z   MOLD_VERSION: 2.42.0
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1418077Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.1545475Z /home/runner/.cache/velnor/mold/2.42.0/mold-2.42.0-x86_64-linux.tar.gz: OK
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3150205Z mold 2.42.0 (441dc1d1fd3c72f41bc9d30f440431d34738def3; compatible with GNU ld)
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3206219Z ##[group]Run timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3207242Z ^[[36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3207958Z ^[[36;1mumask 077^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3208233Z ^[[36;1mmkdir -p "$timing_dir"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3208940Z ^[[36;1mmarker="$timing_dir/TOOL_BOOTSTRAP_ENDED"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3209282Z ^[[36;1mif [[ ! -e "$marker" ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3209841Z ^[[36;1m  if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3210277Z ^[[36;1m    chmod 0444 "$marker" 2>/dev/null || true^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3210582Z ^[[36;1m  fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3210803Z ^[[36;1mfi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3235071Z shell: /usr/bin/bash -e {0}
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3235390Z env:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3235912Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3236481Z   MISE_LOG_LEVEL: info
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3239477Z   MISE_GITHUB_TOKEN: ***
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3239818Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor/velnor
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3240154Z   MISE_YES: 1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3240388Z   MBX_GC_MAX_SIZE: 12GiB
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3240639Z   MBX_CACHE_LINKS: 1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3241056Z   MBX_CACHE_EXPORT_GROUP: github-actions-35207507480-1-75a69228-79ae-4fd9-b1a6-d3e1a96ed8eb
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3241509Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3887626Z ##[group]Run actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3888226Z with:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3888770Z   path: ~/.cargo/registry
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	~/.cargo/git
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3889273Z   key: ci-Linux-X64-rust-c28bd7098d2f3885f2e6aeeea8b58b17d6a51724e661580fc2d922476d09eb5c
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3889769Z   restore-keys: ci-Linux-X64-rust-
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3890094Z   enableCrossOsArchive: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3890381Z   fail-on-cache-miss: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3890657Z   lookup-only: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3890899Z env:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3891373Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3891898Z   MISE_LOG_LEVEL: info
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3894533Z   MISE_GITHUB_TOKEN: ***
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3894883Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor/velnor
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3895238Z   MISE_YES: 1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3895525Z   MBX_GC_MAX_SIZE: 12GiB
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3895796Z   MBX_CACHE_LINKS: 1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3896234Z   MBX_CACHE_EXPORT_GROUP: github-actions-35207507480-1-75a69228-79ae-4fd9-b1a6-d3e1a96ed8eb
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.3896769Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:30.7064249Z Cache hit for: ci-Linux-X64-rust-c28bd7098d2f3885f2e6aeeea8b58b17d6a51724e661580fc2d922476d09eb5c
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:31.9437483Z Received 41943040 of 174044073 (24.1%), 40.0 MBs/sec
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:32.7382021Z Received 174044073 of 174044073 (100.0%), 92.5 MBs/sec
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:32.7383859Z Cache Size: ~166 MB (174044073 B)
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:32.7448659Z [command]/usr/bin/tar -xf /home/runner/work/_temp/bba5303b-5ae1-4924-a267-b62274e3e08d/cache.tzst -P -C /home/runner/work/velnor/velnor --use-compress-program unzstd
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.0542540Z Cache restored successfully
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.1062280Z Cache restored from key: ci-Linux-X64-rust-c28bd7098d2f3885f2e6aeeea8b58b17d6a51724e661580fc2d922476d09eb5c
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.1152030Z ##[group]Run timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.1153273Z ^[[36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.1154065Z ^[[36;1mumask 077^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.1154435Z ^[[36;1mmkdir -p "$timing_dir"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.1154884Z ^[[36;1mmarker="$timing_dir/CACHE_PREP_ENDED"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.1155400Z ^[[36;1mif [[ ! -e "$marker" ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.1155971Z ^[[36;1m  if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.1156602Z ^[[36;1m    chmod 0444 "$marker" 2>/dev/null || true^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.1157057Z ^[[36;1m  fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.1157386Z ^[[36;1mfi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.1190828Z shell: /usr/bin/bash -e {0}
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.1191286Z env:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.1192108Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.1192965Z   MISE_LOG_LEVEL: info
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.1197323Z   MISE_GITHUB_TOKEN: ***
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.1197861Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor/velnor
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.1198613Z   MISE_YES: 1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.1198982Z   MBX_GC_MAX_SIZE: 12GiB
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.1199342Z   MBX_CACHE_LINKS: 1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.1199923Z   MBX_CACHE_EXPORT_GROUP: github-actions-35207507480-1-75a69228-79ae-4fd9-b1a6-d3e1a96ed8eb
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.1200577Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.2284276Z ##[group]Run timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.2285140Z ^[[36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.2285676Z ^[[36;1mumask 077^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.2285958Z ^[[36;1mmkdir -p "$timing_dir"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.2286283Z ^[[36;1mmarker="$timing_dir/CARGO_FETCH_ENDED"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.2286646Z ^[[36;1mif [[ ! -e "$marker" ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.2287174Z ^[[36;1m  if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.2287613Z ^[[36;1m    chmod 0444 "$marker" 2>/dev/null || true^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.2287932Z ^[[36;1m  fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.2288173Z ^[[36;1mfi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.2311848Z shell: /usr/bin/bash -e {0}
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.2312166Z env:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.2312704Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.2313245Z   MISE_LOG_LEVEL: info
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.2315739Z   MISE_GITHUB_TOKEN: ***
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.2316074Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor/velnor
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.2316423Z   MISE_YES: 1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.2316663Z   MBX_GC_MAX_SIZE: 12GiB
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.2316924Z   MBX_CACHE_LINKS: 1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.2317344Z   MBX_CACHE_EXPORT_GROUP: github-actions-35207507480-1-75a69228-79ae-4fd9-b1a6-d3e1a96ed8eb
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.2317796Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3035448Z ##[group]Run set -euo pipefail
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3035811Z ^[[36;1mset -euo pipefail^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3036094Z ^[[36;1mcase "$CI_UNIT_ID" in^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3036382Z ^[[36;1m  'rust-policy') exit 0 ;;^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3036709Z ^[[36;1m  'rust-unit-collector') exit 0 ;;^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3037040Z ^[[36;1m  'rust-velnor-bench') exit 0 ;;^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3037363Z ^[[36;1m  'rust-velnor-client') exit 0 ;;^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3037684Z ^[[36;1m  'rust-velnor-control') exit 0 ;;^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3038001Z ^[[36;1m  'rust-velnor-model') exit 0 ;;^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3038312Z ^[[36;1m  'rust-velnor-render') exit 0 ;;^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3038989Z ^[[36;1m  'rust-velnor-runner') exit 0 ;;^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3039310Z ^[[36;1m  'rust-velnor-tools') exit 0 ;;^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3039618Z ^[[36;1m  'rust-velnor-workflow') : ;;^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3039971Z ^[[36;1m  'rust-velnor-workflow-contract') exit 0 ;;^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3040373Z ^[[36;1m  'rust-velnorctl') exit 0 ;;^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3040699Z ^[[36;1m  'rust-production-topology') exit 0 ;;^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3041103Z ^[[36;1m  *) echo "unknown unit for pin fetch: $CI_UNIT_ID" >&2; exit 1 ;;^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3041470Z ^[[36;1mesac^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3041964Z ^[[36;1mpin="$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1/p' .github-gen/velnor-workflow.toml | head -n 1)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3042667Z ^[[36;1mtest "$pin" != '' || { echo "::error::D19 pin missing from .github-gen/velnor-workflow.toml" >&2; exit 1; }^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3043232Z ^[[36;1mif ! git cat-file -e "$pin^{commit}" 2>/dev/null; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3043714Z ^[[36;1m  git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$pin"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3044129Z ^[[36;1mfi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3066722Z shell: /usr/bin/bash -e {0}
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3067024Z env:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3067530Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3068069Z   MISE_LOG_LEVEL: info
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3070940Z   MISE_GITHUB_TOKEN: ***
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3071288Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor/velnor
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3071637Z   MISE_YES: 1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3071876Z   MBX_GC_MAX_SIZE: 12GiB
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3072140Z   MBX_CACHE_LINKS: 1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3072552Z   MBX_CACHE_EXPORT_GROUP: github-actions-35207507480-1-75a69228-79ae-4fd9-b1a6-d3e1a96ed8eb
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3073031Z   CI_UNIT_ID: rust-velnor-workflow-contract
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.3073341Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4112753Z ##[group]Run set -o pipefail
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4113107Z ^[[36;1mset -o pipefail^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4113637Z ^[[36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4114174Z ^[[36;1mumask 077^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4114440Z ^[[36;1mmkdir -p "$timing_dir"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4114888Z ^[[36;1mmarker="$timing_dir/CHECKS_STARTED"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4115204Z ^[[36;1mif [[ ! -e "$marker" ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4115593Z ^[[36;1m  if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4116016Z ^[[36;1m    chmod 0444 "$marker" 2>/dev/null || true^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4116335Z ^[[36;1m  fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4116569Z ^[[36;1mfi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4116793Z ^[[36;1mrc=0^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4117378Z ^[[36;1mvelnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4118205Z ^[[36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4118899Z ^[[36;1mumask 077^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4119171Z ^[[36;1mmkdir -p "$timing_dir"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4119480Z ^[[36;1mmarker="$timing_dir/CHECKS_ENDED"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4119805Z ^[[36;1mif [[ ! -e "$marker" ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4120184Z ^[[36;1m  if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4120593Z ^[[36;1m    chmod 0444 "$marker" 2>/dev/null || true^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4120897Z ^[[36;1m  fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4121112Z ^[[36;1mfi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4121336Z ^[[36;1mexit $rc^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4143914Z shell: /usr/bin/bash -e {0}
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4144206Z env:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4144693Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4145221Z   MISE_LOG_LEVEL: info
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4147691Z   MISE_GITHUB_TOKEN: ***
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4148026Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor/velnor
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4148375Z   MISE_YES: 1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4148765Z   MBX_GC_MAX_SIZE: 12GiB
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4149027Z   MBX_CACHE_LINKS: 1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4149443Z   MBX_CACHE_EXPORT_GROUP: github-actions-35207507480-1-75a69228-79ae-4fd9-b1a6-d3e1a96ed8eb
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4149908Z   CI_SCOPE: affected
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4150177Z   CI_UNIT_ID: rust-velnor-workflow-contract
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4150496Z   EVENT_NAME: pull_request
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4150800Z   BASE_SHA: 52c424b1d1ed2529275ae2d153f2eab8a8ded046
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4151157Z   HEAD_SHA: b6f5d865acdff9fa3e30481af3893e32dcdcffb5
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4151570Z   VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4151934Z   CARGO_NET_OFFLINE: true
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4152197Z   MISE_AUTO_INSTALL: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4152461Z   MISE_EXEC_AUTO_INSTALL: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4152746Z   MISE_NOT_FOUND_AUTO_INSTALL: false
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4153033Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.4639080Z ##[group]rust-velnor-workflow-contract: cd -- 'crates/velnor-workflow-contract' && mbx fmt --manifest-path 'Cargo.toml' -- --check
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.5312665Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:34.5314176Z ##[group]rust-velnor-workflow-contract: cd -- 'crates/velnor-workflow-contract' && mbx nextest run --locked --all-features --package 'velnor-workflow-contract' --no-tests pass
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:35.2160107Z    Compiling velnor-workflow-contract v0.1.0 (/home/runner/work/velnor/velnor/crates/velnor-workflow-contract)
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4578167Z     Finished `test` profile [unoptimized + debuginfo] target(s) in 1.25s
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4651842Z ────────────
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4652674Z  Nextest run ID 43e84b33-70a3-44ba-abc4-51c17db978eb with nextest profile: default
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4653119Z     Starting 6 tests across 2 binaries
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4726325Z         PASS [   0.005s] (1/6) velnor-workflow-contract::cache_keys kind_reusables_hold_no_per_unit_step_blocks
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4727443Z         PASS [   0.006s] (2/6) velnor-workflow-contract::contract the_generator_owns_every_current_workflow
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4728817Z         PASS [   0.006s] (3/6) velnor-workflow-contract::contract hosted_lane_uses_the_github_mb_boxington_backend
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4730139Z         FAIL [   0.006s] (4/6) velnor-workflow-contract::cache_keys parameterized_callees_resolve_to_the_pre_parameterization_cache_keys
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4731159Z   stdout ───
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4731360Z 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4731507Z     running 1 test
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4732096Z     test parameterized_callees_resolve_to_the_pre_parameterization_cache_keys ... FAILED
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4732609Z 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4732751Z     failures:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4732951Z 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4733095Z     failures:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4733628Z         parameterized_callees_resolve_to_the_pre_parameterization_cache_keys
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4734033Z 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4734413Z     test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4734905Z 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4735109Z   stderr ───
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4735300Z 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4735870Z     thread 'parameterized_callees_resolve_to_the_pre_parameterization_cache_keys' (2855) panicked at tests/cache_keys.rs:258:13:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4737236Z     assertion `left == right` failed: github-docker → ci-unit-docker.yml#verify-github [docker_seed]: primary key changed
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4739112Z       left: "velnor-docker-seed-v3-8a4ee3c72d39-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'deny.toml') }}"
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4741491Z      right: "velnor-docker-seed-v3-9c97194a807b-${{ runner.os }}-${{ runner.arch }}-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'deny.toml') }}"
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4742993Z     note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4743450Z 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4743677Z   Cancelling due to test failure: 2 tests still running
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4749333Z         PASS [   0.004s] (5/6) velnor-workflow-contract::contract the_setup_action_is_owned_verbatim
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4757072Z         PASS [   0.005s] (6/6) velnor-workflow-contract::contract the_regeneration_gate_is_declared
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4757795Z ────────────
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4758122Z      Summary [   0.010s] 6 tests run: 5 passed, 1 failed, 0 skipped
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4759413Z         FAIL [   0.006s] (4/6) velnor-workflow-contract::cache_keys parameterized_callees_resolve_to_the_pre_parameterization_cache_keys
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4760115Z error: test run failed
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4785395Z mbx[cache]: object cache: 2 hits, 0 misses; 0 B downloaded, 0 B uploaded, 0 B stored locally
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4786272Z mbx[cache]: 1.91s session; 597.9ms estimated compiler time avoided (summed across compilations)
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4786883Z mbx[cache]: Cargo artifact reuse and CI cache archive transfers are not included above
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4803398Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4804064Z error: CI command failed for unit rust-velnor-workflow-contract with exit status: 100
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4853027Z ##[error]Process completed with exit code 1.
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4913684Z ##[group]Run timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4914507Z ^[[36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4915026Z ^[[36;1mumask 077^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4915296Z ^[[36;1mmkdir -p "$timing_dir"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4915613Z ^[[36;1mmarker="$timing_dir/CLEANUP_ENDED"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4915939Z ^[[36;1mif [[ ! -e "$marker" ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4916329Z ^[[36;1m  if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4916747Z ^[[36;1m    chmod 0444 "$marker" 2>/dev/null || true^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4917058Z ^[[36;1m  fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4917399Z ^[[36;1mfi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4941789Z shell: /usr/bin/bash -e {0}
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4942123Z env:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4942766Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4943378Z   MISE_LOG_LEVEL: info
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4945914Z   MISE_GITHUB_TOKEN: ***
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4946257Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor/velnor
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4946628Z   MISE_YES: 1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4946871Z   MBX_GC_MAX_SIZE: 12GiB
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4947146Z   MBX_CACHE_LINKS: 1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4947592Z   MBX_CACHE_EXPORT_GROUP: github-actions-35207507480-1-75a69228-79ae-4fd9-b1a6-d3e1a96ed8eb
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.4948097Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5203782Z Prepare all required actions
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5335434Z ##[group]Run ./.github/actions/report-velnor-ci-outcomes
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5335814Z with:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5336093Z   job_label: rust-velnor-workflow-contract
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5336435Z   ci_lane: github
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5336971Z   cache_rustup_primary: velnor-rustup-Linux-X64-01ca15e1b24a13a2533dc81d701f5db1ad9bd6bd978dbd566dac8f8bf1d492dd
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5337809Z   cache_rustup_matched: velnor-rustup-Linux-X64-01ca15e1b24a13a2533dc81d701f5db1ad9bd6bd978dbd566dac8f8bf1d492dd
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5338646Z   cache_mold_primary: velnor-mold-2.42.0-Linux-X64
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5339056Z   cache_mold_matched: velnor-mold-2.42.0-Linux-X64
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5339411Z   cache_mbx_hit: true
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5340525Z   cache_mbx_primary: velnor-mbx-v3-2544c2ae90ab-Linux-X64-rust-velnor-workflow-contract-c28bd7098d2f3885f2e6aeeea8b58b17d6a51724e661580fc2d922476d09eb5c-5ec48d3f5f1501edb7ba8ace1c25078374088eef2fa20f303e61dafe642bd66c
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5341865Z   cache_cargo_primary: ci-Linux-X64-rust-c28bd7098d2f3885f2e6aeeea8b58b17d6a51724e661580fc2d922476d09eb5c
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5342645Z   cache_cargo_matched: ci-Linux-X64-rust-c28bd7098d2f3885f2e6aeeea8b58b17d6a51724e661580fc2d922476d09eb5c
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5343192Z env:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5343702Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5344282Z   MISE_LOG_LEVEL: info
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5346849Z   MISE_GITHUB_TOKEN: ***
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5347216Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor/velnor
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5347588Z   MISE_YES: 1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5347847Z   MBX_GC_MAX_SIZE: 12GiB
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5348133Z   MBX_CACHE_LINKS: 1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5348776Z   MBX_CACHE_EXPORT_GROUP: github-actions-35207507480-1-75a69228-79ae-4fd9-b1a6-d3e1a96ed8eb
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5349260Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5407547Z ##[start-action display=Report phase timings and cache outcomes;id=__self.__run]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5430558Z ##[group]Run set -uo pipefail
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5431533Z ^[[36;1mset -uo pipefail^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5431875Z ^[[36;1mmax_telemetry_seconds=$((7 * 24 * 60 * 60))^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5432519Z ^[[36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5433079Z ^[[36;1mjob_ended="$(date +%s)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5433413Z ^[[36;1mlog="$RUNNER_TEMP/velnor-unit-log.txt"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5433749Z ^[[36;1mlog_present=false^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5434067Z ^[[36;1mif [[ -s "$log" ]]; then log_present=true; fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5434404Z ^[[36;1mread_marker() {^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5434672Z ^[[36;1m  local marker="$1"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5434946Z ^[[36;1m  local value=""^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5435245Z ^[[36;1m  if [[ -r "$timing_dir/$marker" ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5435641Z ^[[36;1m    IFS= read -r value < "$timing_dir/$marker" || true^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5435980Z ^[[36;1m  fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5436222Z ^[[36;1m  printf '%s' "$value"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5436496Z ^[[36;1m}^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5436734Z ^[[36;1mvalid_epoch() {^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5437131Z ^[[36;1m  [[ "${1:-}" =~ ^[1-9][0-9]{9}$ ]]^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5437432Z ^[[36;1m}^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5437675Z ^[[36;1mbounded_duration() {^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5437970Z ^[[36;1m  local duration="${1:-}"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5438298Z ^[[36;1m  [[ "$duration" =~ ^[0-9]+$ ]] || return 1^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5438847Z ^[[36;1m  [[ "${#duration}" -le 6 ]] || return 1^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5439213Z ^[[36;1m  (( 10#$duration <= max_telemetry_seconds ))^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5439534Z ^[[36;1m}^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5439775Z ^[[36;1mphase_seconds() {^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5440071Z ^[[36;1m  local start="${1:-}" end="${2:-}"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5440504Z ^[[36;1m  if valid_epoch "$start" && valid_epoch "$end" && valid_epoch "$job_ended" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5441088Z ^[[36;1m    && (( 10#$end >= 10#$start && 10#$end <= 10#$job_ended \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5441522Z ^[[36;1m      && 10#$job_ended - 10#$start <= max_telemetry_seconds )); then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5441938Z ^[[36;1m    local duration=$((10#$end - 10#$start))^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5442302Z ^[[36;1m    if bounded_duration "$duration"; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5442639Z ^[[36;1m      echo "$duration"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5442930Z ^[[36;1m      return 0^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5443192Z ^[[36;1m    fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5443422Z ^[[36;1m  fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5443658Z ^[[36;1m  return 1^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5443901Z ^[[36;1m}^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5444167Z ^[[36;1mjob_started="$(read_marker JOB_STARTED)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5444494Z ^[[36;1mjob_started_usable=false^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5444799Z ^[[36;1mtotal_source="unusable_job_start"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5445099Z ^[[36;1mtotal=""^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5445411Z ^[[36;1mif valid_epoch "$job_started"; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5445833Z ^[[36;1m  total_candidate="$(phase_seconds "$job_started" "$job_ended" || true)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5446259Z ^[[36;1m  if [[ -n "$total_candidate" ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5446583Z ^[[36;1m    total="$total_candidate"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5446892Z ^[[36;1m    job_started_usable=true^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5447201Z ^[[36;1m    total_source="job_markers"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5447490Z ^[[36;1m  fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5447719Z ^[[36;1mfi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5448053Z ^[[36;1mrunner_setup_end="$(read_marker RUNNER_SETUP_ENDED)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5448593Z ^[[36;1mselection_end="$(read_marker SELECTION_ENDED)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5449024Z ^[[36;1mtool_bootstrap_end="$(read_marker TOOL_BOOTSTRAP_ENDED)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5449449Z ^[[36;1mcache_prep_end="$(read_marker CACHE_PREP_ENDED)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5449855Z ^[[36;1mcargo_fetch_end="$(read_marker CARGO_FETCH_ENDED)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5450260Z ^[[36;1mchecks_started="$(read_marker CHECKS_STARTED)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5450634Z ^[[36;1mchecks_ended="$(read_marker CHECKS_ENDED)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5450994Z ^[[36;1mcleanup_end="$(read_marker CLEANUP_ENDED)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5451444Z ^[[36;1mrunner_setup="$(phase_seconds "$job_started" "$runner_setup_end" || true)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5452010Z ^[[36;1mselection_transport="$(phase_seconds "$runner_setup_end" "$selection_end" || true)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5452583Z ^[[36;1mtool_bootstrap="$(phase_seconds "$selection_end" "$tool_bootstrap_end" || true)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5453131Z ^[[36;1mcache_prep="$(phase_seconds "$tool_bootstrap_end" "$cache_prep_end" || true)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5453657Z ^[[36;1mcargo_fetch="$(phase_seconds "$cache_prep_end" "$cargo_fetch_end" || true)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5454167Z ^[[36;1mchecks_wall="$(phase_seconds "$checks_started" "$checks_ended" || true)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5454659Z ^[[36;1mcleanup="$(phase_seconds "$checks_ended" "$cleanup_end" || true)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5455043Z ^[[36;1mqueue=""^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5455297Z ^[[36;1mqueue_source=""^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5455579Z ^[[36;1mjob_name="${VELNOR_JOB_NAME:-}"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5455994Z ^[[36;1mrun_started="${VELNOR_CONTEXT_RUN_STARTED_AT:-${VELNOR_RUN_STARTED_AT:-}}"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5456513Z ^[[36;1mqueue_at="${VELNOR_JOB_QUEUED_AT:-}"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5456836Z ^[[36;1mrfc3339_epoch() {^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5457119Z ^[[36;1m  local value="${1:-}"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5457415Z ^[[36;1m  [[ -n "$value" ]] || return 1^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5457724Z ^[[36;1m  jq -nr --arg value "$value" '^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5458086Z ^[[36;1m    try ($value | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5458523Z ^[[36;1m    catch empty^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5458799Z ^[[36;1m  ' 2>/dev/null^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5459051Z ^[[36;1m}^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5459300Z ^[[36;1mqueue_seconds_from_timestamp() {^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5459626Z ^[[36;1m  local timestamp="${1:-}"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5460016Z ^[[36;1m  local queued_epoch=""^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5460320Z ^[[36;1m  local queue_candidate=""^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5460679Z ^[[36;1m  queued_epoch="$(rfc3339_epoch "$timestamp" || true)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5461133Z ^[[36;1m  if valid_epoch "$queued_epoch" && [[ "$job_started_usable" == true ]] \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5461575Z ^[[36;1m    && (( 10#$job_started >= 10#$queued_epoch )); then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5461986Z ^[[36;1m    queue_candidate=$((10#$job_started - 10#$queued_epoch))^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5462397Z ^[[36;1m    if bounded_duration "$queue_candidate"; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5462750Z ^[[36;1m      echo "$queue_candidate"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5463047Z ^[[36;1m      return 0^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5463302Z ^[[36;1m    fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5463535Z ^[[36;1m  fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5463765Z ^[[36;1m  return 1^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5464006Z ^[[36;1m}^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5464349Z ^[[36;1mif command -v jq >/dev/null 2>&1 && [[ "$job_started_usable" == true ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5464774Z ^[[36;1m  if [[ -n "$queue_at" ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5465172Z ^[[36;1m    queue_candidate="$(queue_seconds_from_timestamp "$queue_at" || true)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5465609Z ^[[36;1m    if bounded_duration "$queue_candidate"; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5465956Z ^[[36;1m      queue="$queue_candidate"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5466279Z ^[[36;1m      queue_source="job_queue_time"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5466584Z ^[[36;1m    fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5466818Z ^[[36;1m  fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5467100Z ^[[36;1m  if [[ -z "$queue" && -n "$run_started" ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5467539Z ^[[36;1m    queue_candidate="$(queue_seconds_from_timestamp "$run_started" || true)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5467989Z ^[[36;1m    if bounded_duration "$queue_candidate"; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5468328Z ^[[36;1m      queue="$queue_candidate"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5468760Z ^[[36;1m      queue_source="workflow_run_started_at"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5469077Z ^[[36;1m    fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5469314Z ^[[36;1m  fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5469539Z ^[[36;1mfi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5469780Z ^[[36;1mif [[ -z "$job_name" ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5470077Z ^[[36;1m  job_name="unknown"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5470348Z ^[[36;1mfi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5470591Z ^[[36;1mclassify_gha_cache() {^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5470916Z ^[[36;1m  local primary="${1:-}" matched="${2:-}"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5471281Z ^[[36;1m  if [[ -z "$primary" && -z "$matched" ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5471608Z ^[[36;1m    return 0^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5471856Z ^[[36;1m  fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5472102Z ^[[36;1m  if [[ -z "$matched" ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5472391Z ^[[36;1m    echo cold^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5472686Z ^[[36;1m  elif [[ "$primary" == "$matched" ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5473008Z ^[[36;1m    echo exact^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5473259Z ^[[36;1m  else^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5473499Z ^[[36;1m    echo prefix^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5473751Z ^[[36;1m  fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5473982Z ^[[36;1m}^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5474215Z ^[[36;1mhost_warm_layer() {^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5474491Z ^[[36;1m  local layer="$1"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5474805Z ^[[36;1m  local layers="${VELNOR_HOST_WARM_LAYERS:-}"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5475140Z ^[[36;1m  [[ -n "$layers" ]] || return 1^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5475554Z ^[[36;1m  [[ ",$layers," == *",$layer,"* ]]^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5475856Z ^[[36;1m}^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5476079Z ^[[36;1mclassify_mbx() {^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5476359Z ^[[36;1m  if host_warm_layer mbx; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5476656Z ^[[36;1m    echo host_warm^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5476923Z ^[[36;1m    return^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5477165Z ^[[36;1m  fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5477430Z ^[[36;1m  local hit="${VELNOR_CACHE_MBX_HIT:-}"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5477762Z ^[[36;1m  if [[ "$hit" == "true" ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5478065Z ^[[36;1m    echo exact^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5478320Z ^[[36;1m    return^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5478711Z ^[[36;1m  fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5479031Z ^[[36;1m  if [[ -s "$log" ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5479361Z ^[[36;1m    if grep -qiE 'exact hit' "$log"; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5479681Z ^[[36;1m      echo exact^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5479944Z ^[[36;1m      return^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5480195Z ^[[36;1m    fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5480465Z ^[[36;1m    if grep -qiE 'warm start' "$log"; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5480787Z ^[[36;1m      echo prefix^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5481045Z ^[[36;1m      return^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5481293Z ^[[36;1m    fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5481598Z ^[[36;1m    if grep -qiE '(^|[^a-z])miss([^a-z]|$)' "$log"; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5481949Z ^[[36;1m      echo cold^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5482209Z ^[[36;1m      return^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5482449Z ^[[36;1m    fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5482675Z ^[[36;1m  fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5482926Z ^[[36;1m  if [[ "$hit" == "false" ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5483230Z ^[[36;1m    echo prefix^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5483483Z ^[[36;1m    return^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5483721Z ^[[36;1m  fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5483953Z ^[[36;1m  echo cold^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5484195Z ^[[36;1m}^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5484429Z ^[[36;1mcache_outcome_for() {^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5484709Z ^[[36;1m  local layer="$1"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5485018Z ^[[36;1m  local primary="${2:-}" matched="${3:-}"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5485358Z ^[[36;1m  if host_warm_layer "$layer"; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5485662Z ^[[36;1m    echo host_warm^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5485929Z ^[[36;1m    return^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5486167Z ^[[36;1m  fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5486412Z ^[[36;1m  if [[ "$layer" == mbx ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5486709Z ^[[36;1m    classify_mbx^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5486970Z ^[[36;1m    return^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5487208Z ^[[36;1m  fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5487486Z ^[[36;1m  classify_gha_cache "$primary" "$matched"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5487806Z ^[[36;1m}^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5488277Z ^[[36;1mrustup_outcome="$(cache_outcome_for rustup "${VELNOR_CACHE_RUSTUP_PRIMARY:-}" "${VELNOR_CACHE_RUSTUP_MATCHED:-}")"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5489077Z ^[[36;1mmold_outcome="$(cache_outcome_for mold "${VELNOR_CACHE_MOLD_PRIMARY:-}" "${VELNOR_CACHE_MOLD_MATCHED:-}")"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5489770Z ^[[36;1mcargo_outcome="$(cache_outcome_for cargo "${VELNOR_CACHE_CARGO_PRIMARY:-}" "${VELNOR_CACHE_CARGO_MATCHED:-}")"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5490311Z ^[[36;1mmbx_outcome="$(cache_outcome_for mbx "" "")"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5490905Z ^[[36;1mdocker_seed_outcome="$(cache_outcome_for docker_seed "${VELNOR_CACHE_DOCKER_SEED_PRIMARY:-}" "${VELNOR_CACHE_DOCKER_SEED_MATCHED:-}")"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5491469Z ^[[36;1mupdating_index=0^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5491738Z ^[[36;1mupdating_git=0^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5492014Z ^[[36;1mdownloading_crates=0^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5492299Z ^[[36;1mcompiling_count=0^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5492579Z ^[[36;1mdownloaded_lines=""^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5492852Z ^[[36;1mmbx_lines=""^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5493105Z ^[[36;1mfinished_lines=""^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5493384Z ^[[36;1mif [[ -s "$log" ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5493786Z ^[[36;1m  updating_index="$(grep -c 'Updating crates.io index' "$log" || true)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5494315Z ^[[36;1m  updating_git="$(grep -cE 'Updating git (repository|submodule)' "$log" || true)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5494915Z ^[[36;1m  downloading_crates="$(grep -c 'Downloading crates' "$log" || true)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5495380Z ^[[36;1m  compiling_count="$(grep -c 'Compiling ' "$log" || true)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5495846Z ^[[36;1m  downloaded_lines="$(grep -E 'Downloaded [0-9]+ crate' "$log" || true)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5496361Z ^[[36;1m  mbx_lines="$(grep -E 'mbx(\[cache\])?:' "$log" | grep -E 'hits|misses' || true)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5496844Z ^[[36;1m  finished_lines="$(grep -E 'Finished .* in ' "$log" || true)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5497199Z ^[[36;1mfi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5497433Z ^[[36;1mpositive_int() {^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5497705Z ^[[36;1m  local value="$1"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5498072Z ^[[36;1m  [[ "$value" =~ ^[0-9]+$ ]] || value=0^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5498393Z ^[[36;1m  printf '%s' "$value"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5498753Z ^[[36;1m}^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5498990Z ^[[36;1mcache_outcomes_json='{}'^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5499312Z ^[[36;1mif command -v jq >/dev/null 2>&1; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5499655Z ^[[36;1m  cache_outcomes_json="$(jq -nc \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5499992Z ^[[36;1m    --arg lane "${VELNOR_CI_LANE:-}" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5500334Z ^[[36;1m    --arg rustup "$rustup_outcome" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5500668Z ^[[36;1m    --arg mold "$mold_outcome" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5500993Z ^[[36;1m    --arg cargo "$cargo_outcome" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5501315Z ^[[36;1m    --arg mbx "$mbx_outcome" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5501657Z ^[[36;1m    --arg docker_seed "$docker_seed_outcome" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5501979Z ^[[36;1m    '{^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5502285Z ^[[36;1m      lane: ($lane | if length > 0 then . else null end),^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5502700Z ^[[36;1m      rustup: ($rustup | if length > 0 then . else null end),^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5503108Z ^[[36;1m      mold: ($mold | if length > 0 then . else null end),^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5503505Z ^[[36;1m      cargo: ($cargo | if length > 0 then . else null end),^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5503914Z ^[[36;1m      mbx: ($mbx | if length > 0 then . else null end),^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5504343Z ^[[36;1m      docker_seed: ($docker_seed | if length > 0 then . else null end)^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5504737Z ^[[36;1m    }' 2>/dev/null || echo '{}')"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5505023Z ^[[36;1mfi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5505263Z ^[[36;1mcold_layers=()^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5505591Z ^[[36;1mfor layer in rustup mold cargo mbx docker_seed; do^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5505936Z ^[[36;1m  outcome=""^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5506193Z ^[[36;1m  case "$layer" in^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5506493Z ^[[36;1m    rustup) outcome="$rustup_outcome" ;;^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5506835Z ^[[36;1m    mold) outcome="$mold_outcome" ;;^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5507176Z ^[[36;1m    cargo) outcome="$cargo_outcome" ;;^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5507502Z ^[[36;1m    mbx) outcome="$mbx_outcome" ;;^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5507853Z ^[[36;1m    docker_seed) outcome="$docker_seed_outcome" ;;^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5508176Z ^[[36;1m  esac^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5508511Z ^[[36;1m  if [[ "$outcome" == cold ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5508843Z ^[[36;1m    cold_layers+=("$layer")^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5509130Z ^[[36;1m  fi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5509361Z ^[[36;1mdone^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5509613Z ^[[36;1mreport_json="$(jq -nc \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5509920Z ^[[36;1m  --arg job "$job_name" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5510218Z ^[[36;1m  --arg queue "$queue" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5510540Z ^[[36;1m  --arg queue_source "$queue_source" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5510877Z ^[[36;1m  --arg total_source "$total_source" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5511223Z ^[[36;1m  --arg runner_setup "$runner_setup" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5511606Z ^[[36;1m  --arg selection_transport "$selection_transport" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5512015Z ^[[36;1m  --arg tool_bootstrap "$tool_bootstrap" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5512370Z ^[[36;1m  --arg cache_prep "$cache_prep" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5512700Z ^[[36;1m  --arg cargo_fetch "$cargo_fetch" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5513031Z ^[[36;1m  --arg checks_wall "$checks_wall" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5513431Z ^[[36;1m  --arg cleanup "$cleanup" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5513734Z ^[[36;1m  --arg total "$total" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5514249Z ^[[36;1m  --argjson log_present "$log_present" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5514836Z ^[[36;1m  --argjson updating_index "$(positive_int "$updating_index")" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5515427Z ^[[36;1m  --argjson updating_git "$(positive_int "$updating_git")" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5516042Z ^[[36;1m  --argjson downloading_crates "$(positive_int "$downloading_crates")" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5516673Z ^[[36;1m  --argjson compiling_count "$(positive_int "$compiling_count")" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5517525Z ^[[36;1m  --argjson downloaded_lines "$(printf '%s' "$downloaded_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5518341Z ^[[36;1m  --argjson mbx "$(printf '%s' "$mbx_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5519246Z ^[[36;1m  --argjson finished "$(printf '%s' "$finished_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5519946Z ^[[36;1m  --argjson cache_outcomes "$cache_outcomes_json" \^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5520413Z ^[[36;1m  '{^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5520771Z ^[[36;1m    schema_version: 1,^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5521185Z ^[[36;1m    job: $job,^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5521591Z ^[[36;1m    log_present: $log_present,^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5522134Z ^[[36;1m    queue_seconds: ($queue | if test("^[0-9]+$") then tonumber else null end),^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5522803Z ^[[36;1m    queue_source: ($queue_source | if length > 0 then . else null end),^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5523337Z ^[[36;1m    total_source: $total_source,^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5523944Z ^[[36;1m    runner_setup_seconds: ($runner_setup | if test("^[0-9]+$") then tonumber else null end),^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5524709Z ^[[36;1m    selection_transport_seconds: ($selection_transport | if test("^[0-9]+$") then tonumber else null end),^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5525468Z ^[[36;1m    tool_bootstrap_seconds: ($tool_bootstrap | if test("^[0-9]+$") then tonumber else null end),^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5526182Z ^[[36;1m    cache_prep_seconds: ($cache_prep | if test("^[0-9]+$") then tonumber else null end),^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5526883Z ^[[36;1m    cargo_fetch_seconds: ($cargo_fetch | if test("^[0-9]+$") then tonumber else null end),^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5527568Z ^[[36;1m    checks_wall_seconds: ($checks_wall | if test("^[0-9]+$") then tonumber else null end),^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5528232Z ^[[36;1m    checks_seconds: ($checks_wall | if test("^[0-9]+$") then tonumber else null end),^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5529014Z ^[[36;1m    cleanup_seconds: ($cleanup | if test("^[0-9]+$") then tonumber else null end),^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5529671Z ^[[36;1m    total_seconds: ($total | if test("^[0-9]+$") then tonumber else null end),^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5530225Z ^[[36;1m    cache_outcomes: $cache_outcomes,^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5530662Z ^[[36;1m    origin_downloads: {^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5531140Z ^[[36;1m      updating_crates_io_index: $updating_index,^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5531646Z ^[[36;1m      updating_git: $updating_git,^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5532130Z ^[[36;1m      downloading_crates: $downloading_crates,^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5532611Z ^[[36;1m      downloaded_lines: $downloaded_lines^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5533054Z ^[[36;1m    },^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5533438Z ^[[36;1m    compiler: {^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5533836Z ^[[36;1m      mbx_outcomes: $mbx,^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5534257Z ^[[36;1m      finished_segments: $finished,^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5534687Z ^[[36;1m      compiling_lines: $compiling_count^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5535118Z ^[[36;1m    }^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5535506Z ^[[36;1m  }' 2>/dev/null || true)"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5535911Z ^[[36;1mif [[ -z "$report_json" ]]; then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5536430Z ^[[36;1m  report_json="VELNOR_CI_REPORT_FALLBACK job=$job_name"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5536950Z ^[[36;1mfi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5537425Z ^[[36;1mecho "VELNOR_CI_REPORT $report_json"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5537826Z ^[[36;1m{^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5538217Z ^[[36;1m  echo ""^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5538687Z ^[[36;1m  echo '### Phase timings and cache outcomes'^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5539160Z ^[[36;1m  echo ""^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5539512Z ^[[36;1m  echo '```json'^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5539956Z ^[[36;1m  echo "$report_json"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5540335Z ^[[36;1m  echo '```'^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5540737Z ^[[36;1m  echo ""^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5541086Z ^[[36;1m  echo "| metric | value |"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5541552Z ^[[36;1m  echo "| --- | --- |"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5541974Z ^[[36;1m  echo "| lane | ${VELNOR_CI_LANE:-unknown} |"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5542597Z ^[[36;1m  echo "| cache_outcomes.rustup | ${rustup_outcome:-n/a} |"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5543131Z ^[[36;1m  echo "| cache_outcomes.mold | ${mold_outcome:-n/a} |"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5543712Z ^[[36;1m  echo "| cache_outcomes.cargo | ${cargo_outcome:-n/a} |"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5544229Z ^[[36;1m  echo "| cache_outcomes.mbx | ${mbx_outcome:-n/a} |"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5544818Z ^[[36;1m  echo "| cache_outcomes.docker_seed | ${docker_seed_outcome:-n/a} |"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5545349Z ^[[36;1m  echo "| queue_seconds | ${queue:-unknown} |"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5545929Z ^[[36;1m  echo "| runner_setup_seconds | ${runner_setup:-unknown} |"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5546499Z ^[[36;1m  echo "| selection_transport_seconds | ${selection_transport:-unknown} |"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5547195Z ^[[36;1m  echo "| tool_bootstrap_seconds | ${tool_bootstrap:-unknown} |"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5547778Z ^[[36;1m  echo "| cache_prep_seconds | ${cache_prep:-unknown} |"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5548326Z ^[[36;1m  echo "| cargo_fetch_seconds | ${cargo_fetch:-unknown} |"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5548946Z ^[[36;1m  echo "| checks_wall_seconds | ${checks_wall:-unknown} |"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5549485Z ^[[36;1m  echo "| cleanup_seconds | ${cleanup:-unknown} |"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5550017Z ^[[36;1m  echo "| total_seconds | ${total:-unknown} |"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5550535Z ^[[36;1m  echo "| updating_crates_io_index | $updating_index |"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5551037Z ^[[36;1m  echo "| updating_git | $updating_git |"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5551541Z ^[[36;1m  echo "| downloading_crates | $downloading_crates |"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5552080Z ^[[36;1m  echo "| compiling_lines | $compiling_count |"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5552586Z ^[[36;1m} >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5553049Z ^[[36;1mif ((${#cold_layers[@]} > 0)); then^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5553629Z ^[[36;1m  echo "::warning::Cold cache layer(s): ${cold_layers[*]} (lane=${VELNOR_CI_LANE:-unknown})"^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5554190Z ^[[36;1mfi^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5554554Z ^[[36;1mexit 0^[[0m
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5576988Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5577529Z env:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5578149Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5578928Z   MISE_LOG_LEVEL: info
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5581560Z   MISE_GITHUB_TOKEN: ***
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5582041Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor/velnor
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5582511Z   MISE_YES: 1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5582885Z   MBX_GC_MAX_SIZE: 12GiB
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5583288Z   MBX_CACHE_LINKS: 1
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5583843Z   MBX_CACHE_EXPORT_GROUP: github-actions-35207507480-1-75a69228-79ae-4fd9-b1a6-d3e1a96ed8eb
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5584459Z   VELNOR_JOB_NAME: rust-velnor-workflow-contract
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5584932Z   VELNOR_CONTEXT_RUN_STARTED_AT: 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5585367Z   VELNOR_CI_LANE: github
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5585760Z   VELNOR_HOST_WARM_LAYERS: 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5586157Z   VELNOR_RUN_STARTED_AT: 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5586553Z   VELNOR_JOB_QUEUED_AT: 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5587240Z   VELNOR_CACHE_RUSTUP_PRIMARY: velnor-rustup-Linux-X64-01ca15e1b24a13a2533dc81d701f5db1ad9bd6bd978dbd566dac8f8bf1d492dd
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5588329Z   VELNOR_CACHE_RUSTUP_MATCHED: velnor-rustup-Linux-X64-01ca15e1b24a13a2533dc81d701f5db1ad9bd6bd978dbd566dac8f8bf1d492dd
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5589157Z   VELNOR_CACHE_MOLD_PRIMARY: velnor-mold-2.42.0-Linux-X64
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5589730Z   VELNOR_CACHE_MOLD_MATCHED: velnor-mold-2.42.0-Linux-X64
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5590426Z   VELNOR_CACHE_CARGO_PRIMARY: ci-Linux-X64-rust-c28bd7098d2f3885f2e6aeeea8b58b17d6a51724e661580fc2d922476d09eb5c
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5591318Z   VELNOR_CACHE_CARGO_MATCHED: ci-Linux-X64-rust-c28bd7098d2f3885f2e6aeeea8b58b17d6a51724e661580fc2d922476d09eb5c
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5591960Z   VELNOR_CACHE_MBX_HIT: true
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5593193Z   VELNOR_CACHE_MBX_PRIMARY: velnor-mbx-v3-2544c2ae90ab-Linux-X64-rust-velnor-workflow-contract-c28bd7098d2f3885f2e6aeeea8b58b17d6a51724e661580fc2d922476d09eb5c-5ec48d3f5f1501edb7ba8ace1c25078374088eef2fa20f303e61dafe642bd66c
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5594350Z   VELNOR_CACHE_DOCKER_SEED_PRIMARY: 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5594794Z   VELNOR_CACHE_DOCKER_SEED_MATCHED: 
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.5595207Z ##[endgroup]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.6015570Z VELNOR_CI_REPORT {"schema_version":1,"job":"rust-velnor-workflow-contract","log_present":true,"queue_seconds":null,"queue_source":null,"total_source":"job_markers","runner_setup_seconds":3,"selection_transport_seconds":0,"tool_bootstrap_seconds":16,"cache_prep_seconds":4,"cargo_fetch_seconds":0,"checks_wall_seconds":2,"checks_seconds":2,"cleanup_seconds":0,"total_seconds":25,"cache_outcomes":{"lane":"github","rustup":"exact","mold":"exact","cargo":"exact","mbx":"exact","docker_seed":null},"origin_downloads":{"updating_crates_io_index":0,"updating_git":0,"downloading_crates":0,"downloaded_lines":[]},"compiler":{"mbx_outcomes":["mbx[cache]: object cache: 2 hits, 0 misses; 0 B downloaded, 0 B uploaded, 0 B stored locally"],"finished_segments":["    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.25s"],"compiling_lines":1}}
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.6045275Z ##[end-action id=__self.__run;outcome=success;conclusion=success;duration_ms=63]
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.6146089Z Post job cleanup.
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.6960826Z [command]/usr/bin/git version
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.6996740Z git version 2.55.0
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.7026773Z Temporarily overriding HOME='/home/runner/work/_temp/13ada364-8387-45bb-ac5b-65c229b0fca9' before making global git config changes
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.7028277Z Adding repository directory to the temporary git global config as a safe directory
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.7031103Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.7063837Z Removing SSH command configuration
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.7069263Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.7100853Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.7302085Z Removing HTTP extra header
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.7307056Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.7340192Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.7527226Z Removing includeIf entries pointing to credentials config files
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.7549542Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.7561435Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Rust · velnor-workflow-contract / GitHub	UNKNOWN STEP	2026-09-17T09:53:36.7964212Z Cleaning up orphan processes

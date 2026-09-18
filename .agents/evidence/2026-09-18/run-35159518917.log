@@ -1,0 +1,195 @@
+Resolve runtime closure	UNKNOWN STEP	﻿2026-09-16T22:49:39.2132241Z Current runner version: '2.337.0'
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.2167936Z ##[group]Runner Image Provisioner
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.2169359Z Hosted Compute Agent
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.2170406Z Version: 20260828.587
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.2171583Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.2173168Z Build Date: 2026-08-28T16:44:25Z
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.2174689Z Worker ID: {918aa771-4a39-43e9-a8c9-803764ee7781}
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.2176508Z Azure Region: eastus
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.2177678Z ##[endgroup]
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.2180403Z ##[group]Operating System
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.2181632Z Ubuntu
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.2182578Z 24.04.5
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.2183461Z LTS
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.2184802Z ##[endgroup]
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.2185819Z ##[group]Runner Image
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.2186996Z Image: ubuntu-24.04
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.2188023Z Version: 20260907.300.1
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.2190236Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260907.300/images/ubuntu/Ubuntu2404-Readme.md
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.2192954Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260907.300
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.2194948Z ##[endgroup]
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.2196864Z ##[group]GITHUB_TOKEN Permissions
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.2199748Z Contents: read
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.2200829Z Metadata: read
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.2201930Z ##[endgroup]
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.2205233Z Secret source: Actions
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.2206800Z Cache mode: write
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.2208510Z Prepare workflow directory
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.3504217Z Prepare all required actions
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.3553399Z Getting action download info
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.5080594Z Download action repository 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' (SHA:3d3c42e5aac5ba805825da76410c181273ba90b1)
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.7444650Z Complete job name: Resolve runtime closure
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.9936087Z ##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.9937163Z with:
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.9937621Z   persist-credentials: false
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.9938184Z   repository: tailrocks/velnor
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.9941864Z   token: ***
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.9942294Z   ssh-strict: true
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.9942731Z   ssh-user: git
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.9943148Z   clean: true
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.9943586Z   sparse-checkout-cone-mode: true
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.9944100Z   fetch-depth: 1
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.9944734Z   fetch-tags: false
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.9945182Z   show-progress: true
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.9945630Z   lfs: false
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.9946039Z   submodules: false
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.9946481Z   set-safe-directory: true
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.9946987Z   allow-unsafe-pr-checkout: false
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:39.9947772Z ##[endgroup]
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.0971305Z Syncing repository: tailrocks/velnor
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.0973098Z ##[group]Getting Git version info
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.0973881Z Working directory is '/home/runner/work/velnor/velnor'
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.0975771Z [command]/usr/bin/git version
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1077978Z git version 2.55.0
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1113395Z ##[endgroup]
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1122322Z Temporarily overriding HOME='/home/runner/work/_temp/ad64f5b3-e61e-4d5e-87df-5f9f8954b390' before making global git config changes
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1123946Z Adding repository directory to the temporary git global config as a safe directory
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1127346Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1179901Z Deleting the contents of '/home/runner/work/velnor/velnor'
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1185145Z ##[group]Determining repository object format
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1187075Z ##[endgroup]
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1188546Z ##[group]Initializing the repository
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1191399Z [command]/usr/bin/git init /home/runner/work/velnor/velnor
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1329838Z hint: Using 'master' as the name for the initial branch. This default branch name
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1331412Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1332935Z hint: to use in all of your new repositories, which will suppress this warning,
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1333686Z hint: call:
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1334128Z hint:
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1335272Z hint: 	git config --global init.defaultBranch <name>
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1336119Z hint:
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1336738Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1337659Z hint: 'development'. The just-created branch can be renamed via this command:
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1338392Z hint:
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1338802Z hint: 	git branch -m <name>
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1339262Z hint:
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1339873Z hint: Disable this message with "git config set advice.defaultBranchName false"
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1347083Z Initialized empty Git repository in /home/runner/work/velnor/velnor/.git/
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1359862Z [command]/usr/bin/git remote add origin https://github.com/tailrocks/velnor
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1422277Z ##[endgroup]
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1428634Z ##[group]Disabling automatic garbage collection
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1429459Z [command]/usr/bin/git config --local gc.auto 0
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1462614Z ##[endgroup]
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1463834Z ##[group]Setting up auth
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1468619Z Removing SSH command configuration
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1470123Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1505885Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1953605Z Removing HTTP extra header
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.1960263Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.2001204Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.2246359Z Removing includeIf entries pointing to credentials config files
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.2253880Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.2295556Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.2569261Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-c11dc3c6-f496-4656-977c-7350c4f14929.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.2620418Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/.git.path /home/runner/work/_temp/git-credentials-c11dc3c6-f496-4656-977c-7350c4f14929.config
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.2655803Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-c11dc3c6-f496-4656-977c-7350c4f14929.config
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.2692995Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-c11dc3c6-f496-4656-977c-7350c4f14929.config
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.2729986Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-c11dc3c6-f496-4656-977c-7350c4f14929.config
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.2764556Z ##[endgroup]
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.2766001Z ##[group]Fetching the repository
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:40.2772360Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +33688938297eee3933997dbbf368ee20fb1779d4:refs/remotes/origin/main
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.3141845Z From https://github.com/tailrocks/velnor
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.3143925Z  * [new ref]         33688938297eee3933997dbbf368ee20fb1779d4 -> origin/main
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.3151553Z [command]/usr/bin/git branch --list --remote origin/main
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.3181652Z   origin/main
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.3191789Z [command]/usr/bin/git rev-parse refs/remotes/origin/main
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.3220024Z 33688938297eee3933997dbbf368ee20fb1779d4
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.3229525Z ##[endgroup]
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.3230340Z ##[group]Determining the checkout info
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.3231222Z ##[endgroup]
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.3233582Z [command]/usr/bin/git sparse-checkout disable
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.3293520Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.3331440Z ##[group]Checking out the ref
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.3336273Z [command]/usr/bin/git checkout --progress --force -B main refs/remotes/origin/main
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.4059730Z Switched to a new branch 'main'
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.4066498Z branch 'main' set up to track 'origin/main'.
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.4077059Z ##[endgroup]
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.4130303Z [command]/usr/bin/git log -1 --format=%H
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.4161359Z 33688938297eee3933997dbbf368ee20fb1779d4
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.4170832Z ##[group]Removing auth
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.4172188Z Removing SSH command configuration
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.4174553Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.4213047Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.4443709Z Removing HTTP extra header
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.4447274Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.4487344Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.4709726Z Removing includeIf entries pointing to credentials config files
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.4713138Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.4743251Z includeif.gitdir:/home/runner/work/velnor/velnor/.git.path
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.4746355Z includeif.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.4748750Z includeif.gitdir:/github/workspace/.git.path
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.4751072Z includeif.gitdir:/github/workspace/.git/worktrees/*.path
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.4756354Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/.git.path
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.4783810Z /home/runner/work/_temp/git-credentials-c11dc3c6-f496-4656-977c-7350c4f14929.config
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.4795156Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/.git.path \/home\/runner\/work\/_temp\/git\-credentials\-c11dc3c6\-f496\-4656\-977c\-7350c4f14929\.config
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.4832079Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.4864070Z /home/runner/work/_temp/git-credentials-c11dc3c6-f496-4656-977c-7350c4f14929.config
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.4873846Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path \/home\/runner\/work\/_temp\/git\-credentials\-c11dc3c6\-f496\-4656\-977c\-7350c4f14929\.config
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.4910417Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git.path
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.4962251Z /github/runner_temp/git-credentials-c11dc3c6-f496-4656-977c-7350c4f14929.config
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.5003732Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git.path \/github\/runner_temp\/git\-credentials\-c11dc3c6\-f496\-4656\-977c\-7350c4f14929\.config
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.5023788Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git/worktrees/*.path
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.5050243Z /github/runner_temp/git-credentials-c11dc3c6-f496-4656-977c-7350c4f14929.config
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.5058294Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git/worktrees/*.path \/github\/runner_temp\/git\-credentials\-c11dc3c6\-f496\-4656\-977c\-7350c4f14929\.config
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.5095385Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.5316251Z Removing credentials config '/home/runner/work/_temp/git-credentials-c11dc3c6-f496-4656-977c-7350c4f14929.config'
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.5323281Z ##[endgroup]
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.5926459Z ##[group]Run set -euo pipefail
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.5927830Z ^[[36;1mset -euo pipefail^[[0m
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.5930085Z ^[[36;1mcommand -v sha256sum >/dev/null 2>&1 || { echo "::error::sha256sum is required on the closure runner" >&2; exit 1; }^[[0m
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.5932508Z ^[[36;1mhead="$(git rev-parse HEAD)"^[[0m
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.5934583Z ^[[36;1m[[ "$head" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::HEAD is not a commit SHA: $head" >&2; exit 1; }^[[0m
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.5937933Z ^[[36;1mlisting="$(git ls-tree -r HEAD -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo)"^[[0m
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.5941111Z ^[[36;1mtest "$listing" != '' || { echo "::error::HEAD has no closure inputs" >&2; exit 1; }^[[0m
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.5944500Z ^[[36;1mclosure="$(printf '%s\nclosure-version:1\nfeatures:\nprofile:release\n' "$(LC_ALL=C sort <<<"$listing")" | sha256sum | awk '{print $1}')"^[[0m
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.5947840Z ^[[36;1m[[ "$closure" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::closure resolution failed" >&2; exit 1; }^[[0m
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.5950032Z ^[[36;1mtag="velnor-workflow-runtime-v1-${closure:0:16}"^[[0m
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.5951487Z ^[[36;1m{^[[0m
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.5952414Z ^[[36;1m  echo "value=$closure"^[[0m
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.5953573Z ^[[36;1m  echo "tag=$tag"^[[0m
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.5954798Z ^[[36;1m  echo "head-sha=$head"^[[0m
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.5955974Z ^[[36;1m} >> "$GITHUB_OUTPUT"^[[0m
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.5998223Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.5999810Z ##[endgroup]
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.6635800Z ##[group]Run set -euo pipefail
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.6637065Z ^[[36;1mset -euo pipefail^[[0m
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.6638673Z ^[[36;1mif gh release view "$TAG" --repo tailrocks/velnor >/dev/null 2>&1; then^[[0m
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.6640560Z ^[[36;1m  echo "exists=true" >> "$GITHUB_OUTPUT"^[[0m
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.6641881Z ^[[36;1melse^[[0m
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.6642947Z ^[[36;1m  echo "exists=false" >> "$GITHUB_OUTPUT"^[[0m
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.6644435Z ^[[36;1mfi^[[0m
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.6681916Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.6683378Z env:
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.6693229Z   GH_TOKEN: ***
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.6694511Z   TAG: velnor-workflow-runtime-v1-9f236b40635970a4
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:41.6695897Z ##[endgroup]
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:42.4117964Z Post job cleanup.
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:42.4998684Z [command]/usr/bin/git version
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:42.5045507Z git version 2.55.0
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:42.5111576Z Temporarily overriding HOME='/home/runner/work/_temp/9f93d738-f765-473e-bdb8-998d78d68938' before making global git config changes
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:42.5113273Z Adding repository directory to the temporary git global config as a safe directory
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:42.5115591Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:42.5190809Z Removing SSH command configuration
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:42.5197692Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:42.5269587Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:42.5582654Z Removing HTTP extra header
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:42.5594249Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:42.5666368Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:42.5966555Z Removing includeIf entries pointing to credentials config files
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:42.5967975Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:42.6005454Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:42.6490221Z Evaluate and set job outputs
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:42.6626873Z Set output 'closure'
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:42.6628470Z Set output 'tag'
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:42.6629313Z Set output 'head-sha'
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:42.6629693Z Set output 'exists'
+Resolve runtime closure	UNKNOWN STEP	2026-09-16T22:49:42.6630466Z Cleaning up orphan processes

@@ -1,0 +1,808 @@
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	﻿2026-09-17T12:25:09.3133347Z Current runner version: '2.337.0'
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3200734Z ##[group]Runner Image Provisioner
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3202257Z Hosted Compute Agent
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3203227Z Version: 20260828.587
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3204430Z Commit: abac92662cab4cc7352de4f9f9d2e2419aad9c29
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3205617Z Build Date: 2026-08-28T16:44:25Z
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3206820Z Worker ID: {24a5935a-60e6-4b90-9e70-87ee257acba5}
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3208076Z Azure Region: eastus2
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3208954Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3211558Z ##[group]Operating System
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3212624Z Ubuntu
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3213559Z 24.04.5
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3214419Z LTS
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3215226Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3216243Z ##[group]Runner Image
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3217260Z Image: ubuntu-24.04
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3218276Z Version: 20260907.300.1
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3220382Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260907.300/images/ubuntu/Ubuntu2404-Readme.md
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3223425Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260907.300
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3225122Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3227151Z ##[group]GITHUB_TOKEN Permissions
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3229722Z Actions: read
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3230828Z Contents: read
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3232060Z Metadata: read
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3233065Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3236011Z Secret source: Actions
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3237562Z Cache mode: write
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3238712Z Prepare workflow directory
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3707047Z Prepare all required actions
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.3778059Z Getting action download info
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.6119285Z Download action repository 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' (SHA:3d3c42e5aac5ba805825da76410c181273ba90b1)
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.7199934Z Download action repository 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' (SHA:3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c)
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:09.9212888Z Download action repository 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9' (SHA:55cc8345863c7cc4c66a329aec7e433d2d1c52a9)
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1295103Z Uses: tailrocks/velnor/.github/workflows/ci-unit-docs.yml@refs/pull/930/merge (d4b41c6ec765b59199602ce4f4917de151fcbb1c)
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1299844Z ##[group] Inputs
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1300386Z   unit: docs
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1306947Z   selected_units: [{"providers":["github-hosted","velnor"],"unit_id":"bun-velnor"},{"providers":["github-hosted","velnor"],"unit_id":"docker"},{"providers":["github-hosted","velnor"],"unit_id":"docs"},{"providers":["github-hosted","velnor"],"unit_id":"opentofu"},{"providers":["github-hosted","velnor"],"unit_id":"rust-policy"},{"providers":["github-hosted","velnor"],"unit_id":"rust-production-topology"},{"providers":["github-hosted","velnor"],"unit_id":"rust-unit-collector"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-bench"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-client"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-control"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-model"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-render"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-runner"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-tools"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-workflow"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-workflow-contract"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnorctl"}]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1313857Z   scope: affected
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1316490Z   full_units: bun-velnor,docker,docs,opentofu,rust-policy,rust-production-topology,rust-unit-collector,rust-velnor-bench,rust-velnor-client,rust-velnor-control,rust-velnor-model,rust-velnor-render,rust-velnor-runner,rust-velnor-tools,rust-velnor-workflow,rust-velnor-workflow-contract,rust-velnorctl
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1319540Z   base_sha: 52739e176c1cba3ddeeff1ca21eda2edadb52b17
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1320407Z   head_sha: d4b41c6ec765b59199602ce4f4917de151fcbb1c
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1321187Z   plan_digest: 8563e4d2f58b08d6
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1321744Z   provider: github-hosted
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1322244Z   mise_tools: 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1323130Z   mise_runner: false
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1323629Z   mbx_compat: 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1324111Z   mbx_dependency_files: 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1324624Z   mbx_freshness_files: 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1325105Z   cargo_bin_tools: 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1325571Z   tool_version: 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1326051Z   node_cache_dependency_path: 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1326579Z   cache_paths: ~/.npm
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1327122Z   cache_key_files: package-lock.json
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	bun.lock
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1327742Z   seed_compat: 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1328196Z   seed_dependency_files: 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1328702Z   seed_freshness_files: 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1329185Z   cargo_root: 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1329670Z   cargo_fetch_skip_when_warm: false
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1330242Z   cargo_net_offline: false
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1330747Z   host_warm_layers: 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1331647Z   policy_runtime: false
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1332164Z   candidate_publish: false
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1332682Z   unit_platform: linux-x64
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1333202Z   unit_trust: untrusted-ok
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1333708Z   unit_dependencies: 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1334202Z   unit_admission: github-hosted
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1334863Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.1335603Z Complete job name: Documentation · Documentation · github-hosted — docs / GitHub · hosted
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2110841Z ##[group]Run timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2112782Z ^[[36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2113815Z ^[[36;1mumask 077^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2114300Z ^[[36;1mmkdir -p "$timing_dir"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2114910Z ^[[36;1mmarker="$timing_dir/JOB_STARTED"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2115513Z ^[[36;1mif [[ ! -e "$marker" ]]; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2116252Z ^[[36;1m  if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2117046Z ^[[36;1m    chmod 0444 "$marker" 2>/dev/null || true^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2117645Z ^[[36;1m  fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2118068Z ^[[36;1mfi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2158048Z shell: /usr/bin/bash -e {0}
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2158873Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2630685Z ##[group]Run actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2631810Z with:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2632266Z   persist-credentials: false
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2632848Z   ref: d4b41c6ec765b59199602ce4f4917de151fcbb1c
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2633460Z   repository: tailrocks/velnor
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2637425Z   token: ***
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2637868Z   ssh-strict: true
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2638318Z   ssh-user: git
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2638761Z   clean: true
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2639240Z   sparse-checkout-cone-mode: true
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2639775Z   fetch-depth: 1
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2640217Z   fetch-tags: false
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2640671Z   show-progress: true
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2641395Z   lfs: false
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2641830Z   submodules: false
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2642292Z   set-safe-directory: true
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2642830Z   allow-unsafe-pr-checkout: false
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.2643343Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.3749030Z Syncing repository: tailrocks/velnor
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.3752048Z ##[group]Getting Git version info
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.3753161Z Working directory is '/home/runner/work/velnor/velnor'
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.3754730Z [command]/usr/bin/git version
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.3905054Z git version 2.55.0
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.3932715Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.3942007Z Temporarily overriding HOME='/home/runner/work/_temp/202c4f80-4520-4ce3-8022-c8ab54854d64' before making global git config changes
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.3943510Z Adding repository directory to the temporary git global config as a safe directory
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.3948449Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4017223Z Deleting the contents of '/home/runner/work/velnor/velnor'
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4025688Z ##[group]Determining repository object format
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4041572Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4043275Z ##[group]Initializing the repository
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4044626Z [command]/usr/bin/git init /home/runner/work/velnor/velnor
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4185089Z hint: Using 'master' as the name for the initial branch. This default branch name
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4198712Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4208756Z hint: to use in all of your new repositories, which will suppress this warning,
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4210115Z hint: call:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4211177Z hint:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4212205Z hint: 	git config --global init.defaultBranch <name>
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4213382Z hint:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4214462Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4216171Z hint: 'development'. The just-created branch can be renamed via this command:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4220829Z hint:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4222071Z hint: 	git branch -m <name>
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4223007Z hint:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4224218Z hint: Disable this message with "git config set advice.defaultBranchName false"
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4226328Z Initialized empty Git repository in /home/runner/work/velnor/velnor/.git/
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4229364Z [command]/usr/bin/git remote add origin https://github.com/tailrocks/velnor
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4259748Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4261574Z ##[group]Disabling automatic garbage collection
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4263326Z [command]/usr/bin/git config --local gc.auto 0
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4297503Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4299076Z ##[group]Setting up auth
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4300299Z Removing SSH command configuration
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4304880Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4341832Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4752342Z Removing HTTP extra header
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4760616Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.4800289Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.5053063Z Removing includeIf entries pointing to credentials config files
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.5058875Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.5094408Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.5325275Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-c866cf67-4e2e-447e-b8ff-d0a843b93561.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.5366012Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/.git.path /home/runner/work/_temp/git-credentials-c866cf67-4e2e-447e-b8ff-d0a843b93561.config
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.5400144Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-c866cf67-4e2e-447e-b8ff-d0a843b93561.config
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.5439754Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-c866cf67-4e2e-447e-b8ff-d0a843b93561.config
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.5477201Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-c866cf67-4e2e-447e-b8ff-d0a843b93561.config
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.5510858Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.5512467Z ##[group]Fetching the repository
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:10.5519318Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin d4b41c6ec765b59199602ce4f4917de151fcbb1c
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.8925802Z From https://github.com/tailrocks/velnor
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.8927500Z  * branch            d4b41c6ec765b59199602ce4f4917de151fcbb1c -> FETCH_HEAD
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.8935052Z [command]/usr/bin/git rev-parse --verify --quiet d4b41c6ec765b59199602ce4f4917de151fcbb1c^{object}
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.8964863Z d4b41c6ec765b59199602ce4f4917de151fcbb1c
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.8970601Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.8972188Z ##[group]Determining the checkout info
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.8973518Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.8977760Z [command]/usr/bin/git sparse-checkout disable
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.9034151Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.9067345Z ##[group]Checking out the ref
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.9072680Z [command]/usr/bin/git checkout --progress --force d4b41c6ec765b59199602ce4f4917de151fcbb1c
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.9960646Z Note: switching to 'd4b41c6ec765b59199602ce4f4917de151fcbb1c'.
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.9962410Z 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.9963198Z You are in 'detached HEAD' state. You can look around, make experimental
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.9965029Z changes and commit them, and you can discard any commits you make in this
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.9966730Z state without impacting any branches by switching back to a branch.
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.9968091Z 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.9969184Z If you want to create a new branch to retain commits you create, you may
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.9972183Z do so (now or later) by using -c with the switch command. Example:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.9973862Z 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.9974578Z   git switch -c <new-branch-name>
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.9975787Z 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.9976543Z Or undo this operation with:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.9977661Z 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.9978367Z   git switch -
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.9979272Z 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.9980643Z Turn off this advice by setting config variable advice.detachedHead to false
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.9982794Z 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.9985045Z HEAD is now at d4b41c6 Merge bd9952e1dcf84a4ef0173c50a25a1807948ba1f0 into 52739e176c1cba3ddeeff1ca21eda2edadb52b17
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:11.9992133Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0027758Z [command]/usr/bin/git log -1 --format=%H
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0058356Z d4b41c6ec765b59199602ce4f4917de151fcbb1c
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0070525Z ##[group]Removing auth
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0072578Z Removing SSH command configuration
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0075488Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0115307Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0343247Z Removing HTTP extra header
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0346642Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0392325Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0616576Z Removing includeIf entries pointing to credentials config files
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0619304Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0650857Z includeif.gitdir:/home/runner/work/velnor/velnor/.git.path
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0653745Z includeif.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0655575Z includeif.gitdir:/github/workspace/.git.path
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0657121Z includeif.gitdir:/github/workspace/.git/worktrees/*.path
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0662423Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/.git.path
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0690912Z /home/runner/work/_temp/git-credentials-c866cf67-4e2e-447e-b8ff-d0a843b93561.config
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0700831Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/.git.path \/home\/runner\/work\/_temp\/git\-credentials\-c866cf67\-4e2e\-447e\-b8ff\-d0a843b93561\.config
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0735766Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0761798Z /home/runner/work/_temp/git-credentials-c866cf67-4e2e-447e-b8ff-d0a843b93561.config
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0770595Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor/velnor/.git/worktrees/*.path \/home\/runner\/work\/_temp\/git\-credentials\-c866cf67\-4e2e\-447e\-b8ff\-d0a843b93561\.config
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0807046Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git.path
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0839344Z /github/runner_temp/git-credentials-c866cf67-4e2e-447e-b8ff-d0a843b93561.config
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0849142Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git.path \/github\/runner_temp\/git\-credentials\-c866cf67\-4e2e\-447e\-b8ff\-d0a843b93561\.config
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0892366Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git/worktrees/*.path
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0918958Z /github/runner_temp/git-credentials-c866cf67-4e2e-447e-b8ff-d0a843b93561.config
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0927422Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git/worktrees/*.path \/github\/runner_temp\/git\-credentials\-c866cf67\-4e2e\-447e\-b8ff\-d0a843b93561\.config
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.0978193Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1202351Z Removing credentials config '/home/runner/work/_temp/git-credentials-c866cf67-4e2e-447e-b8ff-d0a843b93561.config'
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1211286Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1349787Z ##[group]Run {
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1350306Z ^[[36;1m{^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1350772Z ^[[36;1m  echo '## Unit dependencies'^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1351608Z ^[[36;1m  echo^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1352061Z ^[[36;1m  echo "- Unit: $UNIT_ID"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1352582Z ^[[36;1m  echo "- Provider: $UNIT_PROVIDER"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1353139Z ^[[36;1m  echo "- Admission: $UNIT_ADMISSION"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1353698Z ^[[36;1m  if [[ -z "$UNIT_DEPENDENCIES" ]]; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1354261Z ^[[36;1m    echo '- Dependencies: none'^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1354754Z ^[[36;1m  else^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1355225Z ^[[36;1m    echo "- Dependencies: $UNIT_DEPENDENCIES"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1355750Z ^[[36;1m  fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1356170Z ^[[36;1m} >> "$GITHUB_STEP_SUMMARY"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1393137Z shell: /usr/bin/bash -e {0}
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1393613Z env:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1394005Z   UNIT_ID: docs
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1394419Z   UNIT_DEPENDENCIES: 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1394906Z   UNIT_ADMISSION: github-hosted
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1395381Z   UNIT_PROVIDER: github-hosted
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1395828Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1576541Z ##[group]Run actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1577206Z with:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1577800Z   name: velnor-workflow-runtime-52739e176c1cba3ddeeff1ca21eda2edadb52b17-Linux-X64
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1578482Z   path: .velnor-workflow-runtime
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1578932Z   merge-multiple: false
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1579355Z   repository: tailrocks/velnor
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1579775Z   run-id: 35220938667
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1580186Z   skip-decompress: false
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1580613Z   digest-mismatch: error
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.1581197Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.2937728Z Downloading single artifact
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.3993844Z Preparing to download the following artifacts:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.3996485Z - velnor-workflow-runtime-52739e176c1cba3ddeeff1ca21eda2edadb52b17-Linux-X64 (ID: 10496892155, Size: 7860885, Expected Digest: sha256:8855b71922ce39c196931146f37186749808a7eaa716d973cd8e9268c631a444)
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.5604452Z Redirecting to blob download url: https://productionresultssa13.blob.core.windows.net/actions-results/ae71dbce-6158-45c1-9ea6-ea3f9992cfc3/workflow-job-run-a11a814d-bba8-591f-863e-a302424244c9/artifacts/413955064b329c0de249477e1eee30279a683133292edd9fdaef416bd043ef9b.zip
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.5606449Z Starting download of artifact to: /home/runner/work/velnor/velnor/.velnor-workflow-runtime
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.6700721Z (node:2291) [DEP0005] DeprecationWarning: Buffer() is deprecated due to security and usability issues. Please use the Buffer.alloc(), Buffer.allocUnsafe(), or Buffer.from() methods instead.
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.6705164Z (Use `node --trace-deprecation ...` to show where the warning was created)
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.8763589Z SHA256 digest of downloaded artifact is 8855b71922ce39c196931146f37186749808a7eaa716d973cd8e9268c631a444
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.8764560Z Artifact download completed successfully.
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.8765130Z Total of 1 artifact(s) downloaded
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.8769009Z Download artifact has finished successfully
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.8965761Z ##[group]Run set -euo pipefail
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.8966712Z ^[[36;1mset -euo pipefail^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.8967622Z ^[[36;1mmanifest=.velnor-workflow-runtime/manifest.json^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.8971737Z ^[[36;1mjq -e --arg revision "$EXPECTED_REVISION" --arg repository "$GITHUB_REPOSITORY" --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" --arg run_id "$GITHUB_RUN_ID" '.revision == $revision and .repository == $repository and .platform == $platform and .run_id == $run_id and (.run_id | test("^[0-9]+$")) and .job_id != "" and (.binary_sha256 | test("^[0-9a-f]{64}$")) and (.policy_binary_sha256 | test("^[0-9a-f]{64}$")) and (.closure | test("^[0-9a-f]{64}$")) and (.policy_closure | test("^[0-9a-f]{64}$"))' "$manifest" >/dev/null^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.8975684Z ^[[36;1mexpected="$(jq -er '.binary_sha256' "$manifest")"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.8976478Z ^[[36;1mactual="$(sha256sum .velnor-workflow-runtime/velnor-workflow | awk '{print $1}')"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.8977381Z ^[[36;1m[[ "$actual" == "$expected" ]] || { echo "::error::runtime digest mismatch" >&2; exit 1; }^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.8978127Z ^[[36;1mexpected="$(jq -er '.policy_binary_sha256' "$manifest")"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.8978932Z ^[[36;1mactual="$(sha256sum .velnor-workflow-runtime/velnor-workflow-policy | awk '{print $1}')"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.8979829Z ^[[36;1m[[ "$actual" == "$expected" ]] || { echo "::error::policy runtime digest mismatch" >&2; exit 1; }^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9018763Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9019337Z env:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9019848Z   EXPECTED_REVISION: 52739e176c1cba3ddeeff1ca21eda2edadb52b17
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9020422Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9539447Z ##[group]Run set -euo pipefail
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9540032Z ^[[36;1mset -euo pipefail^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9540592Z ^[[36;1mhome="$RUNNER_TEMP/velnor-workflow-runtime-artifact"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9541742Z ^[[36;1minstall -Dm0755 .velnor-workflow-runtime/velnor-workflow "$home/bin/velnor-workflow"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9542770Z ^[[36;1minstall -Dm0755 .velnor-workflow-runtime/velnor-workflow-policy "$home/bin/velnor-workflow-policy"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9543764Z ^[[36;1mexpected_closure="$(jq -er '.policy_closure' .velnor-workflow-runtime/manifest.json)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9544566Z ^[[36;1mreported="$("$home/bin/velnor-workflow-policy" --closure)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9545539Z ^[[36;1m[[ "$reported" == "$expected_closure" ]] || { echo "::error::policy runtime reports closure $reported, expected $expected_closure" >&2; exit 1; }^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9546427Z ^[[36;1mecho "$home/bin" >> "$GITHUB_PATH"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9547373Z ^[[36;1mecho "VELNOR_WORKFLOW_PINNED_BINARY=$home/bin/velnor-workflow-policy" >> "$GITHUB_ENV"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9584302Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9584869Z env:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9585368Z   EXPECTED_REVISION: 52739e176c1cba3ddeeff1ca21eda2edadb52b17
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9585933Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9893091Z ##[group]Run timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9894290Z ^[[36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9895073Z ^[[36;1mumask 077^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9895495Z ^[[36;1mmkdir -p "$timing_dir"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9895986Z ^[[36;1mmarker="$timing_dir/RUNNER_SETUP_ENDED"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9896507Z ^[[36;1mif [[ ! -e "$marker" ]]; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9897093Z ^[[36;1m  if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9897732Z ^[[36;1m    chmod 0444 "$marker" 2>/dev/null || true^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9898210Z ^[[36;1m  fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9898581Z ^[[36;1mfi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9936691Z shell: /usr/bin/bash -e {0}
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9937135Z env:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9937877Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:12.9938674Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0078283Z ##[group]Run set -euo pipefail
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0078819Z ^[[36;1mset -euo pipefail^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0079306Z ^[[36;1mmkdir -p .velnor-ci-selection^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0079774Z ^[[36;1m{^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0080176Z ^[[36;1m  printf 'version=2\n'^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0080690Z ^[[36;1m  printf 'base_sha=%s\n' "$SELECTION_BASE_SHA"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0081577Z ^[[36;1m  printf 'head_sha=%s\n' "$SELECTION_HEAD_SHA"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0082136Z ^[[36;1m  printf 'scope=%s\n' "$SELECTION_SCOPE"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0082691Z ^[[36;1m  printf 'units=%s\n' "$SELECTION_UNITS"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0083242Z ^[[36;1m  printf 'full_units=%s\n' "$SELECTION_FULL_UNITS"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0083855Z ^[[36;1m  printf 'plan_digest=%s\n' "$SELECTION_PLAN_DIGEST"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0084448Z ^[[36;1m} > .velnor-ci-selection/velnor-ci-selection^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0117104Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0117668Z env:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0118425Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0119332Z   SELECTION_BASE_SHA: 52739e176c1cba3ddeeff1ca21eda2edadb52b17
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0119967Z   SELECTION_HEAD_SHA: d4b41c6ec765b59199602ce4f4917de151fcbb1c
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0120516Z   SELECTION_SCOPE: affected
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0125214Z   SELECTION_UNITS: [{"providers":["github-hosted","velnor"],"unit_id":"bun-velnor"},{"providers":["github-hosted","velnor"],"unit_id":"docker"},{"providers":["github-hosted","velnor"],"unit_id":"docs"},{"providers":["github-hosted","velnor"],"unit_id":"opentofu"},{"providers":["github-hosted","velnor"],"unit_id":"rust-policy"},{"providers":["github-hosted","velnor"],"unit_id":"rust-production-topology"},{"providers":["github-hosted","velnor"],"unit_id":"rust-unit-collector"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-bench"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-client"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-control"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-model"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-render"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-runner"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-tools"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-workflow"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnor-workflow-contract"},{"providers":["github-hosted","velnor"],"unit_id":"rust-velnorctl"}]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0132067Z   SELECTION_FULL_UNITS: bun-velnor,docker,docs,opentofu,rust-policy,rust-production-topology,rust-unit-collector,rust-velnor-bench,rust-velnor-client,rust-velnor-control,rust-velnor-model,rust-velnor-render,rust-velnor-runner,rust-velnor-tools,rust-velnor-workflow,rust-velnor-workflow-contract,rust-velnorctl
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0134266Z   SELECTION_PLAN_DIGEST: 8563e4d2f58b08d6
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0134743Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0243968Z ##[group]Run timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0245145Z ^[[36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0245932Z ^[[36;1mumask 077^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0246355Z ^[[36;1mmkdir -p "$timing_dir"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0246838Z ^[[36;1mmarker="$timing_dir/SELECTION_ENDED"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0247356Z ^[[36;1mif [[ ! -e "$marker" ]]; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0247946Z ^[[36;1m  if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0248566Z ^[[36;1m    chmod 0444 "$marker" 2>/dev/null || true^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0249047Z ^[[36;1m  fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0249411Z ^[[36;1mfi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0281785Z shell: /usr/bin/bash -e {0}
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0282239Z env:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0282998Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0283798Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0419148Z ##[group]Run timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0420329Z ^[[36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0421360Z ^[[36;1mumask 077^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0421819Z ^[[36;1mmkdir -p "$timing_dir"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0422319Z ^[[36;1mmarker="$timing_dir/TOOL_BOOTSTRAP_ENDED"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0422836Z ^[[36;1mif [[ ! -e "$marker" ]]; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0423417Z ^[[36;1m  if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0424044Z ^[[36;1m    chmod 0444 "$marker" 2>/dev/null || true^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0424535Z ^[[36;1m  fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0424906Z ^[[36;1mfi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0458412Z shell: /usr/bin/bash -e {0}
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0458856Z env:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0459599Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.0460366Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.1206854Z ##[group]Run actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.1207502Z with:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.1207879Z   path: ~/.npm
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.1208718Z   key: ci-Linux-X64-github-hosted-linux-x64-untrusted-ok-docs-ee28dd0a9a8d81c176a80d1dfc679113ced5835f4e80dad14bf3fcb2c26fe6ce
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.1209778Z   restore-keys: ci-Linux-X64-github-hosted-linux-x64-untrusted-ok-docs-
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.1210402Z   enableCrossOsArchive: false
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.1210857Z   fail-on-cache-miss: false
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.1211685Z   lookup-only: false
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.1212085Z env:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.1212768Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.1213518Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3080145Z Cache not found for input keys: ci-Linux-X64-github-hosted-linux-x64-untrusted-ok-docs-ee28dd0a9a8d81c176a80d1dfc679113ced5835f4e80dad14bf3fcb2c26fe6ce, ci-Linux-X64-github-hosted-linux-x64-untrusted-ok-docs-
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3271441Z ##[group]Run timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3272667Z ^[[36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3273661Z ^[[36;1mumask 077^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3274126Z ^[[36;1mmkdir -p "$timing_dir"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3274612Z ^[[36;1mmarker="$timing_dir/CACHE_PREP_ENDED"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3275103Z ^[[36;1mif [[ ! -e "$marker" ]]; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3275672Z ^[[36;1m  if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3276281Z ^[[36;1m    chmod 0444 "$marker" 2>/dev/null || true^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3276753Z ^[[36;1m  fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3277109Z ^[[36;1mfi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3314822Z shell: /usr/bin/bash -e {0}
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3315268Z env:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3316009Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3316790Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3460894Z ##[group]Run timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3462365Z ^[[36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3463111Z ^[[36;1mumask 077^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3463519Z ^[[36;1mmkdir -p "$timing_dir"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3463990Z ^[[36;1mmarker="$timing_dir/CARGO_FETCH_ENDED"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3464486Z ^[[36;1mif [[ ! -e "$marker" ]]; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3465038Z ^[[36;1m  if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3465652Z ^[[36;1m    chmod 0444 "$marker" 2>/dev/null || true^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3466122Z ^[[36;1m  fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3466492Z ^[[36;1mfi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3501342Z shell: /usr/bin/bash -e {0}
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3501823Z env:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3502561Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3503326Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3646997Z ##[group]Run set -o pipefail
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3647557Z ^[[36;1mset -o pipefail^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3648311Z ^[[36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3649114Z ^[[36;1mumask 077^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3649523Z ^[[36;1mmkdir -p "$timing_dir"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3649992Z ^[[36;1mmarker="$timing_dir/CHECKS_STARTED"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3650482Z ^[[36;1mif [[ ! -e "$marker" ]]; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3651336Z ^[[36;1m  if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3652091Z ^[[36;1m    chmod 0444 "$marker" 2>/dev/null || true^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3652565Z ^[[36;1m  fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3652920Z ^[[36;1mfi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3653266Z ^[[36;1mrc=0^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3654090Z ^[[36;1mvelnor-workflow run --config .github/ci/project.toml --scope "$CI_SCOPE" --unit "$CI_UNIT_ID" 2>&1 | tee "$RUNNER_TEMP/velnor-unit-log.txt" || rc=$?^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3655251Z ^[[36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3655996Z ^[[36;1mumask 077^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3656414Z ^[[36;1mmkdir -p "$timing_dir"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3656871Z ^[[36;1mmarker="$timing_dir/CHECKS_ENDED"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3657342Z ^[[36;1mif [[ ! -e "$marker" ]]; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3657899Z ^[[36;1m  if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3658518Z ^[[36;1m    chmod 0444 "$marker" 2>/dev/null || true^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3658982Z ^[[36;1m  fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3659338Z ^[[36;1mfi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3659686Z ^[[36;1mexit $rc^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3694122Z shell: /usr/bin/bash -e {0}
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3694557Z env:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3695249Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3696185Z   CI_SCOPE: affected
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3696578Z   CI_UNIT_ID: docs
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3696964Z   EVENT_NAME: pull_request
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3697429Z   BASE_SHA: 52739e176c1cba3ddeeff1ca21eda2edadb52b17
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3697969Z   HEAD_SHA: d4b41c6ec765b59199602ce4f4917de151fcbb1c
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3698564Z   VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3699112Z   MISE_AUTO_INSTALL: false
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3699534Z   MISE_EXEC_AUTO_INSTALL: false
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3699994Z   MISE_NOT_FOUND_AUTO_INSTALL: false
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3700433Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3814693Z error: invalid unit id in CI selection artifact: [{"providers":["github-hosted"
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3867791Z ##[error]Process completed with exit code 1.
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3968290Z ##[group]Run timing_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3969462Z ^[[36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3970216Z ^[[36;1mumask 077^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3970624Z ^[[36;1mmkdir -p "$timing_dir"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3971375Z ^[[36;1mmarker="$timing_dir/CLEANUP_ENDED"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3971863Z ^[[36;1mif [[ ! -e "$marker" ]]; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3972437Z ^[[36;1m  if (set -C; printf '%s\n' "$(date +%s)" > "$marker") 2>/dev/null; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3973033Z ^[[36;1m    chmod 0444 "$marker" 2>/dev/null || true^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3973489Z ^[[36;1m  fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.3973840Z ^[[36;1mfi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4010211Z shell: /usr/bin/bash -e {0}
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4010640Z env:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4011628Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4012387Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4407667Z Prepare all required actions
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4624436Z ##[group]Run ./.github/actions/report-velnor-ci-outcomes
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4625125Z with:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4625785Z   job_label: docs
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4626435Z   ci_lane: github
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4627660Z   cache_cargo_primary: ci-Linux-X64-github-hosted-linux-x64-untrusted-ok-docs-ee28dd0a9a8d81c176a80d1dfc679113ced5835f4e80dad14bf3fcb2c26fe6ce
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4628719Z env:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4629505Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4630401Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4694609Z ##[start-action display=Report phase timings and cache outcomes;id=__self.__run]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4731836Z ##[group]Run set -uo pipefail
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4732842Z ^[[36;1mset -uo pipefail^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4733311Z ^[[36;1mmax_telemetry_seconds=$((7 * 24 * 60 * 60))^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4734165Z ^[[36;1mtiming_dir="$RUNNER_TEMP/velnor-ci-timing-${GITHUB_RUN_ID:-unknown}-${GITHUB_RUN_ATTEMPT:-0}-${GITHUB_JOB:-unknown}"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4734938Z ^[[36;1mjob_ended="$(date +%s)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4735402Z ^[[36;1mlog="$RUNNER_TEMP/velnor-unit-log.txt"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4735896Z ^[[36;1mlog_present=false^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4736359Z ^[[36;1mif [[ -s "$log" ]]; then log_present=true; fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4736843Z ^[[36;1mread_marker() {^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4737246Z ^[[36;1m  local marker="$1"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4737660Z ^[[36;1m  local value=""^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4738098Z ^[[36;1m  if [[ -r "$timing_dir/$marker" ]]; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4738657Z ^[[36;1m    IFS= read -r value < "$timing_dir/$marker" || true^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4739165Z ^[[36;1m  fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4739552Z ^[[36;1m  printf '%s' "$value"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4739957Z ^[[36;1m}^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4740322Z ^[[36;1mvalid_epoch() {^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4740751Z ^[[36;1m  [[ "${1:-}" =~ ^[1-9][0-9]{9}$ ]]^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4741400Z ^[[36;1m}^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4741969Z ^[[36;1mbounded_duration() {^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4742394Z ^[[36;1m  local duration="${1:-}"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4742860Z ^[[36;1m  [[ "$duration" =~ ^[0-9]+$ ]] || return 1^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4743360Z ^[[36;1m  [[ "${#duration}" -le 6 ]] || return 1^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4743875Z ^[[36;1m  (( 10#$duration <= max_telemetry_seconds ))^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4744330Z ^[[36;1m}^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4744691Z ^[[36;1mphase_seconds() {^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4745125Z ^[[36;1m  local start="${1:-}" end="${2:-}"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4745711Z ^[[36;1m  if valid_epoch "$start" && valid_epoch "$end" && valid_epoch "$job_ended" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4746365Z ^[[36;1m    && (( 10#$end >= 10#$start && 10#$end <= 10#$job_ended \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4746972Z ^[[36;1m      && 10#$job_ended - 10#$start <= max_telemetry_seconds )); then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4747547Z ^[[36;1m    local duration=$((10#$end - 10#$start))^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4748061Z ^[[36;1m    if bounded_duration "$duration"; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4748553Z ^[[36;1m      echo "$duration"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4748969Z ^[[36;1m      return 0^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4749355Z ^[[36;1m    fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4749712Z ^[[36;1m  fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4750065Z ^[[36;1m  return 1^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4750419Z ^[[36;1m}^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4750836Z ^[[36;1mjob_started="$(read_marker JOB_STARTED)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4751496Z ^[[36;1mjob_started_usable=false^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4751951Z ^[[36;1mtotal_source="unusable_job_start"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4752394Z ^[[36;1mtotal=""^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4752794Z ^[[36;1mif valid_epoch "$job_started"; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4753391Z ^[[36;1m  total_candidate="$(phase_seconds "$job_started" "$job_ended" || true)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4753996Z ^[[36;1m  if [[ -n "$total_candidate" ]]; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4754470Z ^[[36;1m    total="$total_candidate"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4755091Z ^[[36;1m    job_started_usable=true^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4755548Z ^[[36;1m    total_source="job_markers"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4755984Z ^[[36;1m  fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4756336Z ^[[36;1mfi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4756774Z ^[[36;1mrunner_setup_end="$(read_marker RUNNER_SETUP_ENDED)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4757358Z ^[[36;1mselection_end="$(read_marker SELECTION_ENDED)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4757938Z ^[[36;1mtool_bootstrap_end="$(read_marker TOOL_BOOTSTRAP_ENDED)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4758542Z ^[[36;1mcache_prep_end="$(read_marker CACHE_PREP_ENDED)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4759109Z ^[[36;1mcargo_fetch_end="$(read_marker CARGO_FETCH_ENDED)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4759666Z ^[[36;1mchecks_started="$(read_marker CHECKS_STARTED)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4760198Z ^[[36;1mchecks_ended="$(read_marker CHECKS_ENDED)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4760717Z ^[[36;1mcleanup_end="$(read_marker CLEANUP_ENDED)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4761458Z ^[[36;1mrunner_setup="$(phase_seconds "$job_started" "$runner_setup_end" || true)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4762230Z ^[[36;1mselection_transport="$(phase_seconds "$runner_setup_end" "$selection_end" || true)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4763025Z ^[[36;1mtool_bootstrap="$(phase_seconds "$selection_end" "$tool_bootstrap_end" || true)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4763778Z ^[[36;1mcache_prep="$(phase_seconds "$tool_bootstrap_end" "$cache_prep_end" || true)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4764510Z ^[[36;1mcargo_fetch="$(phase_seconds "$cache_prep_end" "$cargo_fetch_end" || true)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4765233Z ^[[36;1mchecks_wall="$(phase_seconds "$checks_started" "$checks_ended" || true)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4765916Z ^[[36;1mcleanup="$(phase_seconds "$checks_ended" "$cleanup_end" || true)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4766461Z ^[[36;1mqueue=""^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4766840Z ^[[36;1mqueue_source=""^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4767273Z ^[[36;1mjob_name="${VELNOR_JOB_NAME:-}"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4767855Z ^[[36;1mrun_started="${VELNOR_CONTEXT_RUN_STARTED_AT:-${VELNOR_RUN_STARTED_AT:-}}"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4768485Z ^[[36;1mqueue_at="${VELNOR_JOB_QUEUED_AT:-}"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4768971Z ^[[36;1mrfc3339_epoch() {^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4769536Z ^[[36;1m  local value="${1:-}"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4783958Z ^[[36;1m  [[ -n "$value" ]] || return 1^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4784784Z ^[[36;1m  jq -nr --arg value "$value" '^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4785453Z ^[[36;1m    try ($value | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601)^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4786011Z ^[[36;1m    catch empty^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4786428Z ^[[36;1m  ' 2>/dev/null^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4786809Z ^[[36;1m}^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4787200Z ^[[36;1mqueue_seconds_from_timestamp() {^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4787685Z ^[[36;1m  local timestamp="${1:-}"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4788135Z ^[[36;1m  local queued_epoch=""^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4788579Z ^[[36;1m  local queue_candidate=""^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4789089Z ^[[36;1m  queued_epoch="$(rfc3339_epoch "$timestamp" || true)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4789758Z ^[[36;1m  if valid_epoch "$queued_epoch" && [[ "$job_started_usable" == true ]] \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4790390Z ^[[36;1m    && (( 10#$job_started >= 10#$queued_epoch )); then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4791222Z ^[[36;1m    queue_candidate=$((10#$job_started - 10#$queued_epoch))^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4791866Z ^[[36;1m    if bounded_duration "$queue_candidate"; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4792374Z ^[[36;1m      echo "$queue_candidate"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4792809Z ^[[36;1m      return 0^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4793195Z ^[[36;1m    fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4793548Z ^[[36;1m  fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4793911Z ^[[36;1m  return 1^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4794276Z ^[[36;1m}^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4794770Z ^[[36;1mif command -v jq >/dev/null 2>&1 && [[ "$job_started_usable" == true ]]; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4795357Z ^[[36;1m  if [[ -n "$queue_at" ]]; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4795940Z ^[[36;1m    queue_candidate="$(queue_seconds_from_timestamp "$queue_at" || true)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4796572Z ^[[36;1m    if bounded_duration "$queue_candidate"; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4797272Z ^[[36;1m      queue="$queue_candidate"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4797801Z ^[[36;1m      queue_source="job_queue_time"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4798257Z ^[[36;1m    fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4798616Z ^[[36;1m  fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4799049Z ^[[36;1m  if [[ -z "$queue" && -n "$run_started" ]]; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4799678Z ^[[36;1m    queue_candidate="$(queue_seconds_from_timestamp "$run_started" || true)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4800319Z ^[[36;1m    if bounded_duration "$queue_candidate"; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4800817Z ^[[36;1m      queue="$queue_candidate"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4801597Z ^[[36;1m      queue_source="workflow_run_started_at"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4802072Z ^[[36;1m    fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4802428Z ^[[36;1m  fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4802780Z ^[[36;1mfi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4803153Z ^[[36;1mif [[ -z "$job_name" ]]; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4803597Z ^[[36;1m  job_name="unknown"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4804006Z ^[[36;1mfi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4804385Z ^[[36;1mclassify_gha_cache() {^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4804856Z ^[[36;1m  local primary="${1:-}" matched="${2:-}"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4805384Z ^[[36;1m  if [[ -z "$primary" && -z "$matched" ]]; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4805858Z ^[[36;1m    return 0^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4806229Z ^[[36;1m  fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4806604Z ^[[36;1m  if [[ -z "$matched" ]]; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4807037Z ^[[36;1m    echo cold^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4807475Z ^[[36;1m  elif [[ "$primary" == "$matched" ]]; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4807938Z ^[[36;1m    echo exact^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4808319Z ^[[36;1m  else^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4808687Z ^[[36;1m    echo prefix^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4809080Z ^[[36;1m  fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4809437Z ^[[36;1m}^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4809794Z ^[[36;1mhost_warm_layer() {^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4810210Z ^[[36;1m  local layer="$1"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4810670Z ^[[36;1m  local layers="${VELNOR_HOST_WARM_LAYERS:-}"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4811374Z ^[[36;1m  [[ -n "$layers" ]] || return 1^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4811846Z ^[[36;1m  [[ ",$layers," == *",$layer,"* ]]^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4812445Z ^[[36;1m}^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4812805Z ^[[36;1mclassify_mbx() {^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4813227Z ^[[36;1m  if host_warm_layer mbx; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4813665Z ^[[36;1m    echo host_warm^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4814063Z ^[[36;1m    return^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4814429Z ^[[36;1m  fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4814830Z ^[[36;1m  local hit="${VELNOR_CACHE_MBX_HIT:-}"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4815324Z ^[[36;1m  if [[ "$hit" == "true" ]]; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4815767Z ^[[36;1m    echo exact^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4816151Z ^[[36;1m    return^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4816521Z ^[[36;1m  fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4816900Z ^[[36;1m  if [[ -s "$log" ]]; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4817364Z ^[[36;1m    if grep -qiE 'exact hit' "$log"; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4817831Z ^[[36;1m      echo exact^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4818226Z ^[[36;1m      return^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4818594Z ^[[36;1m    fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4819004Z ^[[36;1m    if grep -qiE 'warm start' "$log"; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4819484Z ^[[36;1m      echo prefix^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4819893Z ^[[36;1m      return^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4820256Z ^[[36;1m    fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4820687Z ^[[36;1m    if grep -qiE '(^|[^a-z])miss([^a-z]|$)' "$log"; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4821516Z ^[[36;1m      echo cold^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4822083Z ^[[36;1m      return^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4822460Z ^[[36;1m    fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4822810Z ^[[36;1m  fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4823188Z ^[[36;1m  if [[ "$hit" == "false" ]]; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4823637Z ^[[36;1m    echo prefix^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4824027Z ^[[36;1m    return^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4824388Z ^[[36;1m  fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4824743Z ^[[36;1m  echo cold^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4825103Z ^[[36;1m}^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4825474Z ^[[36;1mcache_outcome_for() {^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4825899Z ^[[36;1m  local layer="$1"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4826494Z ^[[36;1m  local primary="${2:-}" matched="${3:-}"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4826997Z ^[[36;1m  if host_warm_layer "$layer"; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4827458Z ^[[36;1m    echo host_warm^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4827858Z ^[[36;1m    return^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4828223Z ^[[36;1m  fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4828600Z ^[[36;1m  if [[ "$layer" == mbx ]]; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4829048Z ^[[36;1m    classify_mbx^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4829440Z ^[[36;1m    return^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4829805Z ^[[36;1m  fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4830213Z ^[[36;1m  classify_gha_cache "$primary" "$matched"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4830674Z ^[[36;1m}^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4831613Z ^[[36;1mrustup_outcome="$(cache_outcome_for rustup "${VELNOR_CACHE_RUSTUP_PRIMARY:-}" "${VELNOR_CACHE_RUSTUP_MATCHED:-}")"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4832595Z ^[[36;1mmold_outcome="$(cache_outcome_for mold "${VELNOR_CACHE_MOLD_PRIMARY:-}" "${VELNOR_CACHE_MOLD_MATCHED:-}")"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4833547Z ^[[36;1mcargo_outcome="$(cache_outcome_for cargo "${VELNOR_CACHE_CARGO_PRIMARY:-}" "${VELNOR_CACHE_CARGO_MATCHED:-}")"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4834308Z ^[[36;1mmbx_outcome="$(cache_outcome_for mbx "" "")"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4835137Z ^[[36;1mdocker_seed_outcome="$(cache_outcome_for docker_seed "${VELNOR_CACHE_DOCKER_SEED_PRIMARY:-}" "${VELNOR_CACHE_DOCKER_SEED_MATCHED:-}")"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4835935Z ^[[36;1mupdating_index=0^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4836355Z ^[[36;1mupdating_git=0^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4836763Z ^[[36;1mdownloading_crates=0^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4837187Z ^[[36;1mcompiling_count=0^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4837603Z ^[[36;1mdownloaded_lines=""^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4838014Z ^[[36;1mmbx_lines=""^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4838413Z ^[[36;1mfinished_lines=""^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4838827Z ^[[36;1mif [[ -s "$log" ]]; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4839388Z ^[[36;1m  updating_index="$(grep -c 'Updating crates.io index' "$log" || true)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4840118Z ^[[36;1m  updating_git="$(grep -cE 'Updating git (repository|submodule)' "$log" || true)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4840850Z ^[[36;1m  downloading_crates="$(grep -c 'Downloading crates' "$log" || true)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4841985Z ^[[36;1m  compiling_count="$(grep -c 'Compiling ' "$log" || true)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4842660Z ^[[36;1m  downloaded_lines="$(grep -E 'Downloaded [0-9]+ crate' "$log" || true)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4843372Z ^[[36;1m  mbx_lines="$(grep -E 'mbx(\[cache\])?:' "$log" | grep -E 'hits|misses' || true)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4844050Z ^[[36;1m  finished_lines="$(grep -E 'Finished .* in ' "$log" || true)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4844574Z ^[[36;1mfi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4844936Z ^[[36;1mpositive_int() {^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4845352Z ^[[36;1m  local value="$1"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4845785Z ^[[36;1m  [[ "$value" =~ ^[0-9]+$ ]] || value=0^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4846249Z ^[[36;1m  printf '%s' "$value"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4846652Z ^[[36;1m}^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4847024Z ^[[36;1mcache_outcomes_json='{}'^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4847486Z ^[[36;1mif command -v jq >/dev/null 2>&1; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4847988Z ^[[36;1m  cache_outcomes_json="$(jq -nc \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4848480Z ^[[36;1m    --arg lane "${VELNOR_CI_LANE:-}" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4848974Z ^[[36;1m    --arg rustup "$rustup_outcome" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4849449Z ^[[36;1m    --arg mold "$mold_outcome" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4849913Z ^[[36;1m    --arg cargo "$cargo_outcome" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4850385Z ^[[36;1m    --arg mbx "$mbx_outcome" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4850884Z ^[[36;1m    --arg docker_seed "$docker_seed_outcome" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4851481Z ^[[36;1m    '{^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4851915Z ^[[36;1m      lane: ($lane | if length > 0 then . else null end),^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4852498Z ^[[36;1m      rustup: ($rustup | if length > 0 then . else null end),^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4853092Z ^[[36;1m      mold: ($mold | if length > 0 then . else null end),^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4853663Z ^[[36;1m      cargo: ($cargo | if length > 0 then . else null end),^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4854357Z ^[[36;1m      mbx: ($mbx | if length > 0 then . else null end),^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4854972Z ^[[36;1m      docker_seed: ($docker_seed | if length > 0 then . else null end)^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4855549Z ^[[36;1m    }' 2>/dev/null || echo '{}')"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4855981Z ^[[36;1mfi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4856349Z ^[[36;1mcold_layers=()^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4856826Z ^[[36;1mfor layer in rustup mold cargo mbx docker_seed; do^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4857322Z ^[[36;1m  outcome=""^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4857719Z ^[[36;1m  case "$layer" in^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4858170Z ^[[36;1m    rustup) outcome="$rustup_outcome" ;;^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4858671Z ^[[36;1m    mold) outcome="$mold_outcome" ;;^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4859158Z ^[[36;1m    cargo) outcome="$cargo_outcome" ;;^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4859642Z ^[[36;1m    mbx) outcome="$mbx_outcome" ;;^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4860157Z ^[[36;1m    docker_seed) outcome="$docker_seed_outcome" ;;^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4860632Z ^[[36;1m  esac^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4861137Z ^[[36;1m  if [[ "$outcome" == cold ]]; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4861603Z ^[[36;1m    cold_layers+=("$layer")^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4862034Z ^[[36;1m  fi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4862387Z ^[[36;1mdone^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4862765Z ^[[36;1mreport_json="$(jq -nc \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4863199Z ^[[36;1m  --arg job "$job_name" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4863638Z ^[[36;1m  --arg queue "$queue" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4864092Z ^[[36;1m  --arg queue_source "$queue_source" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4864586Z ^[[36;1m  --arg total_source "$total_source" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4865087Z ^[[36;1m  --arg runner_setup "$runner_setup" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4865630Z ^[[36;1m  --arg selection_transport "$selection_transport" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4866177Z ^[[36;1m  --arg tool_bootstrap "$tool_bootstrap" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4866678Z ^[[36;1m  --arg cache_prep "$cache_prep" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4867161Z ^[[36;1m  --arg cargo_fetch "$cargo_fetch" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4867655Z ^[[36;1m  --arg checks_wall "$checks_wall" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4868128Z ^[[36;1m  --arg cleanup "$cleanup" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4868707Z ^[[36;1m  --arg total "$total" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4869168Z ^[[36;1m  --argjson log_present "$log_present" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4869758Z ^[[36;1m  --argjson updating_index "$(positive_int "$updating_index")" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4870399Z ^[[36;1m  --argjson updating_git "$(positive_int "$updating_git")" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4871183Z ^[[36;1m  --argjson downloading_crates "$(positive_int "$downloading_crates")" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4871889Z ^[[36;1m  --argjson compiling_count "$(positive_int "$compiling_count")" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4872745Z ^[[36;1m  --argjson downloaded_lines "$(printf '%s' "$downloaded_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4873684Z ^[[36;1m  --argjson mbx "$(printf '%s' "$mbx_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4874583Z ^[[36;1m  --argjson finished "$(printf '%s' "$finished_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4875342Z ^[[36;1m  --argjson cache_outcomes "$cache_outcomes_json" \^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4875826Z ^[[36;1m  '{^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4876195Z ^[[36;1m    schema_version: 1,^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4876612Z ^[[36;1m    job: $job,^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4877016Z ^[[36;1m    log_present: $log_present,^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4877588Z ^[[36;1m    queue_seconds: ($queue | if test("^[0-9]+$") then tonumber else null end),^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4878283Z ^[[36;1m    queue_source: ($queue_source | if length > 0 then . else null end),^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4878861Z ^[[36;1m    total_source: $total_source,^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4879485Z ^[[36;1m    runner_setup_seconds: ($runner_setup | if test("^[0-9]+$") then tonumber else null end),^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4880357Z ^[[36;1m    selection_transport_seconds: ($selection_transport | if test("^[0-9]+$") then tonumber else null end),^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4881470Z ^[[36;1m    tool_bootstrap_seconds: ($tool_bootstrap | if test("^[0-9]+$") then tonumber else null end),^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4882292Z ^[[36;1m    cache_prep_seconds: ($cache_prep | if test("^[0-9]+$") then tonumber else null end),^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4883072Z ^[[36;1m    cargo_fetch_seconds: ($cargo_fetch | if test("^[0-9]+$") then tonumber else null end),^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4883858Z ^[[36;1m    checks_wall_seconds: ($checks_wall | if test("^[0-9]+$") then tonumber else null end),^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4884617Z ^[[36;1m    checks_seconds: ($checks_wall | if test("^[0-9]+$") then tonumber else null end),^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4885359Z ^[[36;1m    cleanup_seconds: ($cleanup | if test("^[0-9]+$") then tonumber else null end),^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4886072Z ^[[36;1m    total_seconds: ($total | if test("^[0-9]+$") then tonumber else null end),^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4886671Z ^[[36;1m    cache_outcomes: $cache_outcomes,^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4887136Z ^[[36;1m    origin_downloads: {^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4887613Z ^[[36;1m      updating_crates_io_index: $updating_index,^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4888117Z ^[[36;1m      updating_git: $updating_git,^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4888619Z ^[[36;1m      downloading_crates: $downloading_crates,^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4889122Z ^[[36;1m      downloaded_lines: $downloaded_lines^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4889568Z ^[[36;1m    },^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4889932Z ^[[36;1m    compiler: {^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4890347Z ^[[36;1m      mbx_outcomes: $mbx,^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4890795Z ^[[36;1m      finished_segments: $finished,^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4891398Z ^[[36;1m      compiling_lines: $compiling_count^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4891843Z ^[[36;1m    }^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4892216Z ^[[36;1m  }' 2>/dev/null || true)"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4892653Z ^[[36;1mif [[ -z "$report_json" ]]; then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4893180Z ^[[36;1m  report_json="VELNOR_CI_REPORT_FALLBACK job=$job_name"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4893672Z ^[[36;1mfi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4894064Z ^[[36;1mecho "VELNOR_CI_REPORT $report_json"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4894509Z ^[[36;1m{^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4894983Z ^[[36;1m  echo ""^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4895407Z ^[[36;1m  echo '### Phase timings and cache outcomes'^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4895869Z ^[[36;1m  echo ""^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4896235Z ^[[36;1m  echo '```json'^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4896632Z ^[[36;1m  echo "$report_json"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4897035Z ^[[36;1m  echo '```'^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4897431Z ^[[36;1m  echo ""^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4897845Z ^[[36;1m  echo "| metric | value |"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4898278Z ^[[36;1m  echo "| --- | --- |"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4898735Z ^[[36;1m  echo "| lane | ${VELNOR_CI_LANE:-unknown} |"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4899295Z ^[[36;1m  echo "| cache_outcomes.rustup | ${rustup_outcome:-n/a} |"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4899883Z ^[[36;1m  echo "| cache_outcomes.mold | ${mold_outcome:-n/a} |"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4900461Z ^[[36;1m  echo "| cache_outcomes.cargo | ${cargo_outcome:-n/a} |"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4901191Z ^[[36;1m  echo "| cache_outcomes.mbx | ${mbx_outcome:-n/a} |"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4901809Z ^[[36;1m  echo "| cache_outcomes.docker_seed | ${docker_seed_outcome:-n/a} |"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4902413Z ^[[36;1m  echo "| queue_seconds | ${queue:-unknown} |"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4902977Z ^[[36;1m  echo "| runner_setup_seconds | ${runner_setup:-unknown} |"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4903632Z ^[[36;1m  echo "| selection_transport_seconds | ${selection_transport:-unknown} |"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4904301Z ^[[36;1m  echo "| tool_bootstrap_seconds | ${tool_bootstrap:-unknown} |"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4904906Z ^[[36;1m  echo "| cache_prep_seconds | ${cache_prep:-unknown} |"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4905485Z ^[[36;1m  echo "| cargo_fetch_seconds | ${cargo_fetch:-unknown} |"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4906072Z ^[[36;1m  echo "| checks_wall_seconds | ${checks_wall:-unknown} |"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4906644Z ^[[36;1m  echo "| cleanup_seconds | ${cleanup:-unknown} |"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4907175Z ^[[36;1m  echo "| total_seconds | ${total:-unknown} |"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4907839Z ^[[36;1m  echo "| updating_crates_io_index | $updating_index |"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4908396Z ^[[36;1m  echo "| updating_git | $updating_git |"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4908932Z ^[[36;1m  echo "| downloading_crates | $downloading_crates |"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4909486Z ^[[36;1m  echo "| compiling_lines | $compiling_count |"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4910015Z ^[[36;1m} >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4910507Z ^[[36;1mif ((${#cold_layers[@]} > 0)); then^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4911253Z ^[[36;1m  echo "::warning::Cold cache layer(s): ${cold_layers[*]} (lane=${VELNOR_CI_LANE:-unknown})"^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4911854Z ^[[36;1mfi^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4912198Z ^[[36;1mexit 0^[[0m
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4950202Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4950728Z env:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4951548Z   VELNOR_WORKFLOW_PINNED_BINARY: /home/runner/work/_temp/velnor-workflow-runtime-artifact/bin/velnor-workflow-policy
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4952315Z   VELNOR_JOB_NAME: docs
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4952730Z   VELNOR_CONTEXT_RUN_STARTED_AT: 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4953157Z   VELNOR_CI_LANE: github
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4953547Z   VELNOR_HOST_WARM_LAYERS: 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4953950Z   VELNOR_RUN_STARTED_AT: 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4954343Z   VELNOR_JOB_QUEUED_AT: 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4954739Z   VELNOR_CACHE_RUSTUP_PRIMARY: 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4955160Z   VELNOR_CACHE_RUSTUP_MATCHED: 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4955587Z   VELNOR_CACHE_MOLD_PRIMARY: 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4956002Z   VELNOR_CACHE_MOLD_MATCHED: 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4956929Z   VELNOR_CACHE_CARGO_PRIMARY: ci-Linux-X64-github-hosted-linux-x64-untrusted-ok-docs-ee28dd0a9a8d81c176a80d1dfc679113ced5835f4e80dad14bf3fcb2c26fe6ce
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4957887Z   VELNOR_CACHE_CARGO_MATCHED: 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4958301Z   VELNOR_CACHE_MBX_HIT: 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4958705Z   VELNOR_CACHE_MBX_PRIMARY: 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4959116Z   VELNOR_CACHE_DOCKER_SEED_PRIMARY: 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4959560Z   VELNOR_CACHE_DOCKER_SEED_MATCHED: 
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.4959974Z ##[endgroup]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.5521585Z VELNOR_CI_REPORT {"schema_version":1,"job":"docs","log_present":true,"queue_seconds":null,"queue_source":null,"total_source":"job_markers","runner_setup_seconds":3,"selection_transport_seconds":0,"tool_bootstrap_seconds":0,"cache_prep_seconds":0,"cargo_fetch_seconds":0,"checks_wall_seconds":0,"checks_seconds":0,"cleanup_seconds":0,"total_seconds":3,"cache_outcomes":{"lane":"github","rustup":null,"mold":null,"cargo":"cold","mbx":"cold","docker_seed":null},"origin_downloads":{"updating_crates_io_index":0,"updating_git":0,"downloading_crates":0,"downloaded_lines":[]},"compiler":{"mbx_outcomes":[],"finished_segments":[],"compiling_lines":0}}
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.5537135Z ##[warning]Cold cache layer(s): cargo mbx (lane=github)
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.5563333Z ##[end-action id=__self.__run;outcome=success;conclusion=success;duration_ms=86]
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.5709685Z Post job cleanup.
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.6546989Z [command]/usr/bin/git version
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.6591890Z git version 2.55.0
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.6628156Z Temporarily overriding HOME='/home/runner/work/_temp/c0e758f2-b815-425e-bd4d-095b5429aa82' before making global git config changes
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.6630074Z Adding repository directory to the temporary git global config as a safe directory
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.6634391Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor/velnor
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.6667020Z Removing SSH command configuration
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.6673804Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.6711232Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.6956847Z Removing HTTP extra header
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.6963823Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.7004584Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.7302414Z Removing includeIf entries pointing to credentials config files
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.7303522Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.7350409Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+Documentation · Documentation · github-hosted — docs / GitHub · hosted	UNKNOWN STEP	2026-09-17T12:25:13.7837696Z Cleaning up orphan processes

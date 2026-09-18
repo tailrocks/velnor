@@ -1,0 +1,6 @@
+package-state.json: OK
+true
+true
+package-state.json: OK
+package-update: unknown channel: beta
+package-update preview channel checks passed

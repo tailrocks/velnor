@@ -1,0 +1,354 @@
+Command line invocation:
+    /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild test -project native/JackinDesktop.xcodeproj -scheme JackinDesktop -destination platform=macOS -parallel-testing-enabled NO "-only-testing:JackinDesktopUITests/JackinDesktopUITests/testOverviewPassesAccessibilityAudit" -derivedDataPath native/DerivedData -resultBundlePath /tmp/fix4.xcresult
+
+Writing result bundle at path:
+	/tmp/fix4.xcresult
+
+ComputePackagePrebuildTargetDependencyGraph
+
+Prepare packages
+
+CreateBuildRequest
+
+SendProjectDescription
+
+CreateBuildOperation
+
+ComputeTargetDependencyGraph
+note: Building targets in dependency order
+note: Target dependency graph (6 targets)
+    Target 'JackinDesktopUITests' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinDesktop' in project 'JackinDesktop'
+    Target 'JackinDesktopTests' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinDesktopUI' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBridge' in project 'JackinDesktop'
+    Target 'JackinDesktop' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinDesktopUI' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBridge' in project 'JackinDesktop'
+    Target 'JackinDesktopUI' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBridge' in project 'JackinDesktop'
+    Target 'JackinUsageBridge' in project 'JackinDesktop'
+        ➜ Explicit dependency on target 'JackinUsageBindings' in project 'JackinDesktop'
+    Target 'JackinUsageBindings' in project 'JackinDesktop' (no dependencies)
+
+GatherProvisioningInputs
+
+CreateBuildDescription
+
+ClangStatCache /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang-stat-cache /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKStatCaches.noindex/macosx27.0-26A425-7231f6df4def33e022ae2eb8f782df1a.sdkstatcache
+    cd /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/JackinDesktop.xcodeproj
+    /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang-stat-cache /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk -o /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKStatCaches.noindex/macosx27.0-26A425-7231f6df4def33e022ae2eb8f782df1a.sdkstatcache
+
+PruneExplicitPrecompiledModules /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/ExplicitPrecompiledModules
+
+PruneExplicitPrecompiledModules /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/Build/Intermediates.noindex/SwiftExplicitPrecompiledModules
+
+PruneExplicitPrecompiledModules /Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/DerivedData/SDKExplicitPrecompiledModules
+
+2026-09-18 05:00:05.130459+0700 JackinDesktopUITests-Runner[53547:131721873] [Default] Running tests...
+Test Suite 'Selected tests' started at 2026-09-18 05:00:05.163.
+Test Suite 'JackinDesktopUITests.xctest' started at 2026-09-18 05:00:05.163.
+Test Suite 'JackinDesktopUITests' started at 2026-09-18 05:00:05.163.
+Test Case '-[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit]' started.
+    t =     0.00s Start Test at 2026-09-18 05:00:05.163
+    t =     0.18s Set Up
+    t =     0.18s Open com.jackin-project.desktop
+    t =     0.20s     Launch com.jackin-project.desktop
+2026-09-18 05:00:05.398 xcodebuild[53535:131721691] [MT] IDELaunchParametersSnapshot: debugger version lookup failed for path '<nil>': noURL
+2026-09-18 05:00:05.398 xcodebuild[53535:131721691] [MT] IDELaunchParametersSnapshot: no debugger version
+    t =     0.45s         Wait for accessibility to load
+    t =     0.68s         Setting up automation session
+    t =     0.69s         Wait for com.jackin-project.desktop to idle
+    t =     0.74s Open com.jackin-project.desktop
+    t =     0.75s     Activate com.jackin-project.desktop
+    t =     0.75s         Wait for com.jackin-project.desktop to idle
+    t =     0.75s Waiting 8.0s for "usage-window" Window to exist
+    t =     1.79s     Checking `Expect predicate `existsNoRetry == 1` for object "usage-window" Window`
+    t =     1.79s         Checking existence of `"usage-window" Window`
+    t =     1.93s Open com.jackin-project.desktop
+    t =     1.93s     Activate com.jackin-project.desktop
+    t =     1.93s         Wait for com.jackin-project.desktop to idle
+    t =     1.94s Waiting 5.0s for "usage.overview.table" Any to exist
+    t =     2.98s     Checking `Expect predicate `existsNoRetry == 1` for object "usage.overview.table" Any`
+    t =     2.98s         Checking existence of `"usage.overview.table" Any`
+    t =     3.07s Find the "usage.overview.table" Any
+    t =     3.15s Find the "usage.sidebar" Any
+    t =     3.22s Get number of matches for: Descendants matching type OutlineRow
+    t =     3.29s Get number of matches for: Elements matching predicate 'identifier BEGINSWITH "usage.overview.account."'
+    t =     3.34s Find the OutlineRow (First Match)
+    t =     3.36s Find the "usage.overview.table" Outline
+    t =     3.73s Get number of matches for: Descendants matching type OutlineRow
+    t =     3.81s Get number of matches for: Elements matching predicate 'identifier BEGINSWITH "usage.overview.account."'
+    t =     3.87s Find the OutlineRow (First Match)
+    t =     3.89s Find the "usage.overview.table" Outline
+    t =     4.26s Get number of matches for: Descendants matching type OutlineRow
+    t =     4.34s Get number of matches for: Elements matching predicate 'identifier BEGINSWITH "usage.overview.account."'
+    t =     4.40s Find the OutlineRow (First Match)
+    t =     4.42s Find the "usage.overview.table" Outline
+    t =     4.78s Get number of matches for: Descendants matching type OutlineRow
+    t =     4.86s Get number of matches for: Elements matching predicate 'identifier BEGINSWITH "usage.overview.account."'
+    t =     4.92s Find the OutlineRow (First Match)
+    t =     4.93s Find the "usage.overview.table" Outline
+    t =     5.00s Get all elements bound by index for: Elements matching predicate 'identifier BEGINSWITH "usage.overview.provider."'
+    t =     5.05s Find the Any (Element at index 0)
+    t =     5.11s Find the "usage.overview.provider.codex" StaticText
+    t =     5.16s Find the Any (Element at index 1)
+    t =     5.22s Find the "usage.overview.provider.claude" StaticText
+    t =     5.27s Find the Any (Element at index 2)
+    t =     5.34s Find the "usage.overview.provider.amp" StaticText
+    t =     5.39s Find the Any (Element at index 3)
+    t =     5.44s Find the "usage.overview.provider.grok" StaticText
+    t =     5.50s Find the Any (Element at index 4)
+    t =     5.55s Find the "usage.overview.provider.zai" StaticText
+    t =     5.61s Find the Any (Element at index 5)
+    t =     5.67s Find the "usage.overview.provider.kimi" StaticText
+    t =     5.72s Find the Any (Element at index 6)
+    t =     5.78s Find the "usage.overview.provider.minimax" StaticText
+    t =     5.83s Get all elements bound by index for: Elements matching predicate 'identifier BEGINSWITH "usage.overview.account."'
+    t =     5.89s Find the Any (Element at index 0)
+    t =     5.95s Find the "usage.overview.account.codex.codex-personal" StaticText
+    t =     6.00s Find the Any (Element at index 1)
+    t =     6.06s Find the "usage.overview.account.codex.codex-plus" StaticText
+    t =     6.12s Find the Any (Element at index 2)
+    t =     6.17s Find the "usage.overview.account.claude.claude-personal" StaticText
+    t =     6.22s Find the Any (Element at index 3)
+    t =     6.29s Find the "usage.overview.account.claude.claude-work" StaticText
+    t =     6.34s Find the Any (Element at index 4)
+    t =     6.40s Find the "usage.overview.account.grok.grok-default" StaticText
+    t =     6.45s Find the Any (Element at index 5)
+    t =     6.51s Find the "usage.overview.account.zai.zai-default" StaticText
+    t =     6.56s Find the Any (Element at index 6)
+    t =     6.62s Find the "usage.overview.account.kimi.kimi-default" StaticText
+    t =     6.69s Find the Any (Element at index 7)
+    t =     7.70s     Find the Any (Element at index 7) (retry 1)
+    t =     8.74s     Find the Any (Element at index 7) (retry 2)
+    t =     8.78s     Collecting debug information to assist test failure triage
+    t =     8.78s         Requesting snapshot of accessibility hierarchy for app with pid 53552
+    t =     8.82s     Requesting snapshot of accessibility hierarchy for app with pid 53552
+    t =     8.82s Using snapshot previously cached by application
+    t =     8.83s     Find: Descendants matching type Any
+    t =     8.83s     Find: Elements matching predicate 'identifier BEGINSWITH "usage.overview.account."'
+    t =     8.83s     Requesting snapshot of accessibility hierarchy for app with pid 53552
+/Users/donbeave/Projects/tailrocks/jackin-project/jackin/native/UITests/JackinDesktopUITests.swift:952: error: -[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit] : Failed to get matching snapshot: No matches found for Elements matching predicate 'identifier BEGINSWITH "usage.overview.account."' from input {(
+    MenuBar,
+    TouchBar,
+    MenuBar,
+    MenuBarItem,
+    MenuBarItem,
+    MenuBarItem,
+    MenuBarItem,
+    MenuBarItem,
+    MenuBarItem,
+    MenuBarItem,
+    StatusItem,
+    StatusItem,
+    StatusItem,
+    Menu,
+    Menu,
+    Menu,
+    Menu,
+    Menu,
+    Menu,
+    Menu,
+    MenuItem, identifier: '_aboutThisMacRequested:',
+    MenuItem, identifier: '_systemInformationRequested:',
+    MenuItem,
+    MenuItem, identifier: '_systemSettingsRequested:',
+    MenuItem, identifier: '_appStoreRequested:',
+    MenuItem,
+    MenuItem, identifier: '_recentsRequested:',
+    MenuItem,
+    MenuItem, identifier: '_forceQuitPanelRequested:',
+    MenuItem, identifier: '_forceQuitRequested:',
+    MenuItem,
+    MenuItem, identifier: '_sleepRequested:',
+    MenuItem, identifier: '_restartRequested:',
+    MenuItem, identifier: '_restartNowRequested:',
+    MenuItem, identifier: '_shutDownRequested:',
+    MenuItem, identifier: '_shutDownNowRequested:',
+    MenuItem,
+    MenuItem, identifier: '_lockScreenRequested:',
+    MenuItem, identifier: '_logOutRequested:',
+    MenuItem, identifier: '_logOutNowRequested:',
+    MenuItem,
+    MenuItem, identifier: 'orderFrontAbout:',
+    MenuItem,
+    MenuItem, identifier: 'openSettings:',
+    MenuItem,
+    MenuItem,
+    MenuItem,
+    MenuItem, identifier: 'hide:',
+    MenuItem, identifier: 'hideOtherApplications:',
+    MenuItem, identifier: 'unhideAllApplications:',
+    MenuItem,
+    MenuItem, identifier: 'terminate:',
+    MenuItem, identifier: 'performClose:',
+    MenuItem, identifier: 'closeAll:',
+    MenuItem, identifier: 'undo:',
+    MenuItem, identifier: 'redo:',
+    MenuItem,
+    MenuItem, identifier: 'cut:',
+    MenuItem, identifier: 'copy:',
+    MenuItem, identifier: 'paste:',
+    MenuItem, identifier: 'selectAll:',
+    MenuItem,
+    MenuItem, identifier: '__NSTextViewContextSubmenuIdentifierWritingTools',
+    MenuItem, identifier: '_NSMenuItemAutoFillIdentifier',
+    MenuItem, identifier: 'startDictation:',
+    MenuItem, identifier: 'orderFrontCharacterPalette:',
+    MenuItem, identifier: 'toggleSidebar:',
+    MenuItem,
+    MenuItem, identifier: 'refreshAll:',
+    MenuItem, identifier: 'toggleFullScreen:',
+    MenuItem, identifier: 'performMiniaturize:',
+    MenuItem, identifier: 'miniaturizeAll:',
+    MenuItem, identifier: 'performZoom:',
+    MenuItem, identifier: 'zoomAll:',
+    MenuItem, identifier: '_zoomFill:',
+    MenuItem, identifier: '_zoomCenter:',
+    MenuItem,
+    MenuItem,
+    MenuItem,
+    MenuItem,
+    MenuItem, identifier: '_removeWindowFromStageManagerSet:',
+    MenuItem,
+    MenuItem, identifier: 'menu.show-usage',
+    MenuItem,
+    MenuItem, identifier: 'arrangeInFront:',
+    MenuItem, identifier: 'alternateArrangeInFront:',
+    MenuItem,
+    MenuItem, identifier: 'makeKeyAndOrderFront:',
+    MenuItem, identifier: 'showHelp:',
+    Menu,
+    Menu,
+    Menu,
+    Menu,
+    Menu,
+    MenuItem,
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem,
+    MenuItem,
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem,
+    MenuItem,
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem, identifier: '_recentItemRequested:',
+    MenuItem,
+    MenuItem, identifier: '_clearRecentItemsRequested:',
+    MenuItem, identifier: '_processRequest:',
+    MenuItem, identifier: '_processRequest:',
+    MenuItem, identifier: '_processRequest:',
+    MenuItem, identifier: '_processRequest:',
+    MenuItem, identifier: '_processRequest:',
+    MenuItem, identifier: '_processRequest:',
+    MenuItem, identifier: '_processRequest:',
+    MenuItem, identifier: '_processRequest:',
+    MenuItem, identifier: '_processRequest:',
+    MenuItem, identifier: '_processRequest:',
+    MenuItem, identifier: '_processRequest:',
+    MenuItem, identifier: '_configureServicesMenu:',
+    MenuItem, identifier: 'showWritingTools:',
+    MenuItem,
+    MenuItem, identifier: 'showWritingTools:',
+    MenuItem, identifier: 'showWritingTools:',
+    MenuItem,
+    MenuItem, identifier: 'showWritingTools:',
+    MenuItem, identifier: 'showWritingTools:',
+    MenuItem, identifier: 'showWritingTools:',
+    MenuItem,
+    MenuItem, identifier: 'showWritingTools:',
+    MenuItem, identifier: 'showWritingTools:',
+    MenuItem, identifier: 'showWritingTools:',
+    MenuItem, identifier: 'showWritingTools:',
+    MenuItem,
+    MenuItem, identifier: 'showWritingTools:',
+    MenuItem, identifier: '_handleInsertFromContactsCommand:',
+    MenuItem, identifier: '_handleInsertFromPasswordsCommand:',
+    MenuItem, identifier: '_handleInsertFromCreditCardsCommand:',
+    MenuItem,
+    MenuItem, identifier: '_zoomLeft:',
+    MenuItem, identifier: '_zoomRight:',
+    MenuItem, identifier: '_zoomTop:',
+    MenuItem, identifier: '_zoomBottom:',
+    MenuItem,
+    MenuItem,
+    MenuItem, identifier: '_zoomTopLeft:',
+    MenuItem, identifier: '_zoomTopRight:',
+    MenuItem, identifier: '_zoomBottomLeft:',
+    MenuItem, identifier: '_zoomBottomRight:',
+    MenuItem,
+    MenuItem,
+    MenuItem, identifier: '_zoomLeftAndRight:',
+    MenuItem, identifier: '_zoomLeftThreeUp:',
+    MenuItem, identifier: '_zoomRightAndLeft:',
+    MenuItem, identifier: '_zoomRightThreeUp:',
+    MenuItem, identifier: '_zoomTopAndBottom:',
+    MenuItem, identifier: '_zoomTopThreeUp:',
+    MenuItem, identifier: '_zoomBottomAndTop:',
+    MenuItem, identifier: '_zoomBottomThreeUp:',
+    MenuItem, identifier: '_zoomQuarters:',
+    MenuItem,
+    MenuItem, identifier: '_zoomUntile:'
+)}
+    t =     8.90s Tear Down
+Test Case '-[JackinDesktopUITests.JackinDesktopUITests testOverviewPassesAccessibilityAudit]' failed (9.154 seconds).
+Test Suite 'JackinDesktopUITests' failed at 2026-09-18 05:00:14.317.
+	 Executed 1 test, with 1 failure (0 unexpected) in 9.154 (9.154) seconds
+Test Suite 'JackinDesktopUITests.xctest' failed at 2026-09-18 05:00:14.318.
+	 Executed 1 test, with 1 failure (0 unexpected) in 9.154 (9.155) seconds
+Test Suite 'Selected tests' failed at 2026-09-18 05:00:14.318.
+	 Executed 1 test, with 1 failure (0 unexpected) in 9.154 (9.156) seconds
+2026-09-18 05:00:18.537 xcodebuild[53535:131721691] [MT] IDETestOperationsObserverDebug: 13.691 elapsed -- Testing started completed.
+2026-09-18 05:00:18.537 xcodebuild[53535:131721691] [MT] IDETestOperationsObserverDebug: 0.000 sec, +0.000 sec -- start
+2026-09-18 05:00:18.537 xcodebuild[53535:131721691] [MT] IDETestOperationsObserverDebug: 13.691 sec, +13.691 sec -- end
+
+Test session results, code coverage, and logs:
+	/tmp/fix4.xcresult
+
+Failing tests:
+	JackinDesktopUITests.testOverviewPassesAccessibilityAudit()
+
+** TEST FAILED **
+
+Testing started
