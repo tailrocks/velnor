@@ -8149,7 +8149,7 @@ mod tests {
         clippy::panic,
         reason = "tests need setup failures to name their root cause"
     )]
-    fn must_fail<T>(result: Result<T, GeneratorError>, context: &str) -> GeneratorError {
+    fn must_fail<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> E {
         match result {
             Ok(_) => panic!("{context}: expected a failure, got success"),
             Err(error) => error,
@@ -8162,14 +8162,15 @@ mod tests {
 
     #[test]
     fn docker_named_context_render_preserves_cache_seed_context() {
-        let command = append_docker_contexts(
+        let command = must(append_docker_contexts(
             "docker buildx build --build-context velnor-cache-seed='.velnor-docker-cache/seed' .",
             &[DockerContext {
                 name: "source-checkout".to_owned(),
                 path: ".".to_owned(),
             }],
-        )
-        .expect("Docker context should render");
+        ),
+            "Docker context should render",
+        );
         assert!(
             command.contains("--build-context velnor-cache-seed='.velnor-docker-cache/seed'"),
             "{command}"
@@ -8186,14 +8187,16 @@ mod tests {
 
     #[test]
     fn docker_named_context_render_covers_every_architecture_build() {
-        let command = append_docker_contexts(
-            r#"case "$(uname -m)" in x86_64) docker build --file 'Dockerfile.amd64' . ;; aarch64) docker buildx build --file 'Dockerfile.arm64' . ;; esac"#,
-            &[DockerContext {
-                name: "checkout".to_owned(),
-                path: ".".to_owned(),
-            }],
-        )
-        .expect("Docker context should render for every architecture");
+        let command = must(
+            append_docker_contexts(
+                r#"case "$(uname -m)" in x86_64) docker build --file 'Dockerfile.amd64' . ;; aarch64) docker buildx build --file 'Dockerfile.arm64' . ;; esac"#,
+                &[DockerContext {
+                    name: "checkout".to_owned(),
+                    path: ".".to_owned(),
+                }],
+            ),
+            "Docker context should render for every architecture",
+        );
         assert_eq!(
             command.matches("--build-context checkout='.'").count(),
             2,
@@ -8204,14 +8207,16 @@ mod tests {
 
     #[test]
     fn docker_named_context_render_rejects_conflicting_command_context() {
-        let error = append_docker_contexts(
-            "docker build --build-context checkout='/tmp/untrusted' .",
-            &[DockerContext {
-                name: "checkout".to_owned(),
-                path: ".".to_owned(),
-            }],
-        )
-        .expect_err("typed context must reject command-owned override");
+        let error = must_fail(
+            append_docker_contexts(
+                "docker build --build-context checkout='/tmp/untrusted' .",
+                &[DockerContext {
+                    name: "checkout".to_owned(),
+                    path: ".".to_owned(),
+                }],
+            ),
+            "typed context must reject command-owned override",
+        );
         assert!(
             error.contains("already declares context `checkout`"),
             "{error}"
@@ -8221,14 +8226,16 @@ mod tests {
     #[test]
     fn docker_named_context_render_shell_quotes_repository_paths() {
         let path = "dir with 'quote';$HOME";
-        let command = append_docker_contexts(
-            "docker build .",
-            &[DockerContext {
-                name: "checkout".to_owned(),
-                path: path.to_owned(),
-            }],
-        )
-        .expect("Docker context path should render safely");
+        let command = must(
+            append_docker_contexts(
+                "docker build .",
+                &[DockerContext {
+                    name: "checkout".to_owned(),
+                    path: path.to_owned(),
+                }],
+            ),
+            "Docker context path should render safely",
+        );
         assert!(
             command.contains(&format!("--build-context checkout={} ", shell_quote(path))),
             "shell metacharacters must remain inside the quoted context path: {command}"
@@ -13792,27 +13799,19 @@ channel = "stable"
             ("full", &unit.full_commands),
             (
                 "GitHub pull request",
-                unit.github_pr_commands
-                    .as_ref()
-                    .expect("GitHub PR commands"),
+                must_some(unit.github_pr_commands.as_ref(), "GitHub PR commands"),
             ),
             (
                 "GitHub full",
-                unit.github_full_commands
-                    .as_ref()
-                    .expect("GitHub full commands"),
+                must_some(unit.github_full_commands.as_ref(), "GitHub full commands"),
             ),
             (
                 "Velnor pull request",
-                unit.velnor_pr_commands
-                    .as_ref()
-                    .expect("Velnor PR commands"),
+                must_some(unit.velnor_pr_commands.as_ref(), "Velnor PR commands"),
             ),
             (
                 "Velnor full",
-                unit.velnor_full_commands
-                    .as_ref()
-                    .expect("Velnor full commands"),
+                must_some(unit.velnor_full_commands.as_ref(), "Velnor full commands"),
             ),
         ];
         for (lane, commands) in lanes {
