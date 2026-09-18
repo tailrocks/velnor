@@ -284,6 +284,37 @@ mod tests {
     }
 
     #[test]
+    fn agent_exists_and_job_running_exceptions_map() {
+        // Upstream `newRequestResponseError` maps these `typeName`s to the
+        // runner/job sentinels while the status still tags the fault.
+        let exists = request_response_error(
+            "POST",
+            "https://a.example/scalesets",
+            StatusCode::CONFLICT,
+            &HeaderMap::new(),
+            br#"{"typeName":"AgentExistsException","message":"already registered"}"#,
+            None,
+            "unexpected status code",
+        );
+        assert_eq!(exists.fault(), Some(ScaleSetFault::Conflict));
+        assert!(exists.to_string().contains("runner exists"), "{exists}");
+        let running = request_response_error(
+            "DELETE",
+            "https://a.example/agents/11",
+            StatusCode::CONFLICT,
+            &HeaderMap::new(),
+            br#"{"typeName":"JobStillRunningException","message":"job 9 running"}"#,
+            None,
+            "unexpected status code",
+        );
+        assert_eq!(running.fault(), Some(ScaleSetFault::Conflict));
+        assert!(
+            running.to_string().contains("job still running"),
+            "{running}"
+        );
+    }
+
+    #[test]
     fn empty_body_is_unknown_error() {
         let error = request_response_error(
             "DELETE",
