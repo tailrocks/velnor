@@ -726,6 +726,14 @@ mod tests {
     fn promote_renders_schema2_trust_units() {
         let root =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures-s2/promote-trust");
+        assert!(
+            must_fail(
+                crate::config::discover(&root),
+                "the schema-1 parser must reject the trust-bearing tree"
+            )
+            .contains("trust"),
+            "the fixture proves the schema-2-only path"
+        );
         let rendered = must(
             promote_render(&root, RunnerMode::Both, "main"),
             "promotion renders a schema-2 tree carrying `trust`",

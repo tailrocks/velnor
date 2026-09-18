@@ -9,6 +9,6 @@ repository = "example/promote-trust"
 runs_on = ["self-hosted", "example-runner-label"]
 
 [[units]]
-id = "promote-trust-probe"
+id = "docs"
 kind = "docs"
 trust = "trusted-only"
