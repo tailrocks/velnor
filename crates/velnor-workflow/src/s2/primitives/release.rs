@@ -3198,6 +3198,15 @@ fn render_release_unit_job(
     );
     let cargo_offline = checks_env(unit);
     let token_env = docker_build_token_env_for_members(&[unit]);
+    // `run` requires the planned-selection file CI Planning materializes
+    // for reusable legs; release legs have no Planning job, so each lane
+    // plans its own full selection first (full scope short-circuits the
+    // diff, so no history is needed). Without this step every lane fails
+    // reading the missing selection file.
+    let _ = writeln!(
+        output,
+        "      - name: Plan full release selection\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection\n        run: |\n          set -euo pipefail\n          mkdir -p .velnor-ci-selection\n          velnor-workflow plan --config .github/ci/project.toml\n"
+    );
     let _ = writeln!(
         output,
         "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{cargo_offline}{token_env}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
@@ -5208,7 +5217,7 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "36463bd0c122f6a3c17c178224017a33215708fae90b284b46783fad2e6a2968",
+                "6eb122930b9cb0635323976641a722a6c8ebe6e62c66117acc16d89181f1bb6f",
             ),
             (
                 "preview.yml",
@@ -5329,7 +5338,7 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "1be4221cb821d29cde4cbe0706fe8622c1bc85b6bb33571df739228b4203695d",
+                "ae561323482f1a0ec3b45a2553b5dda311a69ca655576b484fea8170b3a08401",
             ),
             (
                 "preview.yml",
@@ -6789,6 +6798,42 @@ mod tests {
             publish.contains("--signer-workflow \"$GITHUB_REPOSITORY/.github/workflows/ci-release-package-signer.yml\""),
             "{publish}"
         );
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn native_release_lanes_plan_their_full_selection_before_running() {
+        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&config, release);
+        // `run` requires the planned-selection file; release legs have no
+        // Planning job, so each lane plans its own full selection first.
+        // Without this step every lane fails reading the missing file.
+        for id in [
+            "release-github-hosted-rust-example",
+            "release-velnor-rust-example",
+        ] {
+            let leg = yaml_job(&workflow, id);
+            let plan_at = must_some(
+                leg.find("name: Plan full release selection"),
+                "selection step renders",
+            );
+            let run_at = must_some(leg.find("velnor-workflow run --config"), "run renders");
+            assert!(plan_at < run_at, "{leg}");
+            assert!(
+                leg.contains("VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection"),
+                "{leg}"
+            );
+            assert!(
+                leg.contains("velnor-workflow plan --config .github/ci/project.toml"),
+                "{leg}"
+            );
+        }
     }
 
     #[test]
