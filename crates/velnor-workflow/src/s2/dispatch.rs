@@ -173,7 +173,20 @@ mod tests {
     fn providers_flag_routes_schema2_without_a_target() {
         assert!(wants_s2(&args(&["--providers", "github-hosted"])));
         assert!(wants_s2(&args(&["--providers=github-hosted"])));
-        assert!(!wants_s2(&args(&["--runners", "both"])));
+    }
+
+    #[test]
+    fn legacy_flag_routes_schema2_for_a_local_schema2_target() {
+        let root = fixture_dir(
+            "legacy-flag-schema2",
+            Some("schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n"),
+        );
+        let target = root.to_string_lossy().into_owned();
+        // Target detection keeps the typed parser in control; it then rejects
+        // the unknown schema-1 option fail-closed. Do not depend on the cargo
+        // test harness CWD being the repository root.
+        assert!(wants_s2(&args(&[target.as_str(), "--runners", "both"])));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -196,6 +209,7 @@ mod tests {
         );
         let target = root.to_string_lossy().into_owned();
         assert!(!wants_s2(&args(&[target.as_str(), "--plain"])));
+        assert!(!wants_s2(&args(&[target.as_str(), "--runners", "both"])));
         let _ = std::fs::remove_dir_all(root);
     }
 

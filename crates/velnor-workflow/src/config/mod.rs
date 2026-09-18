@@ -16,7 +16,7 @@ pub(crate) mod canonical;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
 
@@ -660,6 +660,9 @@ pub(crate) struct UnitSection {
     /// `[[units.prerequisites]]` rows.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     prerequisites: Vec<PrerequisiteSection>,
+    /// Named local Docker build contexts rendered as `--build-context name=path`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    docker_contexts: Vec<DockerContextSection>,
 }
 
 /// One named build product a `[[units]]` row declares: the product's name,
@@ -686,6 +689,14 @@ pub(crate) struct PrerequisiteSection {
     task: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     env: Option<BTreeMap<String, String>>,
+}
+
+/// One repository-local named Docker build context.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DockerContextSection {
+    name: Option<String>,
+    path: Option<String>,
 }
 
 /// The cache contract of a `[[unit]]` row. Each field is independent, so an
@@ -1185,6 +1196,33 @@ impl UnitSection {
         &self.prerequisites
     }
 
+    pub(crate) fn docker_contexts(&self) -> &[DockerContextSection] {
+        &self.docker_contexts
+    }
+
+    pub(crate) fn named_docker_contexts(
+        &self,
+        id: &str,
+        root: &Path,
+    ) -> Result<Vec<crate::DockerContext>, GeneratorError> {
+        let canonical_root = fs::canonicalize(root).map_err(|error| {
+            GeneratorError::io("resolve repository root for Docker context", root, &error)
+        })?;
+        let mut contexts = Vec::with_capacity(self.docker_contexts.len());
+        let mut names = BTreeSet::new();
+        for context in &self.docker_contexts {
+            let name = context.name.as_deref().unwrap_or_default();
+            let path = context.path.as_deref().unwrap_or_default();
+            validate_docker_context_name(id, name, &mut names)?;
+            validate_docker_context_path(id, name, path, &canonical_root)?;
+            contexts.push(crate::DockerContext {
+                name: name.to_owned(),
+                path: path.to_owned(),
+            });
+        }
+        Ok(contexts)
+    }
+
     /// The platform requirement this row declares over `base`: the row
     /// replaces the OS, architecture, and capability set it names and keeps
     /// the rest.
@@ -1343,6 +1381,81 @@ impl UnitSection {
         }
         Ok(prerequisites)
     }
+}
+
+const RESERVED_DOCKER_CONTEXT_NAMES: &[&str] =
+    &["default", "dockerfile", "scratch", "velnor-cache-seed"];
+
+fn validate_docker_context_name(
+    id: &str,
+    name: &str,
+    names: &mut BTreeSet<String>,
+) -> Result<(), GeneratorError> {
+    let valid = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && name.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b'_')
+        });
+    if !valid {
+        return Err(GeneratorError::usage(format!(
+            "[[units.docker_contexts]] {id} declares invalid Docker context name `{name}`"
+        )));
+    }
+    if RESERVED_DOCKER_CONTEXT_NAMES.contains(&name) {
+        return Err(GeneratorError::usage(format!(
+            "[[units.docker_contexts]] {id} declares reserved Docker context name `{name}`"
+        )));
+    }
+    if !names.insert(name.to_owned()) {
+        return Err(GeneratorError::usage(format!(
+            "[[units.docker_contexts]] {id} declares Docker context `{name}` more than once"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_docker_context_path(
+    id: &str,
+    name: &str,
+    path: &str,
+    canonical_root: &Path,
+) -> Result<(), GeneratorError> {
+    let relative = Path::new(path);
+    let lexical_safe = !path.is_empty()
+        && !path.bytes().any(|byte| byte == 0 || byte == b'\\')
+        && relative.is_relative()
+        && relative.components().all(|component| {
+            !matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        });
+    if !lexical_safe {
+        return Err(GeneratorError::usage(format!(
+            "[[units.docker_contexts]] {id} context `{name}` path `{path}` must be repository-relative without traversal"
+        )));
+    }
+    let candidate = canonical_root.join(relative);
+    let canonical_candidate = fs::canonicalize(&candidate).map_err(|error| {
+        GeneratorError::usage(format!(
+            "[[units.docker_contexts]] {id} context `{name}` path `{path}` does not exist: {error}"
+        ))
+    })?;
+    if !canonical_candidate.starts_with(canonical_root) {
+        return Err(GeneratorError::usage(format!(
+            "[[units.docker_contexts]] {id} context `{name}` path `{path}` escapes the repository"
+        )));
+    }
+    if !canonical_candidate.is_dir() {
+        return Err(GeneratorError::usage(format!(
+            "[[units.docker_contexts]] {id} context `{name}` path `{path}` must name a directory"
+        )));
+    }
+    Ok(())
 }
 
 impl UnitCacheSection {
@@ -3841,6 +3954,7 @@ mod tests {
             "velnor-workflow-config-{name}-{}",
             crate::unique_suffix()
         ));
+        let _ = fs::remove_dir_all(&root);
         must(fs::create_dir_all(&root), "create config test repository");
         must(
             fs::write(
@@ -3857,6 +3971,114 @@ mod tests {
             "write fixture toolchain pin",
         );
         root
+    }
+
+    #[test]
+    fn docker_context_names_reject_duplicates_and_reserved_values() {
+        let root = scanned_root("docker-context-names");
+        let duplicate = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [[units]]\nid = \"docker\"\nkind = \"docker\"\n\n\
+             [[units.docker_contexts]]\nname = \"checkout\"\npath = \".\"\n\n\
+             [[units.docker_contexts]]\nname = \"checkout\"\npath = \".\"\n",
+        );
+        let error = must_fail(
+            duplicate.units()[0].named_docker_contexts("docker", &root),
+            "duplicate Docker context name must fail",
+        );
+        assert!(error.to_string().contains("more than once"), "{error}");
+
+        let reserved = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [[units]]\nid = \"docker\"\nkind = \"docker\"\n\n\
+             [[units.docker_contexts]]\nname = \"velnor-cache-seed\"\npath = \".\"\n",
+        );
+        let error = must_fail(
+            reserved.units()[0].named_docker_contexts("docker", &root),
+            "reserved Docker context name must fail",
+        );
+        assert!(error.to_string().contains("reserved"), "{error}");
+        let invalid = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [[units]]\nid = \"docker\"\nkind = \"docker\"\n\n\
+             [[units.docker_contexts]]\nname = \"Checkout\"\npath = \".\"\n",
+        );
+        let error = must_fail(
+            invalid.units()[0].named_docker_contexts("docker", &root),
+            "invalid Docker context name must fail",
+        );
+        assert!(error.to_string().contains("invalid"), "{error}");
+        must(
+            fs::remove_dir_all(root),
+            "remove Docker context name fixture",
+        );
+    }
+
+    #[test]
+    fn docker_context_paths_reject_missing_directories() {
+        let root = scanned_root("docker-context-missing");
+        let missing = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [[units]]\nid = \"docker\"\nkind = \"docker\"\n\n\
+             [[units.docker_contexts]]\nname = \"checkout\"\npath = \"missing\"\n",
+        );
+        let error = must_fail(
+            missing.units()[0].named_docker_contexts("docker", &root),
+            "missing Docker context path must fail",
+        );
+        assert!(error.to_string().contains("does not exist"), "{error}");
+        must(
+            fs::remove_dir_all(root),
+            "remove missing Docker context fixture",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn docker_context_paths_reject_traversal_and_escaping_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = scanned_root("docker-context-paths");
+        let outside = root.with_extension("outside");
+        must(fs::create_dir_all(&outside), "create outside context");
+        must(
+            symlink(&outside, root.join("escape-link")),
+            "create escaping symlink",
+        );
+
+        let escaping = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [[units]]\nid = \"docker\"\nkind = \"docker\"\n\n\
+             [[units.docker_contexts]]\nname = \"checkout\"\npath = \"escape-link\"\n",
+        );
+        let error = must_fail(
+            escaping.units()[0].named_docker_contexts("docker", &root),
+            "escaping symlink must fail",
+        );
+        assert!(
+            error.to_string().contains("escapes the repository"),
+            "{error}"
+        );
+
+        let traversal = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [[units]]\nid = \"docker\"\nkind = \"docker\"\n\n\
+             [[units.docker_contexts]]\nname = \"checkout\"\npath = \"../outside\"\n",
+        );
+        let error = must_fail(
+            traversal.units()[0].named_docker_contexts("docker", &root),
+            "traversal path must fail",
+        );
+        assert!(error.to_string().contains("repository-relative"), "{error}");
+
+        must(
+            fs::remove_dir_all(root),
+            "remove Docker context path fixture",
+        );
+        must(
+            fs::remove_dir_all(outside),
+            "remove outside context fixture",
+        );
     }
 
     fn shape_for(root: &Path) -> crate::scan::RepositoryShape {
