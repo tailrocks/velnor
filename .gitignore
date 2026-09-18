@@ -16,6 +16,7 @@ coverage/
 .velnor-job-dumps/
 .velnor-live-evidence/
 .velnor-compare/
+.guest-seed/
 target-job-payloads/
 .opencode/
 .nitro
