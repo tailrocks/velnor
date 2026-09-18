@@ -36,6 +36,23 @@ jobs:
         run: |
           echo 'native release publishes from GitHub only; Velnor-only dispatch is unsupported' >&2
           exit 1
+      - name: Reject local providers on tag dispatch
+        if: ${{ github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && (contains(format(',{0},', github.event.inputs.providers), ',velnor,') || contains(format(',{0},', github.event.inputs.providers), ',github-self-hosted,')) }}
+        run: |
+          echo 'tag dispatch publishes github-hosted only; use a tag push for full provider scope' >&2
+          exit 1
+      - name: Declare release provider scope
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          PROVIDERS: ${{ github.event.inputs.providers }}
+        run: |
+          set -euo pipefail
+          scope="${PROVIDERS:-github-hosted}"
+          echo "release provider scope: $scope"
+          case ",$scope," in
+            *,velnor,*|*,github-self-hosted,*) echo 'full provider scope includes local lanes' ;;
+            *) echo '::notice::BOOTSTRAP release scope: github-hosted only (local qualification deferred)' ;;
+          esac
 
   verify:
     name: Control / Verify release
@@ -2582,7 +2599,7 @@ jobs:
 
   build:
     name: Build / ${{ matrix.target }}
-    needs: [verify, release-github-hosted-bun-velnor, release-github-hosted-docker, release-github-hosted-docs, release-github-hosted-opentofu, release-github-hosted-rust-policy, release-github-hosted-rust-unit-collector, release-github-hosted-rust-velnor-bench, release-github-hosted-rust-velnor-client, release-github-hosted-rust-velnor-control, release-github-hosted-rust-velnor-model, release-github-hosted-rust-velnor-render, release-github-hosted-rust-velnor-runner, release-github-hosted-rust-velnor-tools, release-github-hosted-rust-velnor-workflow, release-github-hosted-rust-velnor-workflow-contract, release-github-hosted-rust-velnorctl, release-github-hosted-rust-production-topology, release-velnor-bun-velnor, release-velnor-docker, release-velnor-docs, release-velnor-opentofu, release-velnor-rust-policy, release-velnor-rust-unit-collector, release-velnor-rust-velnor-bench, release-velnor-rust-velnor-client, release-velnor-rust-velnor-control, release-velnor-rust-velnor-model, release-velnor-rust-velnor-render, release-velnor-rust-velnor-runner, release-velnor-rust-velnor-tools, release-velnor-rust-velnor-workflow, release-velnor-rust-velnor-workflow-contract, release-velnor-rust-velnorctl, release-velnor-rust-production-topology]
+    needs: [verify, image-admission, release-github-hosted-bun-velnor, release-github-hosted-docker, release-github-hosted-docs, release-github-hosted-opentofu, release-github-hosted-rust-policy, release-github-hosted-rust-unit-collector, release-github-hosted-rust-velnor-bench, release-github-hosted-rust-velnor-client, release-github-hosted-rust-velnor-control, release-github-hosted-rust-velnor-model, release-github-hosted-rust-velnor-render, release-github-hosted-rust-velnor-runner, release-github-hosted-rust-velnor-tools, release-github-hosted-rust-velnor-workflow, release-github-hosted-rust-velnor-workflow-contract, release-github-hosted-rust-velnorctl, release-github-hosted-rust-production-topology, release-velnor-bun-velnor, release-velnor-docker, release-velnor-docs, release-velnor-opentofu, release-velnor-rust-policy, release-velnor-rust-unit-collector, release-velnor-rust-velnor-bench, release-velnor-rust-velnor-client, release-velnor-rust-velnor-control, release-velnor-rust-velnor-model, release-velnor-rust-velnor-render, release-velnor-rust-velnor-runner, release-velnor-rust-velnor-tools, release-velnor-rust-velnor-workflow, release-velnor-rust-velnor-workflow-contract, release-velnor-rust-velnorctl, release-velnor-rust-production-topology]
     strategy:
       fail-fast: false
       matrix:
@@ -2594,7 +2611,7 @@ jobs:
             provider: github-hosted
             runner: ubuntu-24.04
     runs-on: ubuntu-24.04
-    if: ${{ (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref == 'refs/heads/main')) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+    if: ${{ always() && needs.verify.result == 'success' && (needs.release-github-hosted-bun-velnor.result == 'success' && needs.release-github-hosted-docker.result == 'success' && needs.release-github-hosted-docs.result == 'success' && needs.release-github-hosted-opentofu.result == 'success' && needs.release-github-hosted-rust-policy.result == 'success' && needs.release-github-hosted-rust-unit-collector.result == 'success' && needs.release-github-hosted-rust-velnor-bench.result == 'success' && needs.release-github-hosted-rust-velnor-client.result == 'success' && needs.release-github-hosted-rust-velnor-control.result == 'success' && needs.release-github-hosted-rust-velnor-model.result == 'success' && needs.release-github-hosted-rust-velnor-render.result == 'success' && needs.release-github-hosted-rust-velnor-runner.result == 'success' && needs.release-github-hosted-rust-velnor-tools.result == 'success' && needs.release-github-hosted-rust-velnor-workflow.result == 'success' && needs.release-github-hosted-rust-velnor-workflow-contract.result == 'success' && needs.release-github-hosted-rust-velnorctl.result == 'success' && needs.release-github-hosted-rust-production-topology.result == 'success') && (github.event_name == 'workflow_dispatch' || (needs.release-velnor-bun-velnor.result == 'success' && needs.release-velnor-docker.result == 'success' && needs.release-velnor-docs.result == 'success' && needs.release-velnor-opentofu.result == 'success' && needs.release-velnor-rust-policy.result == 'success' && needs.release-velnor-rust-unit-collector.result == 'success' && needs.release-velnor-rust-velnor-bench.result == 'success' && needs.release-velnor-rust-velnor-client.result == 'success' && needs.release-velnor-rust-velnor-control.result == 'success' && needs.release-velnor-rust-velnor-model.result == 'success' && needs.release-velnor-rust-velnor-render.result == 'success' && needs.release-velnor-rust-velnor-runner.result == 'success' && needs.release-velnor-rust-velnor-tools.result == 'success' && needs.release-velnor-rust-velnor-workflow.result == 'success' && needs.release-velnor-rust-velnor-workflow-contract.result == 'success' && needs.release-velnor-rust-velnorctl.result == 'success' && needs.release-velnor-rust-production-topology.result == 'success')) && (github.event_name != 'workflow_dispatch' || (github.ref_type == 'tag' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,') && !contains(format(',{0},', github.event.inputs.providers), ',velnor,'))) && (github.event_name != 'workflow_dispatch' || needs.image-admission.outputs.existing == 'true') }}
     timeout-minutes: 90
     permissions:
       contents: read
@@ -2901,7 +2918,7 @@ jobs:
           retention-days: 2
 
   image:
-    if: ${{ always() && needs.admit-provider.result == 'success' && needs.verify.result == 'success' && needs.metadata.result == 'success' && needs.image-admission.result == 'success' && (needs.image-platform.result == 'success' || needs.image-platform.result == 'skipped') && github.event_name != 'workflow_dispatch' }}
+    if: ${{ always() && needs.admit-provider.result == 'success' && needs.verify.result == 'success' && needs.metadata.result == 'success' && needs.image-admission.result == 'success' && (needs.image-platform.result == 'success' || needs.image-platform.result == 'skipped') && (github.event_name != 'workflow_dispatch' || needs.image-admission.outputs.existing == 'true') }}
     needs: [admit-provider, verify, metadata, image-platform, image-admission]
     name: Assemble one multi-platform GHCR image
     timeout-minutes: 15
