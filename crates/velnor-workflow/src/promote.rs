@@ -24,10 +24,13 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::policy::GENERATION_CONFIG;
+use super::s2::policy::GENERATION_CONFIG;
+use super::s2::provider::{ProviderId, ProviderSet};
+use super::s2::{
+    ownership_state_content, render_tree, write_generated_with_options, OWNERSHIP_STATE,
+};
 use super::{
-    is_full_revision, ownership_state_content, render_tree, resolve_default_branch,
-    write_generated_with_options, GeneratorError, RunnerMode, OWNERSHIP_STATE, SOURCE_CLOSURE,
+    is_full_revision, resolve_default_branch, GeneratorError, RunnerMode, SOURCE_CLOSURE,
     SOURCE_FEATURES, SOURCE_PROFILE,
 };
 
@@ -155,7 +158,7 @@ fn promote_rendered_tree(
     old_pin: &str,
     closure: &str,
 ) -> Result<PromoteReport, GeneratorError> {
-    let rendered = render_tree(repo, options.runners, default_branch)?;
+    let rendered = promote_render(repo, options.runners, default_branch)?;
     snapshot.extend(
         repo,
         rendered
@@ -180,7 +183,8 @@ fn promote_rendered_tree(
         false,
         true,
         false,
-    )?;
+    )
+    .map_err(s2_error)?;
     verify_promoted_tree(repo, &rendered.files, options.runners, default_branch)?;
     let expected_state = ownership_state_content(&rendered.files, &rendered.inputs);
     let state_path = repo.join(OWNERSHIP_STATE);
@@ -270,13 +274,49 @@ fn verify_render_stamp_binding(generator_repo: &Path, rev: &str) -> Result<Strin
 /// Prove the write is faithful: a fresh re-render of the stamped tree must be
 /// byte-identical to the render just written (determinism), and every disk
 /// byte must match it (write integrity).
+/// Map across the pipeline boundary the same way the R2 bridge does: both
+/// error types carry a single message string.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "map_err hands over ownership; borrowing would push a closure onto every call site"
+)]
+fn s2_error(error: super::s2::GeneratorError) -> GeneratorError {
+    GeneratorError::usage(error.to_string())
+}
+
+/// Map the legacy `--runners` vocabulary onto provider sets. `both` stays
+/// unset so the repository config (or the full three-provider universe)
+/// decides, exactly like a plain generator run without `--providers`.
+/// `github` predates the hosted/self-hosted split and keeps both flavors.
+/// Promotion always renders through the schema-2 pipeline, like a plain
+/// generator run: the schema-1 parser predates schema-2 config fields
+/// (`trust`, `platform`) and rejects trees the main pipeline accepts.
+fn promote_render(
+    repo: &Path,
+    runners: RunnerMode,
+    default_branch: &str,
+) -> Result<super::s2::RenderedTree, GeneratorError> {
+    render_tree(repo, runners_to_providers(runners), default_branch).map_err(s2_error)
+}
+
+fn runners_to_providers(runners: RunnerMode) -> Option<ProviderSet> {
+    match runners {
+        RunnerMode::Both => None,
+        RunnerMode::Github => Some(ProviderSet::from([
+            ProviderId::GithubHosted,
+            ProviderId::GithubSelfHosted,
+        ])),
+        RunnerMode::Velnor => Some(ProviderSet::from([ProviderId::Velnor])),
+    }
+}
+
 fn verify_promoted_tree(
     repo: &Path,
     rendered: &std::collections::BTreeMap<PathBuf, String>,
     runners: RunnerMode,
     default_branch: &str,
 ) -> Result<(), GeneratorError> {
-    let again = render_tree(repo, runners, default_branch)?.files;
+    let again = promote_render(repo, runners, default_branch)?.files;
     if again != *rendered {
         let divergent: Vec<String> = rendered
             .keys()
@@ -663,6 +703,36 @@ mod tests {
         assert!(
             stamped.contains(&format!("[workflow]\nrevision = \"{OLD}\"")),
             "other sections keep their bytes: {stamped}"
+        );
+    }
+
+    #[test]
+    fn runners_map_onto_provider_sets() {
+        assert_eq!(runners_to_providers(RunnerMode::Both), None);
+        assert_eq!(
+            runners_to_providers(RunnerMode::Github),
+            Some(ProviderSet::from([
+                ProviderId::GithubHosted,
+                ProviderId::GithubSelfHosted,
+            ]))
+        );
+        assert_eq!(
+            runners_to_providers(RunnerMode::Velnor),
+            Some(ProviderSet::from([ProviderId::Velnor]))
+        );
+    }
+
+    #[test]
+    fn promote_renders_schema2_trust_units() {
+        let root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures-s2/promote-trust");
+        let rendered = must(
+            promote_render(&root, RunnerMode::Both, "main"),
+            "promotion renders a schema-2 tree carrying `trust`",
+        );
+        assert!(
+            !rendered.files.is_empty(),
+            "the trust-bearing tree renders files"
         );
     }
 
