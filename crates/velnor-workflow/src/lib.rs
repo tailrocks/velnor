@@ -8165,7 +8165,7 @@ mod tests {
         let command = append_docker_contexts(
             "docker buildx build --build-context velnor-cache-seed='.velnor-docker-cache/seed' .",
             &[DockerContext {
-                name: "parallax-checkout".to_owned(),
+                name: "source-checkout".to_owned(),
                 path: ".".to_owned(),
             }],
         )
@@ -8175,11 +8175,11 @@ mod tests {
             "{command}"
         );
         assert!(
-            command.contains("--build-context parallax-checkout='.'"),
+            command.contains("--build-context source-checkout='.'"),
             "{command}"
         );
         assert!(
-            command.find("--build-context parallax-checkout='.'") < command.rfind(" ."),
+            command.find("--build-context source-checkout='.'") < command.rfind(" ."),
             "named context must precede the final positional build context: {command}"
         );
     }
