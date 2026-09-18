@@ -2624,11 +2624,12 @@ fn append_docker_contexts(command: &str, contexts: &[DockerContext]) -> Result<S
                         context.name
                     ));
                 }
-                flags.push_str(&format!(
+                let _ = write!(
+                    flags,
                     "--build-context {}={} ",
                     context.name,
                     shell_quote(&context.path)
-                ));
+                );
             }
             let insertion_end = offset + prefix_len;
             rendered.push_str(&segment[..insertion_end]);
@@ -2641,7 +2642,7 @@ fn append_docker_contexts(command: &str, contexts: &[DockerContext]) -> Result<S
         if segment_end == command.len() {
             break;
         }
-        rendered.push_str(&command[segment_end..segment_end + 1]);
+        rendered.push_str(&command[segment_end..=segment_end]);
         segment_start = segment_end + 1;
     }
     if found {
