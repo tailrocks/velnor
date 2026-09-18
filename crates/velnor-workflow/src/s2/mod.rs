@@ -7889,6 +7889,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn docker_named_context_render_shell_quotes_repository_paths() {
+        let path = "dir with 'quote';$HOME";
+        let command = append_docker_contexts(
+            "docker build .",
+            &[DockerContext {
+                name: "checkout".to_owned(),
+                path: path.to_owned(),
+            }],
+        )
+        .expect("Docker context path should render safely");
+        assert!(
+            command.contains(&format!("--build-context checkout={} ", shell_quote(path))),
+            "shell metacharacters must remain inside the quoted context path: {command}"
+        );
+    }
+
     /// The self-hosted labels a scanned fixture renders. A repository without
     /// a generation config declares none, so every fixture lane names its own.
     const FIXTURE_LABELS: &[&str] = &["self-hosted", "example-runner-label"];
@@ -13447,6 +13464,34 @@ lockfile = true
             mutable_mount_seed: true,
         });
         (config, index)
+    }
+
+    #[test]
+    fn docker_named_context_materializes_every_provider_lane() {
+        let (mut config, index) = both_runner_docker_config();
+        config.units[index].docker_contexts = vec![DockerContext {
+            name: "checkout".to_owned(),
+            path: ".".to_owned(),
+        }];
+        let root = temporary_repository("docker-context-lanes");
+        must(
+            materialize_capability_commands(&mut config, &root),
+            "materialize Docker contexts across schema-2 lanes",
+        );
+        let unit = &config.units[index];
+        for (lane, commands) in [
+            ("pull request", &unit.pr_commands),
+            ("full", &unit.full_commands),
+        ] {
+            assert!(!commands.is_empty(), "{lane} lane must have a command");
+            assert!(
+                commands
+                    .iter()
+                    .all(|command| command.contains("--build-context checkout='.'")),
+                "every {lane} Docker command must carry the typed context: {commands:?}"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

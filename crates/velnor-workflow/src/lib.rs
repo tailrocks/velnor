@@ -8213,6 +8213,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn docker_named_context_render_shell_quotes_repository_paths() {
+        let path = "dir with 'quote';$HOME";
+        let command = append_docker_contexts(
+            "docker build .",
+            &[DockerContext {
+                name: "checkout".to_owned(),
+                path: path.to_owned(),
+            }],
+        )
+        .expect("Docker context path should render safely");
+        assert!(
+            command.contains(&format!("--build-context checkout={} ", shell_quote(path))),
+            "shell metacharacters must remain inside the quoted context path: {command}"
+        );
+    }
+
     /// The self-hosted labels a scanned fixture renders. A repository without
     /// a generation config declares none, so every fixture lane names its own.
     const FIXTURE_LABELS: &[&str] = &["self-hosted", "example-runner-label"];
@@ -13748,6 +13765,61 @@ channel = "stable"
             mutable_mount_seed: true,
         });
         (config, index)
+    }
+
+    #[test]
+    fn docker_named_context_materializes_every_legacy_lane() {
+        let (mut config, index) = both_runner_docker_config();
+        config.units[index].github_pr_commands = Some(vec!["docker build .".to_owned()]);
+        config.units[index].github_full_commands = Some(vec!["docker build .".to_owned()]);
+        config.units[index].docker_contexts = vec![DockerContext {
+            name: "checkout".to_owned(),
+            path: ".".to_owned(),
+        }];
+        let root = temporary_repository("docker-context-lanes");
+        must(
+            materialize_capability_commands(&mut config, &root),
+            "materialize Docker contexts across legacy lanes",
+        );
+        let unit = &config.units[index];
+        let lanes = [
+            ("pull request", &unit.pr_commands),
+            ("full", &unit.full_commands),
+            (
+                "GitHub pull request",
+                unit.github_pr_commands
+                    .as_ref()
+                    .expect("GitHub PR commands"),
+            ),
+            (
+                "GitHub full",
+                unit.github_full_commands
+                    .as_ref()
+                    .expect("GitHub full commands"),
+            ),
+            (
+                "Velnor pull request",
+                unit.velnor_pr_commands
+                    .as_ref()
+                    .expect("Velnor PR commands"),
+            ),
+            (
+                "Velnor full",
+                unit.velnor_full_commands
+                    .as_ref()
+                    .expect("Velnor full commands"),
+            ),
+        ];
+        for (lane, commands) in lanes {
+            assert!(!commands.is_empty(), "{lane} lane must have a command");
+            assert!(
+                commands
+                    .iter()
+                    .all(|command| command.contains("--build-context checkout='.'")),
+                "every {lane} Docker command must carry the typed context: {commands:?}"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
