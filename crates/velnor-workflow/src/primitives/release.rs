@@ -7562,6 +7562,54 @@ mod tests {
         clippy::panic,
         reason = "the fixture construction must fail loudly if it loses its release contract"
     )]
+    fn native_identity_publish_verifies_attestations_before_creating_the_release() {
+        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&config, release);
+        let publish = yaml_job(&workflow, "publish");
+        // Missing attestations fail the release: both provenance gates run
+        // before record assembly and release creation, so `gh attestation
+        // verify` exiting nonzero on an unattested subject aborts the
+        // publish job before any mutation.
+        let tarball_at = must_some(
+            publish.find("name: Verify tarball provenance"),
+            "tarball provenance gate renders",
+        );
+        let deb_at = must_some(
+            publish.find("name: Verify deb provenance"),
+            "deb provenance gate renders",
+        );
+        let assembly_at = must_some(
+            publish.find("Assemble the release record from downloaded artifacts"),
+            "record assembly renders",
+        );
+        let create_at = must_some(
+            publish.find("gh release create"),
+            "release creation renders",
+        );
+        assert!(
+            tarball_at < deb_at && deb_at < assembly_at && assembly_at < create_at,
+            "provenance gates must run before record assembly and release creation: {publish}"
+        );
+        // Tarballs verify against the producing repo; debs verify against
+        // the pinned package-signer workflow, never an ambient signer.
+        assert!(
+            publish.contains("for artifact in artifacts/*.tar.gz; do gh attestation verify \"$artifact\" --repo \"$GITHUB_REPOSITORY\"; done"),
+            "{publish}"
+        );
+        assert!(
+            publish.contains("--signer-workflow \"$GITHUB_REPOSITORY/.github/workflows/ci-release-package-signer.yml\""),
+            "{publish}"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
     fn native_identity_build_records_binary_digest_and_debian_reuses_it() {
         let config = native_identity_config(&["release.yml", "preview.yml"]);
         let Some(release) = config.release.as_ref() else {
