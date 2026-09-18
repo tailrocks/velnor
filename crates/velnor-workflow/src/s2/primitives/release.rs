@@ -1794,12 +1794,15 @@ fn render_image_index_job(config: &ProjectConfig, release: &ReleaseSpec) -> Stri
     let login = ActionPin::DockerLogin.reference();
     // A drilled mode assembles no version tag: the immutable index push is
     // publish-only, while skipped staging builds stay skipped. A modeless
-    // lane refuses the dispatch event outright: assembling a version index
-    // off a dispatch orphans a tag no later tag push can adopt.
+    // lane refuses to assemble off a dispatch (assembling a version index
+    // off a dispatch orphans a tag no later tag push can adopt) but may
+    // adopt an already-admitted index: the gate opens on dispatches only
+    // when admission verified an existing tag, and that branch inspects
+    // without pushing, so no dispatch can mint version bytes.
     let mode_gate = if has_release_modes(release) {
         " && needs.verify.outputs.mode == 'publish'"
     } else {
-        " && github.event_name != 'workflow_dispatch'"
+        " && (github.event_name != 'workflow_dispatch' || needs.image-admission.outputs.existing == 'true')"
     };
     format!(
         "  image:\n    if: ${{{{ always() && needs.admit-provider.result == 'success' && needs.verify.result == 'success' && needs.metadata.result == 'success' && needs.image-admission.result == 'success' && (needs.image-platform.result == 'success' || needs.image-platform.result == 'skipped'){mode_gate} }}}}\n    needs: [admit-provider, verify, metadata, image-platform, image-admission]\n    name: Assemble one multi-platform GHCR image\n    timeout-minutes: 15\n    runs-on: {runner}\n    permissions:\n      contents: read\n      packages: write\n    outputs:\n      index_digest: ${{{{ steps.push.outputs.index_digest }}}}\n      manifest_sha256: ${{{{ needs.metadata.outputs.manifest_sha256 }}}}\n    env:\n      GHCR_IMAGE: {image}\n      SOURCE_URL: {source_url}\n      VERSION: ${{{{ needs.verify.outputs.version }}}}\n      COMMIT: ${{{{ github.sha }}}}\n    steps:\n      - name: Download platform digests\n        if: ${{{{ needs.image-admission.outputs.existing != 'true' }}}}\n        uses: {download}\n        with:\n          pattern: image-platform-*\n          path: image-artifacts\n          merge-multiple: true\n      - name: Set up Docker Buildx\n        uses: {buildx}\n        with:\n          cleanup: false\n      - name: Log in to GHCR\n        uses: {login}\n        with:\n          registry: ghcr.io\n          username: ${{{{ github.actor }}}}\n          password: ${{{{ secrets.GITHUB_TOKEN }}}}\n      - name: Assemble and inspect immutable image index\n        id: push\n        env:\n          AMD64_DIGEST_FILE: image-artifacts/image-amd64.digest\n          ARM64_DIGEST_FILE: image-artifacts/image-arm64.digest\n          IMAGE_ALREADY_EXISTS: ${{{{ needs.image-admission.outputs.existing }}}}\n          EXPECTED_EXISTING_INDEX_DIGEST: ${{{{ needs.image-admission.outputs.index_digest }}}}\n        run: |\n          set -euo pipefail\n          if [ \"$IMAGE_ALREADY_EXISTS\" = true ]; then\n            docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n            index_digest=\"$(jq -er '.manifest.digest' image-digests.json)\"\n            [ \"$index_digest\" = \"$EXPECTED_EXISTING_INDEX_DIGEST\" ] || {{\n              echo \"::error::version tag moved from $EXPECTED_EXISTING_INDEX_DIGEST to $index_digest during admission\" >&2\n              exit 1\n            }}\n          else\n            for path in \"$AMD64_DIGEST_FILE\" \"$ARM64_DIGEST_FILE\"; do\n              test -s \"$path\"\n              digest=\"$(tr -d '[:space:]' < \"$path\")\"\n              case \"$digest\" in\n                sha256:[0-9a-fA-F]*) ;;\n                *) echo \"::error::invalid platform digest in $path\" >&2; exit 1 ;;\n              esac\n            done\n            amd64_digest=\"$(tr -d '[:space:]' < \"$AMD64_DIGEST_FILE\")\"\n            arm64_digest=\"$(tr -d '[:space:]' < \"$ARM64_DIGEST_FILE\")\"\n            docker buildx imagetools create \\\n              --tag \"${{GHCR_IMAGE}}:${{VERSION}}\" \\\n              \"${{GHCR_IMAGE}}:release-${{COMMIT}}-amd64\" \\\n              \"${{GHCR_IMAGE}}:release-${{COMMIT}}-arm64\"\n            docker buildx imagetools inspect \"${{GHCR_IMAGE}}:${{VERSION}}\" --format '{{{{json .}}}}' > image-digests.json\n            jq -e --arg amd \"$amd64_digest\" --arg arm \"$arm64_digest\" '\n              any(.manifest.manifests[]; .digest == $amd and .platform.architecture == \"amd64\") and\n              any(.manifest.manifests[]; .digest == $arm and .platform.architecture == \"arm64\")\n            ' image-digests.json >/dev/null || {{\n              echo \"::error::version tag does not reference both newly built platform digests\" >&2\n              exit 1\n            }}\n            [ \"$(jq -r '[.manifest.manifests[] | select((.annotations[\"vnd.docker.reference.type\"] // \"\") != \"attestation-manifest\")] | length' image-digests.json)\" = \"2\" ] || {{\n              echo \"::error::version tag carries an unexpected platform set\" >&2\n              exit 1\n            }}
@@ -3130,7 +3133,25 @@ fn render_release_unit_job(
     let job_name = yaml_scalar(&crate::s2::comparison_job_name(provider, unit));
     let verify_name = yaml_scalar(&unit.label);
     let dispatch_gate = if provider.is_local() {
-        trusted_release_runner_gate(&config.default_branch)
+        let mut gate = trusted_release_runner_gate(&config.default_branch);
+        // Native releases declare the `providers` dispatch input: a tag
+        // dispatch runs a local lane only when the operator selected it,
+        // so a declared github-hosted bootstrap visibly skips (never
+        // greenwashes) the local lanes. Tag pushes keep the full gate;
+        // publishers without the input keep the legacy gate so no
+        // dangling input reference renders.
+        if config
+            .release
+            .as_ref()
+            .is_some_and(|release| release.kind == "native")
+        {
+            let _ = write!(
+                gate,
+                " || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && contains(format(',{{0}},', github.event.inputs.providers), ',{},'))",
+                provider.as_str()
+            );
+        }
+        gate
     } else {
         String::new()
     };
@@ -3323,6 +3344,46 @@ fn render_crates_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
     output
 }
 
+/// The `build` job gate for native releases: `always()` plus explicit
+/// result checks, so a tag dispatch can declare a provider subset while
+/// tag pushes keep the full gate. Every provider lane present in the
+/// configuration constrains the build on pushes; on a tag dispatch a
+/// lane is required only when the `providers` input selects it, and the
+/// build additionally requires the github-hosted lane in scope (mirroring
+/// the admit job) plus an adoptable image index (so a fresh-version
+/// dispatch fails closed at the build instead of after an hour of
+/// wasted binaries). A provider with no rendered lanes constrains
+/// nothing. Rehearse drills keep their arm verbatim inside the gate.
+fn native_release_build_gate(
+    config: &ProjectConfig,
+    unit_job_ids: &[String],
+    release: &ReleaseSpec,
+) -> String {
+    let mut clauses = vec!["needs.verify.result == 'success'".to_owned()];
+    for provider in &config.providers {
+        let prefix = format!("release-{}-", provider.as_str());
+        let required: Vec<String> = unit_job_ids
+            .iter()
+            .filter(|id| id.starts_with(&prefix))
+            .map(|id| format!("needs.{id}.result == 'success'"))
+            .collect();
+        let required = if required.is_empty() {
+            "true".to_owned()
+        } else {
+            required.join(" && ")
+        };
+        clauses.push(format!("((github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && !contains(format(',{{0}},', github.event.inputs.providers), ',{},')) || ({}))", provider.as_str(), required));
+    }
+    clauses.push("(github.event_name != 'workflow_dispatch' || contains(format(',{0},', github.event.inputs.providers), ',github-hosted,'))".to_owned());
+    clauses.push("(github.event_name != 'workflow_dispatch' || needs.image-admission.outputs.existing == 'true')".to_owned());
+    let core = clauses.join(" && ");
+    if has_release_modes(release) {
+        format!("always() && ((github.event_name == 'workflow_dispatch' && needs.verify.outputs.mode == 'rehearse') || ({core}))")
+    } else {
+        format!("always() && {core}")
+    }
+}
+
 fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
     let mut output = String::from(GENERATED_HEADER);
     output.push_str(&release_trigger_header(release));
@@ -3357,10 +3418,21 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
     );
     let (unit_jobs, unit_job_ids) = render_release_unit_jobs(config);
     output = output.replace("\n  build:", &format!("\n{unit_jobs}\n  build:"));
-    let release_needs = std::iter::once("verify".to_owned())
-        .chain(unit_job_ids)
-        .collect::<Vec<_>>()
-        .join(", ");
+    // Native builds additionally wait for image admission: the gate reads
+    // its adoptable-index output, and admission is read-only beside the
+    // lanes, so no critical-path latency is added.
+    let release_needs = if release.kind == "native" {
+        std::iter::once("verify".to_owned())
+            .chain(std::iter::once("image-admission".to_owned()))
+            .chain(unit_job_ids.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(", ")
+    } else {
+        std::iter::once("verify".to_owned())
+            .chain(unit_job_ids.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     output = output.replace(
         "    needs: verify\n",
         &format!("    needs: [{release_needs}]\n"),
@@ -3403,7 +3475,12 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         // feature branch it was dispatched from: the trusted gate alone
         // would skip every build off main, green without building. Publish
         // stays tag-gated downstream, so the extra arm can only rehearse.
-        let build_gate = if has_release_modes(release) {
+        // Native releases carry the stricter always()-plus-results gate
+        // (declared provider subsets on tag dispatch; full gate on push);
+        // other publishers keep the legacy trusted gate verbatim.
+        let build_gate = if release.kind == "native" {
+            native_release_build_gate(config, &unit_job_ids, release)
+        } else if has_release_modes(release) {
             format!(
                 "{} || (github.event_name == 'workflow_dispatch' && needs.verify.outputs.mode == 'rehearse')",
                 trusted_release_runner_gate(&config.default_branch)
@@ -3910,7 +3987,7 @@ fn render_native_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         output = inject_native_binary_digest(&output, release);
     }
     let admit = format!(
-        "  admit-provider:\n    name: Control / Admit release\n    runs-on: {hosted_runner}\n    timeout-minutes: 5\n    steps:\n      - name: Reject Velnor-only native release\n        if: ${{{{ github.event_name == 'workflow_dispatch' && github.event.inputs.providers != '' && !contains(format(',{{0}},', github.event.inputs.providers), ',github-hosted,') }}}}\n        run: |\n          echo 'native release publishes from GitHub only; Velnor-only dispatch is unsupported' >&2\n          exit 1\n"
+        "  admit-provider:\n    name: Control / Admit release\n    runs-on: {hosted_runner}\n    timeout-minutes: 5\n    steps:\n      - name: Reject Velnor-only native release\n        if: ${{{{ github.event_name == 'workflow_dispatch' && github.event.inputs.providers != '' && !contains(format(',{{0}},', github.event.inputs.providers), ',github-hosted,') }}}}\n        run: |\n          echo 'native release publishes from GitHub only; Velnor-only dispatch is unsupported' >&2\n          exit 1\n      - name: Declare release provider scope\n        if: ${{{{ github.event_name == 'workflow_dispatch' }}}}\n        env:\n          PROVIDERS: ${{{{ github.event.inputs.providers }}}}\n        run: |\n          set -euo pipefail\n          scope=\"${{PROVIDERS:-github-hosted}}\"\n          echo \"release provider scope: $scope\"\n          case \",$scope,\" in\n            *,velnor,*) echo 'full provider scope includes velnor' ;;\n            *) echo '::notice::BOOTSTRAP release scope: github-hosted only (velnor qualification deferred)' ;;\n          esac\n"
     );
     output = output.replace("jobs:\n  verify:", &format!("jobs:\n{admit}\n  verify:"));
     output = output.replace(
@@ -5232,7 +5309,7 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "3bff215badf10d22988170dd02fb27d89b2b6374156953c5b753f5f8736b0c20",
+                "7f5e0ae0d512a0fe1ac38f13336a6677be0151ba3db83eda3317849cf487ccf0",
             ),
             (
                 "preview.yml",
@@ -6643,6 +6720,186 @@ mod tests {
         assert!(
             publish.contains("release-record.json \\\n              release-record.json.sha256"),
             "{publish}"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn native_identity_publish_verifies_attestations_before_creating_the_release() {
+        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&config, release);
+        let publish = yaml_job(&workflow, "publish");
+        // Missing attestations fail the release: both provenance gates run
+        // before record assembly and release creation, so `gh attestation
+        // verify` exiting nonzero on an unattested subject aborts the
+        // publish job before any mutation.
+        let tarball_at = must_some(
+            publish.find("name: Verify tarball provenance"),
+            "tarball provenance gate renders",
+        );
+        let deb_at = must_some(
+            publish.find("name: Verify deb provenance"),
+            "deb provenance gate renders",
+        );
+        let assembly_at = must_some(
+            publish.find("Assemble the release record from downloaded artifacts"),
+            "record assembly renders",
+        );
+        let create_at = must_some(
+            publish.find("gh release create"),
+            "release creation renders",
+        );
+        assert!(
+            tarball_at < deb_at && deb_at < assembly_at && assembly_at < create_at,
+            "provenance gates must run before record assembly and release creation: {publish}"
+        );
+        // Tarballs verify against the producing repo; debs verify against
+        // the pinned package-signer workflow, never an ambient signer.
+        assert!(
+            publish.contains("for artifact in artifacts/*.tar.gz; do gh attestation verify \"$artifact\" --repo \"$GITHUB_REPOSITORY\"; done"),
+            "{publish}"
+        );
+        assert!(
+            publish.contains("--signer-workflow \"$GITHUB_REPOSITORY/.github/workflows/ci-release-package-signer.yml\""),
+            "{publish}"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn native_release_local_lanes_honor_the_dispatch_provider_subset() {
+        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&config, release);
+        // A tag dispatch runs a local lane only when the operator selected
+        // its provider, so a declared github-hosted bootstrap visibly
+        // skips (never greenwashes) the local lanes.
+        let velnor = yaml_job(&workflow, "release-velnor-rust-example");
+        assert!(
+            velnor.contains("github.ref_type == 'tag' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')"),
+            "{velnor}"
+        );
+        // Tag pushes keep the trusted gate.
+        assert!(velnor.contains("(github.event_name == 'push'"), "{velnor}");
+        // Hosted lanes stay ungated: the build gate enforces their scope.
+        let hosted = yaml_job(&workflow, "release-github-hosted-rust-example");
+        let header_end = must_some(hosted.find("    steps:"), "leg steps render");
+        assert!(!hosted[..header_end].contains("if: ${{"), "{hosted}");
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn native_release_build_gate_declares_provider_scope_on_dispatch_and_full_scope_on_push() {
+        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&config, release);
+        let build = yaml_job(&workflow, "build");
+        // always() plus explicit result checks (the image job's
+        // established pattern): static needs cannot express a declared
+        // provider subset.
+        assert!(
+            build.contains("always() && needs.verify.result == 'success'"),
+            "{build}"
+        );
+        // Every configured provider lane constrains the build; on a tag
+        // dispatch a lane is required only when selected.
+        for (id, provider) in [
+            ("release-github-hosted-rust-example", "github-hosted"),
+            ("release-velnor-rust-example", "velnor"),
+        ] {
+            assert!(
+                build.contains(&format!("needs.{id}.result == 'success'")),
+                "{build}"
+            );
+            assert!(
+                build.contains(&format!(
+                    "!contains(format(',{{0}},', github.event.inputs.providers), ',{provider},')"
+                )),
+                "{build}"
+            );
+        }
+        // A dispatch additionally requires github-hosted in scope
+        // (mirroring the admit job) plus an adoptable image index, so a
+        // fresh-version dispatch fails closed at the build.
+        assert!(
+            build.contains("(github.event_name != 'workflow_dispatch' || contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')"),
+            "{build}"
+        );
+        assert!(
+            build.contains("(github.event_name != 'workflow_dispatch' || needs.image-admission.outputs.existing == 'true')"),
+            "{build}"
+        );
+        // The build waits for admission (read-only beside the lanes) to
+        // read its adoptable-index output.
+        assert!(
+            build.contains("needs: [verify, image-admission,"),
+            "{build}"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn native_release_image_adopts_but_never_assembles_on_dispatch() {
+        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&config, release);
+        // The index assembly opens on dispatches only when admission
+        // verified an existing tag; that branch inspects without pushing,
+        // so no dispatch can mint version bytes (and a fresh-version
+        // dispatch still refuses outright).
+        let image = yaml_job(&workflow, "image");
+        assert!(
+            image.contains("(github.event_name != 'workflow_dispatch' || needs.image-admission.outputs.existing == 'true')"),
+            "{image}"
+        );
+        assert!(
+            image.contains("name: Assemble and inspect immutable image index"),
+            "{image}"
+        );
+        assert!(image.contains("imagetools create"), "{image}");
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the fixture construction must fail loudly if it loses its release contract"
+    )]
+    fn native_release_admit_declares_the_dispatch_provider_scope() {
+        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract")
+        };
+        let workflow = super::render_release(&config, release);
+        let admit = yaml_job(&workflow, "admit-provider");
+        assert!(
+            admit.contains("Reject Velnor-only native release"),
+            "{admit}"
+        );
+        assert!(admit.contains("Declare release provider scope"), "{admit}");
+        assert!(
+            admit.contains("::notice::BOOTSTRAP release scope: github-hosted only (velnor qualification deferred)"),
+            "{admit}"
         );
     }
 
