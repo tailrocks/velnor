@@ -126,6 +126,16 @@ jobs:
           path: |
             ~/.bun/install/cache
           key: ci-release-${{ runner.os }}-github-hosted-linux-x64-untrusted-ok-bun-velnor-${{ hashFiles('package.json', 'bun.lock') }}
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Bun package (velnor)" checks
         env:
           CI_SCOPE: full
@@ -158,6 +168,16 @@ jobs:
         uses: crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487 # v4.0.0
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run Docker checks
         env:
           CI_SCOPE: full
@@ -194,6 +214,16 @@ jobs:
           path: |
             ~/.npm
           key: ci-release-${{ runner.os }}-github-hosted-linux-x64-untrusted-ok-docs-${{ hashFiles('package-lock.json', 'bun.lock') }}
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run Documentation checks
         env:
           CI_SCOPE: full
@@ -234,6 +264,16 @@ jobs:
           path: |
             ~/.terraform.d/plugin-cache
           key: ci-release-${{ runner.os }}-github-hosted-linux-x64-untrusted-ok-opentofu-${{ hashFiles('**/.terraform.lock.hcl') }}
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run OpenTofu checks
         env:
           CI_SCOPE: full
@@ -379,6 +419,16 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
           key: ci-release-${{ runner.os }}-github-hosted-linux-x64-untrusted-ok-rust-policy-${{ hashFiles('.cargo/**', 'Cargo.lock', 'deny.toml') }}
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Rust dependency policy" checks
         env:
           CI_SCOPE: full
@@ -500,6 +550,16 @@ jobs:
             cd -- "$root"
           fi
           cargo fetch --locked
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Rust crate (unit-collector)" checks
         env:
           CI_SCOPE: full
@@ -622,6 +682,16 @@ jobs:
             cd -- "$root"
           fi
           cargo fetch --locked
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Rust crate (velnor-bench)" checks
         env:
           CI_SCOPE: full
@@ -744,6 +814,16 @@ jobs:
             cd -- "$root"
           fi
           cargo fetch --locked
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Rust crate (velnor-client)" checks
         env:
           CI_SCOPE: full
@@ -866,6 +946,16 @@ jobs:
             cd -- "$root"
           fi
           cargo fetch --locked
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Rust crate (velnor-control)" checks
         env:
           CI_SCOPE: full
@@ -988,6 +1078,16 @@ jobs:
             cd -- "$root"
           fi
           cargo fetch --locked
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Rust crate (velnor-model)" checks
         env:
           CI_SCOPE: full
@@ -1110,6 +1210,16 @@ jobs:
             cd -- "$root"
           fi
           cargo fetch --locked
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Rust crate (velnor-render)" checks
         env:
           CI_SCOPE: full
@@ -1232,6 +1342,16 @@ jobs:
             cd -- "$root"
           fi
           cargo fetch --locked
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Rust crate (velnor-runner)" checks
         env:
           CI_SCOPE: full
@@ -1354,6 +1474,16 @@ jobs:
             cd -- "$root"
           fi
           cargo fetch --locked
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Rust crate (velnor-tools)" checks
         env:
           CI_SCOPE: full
@@ -1476,6 +1606,16 @@ jobs:
             cd -- "$root"
           fi
           cargo fetch --locked
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Rust crate (velnor-workflow)" checks
         env:
           CI_SCOPE: full
@@ -1598,6 +1738,16 @@ jobs:
             cd -- "$root"
           fi
           cargo fetch --locked
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Rust crate (velnor-workflow-contract)" checks
         env:
           CI_SCOPE: full
@@ -1720,6 +1870,16 @@ jobs:
             cd -- "$root"
           fi
           cargo fetch --locked
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Rust crate (velnorctl)" checks
         env:
           CI_SCOPE: full
@@ -1840,6 +2000,16 @@ jobs:
             cd -- "$root"
           fi
           cargo fetch --locked
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Rust production topology" checks
         env:
           CI_SCOPE: full
@@ -1863,6 +2033,16 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Bun package (velnor)" checks
         env:
           CI_SCOPE: full
@@ -1885,6 +2065,16 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run Docker checks
         env:
           CI_SCOPE: full
@@ -1908,6 +2098,16 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run Documentation checks
         env:
           CI_SCOPE: full
@@ -1930,6 +2130,16 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run OpenTofu checks
         env:
           CI_SCOPE: full
@@ -1961,6 +2171,16 @@ jobs:
         uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
         with:
           backend: local
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Rust dependency policy" checks
         env:
           CI_SCOPE: full
@@ -2008,6 +2228,16 @@ jobs:
           else
             cargo fetch --locked
           fi
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Rust crate (unit-collector)" checks
         env:
           CI_SCOPE: full
@@ -2056,6 +2286,16 @@ jobs:
           else
             cargo fetch --locked
           fi
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Rust crate (velnor-bench)" checks
         env:
           CI_SCOPE: full
@@ -2104,6 +2344,16 @@ jobs:
           else
             cargo fetch --locked
           fi
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Rust crate (velnor-client)" checks
         env:
           CI_SCOPE: full
@@ -2152,6 +2402,16 @@ jobs:
           else
             cargo fetch --locked
           fi
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Rust crate (velnor-control)" checks
         env:
           CI_SCOPE: full
@@ -2200,6 +2460,16 @@ jobs:
           else
             cargo fetch --locked
           fi
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Rust crate (velnor-model)" checks
         env:
           CI_SCOPE: full
@@ -2248,6 +2518,16 @@ jobs:
           else
             cargo fetch --locked
           fi
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Rust crate (velnor-render)" checks
         env:
           CI_SCOPE: full
@@ -2296,6 +2576,16 @@ jobs:
           else
             cargo fetch --locked
           fi
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Rust crate (velnor-runner)" checks
         env:
           CI_SCOPE: full
@@ -2344,6 +2634,16 @@ jobs:
           else
             cargo fetch --locked
           fi
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Rust crate (velnor-tools)" checks
         env:
           CI_SCOPE: full
@@ -2444,6 +2744,16 @@ jobs:
           else
             cargo fetch --locked
           fi
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Rust crate (velnor-workflow)" checks
         env:
           CI_SCOPE: full
@@ -2492,6 +2802,16 @@ jobs:
           else
             cargo fetch --locked
           fi
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Rust crate (velnor-workflow-contract)" checks
         env:
           CI_SCOPE: full
@@ -2540,6 +2860,16 @@ jobs:
           else
             cargo fetch --locked
           fi
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Rust crate (velnorctl)" checks
         env:
           CI_SCOPE: full
@@ -2584,6 +2914,16 @@ jobs:
           else
             cargo fetch --locked
           fi
+      - name: Plan full release selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.sha }}
+          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection
+        run: |
+          set -euo pipefail
+          mkdir -p .velnor-ci-selection
+          velnor-workflow plan --config .github/ci/project.toml
+
       - name: Run "Rust production topology" checks
         env:
           CI_SCOPE: full
