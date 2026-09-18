@@ -2183,6 +2183,9 @@ pub(crate) fn publish_suite(inputs: &PublishInputs<'_>) -> Result<(), GeneratorE
         inputs.path_overlay,
     )?;
     let Some(homedir_name) = homedir.to_str() else {
+        // The import succeeded, so the agent holds the key: tear down before
+        // refusing, like every other exit path from the import flow.
+        teardown_signing_homedir(&homedir, inputs.path_overlay);
         return Err(GeneratorError::usage(
             "publish: signing keyring path is not UTF-8",
         ));
@@ -2191,22 +2194,8 @@ pub(crate) fn publish_suite(inputs: &PublishInputs<'_>) -> Result<(), GeneratorE
         Suite::Stable => publish_stable(inputs, passphrase, homedir_name),
         Suite::Preview => publish_preview(inputs, passphrase, homedir_name),
     };
-    // The isolated keyring leaves with the run: shut down the agent it
-    // spawned, then wipe the directory — best-effort, mirroring the oracle's
-    // exit trap. A lingering unlocked agent must not outlive the run, and key
-    // material must not linger in the temp tree either.
-    let _ = run_fixed(
-        "gpgconf",
-        &[
-            "--homedir".to_owned(),
-            homedir_name.to_owned(),
-            "--kill".to_owned(),
-            "gpg-agent".to_owned(),
-        ],
-        None,
-        inputs.path_overlay,
-    );
-    let _ = std::fs::remove_dir_all(&homedir);
+    // The isolated keyring leaves with the run, success or failure.
+    teardown_signing_homedir(&homedir, inputs.path_overlay);
     outcome
 }
 
@@ -2583,10 +2572,31 @@ fn agree_imported_key(
     Ok(())
 }
 
+/// Tear down an isolated signing keyring: shut down the agent it spawned,
+/// then wipe the directory — best-effort, mirroring the oracle's exit trap.
+/// A lingering unlocked agent must not outlive the run, and key material
+/// must not linger in the temp tree either. Every exit path from the
+/// import/agreement flow funnels through here, success or refusal alike.
+fn teardown_signing_homedir(homedir: &Path, path_overlay: Option<&Path>) {
+    let _ = run_fixed(
+        "gpgconf",
+        &[
+            "--homedir".to_owned(),
+            homedir.to_string_lossy().into_owned(),
+            "--kill".to_owned(),
+            "gpg-agent".to_owned(),
+        ],
+        None,
+        path_overlay,
+    );
+    let _ = std::fs::remove_dir_all(homedir);
+}
+
 /// Import the signing-key material into an isolated keyring and prove the
 /// private key agrees with the pinned publisher fingerprint. A failed import
-/// wipes the keyring it created: key material never lingers in the temp
-/// tree. Diagnostics name the secret, never the material.
+/// tears down the keyring it created: no agent survives the refusal, and key
+/// material never lingers in the temp tree. Diagnostics name the secret,
+/// never the material.
 fn import_signing_key(
     signer: &str,
     key_env: &str,
@@ -2595,13 +2605,14 @@ fn import_signing_key(
 ) -> Result<PathBuf, GeneratorError> {
     let homedir = create_signing_homedir()?;
     let Some(homedir_name) = homedir.to_str() else {
+        teardown_signing_homedir(&homedir, path_overlay);
         return Err(GeneratorError::usage(
             "publish: signing keyring path is not UTF-8",
         ));
     };
     let outcome = agree_imported_key(homedir_name, signer, key_env, key_material, path_overlay);
     if outcome.is_err() {
-        let _ = std::fs::remove_dir_all(&homedir);
+        teardown_signing_homedir(&homedir, path_overlay);
     }
     outcome.map(|()| homedir)
 }
@@ -6130,6 +6141,98 @@ mod tests {
         assert!(
             log.contains("--import"),
             "the flow must reach the key import: {log}"
+        );
+        assert_no_signing_attempted(&stubs);
+        assert!(
+            !root.join("public").exists(),
+            "disagreement rejected pre-mutation"
+        );
+        let _ = std::fs::remove_dir_all(&incoming.dir);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn disagreeing_key_refusal_leaves_no_agent_or_key_residue() {
+        // The refusal path must tear down the isolated keyring exactly like
+        // the success path: the agent holding the imported key is killed,
+        // then the directory is wiped. A bare directory wipe would orphan a
+        // live gpg-agent/scdaemon pair holding key material.
+        let incoming = stable_incoming("pub-key-residue");
+        must(
+            verify_suite(&stable_verify_inputs(&incoming)),
+            "verify first",
+        );
+        let stubs = tool_stubs("pub-key-residue-tools");
+        let script = must(
+            std::fs::read_to_string(stubs.bin.join("gpg")),
+            "read the gpg stub",
+        );
+        assert!(
+            script.contains(FIXTURE_FPR),
+            "the stub lists the pinned key"
+        );
+        must(
+            std::fs::write(
+                stubs.bin.join("gpg"),
+                script.replace(FIXTURE_FPR, "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"),
+            ),
+            "re-point the stub at a foreign key",
+        );
+        let root = fixture_dir("pub-key-residue-root");
+        let prev = rollback_prev_dir(&root, "1.2.2", FIXTURE_COMMIT);
+        stable_pointer_file(&root, "v1.2.2");
+        can_both_arches(&stubs, &["1.2.3", "1.2.2"]);
+        let contract = apt_contract();
+        let staging = PathBuf::from("public");
+        let error = in_fixture_root(&root, || {
+            let inputs = publish_inputs(
+                Suite::Stable,
+                contract,
+                "v1.2.3",
+                &incoming.dir,
+                Some(&prev),
+                Path::new("previous-pointer.json"),
+                &staging,
+                false,
+                Some(&stubs.bin),
+            );
+            must_fail(publish_suite(&inputs), "disagreeing key")
+        });
+        assert!(
+            error.contains("disagrees with the pinned publisher key"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("fixture-key-material"),
+            "the refusal names the secret, never the material: {error}"
+        );
+        let gpg_log = must(
+            std::fs::read_to_string(stubs.log.join("gpg.log")),
+            "read the gpg log",
+        );
+        let homedir = must(
+            gpg_log
+                .lines()
+                .find(|line| line.contains("--import"))
+                .and_then(|line| {
+                    let mut args = line.split_whitespace();
+                    args.position(|arg| arg == "--homedir")
+                        .and_then(|_| args.next())
+                })
+                .ok_or_else(|| format!("the flow must reach the key import: {gpg_log}")),
+            "locate the imported keyring",
+        );
+        let kill_log = must(
+            std::fs::read_to_string(stubs.log.join("gpgconf.log")),
+            "the refusal must kill the agent it spawned",
+        );
+        assert!(
+            kill_log.contains(&format!("--homedir {homedir} --kill gpg-agent")),
+            "the refusal must kill this run's agent: {kill_log}"
+        );
+        assert!(
+            !Path::new(homedir).exists(),
+            "the refusal must wipe the keyring holding the material"
         );
         assert_no_signing_attempted(&stubs);
         assert!(
