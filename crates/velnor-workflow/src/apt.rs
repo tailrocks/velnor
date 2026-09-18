@@ -5898,6 +5898,101 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Copy a directory tree the way an artifact round trip moves it: every
+    /// entry recurses, and dotfiles survive only when the upload carries
+    /// hidden files.
+    fn copy_tree_filtered(source: &Path, target: &Path, keep_hidden: bool) {
+        must(std::fs::create_dir_all(target), "create the handoff target");
+        let entries = must(std::fs::read_dir(source), "list the handoff source");
+        for entry in entries {
+            let entry = must(entry, "read a handoff entry");
+            let name = entry.file_name();
+            let hidden = name.to_str().is_some_and(|name| name.starts_with('.'));
+            if hidden && !keep_hidden {
+                continue;
+            }
+            let from = entry.path();
+            let to = target.join(&name);
+            if must(entry.file_type(), "type a handoff entry").is_dir() {
+                copy_tree_filtered(&from, &to, keep_hidden);
+            } else {
+                must(std::fs::copy(&from, &to), "copy a handoff file");
+            }
+        }
+    }
+
+    #[test]
+    fn publish_accepts_a_verify_produced_tree_across_the_artifact_handoff() {
+        // The verify→publish handoff crosses an upload-artifact round trip,
+        // which drops dotfiles unless the upload opts into hidden files.
+        // A handoff that drops the hidden sentinel must still refuse
+        // before any signing; one that carries it must publish.
+        let incoming = stable_incoming("handoff-verify");
+        must(
+            verify_suite(&stable_verify_inputs(&incoming)),
+            "verify first",
+        );
+        assert!(incoming.dir.join(SENTINEL_FILE).is_file());
+
+        let dropped = fixture_dir("handoff-dropped");
+        copy_tree_filtered(&incoming.dir, &dropped, false);
+        assert!(!dropped.join(SENTINEL_FILE).exists());
+        let stubs = tool_stubs("handoff-dropped-tools");
+        let root = fixture_dir("handoff-dropped-root");
+        write_bytes(&root.join("previous-pointer.json"), b"null\n");
+        let contract = apt_contract();
+        let staging = PathBuf::from("public");
+        let error = in_fixture_root(&root, || {
+            let inputs = publish_inputs(
+                Suite::Stable,
+                contract,
+                "v1.2.3",
+                &dropped,
+                None,
+                Path::new("previous-pointer.json"),
+                &staging,
+                false,
+                Some(&stubs.bin),
+            );
+            must_fail(publish_suite(&inputs), "dropped sentinel")
+        });
+        assert!(error.contains("sentinel"), "{error}");
+        assert!(!stubs.log.join("gpg.log").exists(), "no signing attempted");
+        let _ = std::fs::remove_dir_all(&dropped);
+        let _ = std::fs::remove_dir_all(&root);
+
+        let carried = fixture_dir("handoff-carried");
+        copy_tree_filtered(&incoming.dir, &carried, true);
+        assert!(carried.join(SENTINEL_FILE).is_file());
+        let stubs = tool_stubs("handoff-carried-tools");
+        let root = fixture_dir("handoff-carried-root");
+        let prev = rollback_prev_dir(&root, "1.2.2", FIXTURE_COMMIT);
+        stable_pointer_file(&root, "v1.2.2");
+        can_both_arches(&stubs, &["1.2.3", "1.2.2"]);
+        write_bytes(&root.join("example.gpg"), b"fixture-keyring");
+        let contract = apt_contract();
+        let staging = PathBuf::from("public");
+        in_fixture_root(&root, || {
+            let inputs = publish_inputs(
+                Suite::Stable,
+                contract,
+                "v1.2.3",
+                &carried,
+                Some(&prev),
+                Path::new("previous-pointer.json"),
+                &staging,
+                false,
+                Some(&stubs.bin),
+            );
+            must(publish_suite(&inputs), "publish the carried tree");
+        });
+        assert_stable_pool(&root);
+        assert_stable_records(&root);
+        let _ = std::fs::remove_dir_all(&incoming.dir);
+        let _ = std::fs::remove_dir_all(&carried);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Publish with the key material overridden: the key-secret negatives
     /// fail pre-mutation, naming the secret — never the material.
     fn publish_key_material_error(name: &str, material: Option<String>) -> String {
