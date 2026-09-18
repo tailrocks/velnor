@@ -3384,6 +3384,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn docker_context_paths_reject_missing_directories() {
+        let root = scanned_root("docker-context-missing");
+        let missing = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+             [[units]]\nid = \"docker\"\nkind = \"docker\"\n\n\
+             [[units.docker_contexts]]\nname = \"checkout\"\npath = \"missing\"\n",
+        );
+        let error = must_fail(
+            missing.units()[0].named_docker_contexts("docker", &root),
+            "missing Docker context path must fail",
+        );
+        assert!(error.to_string().contains("does not exist"), "{error}");
+        must(
+            fs::remove_dir_all(root),
+            "remove missing Docker context fixture",
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn docker_context_path_rejects_escape_but_allows_in_repo_symlink() {

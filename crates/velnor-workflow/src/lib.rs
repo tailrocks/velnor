@@ -2844,58 +2844,155 @@ fn docker_hosted_pull_request_command(command: &str, unit_id: &str) -> String {
     cmd
 }
 
-fn append_docker_contexts(command: &str, contexts: &[DockerContext]) -> String {
+fn append_docker_contexts(command: &str, contexts: &[DockerContext]) -> Result<String, String> {
     if contexts.is_empty() {
-        return command.to_owned();
-    }
-    let flags = contexts
-        .iter()
-        .filter(|context| !command.contains(&format!("--build-context {}=", context.name)))
-        .map(|context| {
-            format!(
-                "--build-context {}={} ",
-                context.name,
-                shell_quote(&context.path)
-            )
-        })
-        .collect::<String>();
-    if flags.is_empty() {
-        return command.to_owned();
+        return Ok(command.to_owned());
     }
 
-    let mut rendered = String::with_capacity(command.len() + flags.len());
-    let mut cursor = 0;
-    while cursor < command.len() {
-        let remainder = &command[cursor..];
-        let buildx = remainder.find("docker buildx build ");
-        let legacy = remainder.find("docker build ");
-        let (offset, prefix_len) = match (buildx, legacy) {
-            (Some(buildx), Some(legacy)) if buildx <= legacy => {
-                (buildx, "docker buildx build ".len())
+    let mut rendered = String::with_capacity(command.len());
+    let mut segment_start = 0;
+    let mut found = false;
+    loop {
+        let segment_end = shell_segment_end(command, segment_start);
+        let segment = &command[segment_start..segment_end];
+        if let Some((offset, prefix_len)) = find_docker_build(segment) {
+            let build = &segment[offset..];
+            let mut flags = String::new();
+            for context in contexts {
+                if has_named_docker_context(build, &context.name) {
+                    return Err(format!(
+                        "Docker command already declares context `{}`; declare it only through `[[units.docker_contexts]]`",
+                        context.name
+                    ));
+                }
+                flags.push_str(&format!(
+                    "--build-context {}={} ",
+                    context.name,
+                    shell_quote(&context.path)
+                ));
             }
-            (Some(_), Some(legacy)) => (legacy, "docker build ".len()),
-            (Some(buildx), None) => (buildx, "docker buildx build ".len()),
-            (_, Some(legacy)) => (legacy, "docker build ".len()),
-            (None, None) => break,
-        };
-        let start = cursor + offset;
-        let end = start + prefix_len;
-        rendered.push_str(&command[cursor..end]);
-        rendered.push_str(&flags);
-        cursor = end;
+            let insertion_end = offset + prefix_len;
+            rendered.push_str(&segment[..insertion_end]);
+            rendered.push_str(&flags);
+            rendered.push_str(&segment[insertion_end..]);
+            found = true;
+        } else {
+            rendered.push_str(segment);
+        }
+        if segment_end == command.len() {
+            break;
+        }
+        rendered.push_str(&command[segment_end..segment_end + 1]);
+        segment_start = segment_end + 1;
     }
-    rendered.push_str(&command[cursor..]);
-    rendered
+    if found {
+        Ok(rendered)
+    } else {
+        Ok(command.to_owned())
+    }
 }
 
-fn append_docker_contexts_to_commands(commands: &mut [String], contexts: &[DockerContext]) -> bool {
+fn shell_segment_end(command: &str, start: usize) -> usize {
+    let bytes = command.as_bytes();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut index = start;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(active_quote) = quote {
+            if active_quote == b'"' && escaped {
+                escaped = false;
+            } else if active_quote == b'"' && byte == b'\\' {
+                escaped = true;
+            } else if byte == active_quote {
+                quote = None;
+            }
+        } else {
+            match byte {
+                b'\'' | b'"' => quote = Some(byte),
+                b'\\' => {
+                    index = index.saturating_add(1);
+                }
+                b';' | b'&' | b'|' | b'\n' => return index,
+                _ => {}
+            }
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+fn find_docker_build(command: &str) -> Option<(usize, usize)> {
+    let bytes = command.as_bytes();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(active_quote) = quote {
+            if active_quote == b'"' && escaped {
+                escaped = false;
+            } else if active_quote == b'"' && byte == b'\\' {
+                escaped = true;
+            } else if byte == active_quote {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if byte == b'\'' || byte == b'"' {
+            quote = Some(byte);
+            index += 1;
+            continue;
+        }
+        if byte == b'\\' {
+            index = index.saturating_add(2);
+            continue;
+        }
+        let token_boundary = index == 0
+            || !matches!(
+                bytes[index - 1],
+                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'-'
+            );
+        if token_boundary {
+            if command[index..].starts_with("docker buildx build ") {
+                return Some((index, "docker buildx build ".len()));
+            }
+            if command[index..].starts_with("docker build ") {
+                return Some((index, "docker build ".len()));
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+fn has_named_docker_context(command: &str, name: &str) -> bool {
+    let mut search_start = 0;
+    while let Some(relative) = command[search_start..].find("--build-context") {
+        let start = search_start + relative + "--build-context".len();
+        let rest = command[start..].trim_start();
+        if let Some(rest) = rest.strip_prefix(name)
+            && rest.trim_start().starts_with('=')
+        {
+            return true;
+        }
+        search_start = start;
+    }
+    false
+}
+
+fn append_docker_contexts_to_commands(
+    commands: &mut [String],
+    contexts: &[DockerContext],
+) -> Result<bool, String> {
     let mut rendered = false;
     for command in commands {
-        let updated = append_docker_contexts(command, contexts);
+        let updated = append_docker_contexts(command, contexts)?;
         rendered |= updated != *command;
         *command = updated;
     }
-    rendered
+    Ok(rendered)
 }
 
 /// Fill unit commands from typed capabilities. Generation config cannot supply
@@ -2991,19 +3088,33 @@ fn materialize_capability_commands(
         }
         if !unit.docker_contexts.is_empty() {
             let contexts = unit.docker_contexts.clone();
-            let mut rendered = append_docker_contexts_to_commands(&mut unit.pr_commands, &contexts);
-            rendered |= append_docker_contexts_to_commands(&mut unit.full_commands, &contexts);
+            let mut rendered = append_docker_contexts_to_commands(&mut unit.pr_commands, &contexts)
+                .map_err(|error| GeneratorError::usage(format!("unit `{}` {error}", unit.id)))?;
+            rendered |= append_docker_contexts_to_commands(&mut unit.full_commands, &contexts)
+                .map_err(|error| GeneratorError::usage(format!("unit `{}` {error}", unit.id)))?;
             if let Some(commands) = &mut unit.github_pr_commands {
-                rendered |= append_docker_contexts_to_commands(commands, &contexts);
+                rendered |=
+                    append_docker_contexts_to_commands(commands, &contexts).map_err(|error| {
+                        GeneratorError::usage(format!("unit `{}` {error}", unit.id))
+                    })?;
             }
             if let Some(commands) = &mut unit.github_full_commands {
-                rendered |= append_docker_contexts_to_commands(commands, &contexts);
+                rendered |=
+                    append_docker_contexts_to_commands(commands, &contexts).map_err(|error| {
+                        GeneratorError::usage(format!("unit `{}` {error}", unit.id))
+                    })?;
             }
             if let Some(commands) = &mut unit.velnor_pr_commands {
-                rendered |= append_docker_contexts_to_commands(commands, &contexts);
+                rendered |=
+                    append_docker_contexts_to_commands(commands, &contexts).map_err(|error| {
+                        GeneratorError::usage(format!("unit `{}` {error}", unit.id))
+                    })?;
             }
             if let Some(commands) = &mut unit.velnor_full_commands {
-                rendered |= append_docker_contexts_to_commands(commands, &contexts);
+                rendered |=
+                    append_docker_contexts_to_commands(commands, &contexts).map_err(|error| {
+                        GeneratorError::usage(format!("unit `{}` {error}", unit.id))
+                    })?;
             }
             if !rendered {
                 return Err(GeneratorError::usage(format!(
@@ -8052,7 +8163,8 @@ mod tests {
                 name: "parallax-checkout".to_owned(),
                 path: ".".to_owned(),
             }],
-        );
+        )
+        .expect("Docker context should render");
         assert!(
             command.contains("--build-context velnor-cache-seed='.velnor-docker-cache/seed'"),
             "{command}"
@@ -8075,13 +8187,30 @@ mod tests {
                 name: "checkout".to_owned(),
                 path: ".".to_owned(),
             }],
-        );
+        )
+        .expect("Docker context should render for every architecture");
         assert_eq!(
             command.matches("--build-context checkout='.'").count(),
             2,
             "{command}"
         );
         assert!(command.contains("build --build-context checkout='.' --file"));
+    }
+
+    #[test]
+    fn docker_named_context_render_rejects_conflicting_command_context() {
+        let error = append_docker_contexts(
+            "docker build --build-context checkout='/tmp/untrusted' .",
+            &[DockerContext {
+                name: "checkout".to_owned(),
+                path: ".".to_owned(),
+            }],
+        )
+        .expect_err("typed context must reject command-owned override");
+        assert!(
+            error.contains("already declares context `checkout`"),
+            "{error}"
+        );
     }
 
     /// The self-hosted labels a scanned fixture renders. A repository without
