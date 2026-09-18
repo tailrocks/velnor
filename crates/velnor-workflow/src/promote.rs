@@ -20,14 +20,18 @@
 //! write restores the recorded preimages, so the tree is either promoted or
 //! untouched — never half-rendered.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::policy::GENERATION_CONFIG;
+use super::s2::dispatch::dir_is_schema2;
+use super::s2::policy::GENERATION_CONFIG;
+use super::s2::provider::{ProviderId, ProviderSet};
+use super::s2::{
+    ownership_state_content, render_tree, write_generated_with_options, OWNERSHIP_STATE,
+};
 use super::{
-    is_full_revision, ownership_state_content, render_tree, resolve_default_branch,
-    write_generated_with_options, GeneratorError, RunnerMode, OWNERSHIP_STATE, SOURCE_CLOSURE,
+    is_full_revision, resolve_default_branch, GeneratorError, RunnerMode, SOURCE_CLOSURE,
     SOURCE_FEATURES, SOURCE_PROFILE,
 };
 
@@ -155,11 +159,11 @@ fn promote_rendered_tree(
     old_pin: &str,
     closure: &str,
 ) -> Result<PromoteReport, GeneratorError> {
-    let rendered = render_tree(repo, options.runners, default_branch)?;
+    let rendered = PromotedRender::render(repo, options.runners, default_branch)?;
     snapshot.extend(
         repo,
         rendered
-            .files
+            .files()
             .keys()
             .cloned()
             .chain([PathBuf::from(OWNERSHIP_STATE)]),
@@ -172,17 +176,9 @@ fn promote_rendered_tree(
     // the write. Force bypasses only the conflicts guard: ownership proof
     // still rejects manually modified files, and adopt stays false so unowned
     // workflows are never deleted.
-    write_generated_with_options(
-        repo,
-        &rendered.files,
-        &rendered.inputs,
-        false,
-        false,
-        true,
-        false,
-    )?;
-    verify_promoted_tree(repo, &rendered.files, options.runners, default_branch)?;
-    let expected_state = ownership_state_content(&rendered.files, &rendered.inputs);
+    rendered.write(repo)?;
+    verify_promoted_tree(repo, rendered.files(), options.runners, default_branch)?;
+    let expected_state = rendered.expected_ownership_state();
     let state_path = repo.join(OWNERSHIP_STATE);
     let state_disk = std::fs::read_to_string(&state_path)
         .map_err(|error| GeneratorError::io("read ownership state", &state_path, &error))?;
@@ -193,7 +189,7 @@ fn promote_rendered_tree(
         ));
     }
     let owned: BTreeSet<PathBuf> = rendered
-        .files
+        .files()
         .keys()
         .cloned()
         .chain([
@@ -270,14 +266,117 @@ fn verify_render_stamp_binding(generator_repo: &Path, rev: &str) -> Result<Strin
 /// Prove the write is faithful: a fresh re-render of the stamped tree must be
 /// byte-identical to the render just written (determinism), and every disk
 /// byte must match it (write integrity).
+/// Map across the pipeline boundary the same way the R2 bridge does: both
+/// error types carry a single message string.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "map_err hands over ownership; borrowing would push a closure onto every call site"
+)]
+fn s2_error(error: super::s2::GeneratorError) -> GeneratorError {
+    GeneratorError::usage(error.to_string())
+}
+
+/// One promotion render: the target tree's own pipeline, mirroring the R2
+/// bridge dispatch. Schema-2 trees render through the provider pipeline (the
+/// schema-1 parser predates schema-2 config fields like `trust` and rejects
+/// trees the main pipeline accepts); schema-1 consumer trees keep the
+/// original renderer (the schema-2 parser rejects legacy fields like
+/// `velnor_labels`). Either pipeline's strict schema gate still fails a
+/// misrouted tree closed.
+enum PromotedRender {
+    V1(Box<super::RenderedTree>),
+    V2(Box<super::s2::RenderedTree>),
+}
+
+impl PromotedRender {
+    fn render(
+        repo: &Path,
+        runners: RunnerMode,
+        default_branch: &str,
+    ) -> Result<Self, GeneratorError> {
+        if dir_is_schema2(repo) {
+            render_tree(repo, runners_to_providers(runners), default_branch)
+                .map(Box::new)
+                .map(Self::V2)
+                .map_err(s2_error)
+        } else {
+            super::render_tree(repo, runners, default_branch)
+                .map(Box::new)
+                .map(Self::V1)
+        }
+    }
+
+    fn files(&self) -> &BTreeMap<PathBuf, String> {
+        match self {
+            Self::V1(rendered) => &rendered.files,
+            Self::V2(rendered) => &rendered.files,
+        }
+    }
+
+    /// Write the render with promotion (force) semantics.
+    fn write(&self, repo: &Path) -> Result<(), GeneratorError> {
+        match self {
+            Self::V1(rendered) => {
+                super::write_generated_with_options(
+                    repo,
+                    &rendered.files,
+                    &rendered.inputs,
+                    false,
+                    false,
+                    true,
+                    false,
+                )?;
+                Ok(())
+            }
+            Self::V2(rendered) => {
+                write_generated_with_options(
+                    repo,
+                    &rendered.files,
+                    &rendered.inputs,
+                    false,
+                    false,
+                    true,
+                    false,
+                )
+                .map_err(s2_error)?;
+                Ok(())
+            }
+        }
+    }
+
+    /// The ownership metadata the write must have produced.
+    fn expected_ownership_state(&self) -> String {
+        match self {
+            Self::V1(rendered) => super::ownership_state_content(&rendered.files, &rendered.inputs),
+            Self::V2(rendered) => ownership_state_content(&rendered.files, &rendered.inputs),
+        }
+    }
+}
+
+/// Map the legacy `--runners` vocabulary onto provider sets. `both` stays
+/// unset so the repository config (or the full three-provider universe)
+/// decides, exactly like a plain generator run without `--providers`.
+/// `github` predates the hosted/self-hosted split and keeps both flavors.
+fn runners_to_providers(runners: RunnerMode) -> Option<ProviderSet> {
+    match runners {
+        RunnerMode::Both => None,
+        RunnerMode::Github => Some(ProviderSet::from([
+            ProviderId::GithubHosted,
+            ProviderId::GithubSelfHosted,
+        ])),
+        RunnerMode::Velnor => Some(ProviderSet::from([ProviderId::Velnor])),
+    }
+}
+
 fn verify_promoted_tree(
     repo: &Path,
-    rendered: &std::collections::BTreeMap<PathBuf, String>,
+    rendered: &BTreeMap<PathBuf, String>,
     runners: RunnerMode,
     default_branch: &str,
 ) -> Result<(), GeneratorError> {
-    let again = render_tree(repo, runners, default_branch)?.files;
-    if again != *rendered {
+    let again = PromotedRender::render(repo, runners, default_branch)?;
+    let again = again.files();
+    if again != rendered {
         let divergent: Vec<String> = rendered
             .keys()
             .chain(again.keys())
@@ -663,6 +762,70 @@ mod tests {
         assert!(
             stamped.contains(&format!("[workflow]\nrevision = \"{OLD}\"")),
             "other sections keep their bytes: {stamped}"
+        );
+    }
+
+    #[test]
+    fn runners_map_onto_provider_sets() {
+        assert_eq!(runners_to_providers(RunnerMode::Both), None);
+        assert_eq!(
+            runners_to_providers(RunnerMode::Github),
+            Some(ProviderSet::from([
+                ProviderId::GithubHosted,
+                ProviderId::GithubSelfHosted,
+            ]))
+        );
+        assert_eq!(
+            runners_to_providers(RunnerMode::Velnor),
+            Some(ProviderSet::from([ProviderId::Velnor]))
+        );
+    }
+
+    #[test]
+    fn promote_renders_schema2_trust_units() {
+        let root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures-s2/promote-trust");
+        assert!(
+            must_fail(
+                crate::config::discover(&root),
+                "the schema-1 parser must reject the trust-bearing tree"
+            )
+            .contains("trust"),
+            "the fixture proves the schema-2-only path"
+        );
+        let rendered = must(
+            PromotedRender::render(&root, RunnerMode::Both, "main"),
+            "promotion renders a schema-2 tree carrying `trust`",
+        );
+        assert!(
+            matches!(rendered, PromotedRender::V2(_)),
+            "schema-2 trees render through the provider pipeline"
+        );
+        assert!(
+            !rendered.files().is_empty(),
+            "the trust-bearing tree renders files"
+        );
+    }
+
+    #[test]
+    fn promote_renders_schema1_consumers_through_the_legacy_pipeline() {
+        let root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/synthetic-workspace");
+        assert!(
+            !dir_is_schema2(&root),
+            "the consumer fixture declares the legacy schema"
+        );
+        let rendered = must(
+            PromotedRender::render(&root, RunnerMode::Both, "main"),
+            "promotion renders a schema-1 consumer tree",
+        );
+        assert!(
+            matches!(rendered, PromotedRender::V1(_)),
+            "schema-1 trees keep the original renderer"
+        );
+        assert!(
+            !rendered.files().is_empty(),
+            "the consumer tree renders files"
         );
     }
 

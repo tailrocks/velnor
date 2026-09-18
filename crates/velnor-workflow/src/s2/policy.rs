@@ -53,7 +53,7 @@ use super::{
 };
 
 /// The generation config the audited tree declares itself with.
-const GENERATION_CONFIG: &str = ".github-gen/velnor-workflow.toml";
+pub(crate) const GENERATION_CONFIG: &str = ".github-gen/velnor-workflow.toml";
 /// The runtime contract, kept beside the generation config for the Velnor
 /// lane fields the advisory audit needs.
 const RUNTIME_CONFIG: &str = ".github/ci/project.toml";

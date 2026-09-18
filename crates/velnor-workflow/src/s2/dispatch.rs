@@ -120,7 +120,7 @@ fn workflow_root_argument(arguments: &[OsString]) -> Option<PathBuf> {
 /// Whether `dir` carries a generation config declaring `schema = 2`. A
 /// missing or unparsable config is not schema 2; the pipelines' own schema
 /// gates report the real error.
-fn dir_is_schema2(dir: &Path) -> bool {
+pub(crate) fn dir_is_schema2(dir: &Path) -> bool {
     if !dir.is_dir() {
         return false;
     }
