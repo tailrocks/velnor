@@ -330,20 +330,14 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
         description: String::new(),
         manifest_schema: args.string("manifest_schema")?.unwrap_or_default(),
         discovery_script: args.string("discovery_script")?.unwrap_or_default(),
-        canonical_manifest_asset: args
-            .string("canonical_manifest_asset")?
-            .unwrap_or_default(),
+        canonical_manifest_asset: args.string("canonical_manifest_asset")?.unwrap_or_default(),
         canonical_manifest_schema: args
             .string("canonical_manifest_schema")?
             .unwrap_or_default(),
         apt_arches: args.strings("apt_arches")?.unwrap_or_default(),
-        signer_fingerprint: args
-            .string("signer_fingerprint")?
-            .unwrap_or_default(),
+        signer_fingerprint: args.string("signer_fingerprint")?.unwrap_or_default(),
         passphrase_secret: args.string("passphrase_secret")?.unwrap_or_default(),
-        signing_key_secret: args
-            .string("signing_key_secret")?
-            .unwrap_or_default(),
+        signing_key_secret: args.string("signing_key_secret")?.unwrap_or_default(),
         keyring_path: args.string("keyring_path")?.unwrap_or_default(),
         apt_origin: args.string("apt_origin")?.unwrap_or_default(),
         apt_identity_dir: args.string("apt_identity_dir")?.unwrap_or_default(),

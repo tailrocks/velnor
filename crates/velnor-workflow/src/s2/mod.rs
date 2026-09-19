@@ -4610,6 +4610,7 @@ fn audited_pin_script() -> &'static str {
 fn policy_candidate_step(revision: &str) -> String {
     format!(
         r#"      - name: Acquire candidate generator product
+        id: candidate
         working-directory: policy-checkout
         env:
           GH_TOKEN: ${{{{ github.token }}}}
@@ -4701,17 +4702,35 @@ fn policy_candidate_step(revision: &str) -> String {
           fi
           expected="$(jq -er .binary_sha256 "$candidate/candidate-manifest.json")"
           [[ "$actual" == "$expected" ]] || {{ echo "::error::candidate digest mismatch" >&2; exit 1; }}
-          chmod 0755 "$candidate/velnor-workflow"
           manifest_closure="$(jq -er .closure "$candidate/candidate-manifest.json")"
           [[ "$manifest_closure" == "$head_candidate" ]] || {{ echo "::error::candidate manifest closure $manifest_closure is not the head's candidate $head_candidate" >&2; exit 1; }}
-          reported="$(GH_TOKEN="" GITHUB_TOKEN="" "$candidate/velnor-workflow" --closure)"
-          [[ "$reported" == "$manifest_closure" ]] || {{ echo "::error::candidate reports closure $reported, manifest claims $manifest_closure" >&2; exit 1; }}
-          reported_revision="$(GH_TOKEN="" GITHUB_TOKEN="" "$candidate/velnor-workflow" --revision)"
-          [[ "$reported_revision" == "$HEAD_SHA" ]] || {{ echo "::error::candidate reports revision $reported_revision, expected head $HEAD_SHA" >&2; exit 1; }}
+          echo "path=$candidate" >> "$GITHUB_OUTPUT"
+          echo "closure=$manifest_closure" >> "$GITHUB_OUTPUT"
+          echo "revision=$HEAD_SHA" >> "$GITHUB_OUTPUT"
           echo "VELNOR_WORKFLOW_CANDIDATE_RUN_ID=$run_id" >> "$GITHUB_ENV"
           echo "VELNOR_WORKFLOW_CANDIDATE_JOB_ID=candidate-bootstrap" >> "$GITHUB_ENV"
           echo "{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$candidate/velnor-workflow" >> "$GITHUB_ENV"
           echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=$candidate/candidate-manifest.json" >> "$GITHUB_ENV"
+      - name: Probe candidate metadata in an isolated process
+        working-directory: policy-checkout
+        env:
+          CANDIDATE_DIR: ${{{{ steps.candidate.outputs.path }}}}
+          EXPECTED_CLOSURE: ${{{{ steps.candidate.outputs.closure }}}}
+          EXPECTED_REVISION: ${{{{ steps.candidate.outputs.revision }}}}
+        run: |
+          set -euo pipefail
+          candidate="$CANDIDATE_DIR/velnor-workflow"
+          chmod 0755 "$candidate"
+          candidate_home="$RUNNER_TEMP/velnor-workflow-candidate-home"
+          rm -rf "$candidate_home"
+          mkdir -p "$candidate_home"
+          # Candidate bytes run only through a token/command-file-free env.
+          # The API/download shell above is a separate process boundary; no
+          # GitHub channel or credential is inherited by this probe.
+          reported="$(env -i HOME="$candidate_home" PATH="/usr/bin:/bin" "$candidate" --closure)"
+          [[ "$reported" == "$EXPECTED_CLOSURE" ]] || {{ echo "::error::candidate reports closure $reported, manifest claims $EXPECTED_CLOSURE" >&2; exit 1; }}
+          reported_revision="$(env -i HOME="$candidate_home" PATH="/usr/bin:/bin" "$candidate" --revision)"
+          [[ "$reported_revision" == "$EXPECTED_REVISION" ]] || {{ echo "::error::candidate reports revision $reported_revision, expected $EXPECTED_REVISION" >&2; exit 1; }}
 "#,
         pin_script = audited_pin_script(),
     )

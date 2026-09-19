@@ -647,9 +647,7 @@ impl AptContract {
     /// schema 2 owns. The adapter carries no behavior of its own: all package,
     /// signer, URL, architecture, and retention validation remains centralized
     /// in `resolve`.
-    pub(crate) fn resolve_s2(
-        spec: &crate::s2::ReleaseSpec,
-    ) -> Result<Self, GeneratorError> {
+    pub(crate) fn resolve_s2(spec: &crate::s2::ReleaseSpec) -> Result<Self, GeneratorError> {
         let legacy = crate::ReleaseSpec {
             kind: spec.kind.clone(),
             package: spec.package.clone(),
@@ -717,10 +715,12 @@ fn valid_discovery_script(value: &str) -> bool {
     !value.is_empty()
         && !value.starts_with('/')
         && !value.contains('\\')
-        && !value.split('/').any(|segment| segment.is_empty() || segment == "." || segment == "..")
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'/' | b'-')
-        })
+        && !value
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'/' | b'-'))
 }
 
 fn valid_manifest_asset(value: &str) -> bool {
