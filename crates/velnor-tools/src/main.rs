@@ -3,6 +3,7 @@ mod evidence_check;
 mod evidence_live;
 mod fleet_policy;
 mod fleet_policy_client;
+pub(crate) mod github_acquisition;
 mod lane_compare;
 mod workflow_monitor;
 
