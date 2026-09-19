@@ -150,12 +150,11 @@ pub(crate) const MR_BOXINGTON_STORE_BUDGET_ENV: &str = "MBX_GC_MAX_SIZE";
 /// and stays inside the hosted image's free disk (about 20 GiB on
 /// `ubuntu-24.04`); it is a ceiling on the store, not a reservation.
 ///
-/// `jdx/mr-boxington-action` v1.3.1+ would also default `MBX_GC_AUTO=0` on
-/// hosted runners in objects mode, but the Velnor runner admits the action
-/// only at the ref in its compiled capability manifest (v1.3.0 today), so the
-/// budget is the fix: with a 12 GiB ceiling the sweep never reaches a 5.2 GiB
-/// session's results, and the store stays bounded rather than growing to the
-/// runner's disk for the job.
+/// `jdx/mr-boxington-action` v1.3.1 defaults `MBX_GC_AUTO=0` on hosted
+/// runners in objects mode unless a job opts back in. The Velnor runner
+/// admits that exact ref in its compiled capability manifest; the explicit
+/// 12 GiB budget remains the safety ceiling for jobs that enable collection,
+/// keeping the store bounded rather than growing to the runner's disk.
 pub(crate) const MR_BOXINGTON_HOSTED_STORE_BUDGET: &str = "12GiB";
 
 /// The step that exports the hosted action-store budget for the rest of the
@@ -266,15 +265,14 @@ impl ActionPin {
             Self::Sccache => {
                 "mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11"
             }
-            // jdx/mr-boxington-action v1.3.0. The Velnor runner admits this
+            // jdx/mr-boxington-action v1.3.1. The Velnor runner admits this
             // action only at the ref its compiled capability manifest lists
             // (`crates/velnor-runner/src/manifest.rs`), so the pin moves in
-            // lockstep with a runner release, not here. v1.3.1+ would export
-            // `MBX_GC_AUTO=0` on hosted runners in object mode; the hosted
-            // store is bounded by `MR_BOXINGTON_HOSTED_STORE_BUDGET` instead,
-            // which is what keeps the sweep off a job's own action results.
+            // lockstep with a runner release, not here. v1.3.1 defaults
+            // `MBX_GC_AUTO=0` on hosted runners in object mode; the explicit
+            // budget remains the ceiling when collection is enabled.
             Self::MrBoxington => {
-                "jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0"
+                "jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1"
             }
             // rui314/setup-mold v1 (current v1 tag)
             Self::Mold => "rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1",
@@ -944,6 +942,27 @@ pub(crate) struct ReleaseSpec {
     pub(crate) registry_username_secret: String,
     /// The secret holding the registry password. A name, never the value.
     pub(crate) registry_password_secret: String,
+    /// Named-task jobs the tasks publisher renders. Empty for every other
+    /// publisher, whose job graph is fixed.
+    pub(crate) jobs: Vec<ReleaseJobSpec>,
+}
+
+/// One typed named-task release job. Product build, sign, and publication
+/// logic stays in the named mise tasks; the generator owns the job graph,
+/// event gates, runner routing, and protected execution metadata.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ReleaseJobSpec {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) tasks: Vec<String>,
+    pub(crate) needs: Vec<String>,
+    pub(crate) runner: String,
+    pub(crate) modes: Vec<String>,
+    pub(crate) timeout_minutes: u32,
+    pub(crate) environment: String,
+    pub(crate) attest_subjects: Vec<String>,
+    pub(crate) permissions: BTreeMap<String, String>,
+    pub(crate) env: BTreeMap<String, String>,
 }
 
 /// One credential the release lane mounts and must unmount: the setup
@@ -1919,7 +1938,7 @@ fn apply_generation_config(
     if let Some(null) = generation.actionlint_config_variables_null() {
         config.actionlint_config_variables_null = null;
     }
-    apply_release(config, generation.release());
+    apply_release(config, generation.release(), root)?;
     apply_renovate(config, generation.renovate(), root)?;
     apply_docs(config, generation.docs())?;
     apply_check_profiles(config, generation.check_profiles(), root)?;
@@ -2211,7 +2230,11 @@ fn apply_maintenance(
 /// The release contract a repository declares. `enabled` and `reason` are the
 /// recorded decision; the rest is the contract the publisher renders from.
 #[allow(clippy::too_many_lines)]
-fn apply_release(config: &mut ProjectConfig, release: &config::ReleaseSection) {
+fn apply_release(
+    config: &mut ProjectConfig,
+    release: &config::ReleaseSection,
+    root: &Path,
+) -> Result<(), GeneratorError> {
     if let Some(enabled) = release.enabled() {
         config.release_enabled = enabled;
     }
@@ -2242,9 +2265,10 @@ fn apply_release(config: &mut ProjectConfig, release: &config::ReleaseSection) {
         || release.tag_pattern().is_some()
         || release.registry().is_some()
         || release.registry_username_secret().is_some()
-        || release.registry_password_secret().is_some();
+        || release.registry_password_secret().is_some()
+        || !release.jobs().is_empty();
     if !declared {
-        return;
+        return Ok(());
     }
     let mut spec = config.release.clone().unwrap_or_default();
     if let Some(kind) = release.kind() {
@@ -2333,7 +2357,39 @@ fn apply_release(config: &mut ProjectConfig, release: &config::ReleaseSection) {
     if let Some(secret) = release.registry_password_secret() {
         secret.clone_into(&mut spec.registry_password_secret);
     }
+    if !release.jobs().is_empty() {
+        let mise_tasks = parse_mise_task_names(root)?;
+        let mut jobs = Vec::new();
+        for row in release.jobs() {
+            let id = row.id().unwrap_or_default();
+            for task in row.tasks().unwrap_or_default() {
+                if !mise_tasks.iter().any(|name| name == task) {
+                    return Err(GeneratorError::usage(format!(
+                        "[[release.job]] {id} names mise task {task}, which mise.toml does not declare"
+                    )));
+                }
+            }
+            jobs.push(ReleaseJobSpec {
+                id: id.to_owned(),
+                name: row.name().unwrap_or(id).to_owned(),
+                tasks: row.tasks().unwrap_or_default().to_vec(),
+                needs: row.needs().unwrap_or_default().to_vec(),
+                runner: row.runner().unwrap_or("github").to_owned(),
+                modes: row.modes().unwrap_or_default().to_vec(),
+                timeout_minutes: row
+                    .timeout_minutes()
+                    .and_then(|timeout| u32::try_from(timeout).ok())
+                    .unwrap_or(primitives::check_profiles::DEFAULT_CHECK_PROFILE_TIMEOUT_MINUTES),
+                environment: row.environment().unwrap_or_default().to_owned(),
+                attest_subjects: row.attest_subjects().unwrap_or_default().to_vec(),
+                permissions: row.permissions().clone(),
+                env: row.env().clone(),
+            });
+        }
+        spec.jobs = jobs;
+    }
     config.release = Some(spec);
+    Ok(())
 }
 
 /// Apply the `[[unit]]` rows a repository declares: a row whose `id` the scan

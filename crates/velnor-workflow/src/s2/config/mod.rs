@@ -338,6 +338,30 @@ pub(crate) struct CheckProfileSection {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct ReleaseJobSection {
+    id: Option<String>,
+    name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tasks: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    needs: Option<Vec<String>>,
+    runner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    modes: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    timeout_minutes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    environment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attest_subjects: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    permissions: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    env: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ReleaseSection {
     enabled: Option<bool>,
     reason: Option<String>,
@@ -395,6 +419,8 @@ pub(crate) struct ReleaseSection {
     registry_username_secret: Option<String>,
     /// The secret holding the registry password. A name, never the value.
     registry_password_secret: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    job: Vec<ReleaseJobSection>,
 }
 
 /// One credential the release lane mounts: the setup command that
@@ -841,6 +867,56 @@ impl ReleaseSection {
 
     pub(crate) fn registry_password_secret(&self) -> Option<&str> {
         self.registry_password_secret.as_deref()
+    }
+
+    pub(crate) fn jobs(&self) -> &[ReleaseJobSection] {
+        &self.job
+    }
+}
+
+impl ReleaseJobSection {
+    pub(crate) fn id(&self) -> Option<&str> {
+        self.id.as_deref()
+    }
+
+    pub(crate) fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    pub(crate) fn tasks(&self) -> Option<&[String]> {
+        self.tasks.as_deref()
+    }
+
+    pub(crate) fn needs(&self) -> Option<&[String]> {
+        self.needs.as_deref()
+    }
+
+    pub(crate) fn runner(&self) -> Option<&str> {
+        self.runner.as_deref()
+    }
+
+    pub(crate) fn modes(&self) -> Option<&[String]> {
+        self.modes.as_deref()
+    }
+
+    pub(crate) fn timeout_minutes(&self) -> Option<i64> {
+        self.timeout_minutes
+    }
+
+    pub(crate) fn environment(&self) -> Option<&str> {
+        self.environment.as_deref()
+    }
+
+    pub(crate) fn attest_subjects(&self) -> Option<&[String]> {
+        self.attest_subjects.as_deref()
+    }
+
+    pub(crate) fn permissions(&self) -> &BTreeMap<String, String> {
+        &self.permissions
+    }
+
+    pub(crate) fn env(&self) -> &BTreeMap<String, String> {
+        &self.env
     }
 }
 
@@ -2128,7 +2204,34 @@ const RELEASE_KINDS: &[&str] = &[
     "homebrew",
     "apt",
     "docker",
+    "tasks",
 ];
+
+/// The modes a typed release job gates on. validate runs only on workflow
+/// dispatch; publish runs only on tag pushes. Empty runs on both.
+pub(crate) const RELEASE_JOB_MODES: &[&str] = &["validate", "publish"];
+
+/// GitHub permission scopes accepted by a typed release job.
+pub(crate) const RELEASE_JOB_PERMISSIONS: &[&str] = &[
+    "actions",
+    "attestations",
+    "checks",
+    "contents",
+    "deployments",
+    "discussions",
+    "id-token",
+    "issues",
+    "models",
+    "packages",
+    "pages",
+    "pull-requests",
+    "repository-projects",
+    "security-events",
+    "statuses",
+];
+
+/// Permission levels accepted by a typed release job.
+pub(crate) const RELEASE_JOB_PERMISSION_LEVELS: &[&str] = &["read", "write", "none"];
 
 /// The OCI platforms the `docker` publisher builds. Native builders exist
 /// for exactly these; anything else fails closed instead of silently
@@ -2667,6 +2770,7 @@ impl RepoGenerationConfig {
 
     fn validate_release(&self) -> Result<(), GeneratorError> {
         let release = &self.release;
+        validate_release_jobs(&self.workflow, release)?;
         validate_release_bindings(release)?;
         if release.enabled != Some(true) {
             return Ok(());
@@ -2735,6 +2839,7 @@ impl RepoGenerationConfig {
                         .as_deref()
                         .is_none_or(is_contained_repository_path)
             }
+            "tasks" => !release.job.is_empty(),
             _ => false,
         };
         if complete {
@@ -3160,6 +3265,20 @@ fn validate_release_binding_kind(release: &ReleaseSection) -> Result<(), Generat
     if kind.is_empty() || matches!(kind, "rust-binary" | "native") {
         return Ok(());
     }
+    if kind == "tasks" {
+        let unsupported = release.producer_workflow.is_some()
+            || release.producer_conclusion.is_some()
+            || release.archive_checksum.is_some()
+            || release.archive_retention_days.is_some()
+            || !release.archive_members.is_empty()
+            || !release.credential.is_empty();
+        if unsupported {
+            return Err(GeneratorError::usage(
+                "[release] producer bindings, archive contracts, and credential pairings render only for rust-binary or native, not tasks",
+            ));
+        }
+        return Ok(());
+    }
     let bound = release.producer_workflow.is_some()
         || !release.modes.is_empty()
         || release.archive_checksum.is_some()
@@ -3246,6 +3365,171 @@ fn validate_release_bindings(release: &ReleaseSection) -> Result<(), GeneratorEr
 
 /// Whether `value` is a portable archive member name: a bare file name over
 /// the portable asset alphabet, never a path.
+/// Validate the typed named-task release graph. Tasks are repository-owned
+/// commands, but job identity, dependencies, runner aliases, mode gates, and
+/// execution metadata are generator-owned structure and fail closed here.
+#[allow(clippy::too_many_lines)]
+fn validate_release_jobs(
+    workflow: &WorkflowSection,
+    release: &ReleaseSection,
+) -> Result<(), GeneratorError> {
+    if release.job.is_empty() {
+        return Ok(());
+    }
+    let kind = release.kind.as_deref().unwrap_or_default();
+    if kind != "tasks" {
+        return Err(GeneratorError::usage(format!(
+            "[[release.job]] rows render only for kind tasks, not {kind}; other publishers own their job graph"
+        )));
+    }
+    let mut ids = BTreeSet::new();
+    for row in &release.job {
+        let id = row.id.as_deref().unwrap_or_default();
+        if id.is_empty() {
+            return Err(GeneratorError::usage(
+                "[[release.job]] is missing id; name the job the row renders",
+            ));
+        }
+        if !valid_check_profile_id(id) {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} is not a job id; use letters, digits, - and _ starting with a letter or _"
+            )));
+        }
+        if !ids.insert(id.to_owned()) {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} is declared twice; job ids must be unique"
+            )));
+        }
+    }
+    let providers = workflow
+        .providers
+        .as_deref()
+        .map(|values| parse_provider_set(values, "[workflow] providers"))
+        .transpose()?
+        .unwrap_or_else(|| ProviderId::ALL.into_iter().collect());
+    let selectors = parse_selectors(&workflow.selectors)?;
+    for row in &release.job {
+        let id = row.id.as_deref().unwrap_or_default();
+        if let Some(name) = row.name.as_deref()
+            && (name.is_empty() || name.contains(['\n', '\r']))
+        {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} name must be one non-empty line"
+            )));
+        }
+        let Some(tasks) = row.tasks.as_deref() else {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} is missing tasks; name the mise tasks the job runs"
+            )));
+        };
+        if tasks.is_empty() {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} declares empty tasks; name the mise tasks the job runs"
+            )));
+        }
+        for task in tasks {
+            if !valid_check_profile_task(task) {
+                return Err(GeneratorError::usage(format!(
+                    "[[release.job]] {id} names task {task}, which is not a plain task reference"
+                )));
+            }
+        }
+        if let Some(needs) = row.needs.as_deref() {
+            for dependency in needs {
+                if dependency == id {
+                    return Err(GeneratorError::usage(format!(
+                        "[[release.job]] {id} needs itself; a job cannot wait on its own completion"
+                    )));
+                }
+                if !ids.contains(dependency) {
+                    return Err(GeneratorError::usage(format!(
+                        "[[release.job]] {id} needs {dependency}, which no job declares"
+                    )));
+                }
+            }
+        }
+        match row.runner.as_deref() {
+            None | Some("github" | "macos" | "velnor") => {}
+            Some(runner) => {
+                return Err(GeneratorError::usage(format!(
+                    "[[release.job]] {id} runner must be one of github, macos, velnor; found {runner}"
+                )));
+            }
+        }
+        if row.runner.as_deref().unwrap_or("github") == "velnor" {
+            if !providers.contains(&ProviderId::Velnor) {
+                return Err(GeneratorError::usage(format!(
+                    "[[release.job]] {id} runs on velnor, but [workflow] providers has no Velnor lane"
+                )));
+            }
+            if !selectors.contains_key(&ProviderId::Velnor) {
+                return Err(GeneratorError::usage(format!(
+                    "[[release.job]] {id} runs on velnor, but [workflow.selectors.velnor] names no selector for the job"
+                )));
+            }
+        }
+        if let Some(modes) = row.modes.as_deref() {
+            for mode in modes {
+                if !RELEASE_JOB_MODES.contains(&mode.as_str()) {
+                    return Err(GeneratorError::usage(format!(
+                        "[[release.job]] {id} modes must be one of {}, found {mode}",
+                        RELEASE_JOB_MODES.join(", ")
+                    )));
+                }
+            }
+        }
+        if let Some(timeout) = row.timeout_minutes
+            && (timeout < 1 || u32::try_from(timeout).is_err())
+        {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} timeout_minutes must be a positive number of minutes, found {timeout}"
+            )));
+        }
+        if let Some(environment) = row.environment.as_deref()
+            && (environment.is_empty() || environment.contains(['\n', '\r']))
+        {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} environment must be one non-empty line"
+            )));
+        }
+        if let Some(subjects) = row.attest_subjects.as_deref() {
+            for subject in subjects {
+                if subject.is_empty() || subject.contains(['\n', '\r']) {
+                    return Err(GeneratorError::usage(format!(
+                        "[[release.job]] {id} attest_subjects must be one non-empty line per subject"
+                    )));
+                }
+            }
+        }
+        for (scope, level) in &row.permissions {
+            if !RELEASE_JOB_PERMISSIONS.contains(&scope.as_str()) {
+                return Err(GeneratorError::usage(format!(
+                    "[[release.job]] {id} permissions names {scope}, which is not a job permission scope"
+                )));
+            }
+            if !RELEASE_JOB_PERMISSION_LEVELS.contains(&level.as_str()) {
+                return Err(GeneratorError::usage(format!(
+                    "[[release.job]] {id} permissions {scope} must be one of {}, found {level}",
+                    RELEASE_JOB_PERMISSION_LEVELS.join(", ")
+                )));
+            }
+        }
+        for (key, value) in &row.env {
+            if !valid_check_profile_env_key(key) {
+                return Err(GeneratorError::usage(format!(
+                    "[[release.job]] {id} env name {key} is not a shell identifier"
+                )));
+            }
+            if value.contains(['\n', '\r']) {
+                return Err(GeneratorError::usage(format!(
+                    "[[release.job]] {id} env {key} must be one line"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn is_archive_member(value: &str) -> bool {
     !value.is_empty()
         && value

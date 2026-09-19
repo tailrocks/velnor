@@ -320,7 +320,7 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: github
           github-cache-mode: objects
@@ -481,7 +481,7 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: github
           github-cache-mode: objects
@@ -613,7 +613,7 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: github
           github-cache-mode: objects
@@ -745,7 +745,7 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: github
           github-cache-mode: objects
@@ -877,7 +877,7 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: github
           github-cache-mode: objects
@@ -1009,7 +1009,7 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: github
           github-cache-mode: objects
@@ -1141,7 +1141,7 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: github
           github-cache-mode: objects
@@ -1273,7 +1273,7 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: github
           github-cache-mode: objects
@@ -1405,7 +1405,7 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: github
           github-cache-mode: objects
@@ -1537,7 +1537,7 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: github
           github-cache-mode: objects
@@ -1669,7 +1669,7 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: github
           github-cache-mode: objects
@@ -1801,7 +1801,7 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: github
           github-cache-mode: objects
@@ -1931,7 +1931,7 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: github
           github-cache-mode: objects
@@ -2168,7 +2168,7 @@ jobs:
           mise --yes install aqua:EmbarkStudios/cargo-deny
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: local
       - name: Plan full release selection
@@ -2209,7 +2209,7 @@ jobs:
           mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: local
       - name: Prepare Cargo sources
@@ -2267,7 +2267,7 @@ jobs:
           mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: local
       - name: Prepare Cargo sources
@@ -2325,7 +2325,7 @@ jobs:
           mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: local
       - name: Prepare Cargo sources
@@ -2383,7 +2383,7 @@ jobs:
           mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: local
       - name: Prepare Cargo sources
@@ -2441,7 +2441,7 @@ jobs:
           mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: local
       - name: Prepare Cargo sources
@@ -2499,7 +2499,7 @@ jobs:
           mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: local
       - name: Prepare Cargo sources
@@ -2557,7 +2557,7 @@ jobs:
           mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: local
       - name: Prepare Cargo sources
@@ -2615,7 +2615,7 @@ jobs:
           mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: local
       - name: Prepare Cargo sources
@@ -2725,7 +2725,7 @@ jobs:
           mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: local
       - name: Prepare Cargo sources
@@ -2783,7 +2783,7 @@ jobs:
           mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: local
       - name: Prepare Cargo sources
@@ -2841,7 +2841,7 @@ jobs:
           mise --yes install aqua:nextest-rs/nextest/cargo-nextest
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: local
       - name: Prepare Cargo sources
@@ -2895,7 +2895,7 @@ jobs:
           persist-credentials: false
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: local
       - name: Prepare Cargo sources
@@ -3133,7 +3133,7 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: github
           github-cache-mode: objects
@@ -3401,7 +3401,7 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: github
           github-cache-mode: objects
@@ -3527,7 +3527,7 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: github
           github-cache-mode: objects
@@ -3756,7 +3756,7 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: github
           github-cache-mode: objects
