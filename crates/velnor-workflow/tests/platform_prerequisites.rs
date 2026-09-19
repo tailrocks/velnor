@@ -149,11 +149,11 @@ fn workflow_step_script(workflow: &str, name: &str) -> String {
     let marker = format!("      - name: {name}\n");
     let start = workflow
         .find(marker.as_str())
-        .unwrap_or_else(|| panic!("workflow step is absent: {name}"));
+        .expect("workflow step is absent");
     let step = &workflow[start..];
     let run = step
         .find("        run: |\n")
-        .unwrap_or_else(|| panic!("workflow step has no run body: {name}"));
+        .expect("workflow step has no run body");
     let body = &step[run + "        run: |\n".len()..];
     let mut script = String::new();
     for line in body.lines() {
@@ -460,6 +460,10 @@ fn artifact_prerequisite_builds_once_and_crosses_hosted_jobs() {
 }
 
 #[cfg(unix)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the hostile archive harness exercises producer and consumer bytes"
+)]
 #[test]
 fn artifact_shell_materializes_real_bytes_and_rejects_hostile_symlinks() {
     let root = unique_dir("artifact-shell");
@@ -495,6 +499,11 @@ product = "xcframework"
     fs::create_dir_all(source_product.join("Versions/A")).unwrap();
     fs::write(source_product.join("Versions/A/marker"), "linked\n").unwrap();
     std::os::unix::fs::symlink("A", source_product.join("Versions/Current")).unwrap();
+    let framework = source_product.join("Foo.framework");
+    fs::create_dir_all(framework.join("Versions/A")).unwrap();
+    fs::write(framework.join("Versions/A/Foo"), "framework\n").unwrap();
+    std::os::unix::fs::symlink("A", framework.join("Versions/Current")).unwrap();
+    std::os::unix::fs::symlink("Versions/Current/Foo", framework.join("Foo")).unwrap();
     let generated = generate(&root);
     let producer_script = workflow_step_script(
         &generated.workflow("ci-unit-rust.yml"),
@@ -546,6 +555,13 @@ product = "xcframework"
         )
         .unwrap(),
         "linked\n"
+    );
+    assert_eq!(
+        fs::read_to_string(
+            consumer_root.join("target/xcframework/App.xcframework/Foo.framework/Foo")
+        )
+        .unwrap(),
+        "framework\n"
     );
 
     let hostile_source = unique_dir("artifact-hostile-source");
@@ -634,6 +650,104 @@ product = "xcframework"
             || String::from_utf8_lossy(&hardlink_run.stdout).contains("hardlink"),
         "hardlink rejection should name the member type: {hardlink_run:?}"
     );
+
+    let duplicate_source = unique_dir("artifact-duplicate-source");
+    let duplicate_product = duplicate_source.join("target/xcframework/App.xcframework");
+    fs::create_dir_all(&duplicate_product).unwrap();
+    fs::write(duplicate_product.join("file"), "duplicate\n").unwrap();
+    let duplicate_archive = unique_dir("artifact-duplicate-archive").join("archive.tar");
+    let tar = Command::new("tar")
+        .args([
+            "-C",
+            duplicate_source.to_str().unwrap(),
+            "-cf",
+            duplicate_archive.to_str().unwrap(),
+            "--",
+            "target/xcframework/App.xcframework/file",
+        ])
+        .output()
+        .unwrap();
+    assert!(tar.status.success(), "duplicate tar failed: {tar:?}");
+    let tar = Command::new("tar")
+        .args([
+            "-C",
+            duplicate_source.to_str().unwrap(),
+            "-rf",
+            duplicate_archive.to_str().unwrap(),
+            "--",
+            "target/xcframework/App.xcframework/./file",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        tar.status.success(),
+        "canonical duplicate append failed: {tar:?}"
+    );
+    let duplicate_temp = unique_dir("artifact-duplicate-temp");
+    let duplicate_incoming = duplicate_temp.join("velnor-product-inputs/download");
+    fs::create_dir_all(&duplicate_incoming).unwrap();
+    fs::copy(&duplicate_archive, duplicate_incoming.join("archive.tar")).unwrap();
+    write_artifact_manifest(&duplicate_incoming, &duplicate_archive, head_sha);
+    let duplicate_consumer = unique_dir("artifact-duplicate-consumer");
+    fs::create_dir_all(duplicate_consumer.join("target/xcframework")).unwrap();
+    let duplicate_run = run_workflow_step(
+        &consumer_script,
+        &duplicate_consumer,
+        &duplicate_temp,
+        "swift-package-app",
+        head_sha,
+    );
+    assert!(
+        !duplicate_run.status.success(),
+        "canonical duplicate archive was accepted"
+    );
+    assert!(
+        String::from_utf8_lossy(&duplicate_run.stderr).contains("non-canonical")
+            || String::from_utf8_lossy(&duplicate_run.stdout).contains("non-canonical"),
+        "canonical duplicate rejection should name the path form: {duplicate_run:?}"
+    );
+
+    let cycle_source = unique_dir("artifact-symlink-cycle-source");
+    let cycle_product = cycle_source.join("target/xcframework/App.xcframework");
+    fs::create_dir_all(&cycle_product).unwrap();
+    std::os::unix::fs::symlink("B", cycle_product.join("A")).unwrap();
+    std::os::unix::fs::symlink("A", cycle_product.join("B")).unwrap();
+    let cycle_archive = unique_dir("artifact-symlink-cycle-archive").join("archive.tar");
+    let tar = Command::new("tar")
+        .args([
+            "-C",
+            cycle_source.to_str().unwrap(),
+            "-cf",
+            cycle_archive.to_str().unwrap(),
+            "--",
+            "target/xcframework/App.xcframework",
+        ])
+        .output()
+        .unwrap();
+    assert!(tar.status.success(), "symlink cycle tar failed: {tar:?}");
+    let cycle_temp = unique_dir("artifact-symlink-cycle-temp");
+    let cycle_incoming = cycle_temp.join("velnor-product-inputs/download");
+    fs::create_dir_all(&cycle_incoming).unwrap();
+    fs::copy(&cycle_archive, cycle_incoming.join("archive.tar")).unwrap();
+    write_artifact_manifest(&cycle_incoming, &cycle_archive, head_sha);
+    let cycle_consumer = unique_dir("artifact-symlink-cycle-consumer");
+    fs::create_dir_all(cycle_consumer.join("target/xcframework")).unwrap();
+    let cycle_run = run_workflow_step(
+        &consumer_script,
+        &cycle_consumer,
+        &cycle_temp,
+        "swift-package-app",
+        head_sha,
+    );
+    assert!(
+        !cycle_run.status.success(),
+        "symlink cycle archive was accepted"
+    );
+    assert!(
+        String::from_utf8_lossy(&cycle_run.stderr).contains("cycle")
+            || String::from_utf8_lossy(&cycle_run.stdout).contains("cycle"),
+        "symlink cycle rejection should name the cycle: {cycle_run:?}"
+    );
 }
 
 #[cfg(unix)]
@@ -706,6 +820,89 @@ product = "base-artifact"
     assert_eq!(
         fs::read_to_string(consumer_root.join("target/base.bin")).unwrap(),
         "s2 fixture\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn schema_two_artifact_renderer_accepts_framework_symlink_chain() {
+    let root = unique_dir("artifact-s2-framework-chain");
+    write_ffi_fixture(&root);
+    write_s2_config(
+        &root,
+        r#"[workflow]
+providers = ["github-hosted"]
+automatic_providers = ["github-hosted"]
+default_dispatch_providers = ["github-hosted"]
+
+[workflow.selectors.github-hosted]
+runs_on = ["ubuntu-24.04"]
+
+[[units]]
+id = "rust-ffi"
+platform = "macos-arm64"
+
+[[units.products]]
+name = "xcframework"
+task = "build-xcframework"
+artifact_path = "target/xcframework/App.xcframework"
+artifact_kind = "xcframework"
+
+[[units]]
+id = "rust-base"
+platform = "macos-arm64"
+
+[[units.prerequisites]]
+producer = "rust-ffi"
+product = "xcframework"
+"#,
+    );
+    let source_product = root.join("target/xcframework/App.xcframework");
+    let framework = source_product.join("Foo.framework");
+    fs::create_dir_all(framework.join("Versions/A")).unwrap();
+    fs::write(framework.join("Versions/A/Foo"), "s2 framework\n").unwrap();
+    std::os::unix::fs::symlink("A", framework.join("Versions/Current")).unwrap();
+    std::os::unix::fs::symlink("Versions/Current/Foo", framework.join("Foo")).unwrap();
+
+    let generated = generate_s2(&root);
+    let workflow = generated.workflow("ci-unit-rust.yml");
+    let producer_script = workflow_step_script(&workflow, "Stage hosted product artifacts");
+    let consumer_script = workflow_step_script(&workflow, "Materialize hosted product artifacts");
+    let runner_temp = unique_dir("artifact-s2-framework-chain-temp");
+    let head_sha = "0123456789012345678901234567890123456789";
+    let producer = run_workflow_step(&producer_script, &root, &runner_temp, "rust-ffi", head_sha);
+    assert!(
+        producer.status.success(),
+        "schema-2 framework producer failed:\n{}\n{}",
+        String::from_utf8_lossy(&producer.stdout),
+        String::from_utf8_lossy(&producer.stderr)
+    );
+    let staged = runner_temp.join("velnor-products/xcframework");
+    let incoming = runner_temp.join("velnor-product-inputs/download");
+    fs::create_dir_all(&incoming).unwrap();
+    fs::copy(staged.join("archive.tar"), incoming.join("archive.tar")).unwrap();
+    fs::copy(staged.join("manifest.json"), incoming.join("manifest.json")).unwrap();
+    let consumer_root = unique_dir("artifact-s2-framework-chain-consumer");
+    fs::create_dir_all(consumer_root.join("target/xcframework")).unwrap();
+    let consumer = run_workflow_step(
+        &consumer_script,
+        &consumer_root,
+        &runner_temp,
+        "rust-base",
+        head_sha,
+    );
+    assert!(
+        consumer.status.success(),
+        "schema-2 framework consumer failed:\n{}\n{}",
+        String::from_utf8_lossy(&consumer.stdout),
+        String::from_utf8_lossy(&consumer.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(
+            consumer_root.join("target/xcframework/App.xcframework/Foo.framework/Foo")
+        )
+        .unwrap(),
+        "s2 framework\n"
     );
 }
 

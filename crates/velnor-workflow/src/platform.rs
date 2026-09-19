@@ -438,6 +438,10 @@ pub(crate) fn valid_artifact_path(value: &str) -> bool {
 /// hardlink can alias an unexpected file, and duplicate names make the
 /// archive's meaning order-dependent. Keep this validator in the generated
 /// bash step so the consumer rechecks the bytes received from Actions.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the producer and consumer share one executable archive validator"
+)]
 pub(crate) fn artifact_archive_validation_script() -> &'static str {
     r#"          artifact_parents_are_safe() {
             local relative="$1" current="$GITHUB_WORKSPACE" component index last
@@ -454,8 +458,29 @@ pub(crate) fn artifact_archive_validation_script() -> &'static str {
             done
           }
 
+          artifact_normalize_path() {
+            awk -v value="$1" '
+              BEGIN {
+                count = split(value, parts, "/")
+                output = ""
+                for (part_index = 1; part_index <= count; part_index++) {
+                  if (parts[part_index] == "" || parts[part_index] == ".") continue
+                  if (parts[part_index] == "..") {
+                    if (output == "") exit 1
+                    if (index(output, "/") == 0) output = ""
+                    else sub(/\/[^\/]*$/, "", output)
+                    continue
+                  }
+                  output = output (output == "" ? "" : "/") parts[part_index]
+                }
+                if (output == "") exit 1
+                print output
+              }
+            '
+          }
+
           artifact_link_target() {
-            local link_name="$1" target="$2" entries="$3" symlinks="$4"
+            local link_name="$1" target="$2"
             local candidate normalized
             if [[ -z "$target" || "$target" == /* || "$target" == *$'\n'* || "$target" == *$'\r'* || "$target" == *$'\t'* ]]; then
               return 1
@@ -465,26 +490,58 @@ pub(crate) fn artifact_archive_validation_script() -> &'static str {
             else
               candidate="$target"
             fi
-            normalized="$(awk -v value="$candidate" '
-              BEGIN {
-                count = split(value, parts, "/")
-                output = ""
-                for (part_index = 1; part_index <= count; part_index++) {
-                  if (parts[part_index] == "" || parts[part_index] == ".") continue
-                  if (parts[part_index] == "..") {
-                    if (output == "") exit 1
-                    sub(/\/[^\/]*$/, "", output)
-                    continue
-                  }
-                  output = output (output == "" ? "" : "/") parts[part_index]
-                }
-                if (output == "") exit 1
-                print output
-              }
-            ')" || return 1
-            grep -F -x -q -- "$normalized" "$entries" || grep -F -x -q -- "$normalized/" "$entries" || return 1
-            grep -F -x -q -- "$normalized" "$symlinks" || grep -F -x -q -- "$normalized/" "$symlinks" && return 1
+            normalized="$(artifact_normalize_path "$candidate")" || return 1
             printf '%s\t%s\n' "$link_name" "$normalized"
+          }
+
+          artifact_link_target_for() {
+            local link_name="$1" links="$2"
+            awk -F '\t' -v wanted="$link_name" '
+              $1 == wanted { print $2; found = 1; exit }
+              END { exit(found ? 0 : 1) }
+            ' "$links"
+          }
+
+          artifact_entry_exists() {
+            local path="$1" entries="$2"
+            grep -F -x -q -- "$path" "$entries" || grep -F -x -q -- "$path/" "$entries"
+          }
+
+          artifact_resolve_path() {
+            local path="$1" entries="$2" links="$3"
+            local visited="$links.visited" prefix target suffix
+            local steps=0 found_link status=1
+            : >"$visited"
+            while ((steps < 128)); do
+              found_link=0
+              prefix="$path"
+              while :; do
+                if target="$(artifact_link_target_for "$prefix" "$links")"; then
+                  found_link=1
+                  if grep -F -x -q -- "$prefix" "$visited"; then
+                    break 2
+                  fi
+                  printf '%s\n' "$prefix" >>"$visited"
+                  suffix="${path#"$prefix"}"
+                  path="$(artifact_normalize_path "$target$suffix")" || break 2
+                  steps=$((steps + 1))
+                  break
+                fi
+                if [[ "$prefix" != */* ]]; then
+                  break
+                fi
+                prefix="${prefix%/*}"
+              done
+              if ((found_link)); then
+                continue
+              fi
+              if artifact_entry_exists "$path" "$entries"; then
+                status=0
+              fi
+              break
+            done
+            rm -f "$visited"
+            ((status == 0))
           }
 
           validate_artifact_archive() {
@@ -497,6 +554,10 @@ pub(crate) fn artifact_archive_validation_script() -> &'static str {
             tar -tf "$archive" >"$entries"
             if [[ ! -s "$entries" ]]; then
               echo "::error::artifact archive is empty" >&2
+              return 1
+            fi
+            if ! awk '{ raw = $0; name = raw; sub(/\/+$/, "", name); if (name == "" || raw ~ /\/\// || raw ~ /(^|\/)\.($|\/)/ || raw ~ /[\t\r]/) exit 1 }' "$entries"; then
+              echo "::error::artifact archive contains a non-canonical member path" >&2
               return 1
             fi
             if ! awk '{ name = $0; sub(/\/+$/, "", name); if (seen[name]++) exit 1 }' "$entries"; then
@@ -535,7 +596,7 @@ pub(crate) fn artifact_archive_validation_script() -> &'static str {
                     return 1
                   fi
                   printf '%s\n' "$link_name" >>"$symlinks"
-                  if ! artifact_link_target "$link_name" "$link_target" "$entries" "$symlinks" >>"$links"; then
+                  if ! artifact_link_target "$link_name" "$link_target" >>"$links"; then
                     echo "::error::artifact archive symlink escapes its bundle: $link_name -> $link_target" >&2
                     return 1
                   fi
@@ -555,8 +616,8 @@ pub(crate) fn artifact_archive_validation_script() -> &'static str {
               *) echo "::error::artifact root type does not match its declared kind" >&2; return 1 ;;
             esac
             while IFS=$'\t' read -r link_name link_target; do
-              if grep -F -x -q -- "$link_target" "$symlinks" || grep -F -x -q -- "$link_target/" "$symlinks"; then
-                echo "::error::artifact archive symlink chain is not allowed: $link_name -> $link_target" >&2
+              if ! artifact_resolve_path "$link_target" "$entries" "$links"; then
+                echo "::error::artifact archive symlink escapes its bundle or contains a cycle: $link_name -> $link_target" >&2
                 return 1
               fi
             done <"$links"
@@ -831,9 +892,11 @@ fn validate_prerequisite_dag(config: &ProjectConfig) -> Result<(), GeneratorErro
         visited += 1;
         if let Some(children) = outgoing.get(&id) {
             for child in children {
-                let degree = indegree
-                    .get_mut(child)
-                    .expect("prerequisite child is a declared unit");
+                let Some(degree) = indegree.get_mut(child) else {
+                    return Err(GeneratorError::usage(format!(
+                        "prerequisite graph references undeclared child unit `{child}`"
+                    )));
+                };
                 *degree -= 1;
                 if *degree == 0 {
                     ready.insert(child.clone());
