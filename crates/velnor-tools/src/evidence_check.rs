@@ -174,6 +174,10 @@ pub struct EvidenceCheckArgs {
     /// through the read-only GitHub API. G7 always enables this mode.
     #[arg(long)]
     pub live: bool,
+    /// Explicit local root of the immutable CAS evidence store. G0 storage
+    /// references are resolved only below this directory.
+    #[arg(long)]
+    pub evidence_root: Option<PathBuf>,
     /// Emit a stable JSON report.
     #[arg(long)]
     pub json: bool,
@@ -187,6 +191,7 @@ pub struct EvidenceCheckInput {
     pub evidence: PathBuf,
     pub release_manifest: Option<PathBuf>,
     pub live: bool,
+    pub evidence_root: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -838,6 +843,7 @@ pub async fn evidence_check(args: EvidenceCheckArgs) -> Result<()> {
         evidence: args.evidence,
         release_manifest: args.release_manifest,
         live: args.live || stage == Stage::G7,
+        evidence_root: args.evidence_root,
     };
     let report = if input.live {
         check_paths_live(&input).await?
@@ -883,14 +889,27 @@ pub fn check_paths(input: &EvidenceCheckInput) -> Result<CheckReport> {
     let snapshot: SnapshotDocument = read_json(&input.snapshot, "snapshot")?;
     let evidence: EvidenceDocument = read_json(&input.evidence, "evidence")?;
     let release = read_release_manifest(stage, input.release_manifest.as_deref())?;
-    Ok(check_documents(
+    let mut report = check_documents(
         stage,
         &manifest,
         &snapshot,
         &evidence,
         release.as_ref(),
         "offline",
-    ))
+    );
+    check_g0_external_storage(
+        stage,
+        evidence.g0_inventory.as_ref(),
+        input.evidence_root.as_deref(),
+        &mut report.findings,
+    );
+    sort_findings(&mut report.findings);
+    report.status = if report.findings.is_empty() {
+        "pass"
+    } else {
+        "fail"
+    };
+    Ok(report)
 }
 
 /// Live mode uses the existing typed GitHub transport. The supplied snapshot
@@ -931,6 +950,12 @@ pub async fn check_paths_live(input: &EvidenceCheckInput) -> Result<CheckReport>
     );
     compare_snapshot_facts(&supplied_snapshot, &live_snapshot, &mut report.findings);
     check_live_freshness(&live_snapshot, &mut report.findings);
+    check_g0_external_storage(
+        stage,
+        evidence.g0_inventory.as_ref(),
+        input.evidence_root.as_deref(),
+        &mut report.findings,
+    );
     sort_findings(&mut report.findings);
     report.status = if report.findings.is_empty() {
         "pass"
@@ -1880,6 +1905,172 @@ fn check_g0_inventory(
         "evidence.g0_inventory",
         "G0 requires independently collected typed workflow, PR/check, dependency-graph, access, and model evidence; summary counts/digests are insufficient",
     );
+}
+
+const MAX_G0_STORE_OBJECT_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Reopen every content-addressed object from an explicitly approved local
+/// store.  `storage_ref` is only an identifier; accepting its shape without
+/// reading the object would leave the checker vulnerable to self-attested
+/// wrapper digests.  The root is never inferred from a URI and no network
+/// scheme is accepted here.
+fn check_g0_external_storage(
+    stage: Stage,
+    inventory: Option<&G0InventoryEvidence>,
+    evidence_root: Option<&Path>,
+    findings: &mut Vec<Finding>,
+) {
+    let Some(inventory) = inventory else {
+        return;
+    };
+    if stage != Stage::G0 && evidence_root.is_none() {
+        return;
+    }
+    let Some(root) = evidence_root else {
+        finding(
+            findings,
+            "g0-storage-root-missing",
+            "",
+            "evidence_root",
+            "typed G0 evidence requires an explicit local immutable CAS root",
+        );
+        return;
+    };
+    let Ok(root) = fs::canonicalize(root) else {
+        finding(
+            findings,
+            "g0-storage-root",
+            "",
+            "evidence_root",
+            "evidence root must exist and be readable",
+        );
+        return;
+    };
+    if !root.is_dir() {
+        finding(
+            findings,
+            "g0-storage-root",
+            "",
+            "evidence_root",
+            "evidence root must be a directory",
+        );
+        return;
+    }
+
+    let snapshot_bytes = BASE64.decode(&inventory.collector_snapshot_bytes_base64);
+    if let Ok(bytes) = snapshot_bytes.as_ref() {
+        check_g0_external_object(
+            "evidence.g0_inventory.collector_snapshot_storage_ref",
+            &root,
+            &inventory.collector_snapshot_storage_ref,
+            &inventory.collector_snapshot_sha256,
+            bytes,
+            findings,
+        );
+    } else {
+        finding(
+            findings,
+            "g0-storage-bytes",
+            "",
+            "evidence.g0_inventory.collector_snapshot_bytes_base64",
+            "collector snapshot bytes must decode before external CAS verification",
+        );
+    }
+    for raw in &inventory.collector_snapshot.raw_objects {
+        let Ok(bytes) = BASE64.decode(&raw.bytes_base64) else {
+            finding(
+                findings,
+                "g0-storage-bytes",
+                "",
+                "evidence.g0_inventory.collector_snapshot.raw_objects.bytes_base64",
+                format!(
+                    "raw object {} bytes must decode before external CAS verification",
+                    raw.raw_id
+                ),
+            );
+            continue;
+        };
+        check_g0_external_object(
+            "evidence.g0_inventory.collector_snapshot.raw_objects.storage_ref",
+            &root,
+            &raw.storage_ref,
+            &raw.sha256,
+            &bytes,
+            findings,
+        );
+    }
+}
+
+fn check_g0_external_object(
+    field: &str,
+    root: &Path,
+    storage_ref: &str,
+    digest: &str,
+    expected: &[u8],
+    findings: &mut Vec<Finding>,
+) {
+    let Some(path) = g0_storage_path(root, storage_ref, digest) else {
+        finding(
+            findings,
+            "g0-storage-ref",
+            "",
+            field,
+            "storage reference must resolve to a digest-addressed object below the approved evidence root",
+        );
+        return;
+    };
+    let Ok(metadata) = fs::metadata(&path) else {
+        finding(
+            findings,
+            "g0-storage-missing",
+            "",
+            field,
+            format!("immutable storage object is missing: {}", path.display()),
+        );
+        return;
+    };
+    if !metadata.is_file() || metadata.len() > MAX_G0_STORE_OBJECT_BYTES {
+        finding(
+            findings,
+            "g0-storage-size",
+            "",
+            field,
+            "immutable storage object must be a regular file within the bounded CAS size",
+        );
+        return;
+    }
+    let Ok(measured) = fs::read(&path) else {
+        finding(
+            findings,
+            "g0-storage-read",
+            "",
+            field,
+            format!("cannot reopen immutable storage object: {}", path.display()),
+        );
+        return;
+    };
+    if measured != expected || digest_bytes(&measured) != digest {
+        finding(
+            findings,
+            "g0-storage-mismatch",
+            "",
+            field,
+            "reopened immutable storage bytes do not match the captured bytes and digest",
+        );
+    }
+}
+
+fn g0_storage_path(root: &Path, storage_ref: &str, digest: &str) -> Option<PathBuf> {
+    let hex = digest.strip_prefix("sha256:")?;
+    if !g0_storage_ref(storage_ref, digest)
+        || hex.len() != DIGEST_LENGTH
+        || !hex.chars().all(|character| character.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    let path = root.join("sha256").join(hex);
+    let canonical = fs::canonicalize(path).ok()?;
+    canonical.starts_with(root).then_some(canonical)
 }
 
 fn check_g0_collector_identity(collector: &G0CollectorSnapshot, findings: &mut Vec<Finding>) {
@@ -7787,6 +7978,26 @@ mod tests {
             std::env::temp_dir().join(format!("velnor-g0-public-check-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("create fixture directory");
+        let store_root = directory.join("store");
+        let store_objects = store_root.join("sha256");
+        std::fs::create_dir_all(&store_objects).expect("create CAS directory");
+        let snapshot_bytes = BASE64
+            .decode(&baseline_inventory.collector_snapshot_bytes_base64)
+            .expect("decode fixture snapshot bytes");
+        let snapshot_hex = baseline_inventory
+            .collector_snapshot_sha256
+            .strip_prefix("sha256:")
+            .expect("snapshot digest has prefix");
+        std::fs::write(store_objects.join(snapshot_hex), snapshot_bytes)
+            .expect("write snapshot CAS object");
+        for raw in &baseline_inventory.collector_snapshot.raw_objects {
+            let bytes = BASE64.decode(&raw.bytes_base64).expect("decode raw bytes");
+            let hex = raw
+                .sha256
+                .strip_prefix("sha256:")
+                .expect("raw digest has prefix");
+            std::fs::write(store_objects.join(hex), bytes).expect("write raw CAS object");
+        }
         let manifest_path = directory.join("manifest.json");
         let snapshot_path = directory.join("snapshot.json");
         let evidence_path = directory.join("evidence.json");
@@ -7812,6 +8023,7 @@ mod tests {
             evidence: evidence_path.clone(),
             release_manifest: None,
             live: false,
+            evidence_root: Some(store_root.clone()),
         })
         .expect("public checker accepts serialized fixture");
         let unexpected = report
@@ -7824,16 +8036,63 @@ mod tests {
             "unexpected CLI findings: {unexpected:?}"
         );
         assert_eq!(report.mode, "offline");
+        let missing_store_report = check_paths(&EvidenceCheckInput {
+            stage: "G0".to_owned(),
+            manifest: manifest_path.clone(),
+            snapshot: snapshot_path.clone(),
+            evidence: evidence_path.clone(),
+            release_manifest: None,
+            live: false,
+            evidence_root: None,
+        })
+        .expect("public checker reports missing CAS root");
+        assert!(missing_store_report
+            .findings
+            .iter()
+            .any(|finding| finding.code == "g0-storage-root-missing"));
 
-        // Recompute every caller-visible wrapper digest after changing one raw
-        // response, but retain the immutable content-addressed storage refs.
-        // A self-consistent JSON envelope must not turn a changed source into
-        // accepted evidence.
+        let mut graph_inventory = baseline_inventory.clone();
+        graph_inventory.collector_snapshot.dependency_graph.edges[0].target_source_ref =
+            "refs/heads/foreign".to_owned();
+        refresh_typed_inventory_bytes(&mut graph_inventory);
+        let graph_snapshot_bytes = BASE64
+            .decode(&graph_inventory.collector_snapshot_bytes_base64)
+            .expect("decode graph mutation bytes");
+        let graph_snapshot_hex = graph_inventory
+            .collector_snapshot_sha256
+            .strip_prefix("sha256:")
+            .expect("graph digest has prefix");
+        std::fs::write(store_objects.join(graph_snapshot_hex), graph_snapshot_bytes)
+            .expect("write graph mutation CAS object");
+        let mut graph_evidence = evidence.clone();
+        graph_evidence.g0_inventory = Some(graph_inventory);
+        std::fs::write(
+            &evidence_path,
+            serde_json::to_vec(&graph_evidence).expect("serialize graph mutation"),
+        )
+        .expect("write graph mutation");
+        let graph_report = check_paths(&EvidenceCheckInput {
+            stage: "G0".to_owned(),
+            manifest: manifest_path.clone(),
+            snapshot: snapshot_path.clone(),
+            evidence: evidence_path.clone(),
+            release_manifest: None,
+            live: false,
+            evidence_root: Some(store_root.clone()),
+        })
+        .expect("public checker parses graph mutation");
+        assert!(graph_report
+            .findings
+            .iter()
+            .any(|finding| finding.code == "g0-dependency-edge"));
+
+        // Recompute the outer caller-visible envelope digest after changing one
+        // raw response, but retain immutable content-addressed refs and the
+        // captured raw digest. The reopened CAS bytes must still disagree.
         let mut mutated_inventory = baseline_inventory;
         let raw = &mut mutated_inventory.collector_snapshot.raw_objects[0];
         raw.bytes_base64 = BASE64.encode(b"tampered");
         raw.byte_length = 8;
-        raw.sha256 = digest_bytes(b"tampered");
         let value = serde_json::to_value(&mutated_inventory.collector_snapshot)
             .expect("serialize mutated snapshot");
         let bytes = canonical_json(&value).into_bytes();
@@ -7853,6 +8112,7 @@ mod tests {
             evidence: evidence_path,
             release_manifest: None,
             live: false,
+            evidence_root: Some(store_root),
         })
         .expect("public checker parses mutated fixture");
         assert!(mutated_report
@@ -7863,6 +8123,10 @@ mod tests {
             .findings
             .iter()
             .any(|finding| finding.code == "g0-collector-storage"));
+        assert!(mutated_report
+            .findings
+            .iter()
+            .any(|finding| finding.code == "g0-storage-mismatch"));
         std::fs::remove_dir_all(directory).expect("remove fixture directory");
     }
 

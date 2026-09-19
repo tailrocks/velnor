@@ -1,7 +1,7 @@
 # GitHub-first dual-lane evidence schema v2
 
 `velnor-tools evidence-check` is a fail-closed verifier. It consumes four
-independent machine-readable inputs:
+independent machine-readable inputs plus an explicit local evidence store:
 
 ```text
 velnor-tools evidence-check \
@@ -9,6 +9,7 @@ velnor-tools evidence-check \
   --manifest manifest.json \
   --snapshot snapshot.json \
   --evidence records.json \
+  --evidence-root ./immutable-cas \
   --live \
   --release-manifest application-manifest.json
 ```
@@ -23,6 +24,12 @@ Schema v2 is strict: every object has `deny_unknown_fields`; field aliases,
 nullable-row normalization, legacy fallbacks, and flat release/install aliases
 are not accepted. Parse failure is failure. No credentials, bearer tokens, or
 authentication headers may occur in any source/provenance field.
+
+`--evidence-root` is an explicit local immutable CAS root. The checker resolves
+only `artifact://sha256/<hex>` and `cas://sha256/<hex>` references beneath
+`<root>/sha256/<hex>`, reopens each regular file, and recomputes its measured
+bytes and SHA-256. It never treats a URI or caller digest as proof, follows
+symlinks outside the root, or fetches arbitrary network URLs.
 
 ## Reviewed workload manifest
 

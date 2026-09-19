@@ -130,6 +130,16 @@ fn derive_source(
         let job = job_value
             .as_mapping()
             .ok_or_else(|| anyhow!("workflow job {job_id} must be a mapping"))?;
+        if mapping_value(job, "if").is_some() {
+            bail!("workflow job {job_id} has an unmodeled condition");
+        }
+        if mapping_value(job, "strategy")
+            .and_then(Value::as_mapping)
+            .and_then(|strategy| mapping_value(strategy, "matrix"))
+            .is_some()
+        {
+            bail!("workflow job {job_id} has an unmodeled matrix");
+        }
         let reusable = mapping_value(job, "uses").and_then(Value::as_str);
         let (provider, platform, architecture) = if let Some(uses) = reusable {
             let (target, pinned_ref) = resolve_source_target(uses, source)?;
@@ -150,13 +160,14 @@ fn derive_source(
                 );
             }
             let child_plan = derive_source(dependency, sources, &target, stack, depth + 1)?;
-            let child_job = child_plan.jobs.first().ok_or_else(|| {
+            let child_job = child_plan.jobs.first().cloned().ok_or_else(|| {
                 anyhow!(
                     "reusable workflow {}/{} has no derived jobs",
                     target.repository,
                     target.path
                 )
             })?;
+            plan.child_edges.extend(child_plan.child_edges);
             plan.child_edges.push(DerivedChildEdge {
                 workload_id: job_id.clone(),
                 repository: target.repository,
@@ -165,9 +176,9 @@ fn derive_source(
                 relation: "reusable_workflow".to_owned(),
             });
             (
-                child_job.provider.clone(),
-                child_job.platform.clone(),
-                child_job.architecture.clone(),
+                child_job.provider,
+                child_job.platform,
+                child_job.architecture,
             )
         } else {
             let runs_on = mapping_value(job, "runs-on")
@@ -226,6 +237,9 @@ fn action_sources(
         let Some(step) = step.as_mapping() else {
             bail!("workflow step {index} must be a mapping");
         };
+        if mapping_value(step, "if").is_some() {
+            bail!("workflow step {index} has an unmodeled condition");
+        }
         let Some(uses) = mapping_value(step, "uses").and_then(Value::as_str) else {
             continue;
         };
@@ -439,6 +453,13 @@ on:
   workflow_call: {}
 jobs:
   nested:
+    uses: ./.github/workflows/deep.yml@cccccccccccccccccccccccccccccccccccccccc
+"#;
+        let deep_yaml = r#"
+on:
+  workflow_call: {}
+jobs:
+  deep:
     runs-on: ubuntu-24.04
     steps: []
 "#;
@@ -448,11 +469,17 @@ jobs:
             ".github/workflows/reusable.yml",
             reusable_yaml,
         );
+        let mut deep = source("tailrocks/velnor", ".github/workflows/deep.yml", deep_yaml);
+        deep.revision = "cccccccccccccccccccccccccccccccccccccccc".to_owned();
         let action = source("actions/checkout", "action.yml", "name: checkout\n");
         let dependencies = vec![
             G0WorkflowDependency {
                 kind: "reusable_workflow".to_owned(),
                 source: reusable,
+            },
+            G0WorkflowDependency {
+                kind: "reusable_workflow".to_owned(),
+                source: deep,
             },
             G0WorkflowDependency {
                 kind: "action".to_owned(),
@@ -471,6 +498,9 @@ jobs:
         assert!(plan.events.contains("workflow_dispatch"));
         assert!(plan.child_edges.iter().any(|edge| {
             edge.relation == "reusable_workflow" && edge.workflow_path.ends_with("reusable.yml")
+        }));
+        assert!(plan.child_edges.iter().any(|edge| {
+            edge.relation == "reusable_workflow" && edge.workflow_path.ends_with("deep.yml")
         }));
         assert!(plan
             .child_edges
@@ -505,5 +535,46 @@ jobs:
 "#;
         let root = source("tailrocks/velnor", ".github/workflows/ci.yml", dynamic);
         assert!(derive_workflow_plan(&root, &[]).is_err());
+    }
+
+    #[test]
+    fn mutable_uses_ref_is_rejected() {
+        let root_yaml = r#"
+on: [push]
+jobs:
+  child:
+    uses: ./.github/workflows/reusable.yml@main
+"#;
+        let child_yaml = r#"
+on:
+  workflow_call: {}
+jobs:
+  nested:
+    runs-on: ubuntu-24.04
+    steps: []
+"#;
+        let root = source("tailrocks/velnor", ".github/workflows/ci.yml", root_yaml);
+        let child = source(
+            "tailrocks/velnor",
+            ".github/workflows/reusable.yml",
+            child_yaml,
+        );
+        let dependencies = vec![G0WorkflowDependency {
+            kind: "reusable_workflow".to_owned(),
+            source: child,
+        }];
+        assert!(derive_workflow_plan(&root, &dependencies).is_err());
+    }
+
+    #[test]
+    fn unmodeled_condition_and_matrix_are_rejected() {
+        for jobs in [
+            "scan:\n    if: github.ref == 'refs/heads/main'\n    runs-on: ubuntu-24.04\n    steps: []",
+            "scan:\n    strategy:\n      matrix:\n        os: [ubuntu-24.04]\n    runs-on: ${{ matrix.os }}\n    steps: []",
+        ] {
+            let yaml = format!("on: [push]\njobs:\n  {jobs}\n");
+            let root = source("tailrocks/velnor", ".github/workflows/ci.yml", &yaml);
+            assert!(derive_workflow_plan(&root, &[]).is_err());
+        }
     }
 }
