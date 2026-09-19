@@ -128,7 +128,7 @@ fn occupancy_never_exceeds_n_under_churn() {
             for round in 0..25 {
                 if lane % 2 == 0 {
                     let holder = permit_holder(7, i64::from(lane * 1000 + round));
-                    if let Some(guard) = allocator.acquire(&holder).unwrap() {
+                    if let Some(mut guard) = allocator.acquire(&holder).unwrap() {
                         if allocator.occupied().unwrap() > 4 {
                             violations.fetch_add(1, Ordering::SeqCst);
                         }
@@ -137,7 +137,7 @@ fn occupancy_never_exceeds_n_under_churn() {
                     }
                 } else {
                     let holder = native_permit_holder(&format!("churn-{lane}-{round}"));
-                    if let Some(guard) =
+                    if let Some(mut guard) =
                         NativePermitGuard::acquire(&ledger_path, holder, "scope-test").unwrap()
                     {
                         if allocator.occupied().unwrap() > 4 {
