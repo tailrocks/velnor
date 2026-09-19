@@ -454,12 +454,27 @@ fn lane_compare_watch(root: &Path, args: LaneCompareArgs) -> Result<()> {
         bail!("--regress-threshold must be non-negative");
     }
 
-    let run_ids = recent_completed_run_ids(&args.repo, &args.workflow, args.since)?;
-    if run_ids.len() < 2 {
+    let run_items = recent_run_items(&args.repo, &args.workflow, args.since)?;
+    if run_items.len() < 2 {
         bail!(
             "need at least two completed both-lane runs for --watch; found {}",
-            run_ids.len()
+            run_items.len()
         );
+    }
+    for run in &run_items {
+        if !run.status.eq_ignore_ascii_case("completed")
+            || !run
+                .conclusion
+                .as_deref()
+                .is_some_and(|conclusion| conclusion.eq_ignore_ascii_case("success"))
+        {
+            bail!(
+                "recent run {} is not a successful completed run (status `{}`, conclusion `{}`); watch sample is not proven",
+                run.database_id,
+                run.status,
+                run.conclusion.as_deref().unwrap_or("missing")
+            );
+        }
     }
 
     let out_dir = if args.output_dir.is_absolute() {
@@ -472,8 +487,8 @@ fn lane_compare_watch(root: &Path, args: LaneCompareArgs) -> Result<()> {
         .with_context(|| format!("create output directory {}", watch_dir.display()))?;
 
     let mut samples = Vec::new();
-    for run_id in run_ids {
-        samples.push(lane_stats_for_run(&args.repo, run_id)?);
+    for run in &run_items {
+        samples.push(lane_stats_for_run(&args.repo, run.database_id)?);
     }
     let current = samples
         .first()
@@ -494,7 +509,7 @@ fn lane_compare_watch(root: &Path, args: LaneCompareArgs) -> Result<()> {
     println!("report: {}", report_path.display());
     println!("stats: {}", json_path.display());
 
-    if verdict.regression {
+    if verdict.regression || verdict.not_proven {
         bail!(
             "lane-compare regression gate failed: {}",
             verdict.reasons.join("; ")
@@ -511,7 +526,7 @@ struct RunListItem {
     conclusion: Option<String>,
 }
 
-fn recent_completed_run_ids(repo: &str, workflow: &str, limit: usize) -> Result<Vec<u64>> {
+fn recent_run_items(repo: &str, workflow: &str, limit: usize) -> Result<Vec<RunListItem>> {
     let output = Command::new("gh")
         .args([
             "run",
@@ -535,17 +550,7 @@ fn recent_completed_run_ids(repo: &str, workflow: &str, limit: usize) -> Result<
     }
     let runs: Vec<RunListItem> =
         serde_json::from_slice(&output.stdout).context("parse gh run list output")?;
-    Ok(runs
-        .into_iter()
-        .filter(|run| {
-            run.status.eq_ignore_ascii_case("completed")
-                && run
-                    .conclusion
-                    .as_deref()
-                    .is_some_and(|conclusion| conclusion.eq_ignore_ascii_case("success"))
-        })
-        .map(|run| run.database_id)
-        .collect())
+    Ok(runs)
 }
 
 fn save_jobs_json(run_dir: &Path, jobs: &[Job]) -> Result<()> {
@@ -701,6 +706,51 @@ fn lane_name(lane: Lane) -> &'static str {
     }
 }
 
+fn step_is_skipped(step: &Step) -> bool {
+    step.status.eq_ignore_ascii_case("skipped")
+        || step
+            .conclusion
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("skipped"))
+}
+
+fn validate_html_step_coverage(
+    job: &Job,
+    lane: Lane,
+    html: &BTreeMap<u64, HtmlStep>,
+    run_id: u64,
+) -> Result<()> {
+    let job_numbers: BTreeSet<u64> = job.steps.iter().map(|step| step.number).collect();
+    let missing: Vec<String> = job
+        .steps
+        .iter()
+        .filter(|step| !step_is_skipped(step) && !html.contains_key(&step.number))
+        .map(|step| format!("{} ({})", step.number, step.name))
+        .collect();
+    if !missing.is_empty() {
+        bail!(
+            "run {run_id} {} job {} HTML evidence is missing executed step(s): {}",
+            lane_name(lane),
+            job.id,
+            missing.join(", ")
+        );
+    }
+    let unexpected: Vec<String> = html
+        .keys()
+        .filter(|number| !job_numbers.contains(number))
+        .map(u64::to_string)
+        .collect();
+    if !unexpected.is_empty() {
+        bail!(
+            "run {run_id} {} job {} HTML evidence has unexpected step number(s): {}",
+            lane_name(lane),
+            job.id,
+            unexpected.join(", ")
+        );
+    }
+    Ok(())
+}
+
 fn assess_run_evidence(
     run_id: u64,
     jobs: &[Job],
@@ -740,6 +790,8 @@ fn assess_run_evidence(
                 velnor.id
             );
         }
+        validate_html_step_coverage(github, Lane::GitHub, &evidence.github_html, run_id)?;
+        validate_html_step_coverage(velnor, Lane::Velnor, &evidence.velnor_html, run_id)?;
         require_nonempty_evidence(
             &format!("GitHub job {} log", github.id),
             &evidence.github_log,
@@ -877,7 +929,7 @@ fn fetch_job_html_steps(job: &Job) -> Result<BTreeMap<u64, HtmlStep>> {
         );
     }
     let html = String::from_utf8_lossy(&output.stdout);
-    let steps = parse_check_steps(&html);
+    let steps = parse_check_steps(&html)?;
     if steps.is_empty() {
         bail!("job {} page contained no check-step evidence", job.id);
     }
@@ -887,33 +939,57 @@ fn fetch_job_html_steps(job: &Job) -> Result<BTreeMap<u64, HtmlStep>> {
 /// Extract `<check-step …>` elements: `data-number` plus whether
 /// `data-log-url` is non-empty (that attribute is exactly what makes a step
 /// expandable in the UI).
-fn parse_check_steps(html: &str) -> BTreeMap<u64, HtmlStep> {
+fn parse_check_steps(html: &str) -> Result<BTreeMap<u64, HtmlStep>> {
     let mut steps = BTreeMap::new();
     let mut rest = html;
-    while let Some(start) = rest.find("<check-step") {
+    while let Some(start) = find_check_step_start(rest) {
         let element = &rest[start..];
         let Some(end) = element.find('>') else {
-            break;
+            bail!("malformed <check-step> element without closing `>`");
         };
         let element = &element[..end];
-        if let Some(number) =
-            attr_value(element, "data-number").and_then(|value| value.parse::<u64>().ok())
-        {
-            steps.insert(
-                number,
-                HtmlStep {
-                    number,
-                    expandable: attr_value(element, "data-log-url")
-                        .is_some_and(|value| !value.is_empty()),
-                    external_id: attr_value(element, "data-external-id")
-                        .unwrap_or_default()
-                        .to_string(),
-                },
-            );
+        let number_text =
+            attr_value(element, "data-number").context("<check-step> is missing data-number")?;
+        let number = number_text
+            .parse::<u64>()
+            .with_context(|| format!("invalid <check-step> data-number `{number_text}`"))?;
+        if number == 0 {
+            bail!("invalid <check-step> data-number `0`; step numbers start at 1");
         }
+        if steps.contains_key(&number) {
+            bail!("duplicate <check-step> data-number {number}");
+        }
+        steps.insert(
+            number,
+            HtmlStep {
+                number,
+                expandable: attr_value(element, "data-log-url")
+                    .is_some_and(|value| !value.is_empty()),
+                external_id: attr_value(element, "data-external-id")
+                    .unwrap_or_default()
+                    .to_string(),
+            },
+        );
         rest = &rest[start + end..];
     }
-    steps
+    Ok(steps)
+}
+
+fn find_check_step_start(html: &str) -> Option<usize> {
+    const MARKER: &str = "<check-step";
+    let mut offset = 0;
+    while let Some(found) = html[offset..].find(MARKER) {
+        let start = offset + found;
+        let after = html.as_bytes().get(start + MARKER.len()).copied();
+        if matches!(
+            after,
+            Some(b'>') | Some(b' ') | Some(b'\t') | Some(b'\r') | Some(b'\n')
+        ) {
+            return Some(start);
+        }
+        offset = start + MARKER.len();
+    }
+    None
 }
 
 fn attr_value<'a>(element: &'a str, name: &str) -> Option<&'a str> {
@@ -1449,6 +1525,7 @@ impl JobClassStats {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegressionVerdict {
     pub regression: bool,
+    pub not_proven: bool,
     pub reasons: Vec<String>,
 }
 
@@ -1458,6 +1535,17 @@ pub fn is_regression(
     threshold_pct: f64,
 ) -> RegressionVerdict {
     let mut reasons = Vec::new();
+    let mut not_proven = false;
+    let baseline_units: BTreeSet<&String> = baseline.jobs.keys().collect();
+    let current_units: BTreeSet<&String> = current.jobs.keys().collect();
+    if baseline_units != current_units {
+        not_proven = true;
+        reasons.push(format!(
+            "workload set drift: baseline has {} unit(s), current has {} unit(s); no full-unit timing comparison is proven",
+            baseline_units.len(),
+            current_units.len(),
+        ));
+    }
     if current.parity_worse_rows > 0 {
         reasons.push(format!(
             "parity diff: {} worse row(s)",
@@ -1487,7 +1575,8 @@ pub fn is_regression(
     }
 
     RegressionVerdict {
-        regression: !reasons.is_empty(),
+        regression: !reasons.is_empty() && !not_proven,
+        not_proven,
         reasons,
     }
 }
@@ -1644,7 +1733,17 @@ fn regression_report(
         current.parity_worse_rows
     )?;
     writeln!(report)?;
-    if verdict.regression {
+    if verdict.not_proven {
+        writeln!(report, "## Result")?;
+        writeln!(report)?;
+        writeln!(
+            report,
+            "**NOT PROVEN** — workload/evidence sets are not comparable."
+        )?;
+        for reason in &verdict.reasons {
+            writeln!(report, "- {reason}")?;
+        }
+    } else if verdict.regression {
         writeln!(report, "## Result")?;
         writeln!(report)?;
         writeln!(report, "**FAIL**")?;
@@ -2495,6 +2594,28 @@ mod tests {
     }
 
     #[test]
+    fn partial_nonempty_html_cannot_pass_executed_step_coverage() {
+        let (mut jobs, _, evidence) = valid_pair_fixture();
+        for job in &mut jobs {
+            job.steps.push(step(2, "Run security", "success"));
+        }
+        let census = pair_lane_census(&jobs);
+        let error = assess_run_evidence(
+            42,
+            &jobs,
+            census,
+            successful_summary(),
+            "velnor log\n".to_owned(),
+            evidence,
+        )
+        .expect_err("nonempty but partial HTML must not pass");
+        assert!(
+            error.to_string().contains("missing executed step(s)"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
     fn unexpected_velnor_only_step_is_a_parity_failure() {
         let github = Job {
             id: 1,
@@ -2641,7 +2762,7 @@ mod tests {
   <check-step data-name="Skipped" data-number="3" data-conclusion="skipped" data-log-url="">
   </check-step>
 </check-steps>"#;
-        let steps = parse_check_steps(html);
+        let steps = parse_check_steps(html).unwrap();
         assert_eq!(steps.len(), 2);
         assert!(steps[&1].expandable);
         assert_eq!(
@@ -2649,6 +2770,22 @@ mod tests {
             "e7cf94ab-32aa-4712-be84-b4521dcbad16"
         );
         assert!(!steps[&3].expandable);
+    }
+
+    #[test]
+    fn parse_check_steps_rejects_invalid_or_duplicate_numbers() {
+        assert!(parse_check_steps(
+            r#"<check-steps><check-step data-number="nope"></check-step></check-steps>"#
+        )
+        .is_err());
+        assert!(parse_check_steps(
+            r#"<check-steps><check-step data-number="0"></check-step></check-steps>"#
+        )
+        .is_err());
+        assert!(parse_check_steps(
+            r#"<check-steps><check-step data-number="1"></check-step><check-step data-number="1"></check-step></check-steps>"#
+        )
+        .is_err());
     }
 
     #[test]
@@ -2928,6 +3065,30 @@ mod tests {
         let verdict = is_regression(&baseline, &current, 0.0);
 
         assert!(!verdict.regression, "{:?}", verdict.reasons);
+        assert!(verdict.not_proven, "{:?}", verdict.reasons);
+    }
+
+    #[test]
+    fn is_regression_rejects_current_baseline_workload_set_drift() {
+        let mut baseline = lane_stats(100.0, 100.0, 0);
+        baseline.jobs.insert(
+            "compat (app-b".to_owned(),
+            JobClassStats {
+                github_seconds: 80.0,
+                velnor_seconds: 80.0,
+            },
+        );
+        let current = lane_stats(100.0, 100.0, 0);
+
+        let verdict = is_regression(&baseline, &current, 0.0);
+
+        assert!(!verdict.regression, "{:?}", verdict.reasons);
+        assert!(verdict.not_proven, "{:?}", verdict.reasons);
+        assert!(
+            verdict.reasons[0].contains("workload set drift"),
+            "{:?}",
+            verdict.reasons
+        );
     }
 
     #[test]
