@@ -1321,10 +1321,17 @@ fn render_guest_payload_job(
     // The preview lane binds the resolved identity commit instead of the
     // moving branch tip; the stable lane keeps its tag checkout.
     let (needs, checkout_ref) = if preview {
-        (
-            "    needs: [identity]\n",
-            "          ref: ${{ needs.identity.outputs.commit }}\n",
-        )
+        if has_producer_binding(release) {
+            (
+                "    needs: [identity, publish-gate]\n    if: ${{ needs.publish-gate.outputs.admitted == 'true' }}\n",
+                "          ref: ${{ needs.identity.outputs.commit }}\n",
+            )
+        } else {
+            (
+                "    needs: [identity]\n",
+                "          ref: ${{ needs.identity.outputs.commit }}\n",
+            )
+        }
     } else {
         ("", "")
     };
@@ -1416,6 +1423,7 @@ fn render_release_metadata_job(
     } else {
         "cargo"
     };
+    let preview_producer = has_producer_binding(release);
     let (job, name, needs, gate, artifact, checkout_ref, sha_env, sha_check, retention) = if preview
     {
         (
@@ -1444,6 +1452,17 @@ fn render_release_metadata_job(
             "",
             2,
         )
+    };
+    let (needs, gate) = if preview && preview_producer {
+        (
+            "    needs: [identity, publish-gate]\n",
+            format!(
+                "    if: ${{{{ github.ref == 'refs/heads/{}' && needs.publish-gate.outputs.admitted == 'true' }}}}\n",
+                config.default_branch
+            ),
+        )
+    } else {
+        (needs, gate)
     };
     let source_env = if preview {
         "          SOURCE_COMMIT: ${{ needs.identity.outputs.commit }}\n"
@@ -1565,8 +1584,17 @@ fn debian_guard_steps(
 /// architecture fails the lane loudly instead of silently dropping it.
 fn render_undebianable_job(config: &ProjectConfig, release: &ReleaseSpec, needs: &str) -> String {
     let targets = release.targets.join(", ");
+    let gate = if needs
+        .split(", ")
+        .any(|dependency| dependency == "publish-gate")
+    {
+        "    if: ${{ needs.publish-gate.outputs.admitted == 'true' }}\n"
+    } else {
+        ""
+    };
     format!(
-        "  debian:\n    name: Package Debian artifacts\n    needs: [{needs}]\n    runs-on: {runner}\n    timeout-minutes: 5\n    steps:\n      - name: Reject undebianable target\n        run: |\n          echo '::error::native Debian packaging supports x86_64/aarch64 linux only, found {targets}' >&2\n          exit 1\n",
+        "  debian:\n    name: Package Debian artifacts\n    needs: [{needs}]\n{gate}    runs-on: {runner}\n    timeout-minutes: 5\n    steps:\n      - name: Reject undebianable target\n        run: |\n          echo '::error::native Debian packaging supports x86_64/aarch64 linux only, found {targets}' >&2\n          exit 1\n",
+        gate = gate,
         runner = hosted_selector_runs_on(config),
     )
 }
@@ -1594,6 +1622,26 @@ fn debian_reuse_release_steps(config: &ProjectConfig, release: &ReleaseSpec) -> 
     )
 }
 
+fn identity_debian_needs(preview: bool, guest: bool, producer: bool) -> String {
+    let mut needs = if preview {
+        vec!["identity".to_owned(), "metadata".to_owned()]
+    } else {
+        vec![
+            "admit-provider".to_owned(),
+            "verify".to_owned(),
+            "build".to_owned(),
+            "metadata".to_owned(),
+        ]
+    };
+    if guest {
+        needs.push("guest-payload".to_owned());
+    }
+    if preview && producer {
+        needs.push("publish-gate".to_owned());
+    }
+    needs.join(", ")
+}
+
 fn render_identity_debian_job(
     config: &ProjectConfig,
     release: &ReleaseSpec,
@@ -1614,20 +1662,8 @@ fn render_identity_debian_job(
     } else {
         "cargo"
     };
-    let mut needs = if preview {
-        vec!["identity".to_owned(), "metadata".to_owned()]
-    } else {
-        vec![
-            "admit-provider".to_owned(),
-            "verify".to_owned(),
-            "build".to_owned(),
-            "metadata".to_owned(),
-        ]
-    };
-    if guest {
-        needs.push("guest-payload".to_owned());
-    }
-    let needs = needs.join(", ");
+    let producer = has_producer_binding(release);
+    let needs = identity_debian_needs(preview, guest, producer);
     let Some(matrix) = deb_arch_matrix(config, &release.targets, guest) else {
         return render_undebianable_job(config, release, &needs);
     };
@@ -1656,6 +1692,14 @@ fn render_identity_debian_job(
             "\"$VERSION\"",
             2,
         )
+    };
+    let gate = if preview && producer {
+        format!(
+            "    if: ${{{{ github.ref == 'refs/heads/{}' && needs.publish-gate.outputs.admitted == 'true' }}}}\n",
+            config.default_branch
+        )
+    } else {
+        gate
     };
     let lane_env = identity_debian_lane_env(preview, version);
     let metadata_artifact = if preview {
@@ -1746,6 +1790,17 @@ fn render_sign_deb_job(
             "${{ needs.verify.outputs.version }}",
             "refs/tags/${{ github.ref_name }}".to_owned(),
         )
+    };
+    let (needs, gate) = if preview && has_producer_binding(release) {
+        (
+            "    needs: [identity, debian, publish-gate]\n",
+            format!(
+                "    if: ${{{{ github.ref == 'refs/heads/{}' && needs.publish-gate.outputs.admitted == 'true' }}}}\n",
+                config.default_branch
+            ),
+        )
+    } else {
+        (needs, gate)
     };
     Some(format!(
         "  sign-deb:\n    name: {name}\n{needs}{gate}    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    permissions:\n      attestations: write\n      contents: read\n      id-token: write\n    uses: ./.github/workflows/ci-release-package-signer.yml\n    with:\n      artifact-name: debian-packages\n      subject-path: {stem}-{version}-${{{{ matrix.arch }}}}.deb\n      source-ref: {source_ref}\n"
@@ -2099,12 +2154,41 @@ fn render_preview_identity_job(config: &ProjectConfig, release: &ReleaseSpec) ->
         None => "Cargo.toml".to_owned(),
     };
     let manifest = shell_quote(&manifest);
-    format!(
+    let mut output = format!(
         "  identity:\n    name: Resolve preview identity\n    if: ${{{{ github.ref == 'refs/heads/{}' }}}}\n    timeout-minutes: 10\n    runs-on: {runner}\n    outputs:\n      version: ${{{{ steps.identity.outputs.version }}}}\n      crate_version: ${{{{ steps.identity.outputs.crate_version }}}}\n      name: ${{{{ steps.identity.outputs.name }}}}\n      commit: ${{{{ steps.identity.outputs.commit }}}}\n      short_commit: ${{{{ steps.identity.outputs.short_commit }}}}\n    steps:\n      - name: Checkout\n        uses: {checkout}\n        with:\n          ref: ${{{{ github.sha }}}}\n{POLICY_CHECKOUT_WITH}{setup}{policy}      - name: Resolve the preview version from the crate manifest\n        id: identity\n        env:\n          EVENT_SHA: ${{{{ github.sha }}}}\n          RUN_NUMBER: ${{{{ github.run_number }}}}\n        run: |\n          set -euo pipefail\n          commit=\"$(git rev-parse HEAD)\"\n          case \"$commit\" in\n            *[!0-9a-f]*|'') echo \"::error::HEAD did not resolve to lowercase hex\" >&2; exit 1 ;;\n          esac\n          [ \"${{#commit}}\" -eq 40 ] || {{ echo \"::error::HEAD is not a 40-hex commit\" >&2; exit 1; }}\n          [ \"$commit\" = \"$EVENT_SHA\" ] || {{ echo \"::error::checkout $commit != event commit $EVENT_SHA\" >&2; exit 1; }}\n          case \"$RUN_NUMBER\" in\n            ''|*[!0-9]*) echo \"::error::invalid workflow run number $RUN_NUMBER\" >&2; exit 1 ;;\n          esac\n          [ \"$RUN_NUMBER\" -gt 0 ] || {{ echo \"::error::run number must be positive\" >&2; exit 1; }}\n          crate=\"$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' {manifest} | head -n1)\"\n          case \"$crate\" in\n            ''|*[!0-9.]*) echo \"::error::crate version $crate is not an X.Y.Z version\" >&2; exit 1 ;;\n          esac\n          [[ \"$crate\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]] \\\n            || {{ echo \"::error::crate version $crate is not an X.Y.Z version\" >&2; exit 1; }}\n          short_commit=\"${{commit:0:7}}\"\n          version=\"${{crate}}~preview.${{RUN_NUMBER}}+${{short_commit}}\"\n          [[ \"$version\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+~preview\\.[0-9]+\\+[0-9a-f]{{7}}$ ]] \\\n            || {{ echo \"::error::preview version $version violates the preview contract\" >&2; exit 1; }}\n          {{\n            echo \"version=$version\"\n            echo \"crate_version=$crate\"\n            echo \"name=Preview $version\"\n            echo \"commit=$commit\"\n            echo \"short_commit=$short_commit\"\n          }} >> \"$GITHUB_OUTPUT\"\n",
         config.default_branch,
         runner = hosted_selector_runs_on(config),
         policy = policy_enforcement_step(),
-    )
+    );
+    if has_producer_binding(release) {
+        output = output.replacen(
+            "  identity:\n    name: Resolve preview identity\n",
+            "  identity:\n    name: Resolve preview identity\n    needs: [source, publish-gate]\n",
+            1,
+        );
+        output = output.replacen(
+            &format!(
+                "    if: ${{{{ github.ref == 'refs/heads/{}' }}}}\n",
+                config.default_branch
+            ),
+            &format!(
+                "    if: ${{{{ github.ref == 'refs/heads/{}' && needs.publish-gate.outputs.admitted == 'true' }}}}\n",
+                config.default_branch
+            ),
+            1,
+        );
+        output = output.replacen(
+            "          ref: ${{ github.sha }}\n",
+            "          ref: ${{ needs.source.outputs.sha }}\n",
+            1,
+        );
+        output = output.replacen(
+            "          EVENT_SHA: ${{ github.sha }}\n",
+            "          EVENT_SHA: ${{ needs.source.outputs.sha }}\n",
+            1,
+        );
+    }
+    output
 }
 
 /// The `with:` body of a checkout in a job that runs the policy validator:
@@ -2276,21 +2360,6 @@ fn inject_native_preview_bindings(
         output = output.replace(
             "gh release edit preview --target \"${{ github.sha }}\"",
             "gh release edit preview --target \"${{ needs.publish-gate.outputs.sha }}\"",
-        );
-        output = output.replacen(
-            "  identity:\n    name: Resolve preview identity\n",
-            "  identity:\n    name: Resolve preview identity\n    needs: [source]\n",
-            1,
-        );
-        output = output.replacen(
-            "          ref: ${{ github.sha }}\n",
-            "          ref: ${{ needs.source.outputs.sha }}\n",
-            1,
-        );
-        output = output.replacen(
-            "          EVENT_SHA: ${{ github.sha }}\n",
-            "          EVENT_SHA: ${{ needs.source.outputs.sha }}\n",
-            1,
         );
         output = output.replacen(
             "  publish:\n    needs: [",
@@ -2513,6 +2582,14 @@ fn render_binding_source_job(config: &ProjectConfig) -> String {
         "  source:\n    name: Resolve release source\n    runs-on: {}\n    timeout-minutes: 5\n    outputs:\n      sha: ${{{{ steps.resolve.outputs.sha }}}}\n    steps:\n{setup}      - name: Resolve source revision\n        id: resolve\n        env:\n          EVENT: ${{{{ github.event_name }}}}\n          SHA: ${{{{ github.sha }}}}\n          RUN_SHA: ${{{{ github.event.workflow_run.head_sha }}}}\n          RUN_ID: ${{{{ github.event.workflow_run.id }}}}\n          SOURCE_SHA: ${{{{ github.event.workflow_run.head_sha }}}}\n        run: |\n          set -euo pipefail\n          sha=\"$(velnor-workflow release resolve-source --event \"$EVENT\" --sha \"$SHA\" --run-sha \"$RUN_SHA\" --run-id \"$RUN_ID\" --source-sha \"$SOURCE_SHA\")\"\n          echo \"sha=$sha\" >> \"$GITHUB_OUTPUT\"\n",
         selected_runner(config),
     )
+    .replace(
+        "      sha: ${{ steps.resolve.outputs.sha }}\n",
+        "      sha: ${{ steps.resolve.outputs.sha }}\n      run_id: ${{ steps.resolve.outputs.run_id }}\n",
+    )
+    .replace(
+        "          echo \"sha=$sha\" >> \"$GITHUB_OUTPUT\"\n",
+        "          echo \"sha=$sha\" >> \"$GITHUB_OUTPUT\"\n          echo \"run_id=$RUN_ID\" >> \"$GITHUB_OUTPUT\"\n",
+    )
 }
 
 /// The rolling publish gate: `workflow_run` admits only the trusted
@@ -2532,10 +2609,19 @@ fn render_binding_gate_job(config: &ProjectConfig, release: &ReleaseSpec) -> Str
         yaml_scalar(&release.producer_workflow),
         yaml_scalar(&config.default_branch),
     );
-    rendered.replace(
-        "--event \"$PRODUCER_EVENT\"",
-        "--producer-event \"$PRODUCER_EVENT\"",
-    )
+    rendered
+        .replace(
+            "--event \"$PRODUCER_EVENT\"",
+            "--producer-event \"$PRODUCER_EVENT\"",
+        )
+        .replace(
+            "          SOURCE_SHA: ${{ needs.source.outputs.sha }}\n",
+            "          SOURCE_SHA: ${{ needs.source.outputs.sha }}\n          SOURCE_RUN_ID: ${{ needs.source.outputs.run_id }}\n",
+        )
+        .replace(
+            "              --run-id \"$RUN_ID\" --head-sha \"$HEAD_SHA\" --run-sha \"$RUN_SHA\" \\\n              --source-sha \"$SOURCE_SHA\"",
+            "              --run-id \"$RUN_ID\" --source-run-id \"$SOURCE_RUN_ID\" --head-sha \"$HEAD_SHA\" --run-sha \"$RUN_SHA\" \\\n              --source-sha \"$SOURCE_SHA\"",
+        )
 }
 
 /// Prepend the source-resolution and publish-gate jobs. No-op without a
@@ -2931,7 +3017,7 @@ fn inject_tarball_preview_bindings(
         if output.contains("  guest-payload:\n") {
             output = output.replacen(
                 "  guest-payload:\n    name: Guest payload ${{ matrix.arch }}\n    runs-on:",
-                "  guest-payload:\n    name: Guest payload ${{ matrix.arch }}\n    needs: [source]\n    runs-on:",
+                "  guest-payload:\n    name: Guest payload ${{ matrix.arch }}\n    needs: [source, publish-gate]\n    if: ${{ needs.publish-gate.outputs.admitted == 'true' }}\n    runs-on:",
                 1,
             );
             output = output.replacen(
@@ -5049,6 +5135,67 @@ mod tests {
                     assert!(
                         dependency_index < index,
                         "{id} depends on later job {dependency}; graph is cyclic or unordered"
+                    );
+                }
+            }
+        }
+    }
+
+    fn yaml_job_ids(workflow: &str) -> Vec<String> {
+        let mut in_jobs = false;
+        let mut ids = Vec::new();
+        for line in workflow.lines() {
+            if line == "jobs:" {
+                in_jobs = true;
+                continue;
+            }
+            if in_jobs && line.starts_with("  ") && !line.starts_with("   ") && line.ends_with(':')
+            {
+                ids.push(line.trim().trim_end_matches(':').to_owned());
+            }
+        }
+        ids
+    }
+
+    /// Every producer-preview job consumes bytes only after the admission
+    /// gate. The gate is a direct edge: GitHub does not expose transitive
+    /// `needs` outputs, and a transitive source edge would let an unadmitted
+    /// producer reach checkout/build/sign.
+    fn assert_every_producer_consumer_is_admitted(workflow: &str) {
+        let jobs = yaml_job_ids(workflow);
+        assert!(
+            jobs.contains(&"source".to_owned()),
+            "missing source job: {workflow}"
+        );
+        assert!(
+            jobs.contains(&"publish-gate".to_owned()),
+            "missing publish gate: {workflow}"
+        );
+        for (index, id) in jobs.iter().enumerate() {
+            let job = yaml_job(workflow, id);
+            if id == "source" || id == "publish-gate" {
+                continue;
+            }
+            let needs = yaml_job_needs(job);
+            assert!(
+                needs.iter().any(|dependency| dependency == "publish-gate"),
+                "producer consumer {id} lacks a direct publish-gate edge: {job}"
+            );
+            assert!(
+                job.contains("needs.publish-gate.outputs.admitted == 'true'"),
+                "producer consumer {id} lacks an admitted gate: {job}"
+            );
+            assert_output_references_are_direct(id, job);
+            for dependency in needs {
+                let dependency_index = jobs.iter().position(|candidate| candidate == &dependency);
+                assert!(
+                    dependency_index.is_some(),
+                    "{id} depends on unknown job {dependency}: {job}"
+                );
+                if let Some(dependency_index) = dependency_index {
+                    assert!(
+                        dependency_index < index,
+                        "{id} depends on later job {dependency}: {job}"
                     );
                 }
             }
@@ -8330,6 +8477,7 @@ mod tests {
         let config = config(&["preview.yml"], Some(bound_spec()));
         let surface = generate(&root, &config, None);
         let preview = rendered(&surface, "preview.yml");
+        assert_every_producer_consumer_is_admitted(&preview);
         assert!(
             preview.contains("  workflow_run:\n    workflows: [CI]\n    types: [completed]\n    branches: [main]\n"),
             "the bound producer must render its trigger: {preview}"
@@ -8338,6 +8486,11 @@ mod tests {
         assert!(
             source.contains("release resolve-source"),
             "the source job must resolve one revision: {source}"
+        );
+        assert!(
+            source.contains("run_id: ${{ steps.resolve.outputs.run_id }}")
+                && source.contains("echo \"run_id=$RUN_ID\" >> \"$GITHUB_OUTPUT\""),
+            "the source job must export the validated producer run identity: {source}"
         );
         let gate = yaml_job(&preview, "publish-gate");
         assert!(
@@ -8352,10 +8505,15 @@ mod tests {
             !gate.contains("sleep") && !gate.contains("gh run list"),
             "the gate resolves, never polls: {gate}"
         );
+        assert!(
+            gate.contains("SOURCE_RUN_ID: ${{ needs.source.outputs.run_id }}")
+                && gate.contains("--source-run-id \"$SOURCE_RUN_ID\""),
+            "the gate must bind admission to the source job run identity: {gate}"
+        );
         let build = yaml_job(&preview, "build");
         assert!(
             build.contains(
-                "    needs: [source, release-github-hosted-rust-example, release-github-self-hosted-rust-example, release-velnor-rust-example]\n"
+                "    needs: [source, publish-gate, release-github-hosted-rust-example, release-github-self-hosted-rust-example, release-velnor-rust-example]\n"
             ),
             "the build must wait for the resolved source: {build}"
         );
@@ -8369,7 +8527,7 @@ mod tests {
                 "    needs: [build, release-github-hosted-rust-example, release-github-self-hosted-rust-example, release-velnor-rust-example, publish-gate]\n"
             )
                 && publish.contains(
-                    "    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.publish-gate.outputs.admitted == 'true' && needs.publish-gate.outputs.mode == 'publish') }}\n"
+                    "    if: ${{ github.ref == 'refs/heads/main' && (needs.publish-gate.outputs.admitted == 'true' && needs.publish-gate.outputs.mode == 'publish') }}\n"
                 ),
             "the rolling publish must admit only the gate's publish mode: {publish}"
         );
@@ -8385,6 +8543,7 @@ mod tests {
         let config = config(&["preview.yml"], Some(bound_spec()));
         let surface = generate(&root, &config, None);
         let preview = rendered(&surface, "preview.yml");
+        assert_every_producer_consumer_is_admitted(&preview);
         assert!(
             preview.contains("      mode:\n")
                 && preview.contains("          - validate\n")
@@ -8790,13 +8949,15 @@ mod tests {
         config.release = Some(spec);
         let surface = generate(&root, &config, None);
         let preview = rendered(&surface, "preview.yml");
+        assert_every_producer_consumer_is_admitted(&preview);
         assert!(
             preview.contains("  workflow_run:\n    workflows: [CI]\n"),
             "the Debian preview must bind the producer trigger: {preview}"
         );
         let identity = yaml_job(&preview, "identity");
         assert!(
-            identity.contains("    needs: [source]\n")
+            identity.contains("    needs: [source, publish-gate]\n")
+                && identity.contains("needs.publish-gate.outputs.admitted == 'true'")
                 && identity.contains("          ref: ${{ needs.source.outputs.sha }}\n")
                 && identity.contains("          EVENT_SHA: ${{ needs.source.outputs.sha }}\n"),
             "identity must resolve from the bound source: {identity}"
@@ -8806,6 +8967,43 @@ mod tests {
             publish.contains("    needs: [publish-gate, ")
                 && publish.contains("needs.publish-gate.outputs.mode == 'publish'"),
             "the Debian rolling publish must admit only the gate: {publish}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn producer_native_guest_consumers_wait_for_admission() {
+        let root = scanned_root("native-preview-guest-binding");
+        let mut config = native_identity_config(&["preview.yml"]);
+        config.analysis.detected.extend([
+            "guest-agent:example:example-guest-agent".to_owned(),
+            "guest-image:example:example-guest-image".to_owned(),
+        ]);
+        let watched = config
+            .units
+            .iter_mut()
+            .find(|unit| unit.id == "rust-example");
+        assert!(watched.is_some(), "native fixture must have release unit");
+        if let Some(unit) = watched {
+            unit.watch.push("microvm/**".to_owned());
+        }
+        let mut spec = native_spec();
+        spec.producer_workflow = "CI".to_owned();
+        spec.producer_workflow_id = 42;
+        spec.producer_workflow_path = ".github/workflows/ci.yml".to_owned();
+        config.release = Some(spec);
+        let surface = generate(&root, &config, None);
+        let preview = rendered(&surface, "preview.yml");
+        assert_every_producer_consumer_is_admitted(&preview);
+        let guest = yaml_job(&preview, "guest-payload");
+        assert_eq!(
+            yaml_job_needs(guest),
+            ["identity", "publish-gate"],
+            "native guest must wait for identity and admission"
+        );
+        assert!(
+            guest.contains("ref: ${{ needs.identity.outputs.commit }}"),
+            "native guest must use the admitted identity source: {guest}"
         );
         let _ = fs::remove_dir_all(root);
     }

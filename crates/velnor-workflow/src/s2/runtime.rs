@@ -3815,6 +3815,7 @@ fn resolve_mode_token(arguments: &[OsString]) -> Result<&'static str, GeneratorE
             "expected-branch",
             "expected-ref",
             "run-id",
+            "source-run-id",
             "head-sha",
             "run-sha",
             "source-sha",
@@ -3969,6 +3970,7 @@ fn admit_producer(arguments: &[OsString]) -> Result<(), GeneratorError> {
             "ref",
             "expected-ref",
             "run-id",
+            "source-run-id",
             "head-sha",
             "run-sha",
             "source-sha",
@@ -3982,6 +3984,10 @@ fn admit_producer(arguments: &[OsString]) -> Result<(), GeneratorError> {
 /// The one producer admission contract shared by `resolve-mode` and the
 /// privileged `admit-producer` command. It deliberately compares both
 /// human-readable names and immutable repository/workflow object identities.
+/// The workflow event is the immutable provider record available to this
+/// offline runtime: replaying the same positive run ID with the same source
+/// SHA is idempotent, while the source job's run ID and SHA must match the
+/// gate's event values exactly. A positive ID alone never admits a run.
 fn validate_producer_admission(options: &BTreeMap<String, String>) -> Result<(), GeneratorError> {
     let producer = required_option(options, "producer")?;
     let expected = required_option(options, "expected")?;
@@ -4076,13 +4082,27 @@ fn validate_producer_admission(options: &BTreeMap<String, String>) -> Result<(),
         )));
     }
 
-    require_positive_decimal("run-id", required_option(options, "run-id")?)?;
+    validate_admitted_run_identity(options)?;
     let head_sha = require_full_sha("head-sha", required_option(options, "head-sha")?)?;
     let run_sha = require_full_sha("run-sha", required_option(options, "run-sha")?)?;
     let source_sha = require_full_sha("source-sha", required_option(options, "source-sha")?)?;
     if head_sha != run_sha || run_sha != source_sha {
         return Err(GeneratorError::usage(format!(
             "release publish refused: producer head/run/source SHA mismatch ({head_sha}, {run_sha}, {source_sha})"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_admitted_run_identity(
+    options: &BTreeMap<String, String>,
+) -> Result<(), GeneratorError> {
+    let run_id = require_positive_decimal("run-id", required_option(options, "run-id")?)?;
+    let source_run_id =
+        require_positive_decimal("source-run-id", required_option(options, "source-run-id")?)?;
+    if run_id != source_run_id {
+        return Err(GeneratorError::usage(format!(
+            "release publish refused: producer run identity {run_id} != admitted source run identity {source_run_id}"
         )));
     }
     Ok(())
@@ -6199,6 +6219,7 @@ workspace_check = true
             ("--ref", "refs/heads/main"),
             ("--expected-ref", "refs/heads/main"),
             ("--run-id", "77"),
+            ("--source-run-id", "77"),
             ("--head-sha", "0123456789abcdef0123456789abcdef01234567"),
             ("--run-sha", "0123456789abcdef0123456789abcdef01234567"),
             ("--source-sha", "0123456789abcdef0123456789abcdef01234567"),
@@ -6564,6 +6585,11 @@ workspace_check = true
                 "mismatched source",
                 vec![("--source-sha", "89abcdef0123456789abcdef0123456789abcdef")],
                 "SHA mismatch",
+            ),
+            (
+                "mismatched source run",
+                vec![("--source-run-id", "78")],
+                "run identity",
             ),
             ("invalid run", vec![("--run-id", "0")], "run-id"),
         ] {
