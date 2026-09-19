@@ -136,10 +136,10 @@ impl IncludeScanner {
     }
 }
 
-fn include_invocation<'a>(
-    tokens: &'a [TokenTree],
+fn include_invocation(
+    tokens: &[TokenTree],
     index: usize,
-) -> Result<Option<(&'static str, &'a proc_macro2::Group)>, String> {
+) -> Result<Option<(&'static str, &proc_macro2::Group)>, String> {
     let TokenTree::Ident(identifier) = &tokens[index] else {
         return Ok(None);
     };
@@ -170,9 +170,8 @@ fn parse_static_string_expression(
     tokens: TokenStream,
     macro_name: &str,
 ) -> Result<StaticString, String> {
-    let expression = syn::parse2::<Expr>(tokens).map_err(|error| {
-        format!("{macro_name} must use a static string expression: {error}")
-    })?;
+    let expression = syn::parse2::<Expr>(tokens)
+        .map_err(|error| format!("{macro_name} must use a static string expression: {error}"))?;
     evaluate_static_expression(&expression, macro_name)
 }
 
@@ -180,14 +179,10 @@ fn evaluate_static_expression(expression: &Expr, macro_name: &str) -> Result<Sta
     match expression {
         Expr::Lit(literal) => match &literal.lit {
             Lit::Str(value) => Ok(StaticString::literal(value.value())),
-            _ => Err(format!(
-                "{macro_name} must use a static string expression"
-            )),
+            _ => Err(format!("{macro_name} must use a static string expression")),
         },
         Expr::Macro(expression) => evaluate_static_macro(expression, macro_name),
-        _ => Err(format!(
-            "{macro_name} must use a static string expression"
-        )),
+        _ => Err(format!("{macro_name} must use a static string expression")),
     }
 }
 
@@ -282,17 +277,19 @@ pub(crate) fn resolve_include_path(
     })?;
     let candidate = match included {
         IncludeString::Relative(value) => {
-            let logical = resolve_repo_path(source_parent, value).ok_or(IncludePathError::Escapes)?;
-            root.join(logical)
+            let logical =
+                resolve_repo_path(source_parent, value).ok_or(IncludePathError::Escapes)?;
+            canonical_root.join(logical)
         }
         IncludeString::ManifestDir(parts) => {
-            let manifest_dir = fs::canonicalize(root.join(package_root)).map_err(|source| {
-                IncludePathError::Io {
-                    operation: "resolve Cargo manifest directory",
-                    path: root.join(package_root),
-                    source,
-                }
-            })?;
+            let manifest_dir =
+                fs::canonicalize(canonical_root.join(package_root)).map_err(|source| {
+                    IncludePathError::Io {
+                        operation: "resolve Cargo manifest directory",
+                        path: canonical_root.join(package_root),
+                        source,
+                    }
+                })?;
             let mut exact = OsString::new();
             for part in parts {
                 match part {
@@ -300,20 +297,34 @@ pub(crate) fn resolve_include_path(
                     ManifestPart::ManifestDir => exact.push(manifest_dir.as_os_str()),
                 }
             }
-            PathBuf::from(exact)
-        }
-    };
-    let canonical_target = fs::canonicalize(&candidate).map_err(|source| {
-        if source.kind() == io::ErrorKind::NotFound {
-            IncludePathError::Missing
-        } else {
-            IncludePathError::Io {
-                operation: "resolve include target",
-                path: candidate.clone(),
-                source,
+            let exact = PathBuf::from(exact);
+            if exact.is_absolute() {
+                exact
+            } else {
+                canonical_root.join(source_parent).join(exact)
             }
         }
-    })?;
+    };
+    if !lexically_within(&canonical_root, &candidate) {
+        return Err(IncludePathError::Escapes);
+    }
+    let canonical_target = match fs::canonicalize(&candidate) {
+        Ok(path) => path,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            let parent = canonicalize_existing_parent(&candidate)?;
+            if !parent.starts_with(&canonical_root) {
+                return Err(IncludePathError::Escapes);
+            }
+            return Err(IncludePathError::Missing);
+        }
+        Err(source) => {
+            return Err(IncludePathError::Io {
+                operation: "resolve include target",
+                path: candidate,
+                source,
+            });
+        }
+    };
     let Ok(relative) = canonical_target.strip_prefix(&canonical_root) else {
         return Err(IncludePathError::Escapes);
     };
@@ -334,6 +345,59 @@ pub(crate) fn resolve_include_path(
         }
     }
     Err(IncludePathError::Missing)
+}
+
+fn lexically_within(root: &Path, candidate: &Path) -> bool {
+    let Some(root) = normalize_lexical_path(root) else {
+        return false;
+    };
+    let Some(candidate) = normalize_lexical_path(candidate) else {
+        return false;
+    };
+    candidate.starts_with(root)
+}
+
+fn normalize_lexical_path(path: &Path) -> Option<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(Path::new(std::path::MAIN_SEPARATOR_STR)),
+            Component::CurDir => {}
+            Component::Normal(component) => normalized.push(component),
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return None;
+                }
+            }
+        }
+    }
+    Some(normalized)
+}
+
+fn canonicalize_existing_parent(path: &Path) -> Result<PathBuf, IncludePathError> {
+    let mut probe = path.to_owned();
+    loop {
+        match fs::canonicalize(&probe) {
+            Ok(path) => return Ok(path),
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                let Some(parent) = probe.parent().map(Path::to_owned) else {
+                    return Err(IncludePathError::Missing);
+                };
+                if parent == probe {
+                    return Err(IncludePathError::Missing);
+                }
+                probe = parent;
+            }
+            Err(source) => {
+                return Err(IncludePathError::Io {
+                    operation: "resolve include parent",
+                    path: probe,
+                    source,
+                });
+            }
+        }
+    }
 }
 
 fn is_static_github_input(target: &str) -> bool {
@@ -394,13 +458,18 @@ mod tests {
 
     #[test]
     fn accepts_comments_and_all_macro_delimiters() {
-        assert_eq!(
-            parse_include_paths(
-                "include_str /* trivia */ ! { concat /* trivia */ ! [ r#\"a\"#, \"/b\" ] }"
-            )
-            .ok(),
-            Some(vec![IncludeString::Relative("a/b".to_owned())])
-        );
+        let sources = [
+            "include_str /* trivia */ ! (concat /* trivia */ ! [ r#\"a\"#, \"/b\" ])",
+            "include_str /* trivia */ ! [concat /* trivia */ ! { r#\"a\"#, \"/b\" }]",
+            "include_bytes /* trivia */ ! {concat /* trivia */ ! (r#\"a\"#, \"/b\")}",
+        ];
+        for source in sources {
+            assert_eq!(
+                parse_include_paths(source).ok(),
+                Some(vec![IncludeString::Relative("a/b".to_owned())]),
+                "failed source: {source}"
+            );
+        }
     }
 
     #[test]

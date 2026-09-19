@@ -1163,6 +1163,43 @@ mod tests {
     }
 
     #[test]
+    fn include_str_manifest_dir_concat_preserves_exact_boundary() {
+        let root = scratch("manifest-dir-exact-boundary");
+        must(
+            fs::create_dir_all(root.join("crates/app/src")),
+            "create package source directory",
+        );
+        must(
+            fs::create_dir_all(root.join("crates/appsrc")),
+            "create exact-concat target directory",
+        );
+        must(
+            fs::write(
+                root.join("crates/app/src/lib.rs"),
+                "const SOURCE: &str = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"src/lib.rs\"));\n",
+            ),
+            "write package source",
+        );
+        must(
+            fs::write(root.join("crates/appsrc/lib.rs"), "exact\n"),
+            "write exact-concat target",
+        );
+
+        let files = vec![
+            "crates/app/src/lib.rs".to_owned(),
+            "crates/appsrc/lib.rs".to_owned(),
+        ];
+        let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+        let targets = must(
+            include_str_paths(&root, &files, &file_set, "crates/app"),
+            "resolve exact concat include",
+        );
+
+        assert_eq!(targets, vec!["crates/appsrc/lib.rs"]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn include_str_manifest_dir_traversal_is_rejected() {
         let root = scratch("manifest-dir-traversal");
         must(
@@ -1275,6 +1312,46 @@ mod tests {
         reason = "the test must distinguish an accepted external target from the expected error"
     )]
     #[test]
+    fn include_str_through_external_github_parent_is_rejected() {
+        let root = scratch("external-github-parent");
+        let outside = scratch("external-github-parent-target");
+        must(
+            fs::create_dir_all(root.join("src")),
+            "create source directory",
+        );
+        must(
+            fs::write(outside.join("manifest.yml"), "external\n"),
+            "write external target",
+        );
+        must(
+            fs::write(
+                root.join("src/lib.rs"),
+                "const MANIFEST: &str = include_str!(\"../.github/manifest.yml\");\n",
+            ),
+            "write Rust source",
+        );
+        must(
+            symlink(&outside, root.join(".github")),
+            "create external .github symlink directory",
+        );
+
+        let files = vec!["src/lib.rs".to_owned()];
+        let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+        let error = match include_str_paths(&root, &files, &file_set, ".") {
+            Ok(targets) => panic!("external .github include target was accepted: {targets:?}"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("escapes the repository"));
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+
+    #[expect(
+        clippy::panic,
+        reason = "the test must distinguish an accepted external target from the expected error"
+    )]
+    #[test]
     fn include_str_through_external_symlink_is_rejected() {
         let root = scratch("external-symlink");
         let outside = scratch("external-symlink-target");
@@ -1305,9 +1382,7 @@ mod tests {
             Err(error) => error,
         };
 
-        assert!(error
-            .to_string()
-            .contains("include_str! target does not exist"));
+        assert!(error.to_string().contains("escapes the repository"));
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(outside);
     }
