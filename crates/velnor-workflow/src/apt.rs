@@ -1911,13 +1911,13 @@ fn validate_product_manifest_selection(
         .iter()
         .filter(|(_, kind, _)| *kind == "apt-package")
     {
-        let expected_target = if name.ends_with("-amd64.deb") {
+        let expected_target = if name.ends_with("-amd64.deb") || name.ends_with("_amd64.deb") {
             "x86_64-unknown-linux-gnu"
-        } else if name.ends_with("-arm64.deb") {
+        } else if name.ends_with("-arm64.deb") || name.ends_with("_arm64.deb") {
             "aarch64-unknown-linux-gnu"
         } else {
             return Err(GeneratorError::usage(
-                "discovery APT artifact name must end in -amd64.deb or -arm64.deb",
+                "discovery APT artifact name must end in -amd64.deb, _amd64.deb, -arm64.deb, or _arm64.deb",
             ));
         };
         if *target != expected_target {
