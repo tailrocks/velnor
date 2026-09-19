@@ -803,7 +803,9 @@ where
     .await?;
     let default_branch_sha = required_sha(&commit, &["sha"])?;
     let rulesets = collect_rulesets(transport, store, auth, manifest, ledger).await?;
-    let workflows = collect_workflows(
+    let identities =
+        collect_pr_identities(transport, store, auth, manifest, "inventory", ledger).await?;
+    let mut workflows = collect_workflows(
         transport,
         store,
         auth,
@@ -812,13 +814,17 @@ where
         ledger,
     )
     .await?;
-    let identities =
-        collect_pr_identities(transport, store, auth, manifest, "inventory", ledger).await?;
     let mut open_prs = Vec::with_capacity(identities.len());
     let mut artifacts = Vec::new();
     for identity in identities {
         let (executions, checks, run_artifacts) = collect_pr_execution_facts(
-            transport, store, auth, manifest, &workflows, &identity, ledger,
+            transport,
+            store,
+            auth,
+            manifest,
+            &mut workflows,
+            &identity,
+            ledger,
         )
         .await?;
         merge_artifacts(&mut artifacts, run_artifacts)?;
@@ -837,7 +843,7 @@ where
         store,
         auth,
         manifest,
-        &workflows,
+        &mut workflows,
         &default_branch_sha,
         "main",
         ledger,
@@ -1011,12 +1017,65 @@ where
     Ok(workflows)
 }
 
+async fn collect_workflow_at_source<T, S>(
+    transport: &T,
+    store: &mut S,
+    auth: &AuthIdentity,
+    manifest: &ManifestRepository,
+    path: &str,
+    source_sha: &str,
+    ledger: &mut Ledger,
+) -> Result<LiveWorkflow>
+where
+    T: super::AcquisitionTransport + ?Sized,
+    S: RawObjectStore,
+{
+    let encoded_path = path.replace(' ', "%20");
+    let (content, content_raw_ids) = collect_one(
+        transport,
+        store,
+        auth,
+        ledger,
+        github_single_object_request(
+            collection_id(
+                &manifest.repository,
+                &format!("workflow-content-{}-{}", safe_id(path), safe_id(source_sha)),
+            ),
+            format!(
+                "/repos/{}/contents/{encoded_path}?ref={source_sha}",
+                manifest.repository
+            ),
+            "workflow.source",
+        ),
+    )
+    .await?;
+    validate_workflow_content(&content, &manifest.repository, path, source_sha)?;
+    let revision = required_sha(&content, &["sha"])?;
+    let source_text = decode_workflow_content(&content)?;
+    let (reusable_workflows, actions, scanners) = parse_workflow_dependencies(
+        &source_text,
+        &manifest.repository,
+        source_sha,
+        &content_raw_ids,
+    )?;
+    Ok(LiveWorkflow {
+        path: path.to_owned(),
+        revision,
+        source_sha: source_sha.to_owned(),
+        events: parse_workflow_events(&source_text)?,
+        reusable_workflows,
+        actions,
+        scanners,
+        raw_object_refs: content_raw_ids,
+    })
+}
+
 async fn collect_pr_execution_facts<T, S>(
     transport: &T,
     store: &mut S,
     auth: &AuthIdentity,
     manifest: &ManifestRepository,
-    workflows: &[LiveWorkflow],
+    workflows: &mut Vec<LiveWorkflow>,
     identity: &LivePullRequestIdentity,
     ledger: &mut Ledger,
 ) -> Result<(Vec<LiveExecution>, Vec<LiveCheck>, Vec<LiveArtifact>)>
@@ -1073,7 +1132,7 @@ async fn collect_executions_for_source<T, S>(
     store: &mut S,
     auth: &AuthIdentity,
     manifest: &ManifestRepository,
-    workflows: &[LiveWorkflow],
+    workflows: &mut Vec<LiveWorkflow>,
     source_sha: &str,
     collection_prefix: &str,
     ledger: &mut Ledger,
@@ -1110,10 +1169,32 @@ where
             continue;
         }
         let workflow_path = required_string(&run, &["path"])?;
-        let workflow = workflows
+        let workflow_index = workflows
             .iter()
-            .find(|workflow| workflow.path == workflow_path)
-            .ok_or_else(|| anyhow!("run {run_id} references unknown workflow {workflow_path}"))?;
+            .position(|workflow| {
+                workflow.path == workflow_path && workflow.source_sha == run_source_sha
+            })
+            .unwrap_or(usize::MAX);
+        let workflow_index = if workflow_index == usize::MAX {
+            let workflow = collect_workflow_at_source(
+                transport,
+                store,
+                auth,
+                manifest,
+                &workflow_path,
+                &run_source_sha,
+                ledger,
+            )
+            .await
+            .with_context(|| {
+                format!("collect workflow {workflow_path} at run {run_id} source {run_source_sha}")
+            })?;
+            workflows.push(workflow);
+            workflows.len() - 1
+        } else {
+            workflow_index
+        };
+        let workflow = &workflows[workflow_index];
         let latest_attempt = required_u64(&run, &["run_attempt"])? as u32;
         let attempts = collect_attempt_chain(
             transport,
@@ -1381,11 +1462,13 @@ where
         for run in runs {
             let mut raw_ids = suite_raw_ids.clone();
             raw_ids.extend(run_raw_ids.clone());
-            let mut check = parse_check(&run, source_sha, raw_ids, suite_id)?;
-            if check.check_suite_id.is_none() {
-                check.check_suite_id = Some(suite_id);
-            }
-            checks.push(check);
+            checks.push(parse_check(
+                &run,
+                &manifest.repository,
+                source_sha,
+                raw_ids,
+                suite_id,
+            )?);
         }
     }
     checks.sort_by_key(|check| check.check_run_id);
@@ -1766,42 +1849,53 @@ fn parse_safe_url(value: &str, host: &str) -> Result<Url> {
     Ok(parsed)
 }
 
-fn validate_external_url(value: &str) -> Result<()> {
-    let parsed = Url::parse(value).context("parse check source URL")?;
-    if parsed.scheme() != "https"
-        || parsed.host_str().is_none()
-        || parsed.username() != ""
-        || parsed.password().is_some()
-        || parsed.fragment().is_some()
-    {
-        bail!("check source URL has an unsafe origin or components");
+fn validate_check_run_url(value: &str, repository: &str, check_run_id: u64) -> Result<()> {
+    let parsed = parse_safe_url(value, "github.com")?;
+    let expected = format!("/{repository}/runs/{check_run_id}");
+    if parsed.path() != expected {
+        bail!("check run URL is not bound to {repository}/{check_run_id}");
     }
     Ok(())
 }
 
 fn parse_check(
     value: &Value,
+    repository: &str,
     source_sha: &str,
     raw_ids: Vec<String>,
     suite_id: u64,
 ) -> Result<LiveCheck> {
-    let check_suite_id = optional_u64(value, &["check_suite", "id"]).or(Some(suite_id));
+    let check_suite_id = required_u64(value, &["check_suite", "id"])?;
+    if check_suite_id != suite_id {
+        bail!("check run belongs to suite {check_suite_id}, expected {suite_id}");
+    }
+    let check_source_sha = required_sha(value, &["head_sha"])?;
+    if check_source_sha != source_sha {
+        bail!("check run head SHA differs from requested source");
+    }
+    let check_repository = optional_string(value, &["repository", "full_name"])
+        .or_else(|| optional_string(value, &["check_suite", "repository", "full_name"]))
+        .ok_or_else(|| anyhow!("check run lacks repository identity"))?;
+    if check_repository != repository {
+        bail!("check run belongs to {check_repository}, expected {repository}");
+    }
     let workflow_run_id = optional_u64(value, &["check_suite", "workflow_run", "id"]);
-    let app_id = value.get("app").and_then(|app| {
-        app.get("id")
-            .and_then(Value::as_i64)
-            .map(|id| id.to_string())
-            .or_else(|| app.get("slug").and_then(Value::as_str).map(str::to_owned))
-    });
+    if workflow_run_id.is_some()
+        && optional_revision(value, &["check_suite", "workflow_run", "head_sha"])?.as_deref()
+            != Some(source_sha)
+    {
+        bail!("associated workflow run head SHA differs from check run");
+    }
+    let app_id = optional_u64(value, &["app", "id"]).map(|id| id.to_string());
     let job_id = optional_string(value, &["external_id"]).and_then(|id| id.parse().ok());
-    let source_url = required_string(value, &["details_url"])
-        .or_else(|_| required_string(value, &["html_url"]))?;
-    validate_external_url(&source_url)?;
+    let check_run_id = required_u64(value, &["id"])?;
+    let source_url = required_string(value, &["html_url"])?;
+    validate_check_run_url(&source_url, repository, check_run_id)?;
     Ok(LiveCheck {
         context: required_string(value, &["name"])?,
         app_id,
-        check_suite_id,
-        check_run_id: required_u64(value, &["id"])?,
+        check_suite_id: Some(check_suite_id),
+        check_run_id,
         workflow_run_id,
         job_id,
         run_attempt: optional_u64(value, &["check_suite", "workflow_run", "run_attempt"])
@@ -2242,6 +2336,51 @@ jobs:
         });
         let checks = parse_ruleset_checks(&slug, 1, vec![]).expect("ruleset checks");
         assert_eq!(checks[0].app_id, None);
+    }
+
+    #[test]
+    fn check_identity_requires_api_bound_suite_source_and_repository() {
+        let source_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let value = serde_json::json!({
+            "id": 17,
+            "name": "ci",
+            "head_sha": source_sha,
+            "repository": {"full_name": "tailrocks/example"},
+            "check_suite": {
+                "id": 9,
+                "workflow_run": {
+                    "id": 11,
+                    "head_sha": source_sha,
+                    "run_attempt": 1,
+                    "event": "pull_request"
+                }
+            },
+            "app": {"id": 123},
+            "status": "completed",
+            "conclusion": "success",
+            "html_url": "https://github.com/tailrocks/example/runs/17"
+        });
+        let check = parse_check(
+            &value,
+            "tailrocks/example",
+            source_sha,
+            vec!["raw".to_owned()],
+            9,
+        )
+        .expect("API-bound check");
+        assert_eq!(check.check_suite_id, Some(9));
+        assert_eq!(check.workflow_run_id, Some(11));
+        assert_eq!(check.app_id.as_deref(), Some("123"));
+
+        let mut wrong_source = value.clone();
+        wrong_source["head_sha"] = serde_json::json!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        assert!(parse_check(&wrong_source, "tailrocks/example", source_sha, vec![], 9,).is_err());
+
+        let mut slug_only = value.clone();
+        slug_only["app"] = serde_json::json!({"slug": "sonarcloud"});
+        let slug_check = parse_check(&slug_only, "tailrocks/example", source_sha, vec![], 9)
+            .expect("slug check remains observed but unbound");
+        assert_eq!(slug_check.app_id, None);
     }
 
     #[test]
