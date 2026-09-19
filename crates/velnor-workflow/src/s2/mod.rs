@@ -918,6 +918,12 @@ pub(crate) struct ReleaseSpec {
     /// before a rolling lane publishes. Empty renders no `workflow_run`
     /// trigger: the lane keeps its push/dispatch surface exactly.
     pub(crate) producer_workflow: String,
+    /// The immutable numeric Actions workflow identity. A producer binding
+    /// must carry this alongside its display name and repository path.
+    pub(crate) producer_workflow_id: u64,
+    /// The immutable repository workflow path (for example
+    /// `.github/workflows/ci.yml`).
+    pub(crate) producer_workflow_path: String,
     /// The producer conclusion the publish gate requires. Empty means the
     /// only admitted value, `success`; anything else is a usage error.
     pub(crate) producer_conclusion: String,
@@ -2241,6 +2247,8 @@ fn apply_release(
         || release.context().is_some()
         || !release.platforms().is_empty()
         || release.producer_workflow().is_some()
+        || release.producer_workflow_id().is_some()
+        || release.producer_workflow_path().is_some()
         || release.producer_conclusion().is_some()
         || !release.modes().is_empty()
         || !release.archive_members().is_empty()
@@ -2308,6 +2316,12 @@ fn apply_release(
     }
     if let Some(producer) = release.producer_workflow() {
         producer.clone_into(&mut spec.producer_workflow);
+    }
+    if let Some(workflow_id) = release.producer_workflow_id() {
+        spec.producer_workflow_id = workflow_id;
+    }
+    if let Some(workflow_path) = release.producer_workflow_path() {
+        workflow_path.clone_into(&mut spec.producer_workflow_path);
     }
     if let Some(conclusion) = release.producer_conclusion() {
         conclusion.clone_into(&mut spec.producer_conclusion);
@@ -9592,7 +9606,7 @@ mod tests {
     /// pinned runtime keeps parsing the emitted table.
     #[test]
     fn release_bindings_stay_generation_time_only() {
-        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"github-hosted\"]\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n[release]\nenabled = true\nkind = \"rust-binary\"\npackage = \"example\"\nbinary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\nproducer_workflow = \"CI\"\nproducer_conclusion = \"success\"\nmodes = [\"validate\", \"rehearse\"]\narchive_members = [\"example-role\"]\narchive_checksum = \"sha256\"\narchive_retention_days = 14\n[[release.credential]]\nname = \"store\"\nsetup = \"mount\"\nteardown = \"unmount\"\n";
+        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"github-hosted\"]\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n[release]\nenabled = true\nkind = \"rust-binary\"\npackage = \"example\"\nbinary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\nproducer_workflow = \"CI\"\nproducer_workflow_id = 42\nproducer_workflow_path = \".github/workflows/ci.yml\"\nproducer_conclusion = \"success\"\nmodes = [\"validate\", \"rehearse\"]\narchive_members = [\"example-role\"]\narchive_checksum = \"sha256\"\narchive_retention_days = 14\n[[release.credential]]\nname = \"store\"\nsetup = \"mount\"\nteardown = \"unmount\"\n";
         let root = configured_repository("release-bindings-emitted", Some(config));
         let scanned = must(
             scan_target(
@@ -9606,6 +9620,8 @@ mod tests {
         );
         let release = must_some(scanned.config.release.as_ref(), "release contract");
         assert_eq!(release.producer_workflow, "CI");
+        assert_eq!(release.producer_workflow_id, 42);
+        assert_eq!(release.producer_workflow_path, ".github/workflows/ci.yml");
         assert_eq!(
             release.modes,
             ["validate".to_owned(), "rehearse".to_owned()]
