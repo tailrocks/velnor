@@ -245,8 +245,12 @@ present as another immutable dependency blob. `workflow_run` and
 `workflow_dispatch` triggers become explicit child obligations. The derived
 job/workload set and targets must equal the reviewed manifest's expected plan,
 and every reviewed child obligation must be present in the source-derived
-edges. Jobs, child runs, or expected checks observed only in result records
-cannot create an expectation.
+edges. Recursive edges retain root workload, child source SHA, and parent
+repository/workflow/source identity. Runtime child rows must bind their
+`parent_run_id` to the root run or an independently observed intermediate
+child run; matching a SHA alone is not a parent association. Jobs, child runs,
+or expected checks observed only in result records cannot create an
+expectation.
 
 The dependency graph is also typed source evidence, not a summary digest.
 Every node and edge has an immutable source SHA/ref, raw-object references,
