@@ -48,6 +48,10 @@ struct ActionRuns {
     pre: Option<String>,
     #[serde(default)]
     post: Option<String>,
+    #[serde(default, rename = "pre-if", alias = "preIf")]
+    pre_if: Option<String>,
+    #[serde(default, rename = "post-if", alias = "postIf")]
+    post_if: Option<String>,
     #[serde(default)]
     image: Option<String>,
     #[serde(default)]
@@ -56,6 +60,10 @@ struct ActionRuns {
     pre_entrypoint: Option<String>,
     #[serde(default, rename = "post-entrypoint", alias = "postEntrypoint")]
     post_entrypoint: Option<String>,
+    #[serde(default)]
+    args: serde_yaml::Value,
+    #[serde(default)]
+    env: serde_yaml::Value,
     #[serde(default)]
     steps: Vec<ActionStep>,
 }
@@ -369,22 +377,213 @@ fn parse_metadata(
     let contents = std::fs::read_to_string(&metadata_file).map_err(|error| {
         crate::s2::GeneratorError::io("read GitHub Action metadata", &metadata_file, &error)
     })?;
-    let metadata: ActionMetadata = serde_yaml::from_str(&contents).map_err(|error| {
+    let document: serde_yaml::Value = serde_yaml::from_str(&contents).map_err(|error| {
         crate::s2::GeneratorError::usage(format!(
             "parse GitHub Action metadata {}: {error}",
             metadata_file.display()
         ))
     })?;
-    validate_mapping(&metadata.inputs, "inputs")?;
-    validate_mapping(&metadata.outputs, "outputs")?;
+    validate_metadata_shape(&document)?;
+    let metadata: ActionMetadata = serde_yaml::from_value(&document).map_err(|error| {
+        crate::s2::GeneratorError::usage(format!(
+            "parse GitHub Action metadata {}: {error}",
+            metadata_file.display()
+        ))
+    })?;
     Ok(metadata)
+}
+
+/// Validate the typed fields that actions/runner's action manifest schema
+/// asserts before converting the manifest. Unknown keys stay loose like the
+/// runner; known keys never silently fall through a `serde_yaml::Value`.
+fn validate_metadata_shape(document: &serde_yaml::Value) -> Result<(), crate::s2::GeneratorError> {
+    let root = require_mapping(document, "action manifest")?;
+    if let Some(value) = mapping_value(root, "name") {
+        require_string(value, "name", false)?;
+    }
+    if let Some(value) = mapping_value(root, "description") {
+        require_string(value, "description", false)?;
+    }
+    if let Some(value) = mapping_value(root, "inputs") {
+        validate_inputs(value)?;
+    }
+    if let Some(value) = mapping_value(root, "outputs") {
+        validate_outputs(value)?;
+    }
+    validate_runs(mapping_value(root, "runs").ok_or_else(|| {
+        crate::s2::GeneratorError::usage(
+            "GitHub Action metadata `runs` must be a mapping, but it is missing".to_owned(),
+        )
+    })?)
+}
+
+fn require_mapping<'a>(
+    value: &'a serde_yaml::Value,
+    field: &str,
+) -> Result<&'a serde_yaml::Mapping, crate::s2::GeneratorError> {
+    value.as_mapping().ok_or_else(|| {
+        crate::s2::GeneratorError::usage(format!(
+            "GitHub Action metadata `{field}` must be a mapping"
+        ))
+    })
+}
+
+fn mapping_value<'a>(
+    mapping: &'a serde_yaml::Mapping,
+    name: &str,
+) -> Option<&'a serde_yaml::Value> {
+    mapping.get(name)
+}
+
+fn mapping_key<'a>(key: &'a str, field: &str) -> Result<&'a str, crate::s2::GeneratorError> {
+    if key.is_empty() {
+        return Err(crate::s2::GeneratorError::usage(format!(
+            "GitHub Action metadata `{field}` keys must not be empty"
+        )));
+    }
+    Ok(key)
+}
+
+fn require_string(
+    value: &serde_yaml::Value,
+    field: &str,
+    non_empty: bool,
+) -> Result<(), crate::s2::GeneratorError> {
+    let text = value.as_str().ok_or_else(|| {
+        crate::s2::GeneratorError::usage(format!(
+            "GitHub Action metadata `{field}` must be a string"
+        ))
+    })?;
+    if non_empty && text.is_empty() {
+        return Err(crate::s2::GeneratorError::usage(format!(
+            "GitHub Action metadata `{field}` must not be empty"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_inputs(value: &serde_yaml::Value) -> Result<(), crate::s2::GeneratorError> {
+    let inputs = require_mapping(value, "inputs")?;
+    for (name, definition) in inputs {
+        mapping_key(name, "inputs")?;
+        let definition = require_mapping(definition, "input definition")?;
+        for (field, value) in definition {
+            let field = mapping_key(field, "input definition")?;
+            if field.eq_ignore_ascii_case("default")
+                || field.eq_ignore_ascii_case("deprecationMessage")
+            {
+                require_string(value, &format!("inputs.{field}"), false)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_outputs(value: &serde_yaml::Value) -> Result<(), crate::s2::GeneratorError> {
+    let outputs = require_mapping(value, "outputs")?;
+    for (name, definition) in outputs {
+        mapping_key(name, "outputs")?;
+        let definition = require_mapping(definition, "output definition")?;
+        for (field, value) in definition {
+            let field = mapping_key(field, "output definition")?;
+            if field.eq_ignore_ascii_case("description") || field.eq_ignore_ascii_case("value") {
+                require_string(value, &format!("outputs.{field}"), false)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_runs(value: &serde_yaml::Value) -> Result<(), crate::s2::GeneratorError> {
+    let runs = require_mapping(value, "runs")?;
+    for (field, value) in runs {
+        let field = mapping_key(field, "runs")?;
+        match field {
+            "using" | "image" | "entrypoint" | "pre-entrypoint" | "pre-if" | "post-entrypoint"
+            | "post-if" | "main" | "pre" | "post" | "plugin" => {
+                require_string(value, &format!("runs.{field}"), true)?;
+            }
+            "args" => validate_string_sequence(value, "runs.args")?,
+            "env" => validate_string_mapping(value, "runs.env")?,
+            "steps" => validate_composite_steps(value)?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_string_sequence(
+    value: &serde_yaml::Value,
+    field: &str,
+) -> Result<(), crate::s2::GeneratorError> {
+    let sequence = value.as_sequence().ok_or_else(|| {
+        crate::s2::GeneratorError::usage(format!(
+            "GitHub Action metadata `{field}` must be a sequence"
+        ))
+    })?;
+    for (index, item) in sequence.iter().enumerate() {
+        require_string(item, &format!("{field}[{index}]"), false)?;
+    }
+    Ok(())
+}
+
+fn validate_string_mapping(
+    value: &serde_yaml::Value,
+    field: &str,
+) -> Result<(), crate::s2::GeneratorError> {
+    let mapping = require_mapping(value, field)?;
+    for (name, value) in mapping {
+        mapping_key(name, field)?;
+        require_string(value, &format!("{field} entry"), false)?;
+    }
+    Ok(())
+}
+
+fn validate_composite_steps(value: &serde_yaml::Value) -> Result<(), crate::s2::GeneratorError> {
+    let steps = value.as_sequence().ok_or_else(|| {
+        crate::s2::GeneratorError::usage(
+            "GitHub Action metadata `runs.steps` must be a sequence".to_owned(),
+        )
+    })?;
+    for (index, step) in steps.iter().enumerate() {
+        let step = require_mapping(step, &format!("runs.steps[{index}]"))?;
+        for (field, value) in step {
+            let field = mapping_key(field, &format!("runs.steps[{index}]"))?;
+            match field {
+                "id" => require_string(value, "composite step id", true)?,
+                "name" | "if" | "run" | "shell" | "working-directory" | "uses" => {
+                    require_string(value, &format!("composite step {field}"), field == "uses")?;
+                }
+                "with" | "env" => validate_string_mapping(value, &format!("step.{field}"))?,
+                "continue-on-error" => {
+                    if !value.is_bool() {
+                        require_string(value, "composite step continue-on-error", false)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let has_run = mapping_value(step, "run").is_some();
+        let has_uses = mapping_value(step, "uses").is_some();
+        if has_run == has_uses {
+            return Err(crate::s2::GeneratorError::usage(format!(
+                "GitHub composite action step {index} must declare exactly one of `run` or `uses`"
+            )));
+        }
+        if has_run && mapping_value(step, "shell").is_none() {
+            return Err(crate::s2::GeneratorError::usage(format!(
+                "GitHub composite action step {index} must declare `shell`"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_mapping(
     value: &serde_yaml::Value,
     field: &str,
 ) -> Result<(), crate::s2::GeneratorError> {
-    if !value.is_null() && !value.is_mapping() {
+    if !value.is_mapping() {
         return Err(crate::s2::GeneratorError::usage(format!(
             "GitHub Action metadata `{field}` must be a mapping"
         )));
@@ -488,8 +687,20 @@ fn local_references(
 }
 
 fn is_full_sha_action_reference(value: &str) -> bool {
-    value.split_once('@').is_some_and(|(action, revision)| {
-        !action.is_empty() && !action.contains(char::is_whitespace) && is_full_revision(revision)
+    if value
+        .get(0.."docker://".len())
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("docker://"))
+    {
+        return false;
+    }
+    value.rsplit_once('@').is_some_and(|(action, revision)| {
+        let mut parts = action.split('/');
+        let owner = parts.next().unwrap_or_default();
+        let repository = parts.next().unwrap_or_default();
+        !owner.is_empty()
+            && !repository.is_empty()
+            && !action.contains(char::is_whitespace)
+            && is_full_revision(revision)
     })
 }
 
@@ -545,8 +756,12 @@ fn validate_composite_step(step: &ActionStep) -> Result<(), crate::s2::Generator
     // mapping/value shapes instead of silently treating malformed metadata as
     // a valid action. `if`, `id`, `name`, and `working-directory` remain
     // untouched by the detector and therefore retain the action's semantics.
-    validate_mapping(&step.with, "step.with")?;
-    validate_mapping(&step.env, "step.env")?;
+    if !step.with.is_null() {
+        validate_mapping(&step.with, "step.with")?;
+    }
+    if !step.env.is_null() {
+        validate_mapping(&step.env, "step.env")?;
+    }
     if let Some(continue_on_error) = &step.continue_on_error
         && !continue_on_error.is_bool()
         && !continue_on_error.is_string()
@@ -976,6 +1191,87 @@ mod tests {
     }
 
     #[test]
+    fn runner_typed_manifest_shapes_fail_closed() {
+        let cases = [
+            (
+                "inputs-child-scalar",
+                "inputs:\n  bad: scalar\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo ok\n",
+            ),
+            (
+                "inputs-child-null",
+                "inputs:\n  bad:\n    default: null\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo ok\n",
+            ),
+            (
+                "outputs-child-scalar",
+                "outputs:\n  bad: scalar\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo ok\n",
+            ),
+            (
+                "outputs-child-null",
+                "outputs:\n  bad:\n    description: null\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo ok\n",
+            ),
+            (
+                "explicit-null-fields",
+                "inputs: null\noutputs: null\nruns:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo ok\n",
+            ),
+            (
+                "docker-args-shape",
+                "runs:\n  using: docker\n  image: ubuntu\n  args: {}\n",
+            ),
+            (
+                "docker-args-null",
+                "runs:\n  using: docker\n  image: ubuntu\n  args: null\n",
+            ),
+            (
+                "docker-env-shape",
+                "runs:\n  using: docker\n  image: ubuntu\n  env: []\n",
+            ),
+            (
+                "docker-env-value-null",
+                "runs:\n  using: docker\n  image: ubuntu\n  env:\n    BAD: null\n",
+            ),
+            (
+                "docker-condition-shape",
+                "runs:\n  using: docker\n  image: ubuntu\n  pre-if: []\n",
+            ),
+        ];
+        for (name, metadata) in cases {
+            let root = fixture(name);
+            must(
+                fs::write(root.join("action.yml"), metadata),
+                "write malformed action metadata",
+            );
+            let error = super::super::scan_shape(&root, &providers(), "main", &[])
+                .err()
+                .unwrap_or_else(|| panic!("runner-invalid metadata passed scan: {name}"));
+            assert!(
+                error.to_string().contains("GitHub Action metadata"),
+                "unexpected malformed metadata error for {name}: {error}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn external_action_reference_requires_owner_and_repository() {
+        let root = fixture("external-reference-shape");
+        must(
+            fs::write(
+                root.join("action.yml"),
+                "runs:\n  using: composite\n  steps:\n    - uses: foo@0123456789abcdef0123456789abcdef01234567\n",
+            ),
+            "write malformed repository action reference",
+        );
+        let error = super::super::scan_shape(&root, &providers(), "main", &[])
+            .err()
+            .unwrap_or_else(|| panic!("repository action without owner passed scan"));
+        assert!(
+            error.to_string().contains("full 40-character SHA pin"),
+            "{error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     #[expect(
         clippy::too_many_lines,
         reason = "runner precedence fixture keeps the competing action roots in one audit"
@@ -1387,7 +1683,10 @@ mod tests {
         let error = super::super::scan_shape(&missing_shell, &providers(), "main", &[])
             .err()
             .unwrap_or_else(|| panic!("composite run without shell must fail"));
-        assert!(error.to_string().contains("must declare shell"), "{error}");
+        assert!(
+            error.to_string().contains("must declare `shell`"),
+            "{error}"
+        );
         let _ = fs::remove_dir_all(missing_shell);
 
         let dynamic = fixture("dynamic-action-path");
@@ -1418,7 +1717,7 @@ mod tests {
         must(
             fs::write(
                 root.join("action.yml"),
-            "name: consumer\ninputs:\n  enabled:\n    default: true\noutputs:\n  result:\n    value: ${{ steps.local.outputs.result }}\nruns:\n  using: composite\n  steps:\n    - id: local\n      if: ${{ inputs.enabled }}\n      uses: ./nested\n      with:\n        value: ${{ inputs.enabled }}\n      env:\n        ACTION_MODE: checked\n    - name: external\n      if: always()\n      uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332\n",
+            "name: consumer\ninputs:\n  enabled:\n    default: 'true'\noutputs:\n  result:\n    value: ${{ steps.local.outputs.result }}\nruns:\n  using: composite\n  steps:\n    - id: local\n      if: ${{ inputs.enabled }}\n      uses: ./nested\n      with:\n        value: ${{ inputs.enabled }}\n      env:\n        ACTION_MODE: checked\n    - name: external\n      if: always()\n      uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332\n",
             ),
             "write semantic action metadata",
         );
