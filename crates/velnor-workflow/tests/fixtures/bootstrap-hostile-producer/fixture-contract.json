@@ -4,6 +4,16 @@
   "execution": "future-hosted-canary-only",
   "sandbox_base_image": "ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b",
   "sandbox_image_ref_policy": "final-platform-manifest-digest-only",
+  "trusted_handoff_schema": "trusted-contract.schema.json",
+  "trusted_handoff_authority": "base-owned measured hash contract only",
+  "trusted_files": [
+    "probe.rs",
+    "build.sh",
+    "fixture-contract.json",
+    "trusted-contract.schema.json",
+    "trusted-archive-check.py",
+    "trusted-harness.sh"
+  ],
   "binary_source": "probe.rs",
   "probe_entrypoint": [
     "--canary",
@@ -32,7 +42,17 @@
     "H6-symlink-hardlink",
     "H7-output-abuse",
     "H8-pid-and-process-limits",
-    "H9-source-mutation-contract-minting"
+    "H9-source-mutation-source-cache-image-contract-minting"
   ],
+  "bounded_limits": {
+    "archive_bytes": 67108864,
+    "archive_members": 4096,
+    "archive_unpacked_bytes": 268435456,
+    "output_bytes": 67108864,
+    "output_inodes": 4096,
+    "container_pids": 128,
+    "container_memory_bytes": 536870912,
+    "container_timeout_seconds": 300
+  },
   "authority": "diagnostic-only; trusted wrapper and verifier decide"
 }

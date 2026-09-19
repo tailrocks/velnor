@@ -9,6 +9,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::os::unix::fs::symlink;
+use std::os::unix::net::UnixStream;
 use std::path::{Component, Path, PathBuf};
 use std::process::{self, Child, Command, Stdio};
 use std::thread;
@@ -203,6 +204,27 @@ fn command_file_status(name: &str, root: Option<&Path>) -> Status {
     inspect_outside_root(&path, root)
 }
 
+fn fixed_command_path_statuses(root: Option<&Path>) -> (u64, u64) {
+    let paths = [
+        "/github_env",
+        "/github_path",
+        "/github_output",
+        "/github_state",
+        "/github_step_summary",
+        "/__w/_temp/_runner_file_commands",
+    ];
+    let mut present = 0;
+    let mut guarded = 0;
+    for path in paths {
+        match inspect_outside_root(Path::new(path), root) {
+            "absent" | "missing" => {}
+            "present-guarded" => present += 1,
+            _ => guarded += 1,
+        }
+    }
+    (present, guarded)
+}
+
 fn parse_endpoint(raw: &str) -> Option<(String, u16)> {
     if raw.len() > 4096 || raw.contains(['\r', '\n']) {
         return None;
@@ -243,39 +265,62 @@ fn parse_endpoint(raw: &str) -> Option<(String, u16)> {
     Some((host, port))
 }
 
-fn artifact_upload_status() -> (Status, bool, bool) {
+fn artifact_upload_status() -> (Status, bool, bool, bool, bool) {
     let Some(endpoint) = env::var("ACTIONS_RUNTIME_URL")
         .ok()
         .or_else(|| env::var("ACTIONS_RESULTS_URL").ok())
     else {
-        return ("absent", false, false);
+        return ("absent", false, false, false, false);
     };
+    let token = env::var("ACTIONS_RUNTIME_TOKEN").ok();
+    let token_name_present = token.is_some();
+    let synthetic_token = token.filter(|value| {
+        value == "velnor-synthetic-canary-token"
+            && env::var("HOSTILE_PROBE_SYNTHETIC_UPLOAD").ok().as_deref() == Some("1")
+    });
+    if token_name_present && synthetic_token.is_none() {
+        return ("real-token-refused", true, true, false, false);
+    }
     let Some((host, port)) = parse_endpoint(&endpoint) else {
-        return ("invalid", true, false);
+        return ("invalid", true, token_name_present, false, false);
     };
     let Ok(mut addresses) = (host.as_str(), port).to_socket_addrs() else {
-        return ("resolve-failed", true, false);
+        return ("resolve-failed", true, token_name_present, false, false);
     };
     let Some(address) = addresses.next() else {
-        return ("resolve-empty", true, false);
+        return ("resolve-empty", true, token_name_present, false, false);
     };
     let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(250)) else {
-        return ("connect-failed", true, false);
+        if token_name_present && synthetic_token.is_none() {
+            return ("real-token-refused", true, true, false, false);
+        }
+        return ("connect-failed", true, token_name_present, false, false);
     };
+    let body = br#"{"fixture":"velnor-hostile-probe","bytes":"synthetic"}"#;
+    let authorization = synthetic_token
+        .as_deref()
+        .map(|value| format!("Authorization: Bearer {value}\r\n"))
+        .unwrap_or_default();
     let request = format!(
-        "POST / HTTP/1.0\r\nHost: {host}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        "POST /_apis/artifactcache/cache HTTP/1.0\r\nHost: {host}\r\nContent-Type: application/json\r\n{authorization}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        String::from_utf8_lossy(body)
     );
     let sent = stream.write_all(request.as_bytes()).is_ok();
     let _ = stream.shutdown(Shutdown::Write);
-    if sent {
-        ("sent-without-auth", true, true)
+    if synthetic_token.is_some() && sent {
+        ("sent-with-synthetic-auth", true, true, false, true)
+    } else if sent {
+        ("sent-without-auth", true, token_name_present, true, false)
+    } else if token_name_present && synthetic_token.is_none() {
+        ("real-token-refused", true, true, false, false)
     } else {
-        ("write-failed", true, false)
+        ("write-failed", true, token_name_present, false, false)
     }
 }
 
-fn network_status() -> Status {
-    let Ok(mut addresses) = ("198.51.100.1", 80).to_socket_addrs() else {
+fn connect_status(host: &str, port: u16) -> Status {
+    let Ok(mut addresses) = (host, port).to_socket_addrs() else {
         return "resolve-failed";
     };
     let Some(address) = addresses.next() else {
@@ -288,6 +333,54 @@ fn network_status() -> Status {
         }
         Err(error) => status_for_error(&error),
     }
+}
+
+fn network_statuses() -> (Status, Status, Status, Status, Status) {
+    (
+        connect_status("bootstrap-hostile-probe.invalid", 80),
+        connect_status("127.0.0.1", 9),
+        connect_status("::1", 9),
+        connect_status("169.254.169.254", 80),
+        if ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]
+            .iter()
+            .any(|name| env::var_os(name).is_some())
+        {
+            "present-guarded"
+        } else {
+            "absent"
+        },
+    )
+}
+
+fn unix_socket_status(path: &Path) -> Status {
+    match UnixStream::connect(path) {
+        Ok(stream) => {
+            let _ = stream.shutdown(Shutdown::Both);
+            "connected"
+        }
+        Err(error) => status_for_error(&error),
+    }
+}
+
+fn cache_statuses(active: bool) -> (u64, u64) {
+    let paths = ["/cache", "/root/.cache", "/opt/mise", "/mbx", "/var/cache"];
+    let mut present = 0;
+    let mut wrote = 0;
+    for path in paths {
+        if !matches!(
+            inspect_outside_root(Path::new(path), None),
+            "absent" | "missing"
+        ) {
+            present += 1;
+        }
+        if active
+            && mount_write_status(&PathBuf::from(path).join(".velnor-hostile-cache"), active)
+                == "wrote"
+        {
+            wrote += 1;
+        }
+    }
+    (present, wrote)
 }
 
 fn mount_write_status(path: &Path, active: bool) -> Status {
@@ -542,7 +635,15 @@ fn main() {
     ]
     .iter()
     .any(|name| env::var_os(name).is_some());
-    let (h3_upload, h3_endpoint_present, h3_sent_without_auth) = artifact_upload_status();
+    let (
+        h3_upload,
+        h3_endpoint_present,
+        h3_artifact_token_name_present,
+        h3_sent_without_auth,
+        h3_sent_with_synthetic_auth,
+    ) = artifact_upload_status();
+    let (h2_fixed_command_paths_present, h2_fixed_command_paths_guarded) =
+        fixed_command_path_statuses(Some(&root));
     let h4_github_workspace = env::var_os("GITHUB_WORKSPACE")
         .map(|path| inspect_outside_root(&PathBuf::from(path), Some(&root)))
         .unwrap_or("absent");
@@ -554,7 +655,10 @@ fn main() {
     let h4_input_write = mount_write_status(Path::new("/input/.velnor-hostile-source"), true);
     let h4_candidate_write =
         mount_write_status(Path::new("/candidate/.velnor-hostile-binary"), true);
-    let h5_network = network_status();
+    let (h5_dns, h5_loopback_v4, h5_loopback_v6, h5_metadata, h5_proxy) = network_statuses();
+    let h4_docker_socket = unix_socket_status(Path::new("/var/run/docker.sock"));
+    let h4_docker_socket_run = unix_socket_status(Path::new("/run/docker.sock"));
+    let (h9_cache_paths_present, h9_cache_paths_wrote) = cache_statuses(true);
     let h6_symlink = symlink_status(&output);
     let h6_hardlink = hardlink_status(&output, &root);
     let h7_traversal = traversal_status(&output, true);
@@ -593,15 +697,27 @@ fn main() {
         ("h2_github_output", JsonValue::Text(h2_github_output)),
         ("h2_github_state", JsonValue::Text(h2_github_state)),
         ("h2_step_summary", JsonValue::Text(h2_step_summary)),
+        (
+            "h2_fixed_command_paths_present",
+            JsonValue::Number(h2_fixed_command_paths_present),
+        ),
+        (
+            "h2_fixed_command_paths_guarded",
+            JsonValue::Number(h2_fixed_command_paths_guarded),
+        ),
         ("h3_endpoint_present", JsonValue::Bool(h3_endpoint_present)),
         (
             "h3_token_name_present",
-            JsonValue::Bool(h3_token_name_present),
+            JsonValue::Bool(h3_token_name_present || h3_artifact_token_name_present),
         ),
         ("h3_upload_status", JsonValue::Text(h3_upload)),
         (
             "h3_sent_without_auth",
             JsonValue::Bool(h3_sent_without_auth),
+        ),
+        (
+            "h3_sent_with_synthetic_auth",
+            JsonValue::Bool(h3_sent_with_synthetic_auth),
         ),
         ("h4_github_workspace", JsonValue::Text(h4_github_workspace)),
         ("h4_runner_temp", JsonValue::Text(h4_runner_temp)),
@@ -612,7 +728,16 @@ fn main() {
         ),
         ("h4_input_write", JsonValue::Text(h4_input_write)),
         ("h4_candidate_write", JsonValue::Text(h4_candidate_write)),
-        ("h5_network", JsonValue::Text(h5_network)),
+        ("h4_docker_socket", JsonValue::Text(h4_docker_socket)),
+        (
+            "h4_docker_socket_run",
+            JsonValue::Text(h4_docker_socket_run),
+        ),
+        ("h5_dns", JsonValue::Text(h5_dns)),
+        ("h5_loopback_v4", JsonValue::Text(h5_loopback_v4)),
+        ("h5_loopback_v6", JsonValue::Text(h5_loopback_v6)),
+        ("h5_metadata", JsonValue::Text(h5_metadata)),
+        ("h5_proxy", JsonValue::Text(h5_proxy)),
         ("h6_symlink", JsonValue::Text(h6_symlink)),
         ("h6_hardlink", JsonValue::Text(h6_hardlink)),
         ("h7_sparse_80m", JsonValue::Text(h7_sparse)),
@@ -637,6 +762,14 @@ fn main() {
         ),
         ("h8_child_error", JsonValue::Text(h8_child_error)),
         ("h9_source_write", JsonValue::Text(h9_source_write)),
+        (
+            "h9_cache_paths_present",
+            JsonValue::Number(h9_cache_paths_present),
+        ),
+        (
+            "h9_cache_paths_wrote",
+            JsonValue::Number(h9_cache_paths_wrote),
+        ),
         ("h9_contract_minting", JsonValue::Text(h7_fake_contract)),
         ("authority", JsonValue::Text("diagnostic-only")),
     ];
