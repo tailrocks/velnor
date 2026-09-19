@@ -16,6 +16,7 @@ use std::thread;
 use std::time::Duration;
 
 const MAX_PROC_ENV_BYTES: u64 = 1024 * 1024;
+const MAX_VISIBLE_PROCS: u64 = 128;
 const H7_FILE_ATTEMPTS: u64 = 4096;
 const H8_CHILD_ATTEMPTS: u64 = 160;
 const H8_CHILD_LIFETIME: Duration = Duration::from_millis(750);
@@ -109,17 +110,16 @@ fn visible_proc_env_scan() -> (Status, u64, u64) {
     let mut scanned = 0;
     let mut unreadable = 0;
     let mut forbidden = 0;
-    for entry in entries
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .bytes()
-                .all(|byte| byte.is_ascii_digit())
-        })
-        .take(1025)
-    {
+    for entry in entries.filter_map(Result::ok).filter(|entry| {
+        entry
+            .file_name()
+            .to_string_lossy()
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+    }) {
+        if scanned + unreadable >= MAX_VISIBLE_PROCS {
+            return ("over-limit", scanned, forbidden);
+        }
         match bounded_read(&entry.path().join("environ"), MAX_PROC_ENV_BYTES) {
             Ok(bytes) => {
                 scanned += 1;
@@ -151,7 +151,6 @@ fn visible_pid_count() -> u64 {
                 .bytes()
                 .all(|byte| byte.is_ascii_digit())
         })
-        .take(1025)
         .count() as u64
 }
 
@@ -464,6 +463,42 @@ fn fake_contract_status(output: &Path, root: &Path) -> Status {
     )
 }
 
+fn fake_manifest_status(output: &Path, root: &Path) -> Status {
+    let path = output.join("manifest.json");
+    write_under_root(
+        &path,
+        root,
+        br#"{"schema":"forged","head_sha":"deadbeef","closure":"deadbeef"}
+"#,
+    )
+}
+
+fn rewrite_existing_status(path: &Path, active: bool) -> Status {
+    if !active {
+        return "not-run";
+    }
+    if !path.is_file() {
+        return "missing";
+    }
+    match OpenOptions::new().append(true).open(path) {
+        Ok(mut file) => match file.write_all(b"velnor-hostile-source-rewrite\n") {
+            Ok(()) => "wrote",
+            Err(error) => status_for_error(&error),
+        },
+        Err(error) => status_for_error(&error),
+    }
+}
+
+fn delete_existing_status(path: &Path, active: bool) -> Status {
+    if !active {
+        return "not-run";
+    }
+    match fs::remove_file(path) {
+        Ok(()) => "deleted",
+        Err(error) => status_for_error(&error),
+    }
+}
+
 fn proc_status_flags() -> (Status, bool, bool, bool, bool) {
     let Ok(bytes) = bounded_read(Path::new("/proc/1/status"), 64 * 1024) else {
         return ("unreadable", false, false, false, false);
@@ -655,7 +690,12 @@ fn main() {
     let h4_input_write = mount_write_status(Path::new("/input/.velnor-hostile-source"), true);
     let h4_candidate_write =
         mount_write_status(Path::new("/candidate/.velnor-hostile-binary"), true);
+    let h4_workspace_write =
+        mount_write_status(Path::new("/workspace/.velnor-hostile-workspace"), true);
+    let h4_runner_workspace_write =
+        mount_write_status(Path::new("/__w/.velnor-hostile-runner"), true);
     let (h5_dns, h5_loopback_v4, h5_loopback_v6, h5_metadata, h5_proxy) = network_statuses();
+    let h5_unix_socket = unix_socket_status(Path::new("/tmp/velnor-hostile-network.sock"));
     let h4_docker_socket = unix_socket_status(Path::new("/var/run/docker.sock"));
     let h4_docker_socket_run = unix_socket_status(Path::new("/run/docker.sock"));
     let (h9_cache_paths_present, h9_cache_paths_wrote) = cache_statuses(true);
@@ -663,7 +703,10 @@ fn main() {
     let h6_hardlink = hardlink_status(&output, &root);
     let h7_traversal = traversal_status(&output, true);
     let h7_fake_contract = fake_contract_status(&output, &root);
+    let h7_fake_manifest = fake_manifest_status(&output, &root);
     let h9_source_write = mount_write_status(Path::new("/input/.git/.velnor-hostile-git"), true);
+    let h9_source_rewrite = rewrite_existing_status(Path::new("/input/Cargo.toml"), true);
+    let h9_source_delete = delete_existing_status(Path::new("/input/Cargo.toml"), true);
     let h7_sparse = sparse_status(&output);
     let (h7_files_created, h7_file_error) = file_flood_status(&output);
     let (h8_children_spawned, h8_children_attempted, h8_child_error) = child_pressure();
@@ -728,6 +771,11 @@ fn main() {
         ),
         ("h4_input_write", JsonValue::Text(h4_input_write)),
         ("h4_candidate_write", JsonValue::Text(h4_candidate_write)),
+        ("h4_workspace_write", JsonValue::Text(h4_workspace_write)),
+        (
+            "h4_runner_workspace_write",
+            JsonValue::Text(h4_runner_workspace_write),
+        ),
         ("h4_docker_socket", JsonValue::Text(h4_docker_socket)),
         (
             "h4_docker_socket_run",
@@ -738,6 +786,7 @@ fn main() {
         ("h5_loopback_v6", JsonValue::Text(h5_loopback_v6)),
         ("h5_metadata", JsonValue::Text(h5_metadata)),
         ("h5_proxy", JsonValue::Text(h5_proxy)),
+        ("h5_unix_socket", JsonValue::Text(h5_unix_socket)),
         ("h6_symlink", JsonValue::Text(h6_symlink)),
         ("h6_hardlink", JsonValue::Text(h6_hardlink)),
         ("h7_sparse_80m", JsonValue::Text(h7_sparse)),
@@ -746,6 +795,7 @@ fn main() {
         ("h7_file_error", JsonValue::Text(h7_file_error)),
         ("h7_traversal", JsonValue::Text(h7_traversal)),
         ("h7_fake_contract", JsonValue::Text(h7_fake_contract)),
+        ("h7_fake_manifest", JsonValue::Text(h7_fake_manifest)),
         ("h8_proc1_status", JsonValue::Text(status_status)),
         ("h8_pid_is_one", JsonValue::Bool(process::id() == 1)),
         ("h8_uid_nonzero", JsonValue::Bool(uid_nonzero)),
@@ -762,6 +812,8 @@ fn main() {
         ),
         ("h8_child_error", JsonValue::Text(h8_child_error)),
         ("h9_source_write", JsonValue::Text(h9_source_write)),
+        ("h9_source_rewrite", JsonValue::Text(h9_source_rewrite)),
+        ("h9_source_delete", JsonValue::Text(h9_source_delete)),
         (
             "h9_cache_paths_present",
             JsonValue::Number(h9_cache_paths_present),

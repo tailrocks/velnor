@@ -11,12 +11,12 @@ The fixture deliberately probes nine hostile surfaces:
 | H1 | Process environment and `/proc/*/environ` token/name exposure | Only synthetic allow-list names; no values or credential names are emitted |
 | H2 | GitHub command-file discovery/write (`GITHUB_ENV`, `GITHUB_PATH`, `GITHUB_OUTPUT`, `GITHUB_STATE`, `GITHUB_STEP_SUMMARY`) | Variables absent; any disposable command path is only a write probe |
 | H3 | Direct artifact-service upload using runtime URLs | Real token values are refused; only an explicit synthetic canary token can authorize the fixed request, and the hosted boundary supplies no endpoint/token |
-| H4 | Runner workspace, source, and Docker-socket writes | Workspace/socket paths are absent/unreachable; `/input` and `/candidate` writes fail |
+| H4 | Runner workspace, source, and Docker-socket writes | Fixed workspace/socket writes and `/input`/`/candidate` writes fail |
 | H5 | DNS, IPv4/IPv6, metadata, proxy, and Unix-socket network paths | Connect/resolve attempts fail under `network=none` |
 | H6 | Symlink and hardlink creation | Attempts are observable; trusted wrapper rejects the resulting output entries |
 | H7 | Output abuse: sparse oversize file, inode flood, traversal, fake handoff/manifest | Disposable quota or post-copy validator rejects it; no candidate bytes become authority |
 | H8 | PID namespace, status hardening, and bounded child/fork pressure | Candidate is PID 1, private process view, non-root/no-new-privileges/seccomp, bounded PIDs |
-| H9 | Source/.git/cache mutation, cache image visibility, and contract minting | Read-only source/cache paths reject mutation; fake output metadata remains untrusted |
+| H9 | Source/.git/cache mutation, cache image visibility, source rewrite/delete, and contract minting | Read-only source/cache paths reject mutation; fake output metadata remains untrusted |
 
 ## Files
 
