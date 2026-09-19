@@ -60,6 +60,23 @@ ruleset transition has been claimed. Preserve neutral contexts and substantive
 verification; prove the hosted-only contract on the exact candidate before any
 required-check change.
 
+### Checkpoint and publication discipline
+
+Commit and push coherent checkpoints regularly at safe handoff, review, and
+substantive-change boundaries. A checkpoint may be WIP, but its commit subject,
+external record, and task-graph state must say `WIP` or otherwise say explicitly
+that it is not approved. Every source commit uses DCO signoff and
+`Co-authored-by: Codex <codex@openai.com>`, and every task-branch push is a
+normal non-force push whose local and remote SHAs are recorded.
+
+Source commits contain only the owned source records. Live operational evidence,
+mutable session state, raw logs, review snapshots, and final ledgers stay under
+the external evidence root and are linked by immutable path, SHA, or digest.
+Each checkpoint records branch, local/remote SHA, clean/dirty status, validation
+commands, pending/rejected/approved review state, and blockers. A commit or push
+never implies review approval, merge, publication, or gate success; merges and
+remote operational mutations remain separately authorized actions.
+
 ## 2. Intended outcome and boundaries
 
 Deliver a reproducible recovery and migration in this order:
@@ -215,6 +232,11 @@ summary alone is not evidence.
 - Do not merge while any review, comment, thread, requested change, or CI
   result is unread, unverified, or actionable. Do not treat a green subset,
   stale review, or bot summary as clearance.
+- Bind the review snapshot to the exact candidate head SHA and base SHA. Record
+  every review, comment, and inline-thread item with its commit ID (or explicit
+  no-commit value), author, state, timestamp, and current/stale disposition.
+  Retrieve paginated `reviewThreads` resolution and outdated state; a failed or
+  incomplete page fetch blocks merge.
 
 The merge record must link the exact candidate SHA, complete review/comment
 snapshot, disposition of every finding, required-check results, final diff

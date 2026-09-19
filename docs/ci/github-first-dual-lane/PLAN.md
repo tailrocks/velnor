@@ -65,9 +65,29 @@ threads, bot comments, requested changes, and feedback added after any fix.
    actionable. Merge only with a complete disposition and final main-SHA
    record.
 
+The review snapshot must bind exact candidate head/base SHAs and retain each
+review/comment/thread commit ID (or explicit no-commit value), author, state,
+timestamp, and stale/current disposition. Paginated `reviewThreads` resolution
+and outdated state are required; an incomplete page fetch blocks merge.
+
 This is an execution prerequisite, not a gate-success claim. The authoritative
 procedure and command boundary are in
 [`RUNBOOK.md`](./RUNBOOK.md#mandatory-pr-merge-preflight).
+
+## Checkpoint and publication discipline
+
+Commit and push coherent WIP or ready checkpoints regularly at safe handoff,
+review, and substantive-change boundaries. Every source commit must use DCO
+signoff plus `Co-authored-by: Codex <codex@openai.com>`. Push only the normal
+task branch; never force-push. A checkpoint record must bind the branch, local
+and remote SHAs, clean/dirty status, validation, review disposition, and open
+blockers.
+
+Keep source records separate from live evidence. Operational session state,
+review/comment/thread snapshots, raw logs, mutable ledgers, and final ledgers
+stay external and are linked by path/SHA/digest. Label WIP explicitly. A commit
+or push is not review approval, merge, publication, or gate success; merge and
+other remote mutations remain separately authorized.
 
 ## Bounded initial task queue
 

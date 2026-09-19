@@ -16,6 +16,36 @@ that its operation succeeded.
 - Before any destructive/release action, resolve exact repository, revision,
   channel, and destination. A stale or moving source invalidates evidence.
 
+## Regular checkpoint and push procedure
+
+Take a coherent checkpoint at each safe handoff, review disposition, or
+substantive change. WIP is allowed, but label it in the commit subject and
+external task record. These commands are the normal task-branch procedure;
+never force-push and never stage the external evidence tree.
+
+```bash
+# [PENDING] read-only checkpoint facts
+rtk git status --short --branch
+rtk git rev-parse HEAD
+rtk git diff --check
+rtk git show -s --format='%H%n%B' HEAD
+
+# [PENDING] stage only the owned source files, then sign and push normally
+rtk git add docs/ci/github-first-dual-lane/SPEC.md \
+  docs/ci/github-first-dual-lane/PLAN.md \
+  docs/ci/github-first-dual-lane/RUNBOOK.md
+rtk git commit -s -m 'WIP: describe coherent checkpoint' \
+  --trailer 'Co-authored-by: Codex <codex@openai.com>'
+rtk git push origin BRANCH:BRANCH
+rtk git ls-remote origin refs/heads/BRANCH
+```
+
+Record the exact branch, local SHA, remote SHA, clean/dirty result, validation
+commands, review status, and blockers in the external session graph. The push
+is a durable WIP/ready checkpoint only; it does not imply review approval,
+merge, publication, or gate success. Keep mutable session state, raw logs,
+review snapshots, and final ledgers outside this source tree.
+
 ## Mandatory PR merge preflight
 
 This is required before every recovery, migration, release, or generated-output
@@ -34,6 +64,58 @@ exact candidate SHA and recorded externally.
    gh pr view PR --repo OWNER/REPO --json reviews,comments,latestReviews,reviewDecision
    ```
 
+   Bind the snapshot to the candidate before reading dispositions, and retain
+   each item’s commit ID (or explicit `null` for a comment without one):
+
+   ```bash
+   # [PENDING] PR must be the exact candidate; PR is numeric for GraphQL
+   gh api repos/OWNER/REPO/pulls/PR \
+     --jq '{head_sha:.head.sha,base_sha:.base.sha,head_ref:.head.ref,base_ref:.base.ref}'
+   gh api --paginate repos/OWNER/REPO/pulls/PR/reviews \
+     --jq '.[] | {id,state,commit_id,user:(.user.login // null),submitted_at}'
+   gh api --paginate repos/OWNER/REPO/pulls/PR/comments \
+     --jq '.[] | {id,commit_id,in_reply_to_id,user:(.user.login // null),created_at,updated_at}'
+   gh api --paginate repos/OWNER/REPO/issues/PR/comments \
+     --jq '.[] | {id,commit_id:null,user:(.user.login // null),created_at,updated_at}'
+
+   # [PENDING] read every review thread's resolution/outdated state
+   gh api graphql --paginate \
+     -F owner=OWNER -F name=REPO -F number=123 \
+     -f query='query($owner:String!, $name:String!, $number:Int!, $endCursor:String) {
+       repository(owner:$owner, name:$name) {
+         pullRequest(number:$number) {
+           headRefOid baseRefOid
+           reviewThreads(first:100, after:$endCursor) {
+             nodes { id isResolved isOutdated path line
+               comments(first:100) {
+                 nodes { id databaseId author { login } createdAt updatedAt commit { oid } }
+                 pageInfo { hasNextPage endCursor }
+               }
+             }
+             pageInfo { hasNextPage endCursor }
+           }
+         }
+       }
+     }'
+
+   # [PENDING] for every thread whose nested comments pageInfo hasNextPage=true
+   gh api graphql --paginate -F threadId=THREAD_NODE_ID \
+     -f query='query($threadId:ID!, $endCursor:String) {
+       node(id:$threadId) { ... on PullRequestReviewThread {
+         comments(first:100, after:$endCursor) {
+           nodes { id databaseId author { login } createdAt updatedAt commit { oid } }
+           pageInfo { hasNextPage endCursor }
+         }
+       }}
+     }'
+   ```
+
+   The REST inline-comment pages provide complete comment content; GraphQL
+   `reviewThreads` supplies resolution and outdated state. Reconcile IDs across
+   both outputs. Any failed page, `hasNextPage` left unresolved, missing
+   candidate head/base binding, or missing per-item commit disposition blocks
+   merge.
+
    Use the review-comment data and GitHub's thread state to account for every
    inline thread, including resolved and bot-authored items. If pagination or
    thread state cannot be verified, the merge is blocked.
@@ -45,6 +127,7 @@ exact candidate SHA and recorded externally.
 
    ```bash
    # [PENDING] exact candidate only
+   gh api repos/OWNER/REPO/pulls/PR --jq '{head_sha:.head.sha,base_sha:.base.sha}'
    gh pr checks PR --repo OWNER/REPO
    gh pr diff PR --repo OWNER/REPO
    rtk git diff --check BASE_SHA...HEAD_SHA
