@@ -166,9 +166,10 @@ fn package_release_hook_renders_and_passes_policy() {
 fn package_release_owner_publish_uses_source_checkout_for_runtime_action() {
     let workspace = temporary_root("owner-runtime");
     let root = fixture_root(&workspace.join("repo"));
+    let owner_repository = ["tailrocks", "velnor"].join("/");
     write_inputs(
         &root,
-        &package_config_for_repository("tailrocks/velnor", "verify-release"),
+        &package_config_for_repository(&owner_repository, "verify-release"),
         true,
     );
     let generated = generate_in_place(&root);
