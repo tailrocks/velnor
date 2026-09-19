@@ -12923,48 +12923,13 @@ impl ActionAdmissionFailure {
     }
 }
 
-struct TrackingActionMetadataSource<S> {
-    inner: S,
-    fetch_failed: AtomicBool,
-}
-
-impl<S> TrackingActionMetadataSource<S> {
-    fn new(inner: S) -> Self {
-        Self {
-            inner,
-            fetch_failed: AtomicBool::new(false),
-        }
-    }
-
-    fn fetch_failed(&self) -> bool {
-        self.fetch_failed.load(Ordering::Relaxed)
-    }
-}
-
-impl<S: crate::admission::ActionMetadataSource> crate::admission::ActionMetadataSource
-    for TrackingActionMetadataSource<S>
-{
-    fn fetch_action_metadata(
-        &self,
-        repository: &str,
-        git_ref: &str,
-        subpath: Option<&str>,
-    ) -> Result<ActionMetadata> {
-        let result = self
-            .inner
-            .fetch_action_metadata(repository, git_ref, subpath);
-        if result.is_err() {
-            self.fetch_failed.store(true, Ordering::Relaxed);
-        }
-        result
-    }
-}
-
-fn action_admission_failure_remediation(metadata_fetch_failed: bool) -> FailureRemediation {
-    if metadata_fetch_failed {
-        FailureRemediation::DaemonApi
-    } else {
-        FailureRemediation::WorkflowPolicy
+fn action_admission_failure_remediation(
+    kind: crate::admission::AdmissionFailureKind,
+) -> FailureRemediation {
+    use crate::admission::AdmissionFailureKind as K;
+    match kind {
+        K::ApiTransport | K::ApiStatus | K::Internal => FailureRemediation::DaemonApi,
+        K::Policy | K::ManifestMissing | K::ManifestMalformed => FailureRemediation::WorkflowPolicy,
     }
 }
 
@@ -13053,13 +13018,12 @@ fn admit_job_closure_sync(
                 error.context("build read-only action metadata source"),
             )
         })?;
-    let source = TrackingActionMetadataSource::new(source);
     let graph = crate::admission::admit_job(job, context_data, &source);
     let graph = match graph {
         Ok(graph) => graph,
         Err(error) => {
             return Err(ActionAdmissionFailure::new(
-                action_admission_failure_remediation(source.fetch_failed()),
+                action_admission_failure_remediation(error.failure_kind()),
                 anyhow::Error::new(error),
             ));
         }
@@ -13067,7 +13031,7 @@ fn admit_job_closure_sync(
     println!(
         "Admitted action closure: {} node(s) from {} read-only metadata fetch(es).",
         graph.nodes.len(),
-        source.inner.reads()
+        source.reads()
     );
     Ok(graph)
 }
@@ -21934,40 +21898,24 @@ jobs:
         );
     }
 
-    struct FailingActionMetadataSource;
-
-    impl crate::admission::ActionMetadataSource for FailingActionMetadataSource {
-        fn fetch_action_metadata(
-            &self,
-            _repository: &str,
-            _git_ref: &str,
-            _subpath: Option<&str>,
-        ) -> Result<ActionMetadata> {
-            anyhow::bail!("GitHub Contents API unavailable");
-        }
-    }
-
     #[test]
-    fn action_admission_classifies_metadata_fetch_errors_as_daemon_api() {
-        let source = TrackingActionMetadataSource::new(FailingActionMetadataSource);
-        assert!(
-            crate::admission::ActionMetadataSource::fetch_action_metadata(
-                &source,
-                "owner/repo",
-                "0123456789012345678901234567890123456789",
-                None,
-            )
-            .is_err()
-        );
-        assert!(source.fetch_failed());
-        assert_eq!(
-            action_admission_failure_remediation(source.fetch_failed()),
-            FailureRemediation::DaemonApi
-        );
-        assert_eq!(
-            action_admission_failure_remediation(false),
-            FailureRemediation::WorkflowPolicy
-        );
+    fn action_admission_maps_typed_failures_to_remediation() {
+        use crate::admission::AdmissionFailureKind as K;
+
+        for (kind, expected) in [
+            (K::ApiTransport, FailureRemediation::DaemonApi),
+            (K::ApiStatus, FailureRemediation::DaemonApi),
+            (K::ManifestMissing, FailureRemediation::WorkflowPolicy),
+            (K::ManifestMalformed, FailureRemediation::WorkflowPolicy),
+            (K::Policy, FailureRemediation::WorkflowPolicy),
+            (K::Internal, FailureRemediation::DaemonApi),
+        ] {
+            assert_eq!(
+                action_admission_failure_remediation(kind),
+                expected,
+                "failure kind {kind:?}"
+            );
+        }
     }
 
     #[test]
