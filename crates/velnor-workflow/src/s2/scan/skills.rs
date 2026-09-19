@@ -1244,6 +1244,13 @@ fn read_text(path: &Path, operation: &str) -> Result<String, GeneratorError> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    clippy::manual_let_else,
+    clippy::panic,
+    clippy::unreachable,
+    reason = "negative detector fixtures intentionally use direct failure assertions"
+)]
 mod tests {
     use super::{
         detect, is_markdown_placeholder, normalize_markdown_destination, parse_frontmatter,
