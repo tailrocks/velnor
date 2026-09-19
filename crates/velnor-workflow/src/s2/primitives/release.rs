@@ -2861,6 +2861,15 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
     } else {
         "true"
     };
+    // A producer-bound rolling release is built from the admitted source
+    // revision, not the workflow_run event's default-branch SHA. Keep the
+    // initial create and replacement edit on one explicit target so a missing
+    // release cannot silently fall back to the moving default branch.
+    let preview_target = if has_producer_binding(release) {
+        "${{ needs.publish-gate.outputs.sha }}"
+    } else {
+        "${{ github.sha }}"
+    };
     let mut output = format!(
         r#"{GENERATED_HEADER}name: Preview\nrun-name: Preview · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    branches: [{}]\n    paths:\n{paths}  workflow_dispatch:\n\nconcurrency:\n  group: preview-${{{{ github.repository }}}}\n  cancel-in-progress: true\n\npermissions:\n  contents: read\n\njobs:\n  build:\n    name: Preview / ${{{{ matrix.target }}}}\n    runs-on: {matrix_runner}\n    timeout-minutes: 75\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Build preview binary\n        env:\n          CARGO_INCREMENTAL: "0"\n          RUSTC_WRAPPER: sccache\n        run: cargo build --locked --release --package {} --bin {} --target "${{{{ matrix.target }}}}"\n      - name: Package preview binary\n        run: velnor-workflow release package-binary --target "${{{{ matrix.target }}}}" --version preview --package {} --binary {}\n      - name: Attest preview artifact\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload preview artifact\n        uses: {}\n        with:\n          name: ${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 1\n\n  publish:\n    name: Publish rolling preview\n    needs: build\n    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{}' }}}}\n    runs-on: ubuntu-24.04\n    timeout-minutes: 15\n    permissions:\n      contents: write\n    steps:\n      - name: Download preview artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Replace rolling preview\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          gh release view preview >/dev/null 2>&1 || gh release create preview --prerelease --title "Rolling preview"\n          gh release edit preview --target "${{{{ github.sha }}}}" --prerelease\n          gh release upload preview dist/* --clobber\n"#,
         yaml_scalar(&config.default_branch),
@@ -2955,6 +2964,24 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
         ),
     )
     .replace("run: cargo build ", "run: mbx build ");
+    if has_producer_binding(release) {
+        // Bind both the first-create fallback and the replacement edit to the
+        // exact source admitted by publish-gate. Without this pair, a
+        // workflow_run publisher can create/tag the moving default branch.
+        output = output
+            .replace(
+                "gh release view preview >/dev/null 2>&1 || gh release create preview --prerelease --title \"Rolling preview\"",
+                &format!(
+                    "gh release view preview >/dev/null 2>&1 || gh release create preview --target \"{preview_target}\" --prerelease --title \"Rolling preview\""
+                ),
+            )
+            .replace(
+                "gh release edit preview --target \"${{ github.sha }}\" --prerelease",
+                &format!(
+                    "gh release edit preview --target \"{preview_target}\" --prerelease"
+                ),
+            );
+    }
     // Unit verification is part of the preview admission graph. Keep the
     // provider jobs ahead of the artifact build and make the singular
     // publisher wait on the same exact IDs.
@@ -8530,6 +8557,32 @@ mod tests {
                     "    if: ${{ github.ref == 'refs/heads/main' && (needs.publish-gate.outputs.admitted == 'true' && needs.publish-gate.outputs.mode == 'publish') }}\n"
                 ),
             "the rolling publish must admit only the gate's publish mode: {publish}"
+        );
+        let release_commands: Vec<&str> = publish
+            .lines()
+            .filter(|line| {
+                line.contains("gh release create preview")
+                    || line.contains("gh release edit preview")
+            })
+            .collect();
+        assert_eq!(
+            release_commands.len(),
+            2,
+            "producer tarball publisher must render both create and edit paths: {publish}"
+        );
+        for command in release_commands {
+            assert!(
+                command.contains("--target \"${{ needs.publish-gate.outputs.sha }}\""),
+                "producer release command must target the admitted source SHA: {command}"
+            );
+            assert!(
+                !command.contains("github.sha"),
+                "producer release command must not use the workflow event SHA: {command}"
+            );
+        }
+        assert!(
+            !publish.contains("gh release create preview --prerelease --title \"Rolling preview\""),
+            "producer create fallback must not omit its admitted target: {publish}"
         );
         let _ = fs::remove_dir_all(root);
     }
