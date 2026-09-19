@@ -55,6 +55,11 @@ the artifact or that a gate passed.
 The following read-only observations were captured around
 `2026-09-19T22:47:37Z`; they are external evidence references, not verified
 merge instructions or gate results:
+A separate 2026-09-20 reconciliation observed live `main` at
+`1048337062ea625fada1b4f7c07f2feed75f60c7`, parent `b5a4b4af`; it reports
+generator-rendering reproducibility only. The candidate observations below
+remain timestamped `b5`-bound evidence, not current-main proof. See external
+`G1/bootstrap-transition/VALIDATOR-ONLY-DESIGN-2026-09-20.md`.
 
 - PR957 source `9e06`, revision `53`, is approved only by
   `G0/native-review/review-pr957-92387e88.md` (1,888 source tests plus
@@ -68,9 +73,14 @@ merge instructions or gate results:
   `94b43578cad9720e569780d18dc966370ed47c11` against the same base, with
   required/Velnor-workflow hosted failures observed. Do not merge either
   without the complete paginated preflight below.
-- PR961's DCO remediation uses a replacement branch from current main with
-  signed source units only; exclude redundant unsigned `857`, and never
-  force-push or override required checks.
+- PR961 is the historical open path at head
+  `5b9a16a620951b65bbfe0a5cf7b1ffe04a317303` on base `b5a4b4af`; its history
+  contains unsigned `857` and DCO is `action_required`. It is not repaired or
+  approved. PR963 is the separate signed replacement at head
+  `fb78d85d464fd5082e5c161922afd7942380fabc`; external comparison records the
+  tree-equivalent replacement with `857` excluded. Its hosted checks were
+  observed successful, but exact-head independent review rejects source
+  admission. Never force-push or override required checks.
 - Product validation uses the separately typed validator-only
   product/publisher design owned by `/root/g0_inventory` and reviewed by
   `/root/g0_reviewer`; publication precedes separate PR957 pin adoption. Do

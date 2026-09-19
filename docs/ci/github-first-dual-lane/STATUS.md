@@ -38,13 +38,15 @@ not reusable against the later live default revision.
 ## User native-version amendment
 
 The amended policy is explicit: every Velnor workload on a GitHub-hosted macOS
-runner uses the newest actual supported major available at dispatch. `macos-27`
-and `macos-26` are current examples, not a ceiling; a future newest major such
-as `macos-28` supersedes them. `macos-15`, older majors, and a lagging
-`macos-latest` alias are never fallback choices. Evidence must bind the
-resolved label, host/image identity, Xcode/Swift, SDK, deployment target, and
-architecture. An incompatible native constraint fails explicitly; it is not
-skipped, downgraded, or silently rerouted.
+runner uses the newest actual supported major and architecture available at
+dispatch. The current verified arm64 mapping is macOS 27 via exact hosted label
+`xcode-27`; this is an observed mapping, not a ceiling. A future newest actual
+major and exact label supersede it. macOS 27 Intel has no supported hosted
+label in current evidence; it must fail explicitly, never downgrade to
+`macos-26`, `macos-26-intel`, an older major, or a lagging `macos-latest`
+alias. Evidence must bind the resolved label, host/image identity, Xcode/Swift,
+SDK, deployment target, and architecture. An incompatible native constraint
+fails explicitly; it is not skipped or silently rerouted.
 
 This does not weaken immutable action, container-image, release-asset, or
 digest pins. Pin updates require reviewed immutable identities. The isolated
@@ -58,6 +60,11 @@ research and policy PR evidence remain external and pending.
 
 External candidate observations around `2026-09-19T22:47:37Z` do not advance
 G0 or any later gate:
+A separate 2026-09-20 reconciliation observed live `main` at
+`1048337062ea625fada1b4f7c07f2feed75f60c7`, parent `b5a4b4af`; it reports
+generator-rendering reproducibility only. The candidate rows below remain
+timestamped `b5`-bound observations, not current-main proof. See external
+`G1/bootstrap-transition/VALIDATOR-ONLY-DESIGN-2026-09-20.md`.
 
 - PR957 source `9e06`, revision `53`, has source-only approval in
   `G0/native-review/review-pr957-92387e88.md` with 1,888 source tests plus
@@ -70,9 +77,14 @@ G0 or any later gate:
   capture and no review decision or merge exists. PR962 is open at head
   `94b43578cad9720e569780d18dc966370ed47c11` on the same base; required and
   Velnor-workflow hosted failures were observed. These are not approvals.
-- The signed replacement integration path starts from current main, carries
-  signed source units only, excludes redundant unsigned `857`, and forbids
-  force/override. DCO plus complete review/CI evidence remain required.
+- PR961 remains the historical open path at head
+  `5b9a16a620951b65bbfe0a5cf7b1ffe04a317303` on base `b5a4b4af`; its history
+  contains unsigned `857` and DCO is `action_required`. It is not repaired or
+  approved. PR963 is the separate signed replacement at head
+  `fb78d85d464fd5082e5c161922afd7942380fabc`; external comparison records the
+  tree-equivalent replacement with `857` excluded. Its hosted checks were
+  observed successful, but exact-head independent review rejects source
+  admission. Force/override remains forbidden.
 - The selected product boundary is a separately typed validator-only
   product/publisher owned by `/root/g0_inventory` and reviewed by
   `/root/g0_reviewer`; no three-platform runtime reuse or platform-selection
@@ -161,7 +173,7 @@ package delivery, fleet migration, Mac operation, or any gate exit.
 | PR954 current head | `f16592ea165ced141bf0bb1c43466a95d7df8b2e` | Observed; current run still pending/partial |
 | PR953 cache result | Run `35453601367` failed cache contract | Observed; cache diagnosis reopened |
 | G0-runtime | Read-only report persisted at external `G0/runtime/report.md`; actual Mac not operated before G3 | Completed investigation; G4/G5 pending |
-| Native macOS version policy | GitHub-hosted Velnor macOS workloads must use the newest actual major; `macos-27`/`macos-26` are current examples and future majors supersede them; no `macos-15`, lagging alias, old fallback, skip, or silent reroute | Amendment recorded; official-label research/PR and exact runner/image/SDK evidence pending; immutable action/image pins remain required |
+| Native macOS version policy | GitHub-hosted Velnor macOS workloads must use the newest actual major/architecture; current verified macOS 27 arm64 label is exact `xcode-27`; macOS 27 Intel has no supported label and cannot fall back to `macos-26`/`macos-26-intel`/older/alias/skip | Amendment recorded; official-label research/PR and exact runner/image/SDK evidence pending; immutable action/image pins remain required |
 | Runner protocol source | `actions/runner` revision `80bb1fb827fa44d489263061e71ef4adba7ad8cd` pinned for later work | Observed; no implementation here |
 | G2 native package compile | Three required ARM64 macOS binaries compile/smoke at `abe9ad82`; nothing installed or published | Preliminary only; G2 remains pending |
 | G2 product identity | Application/native asset/component identity contract is missing | Blocker for package acceptance; owned by G2-native-product |
@@ -217,7 +229,7 @@ unknown.
 | G2-native-product | Source implementation assigned to native-packages worker | `/root/g2_native_packages`, thread `01a0ba7a-328e-7282-943e-5b54c2ac209d`, worktree `dual-lane-native-product`; define application/runtime component identity and authoritative package manifest |
 | G2-preview-publication | Planned; blocked until G1 | `/root/g1_run_operations`, thread `01a0ba7a-9d5d-7291-a2f5-357ff78dba5e`, worktree `dual-lane-preview-publication`; reviewer `/root/g2_distribution_review` |
 | G2-distribution-review | Typed review pending; initial checker hostile G2 suite failed all nine mutations on old b3b6 | Thread `01a0ba81-1af6-7f11-9f24-3ff115b8f314`; no publication approval |
-| latest_macos_policy | Amendment assigned; exact official label research/PR pending | Isolated AGENTS-rule/research task; newest actual major (current examples `macos-27`/`macos-26`, future majors supersede); no `macos-15`/lagging alias/old fallback/skip; reviewer `/root/g2_homebrew_contract` |
+| latest_macos_policy | Amendment assigned; exact official label research/PR pending | Isolated AGENTS-rule/research task; exact current arm64 label `xcode-27`, future newest labels supersede; macOS 27 Intel has no fallback; reviewer `/root/g2_homebrew_contract` |
 | g3-skills-adapter | Read-only evidence written; central scanner fix required | Thread `01a0ba7b-0152-7a70-8d18-c2387f1c9469`; external report only, no rollout |
 | g3-native-routing | Read-only evidence written; generator policy amendment must use newest actual hosted macOS major and explicit incompatibility failure; rollout blocked until G2 | Thread `01a0ba7b-32f1-7af1-a25f-4cde73f1f075`; native routing report only; native/package contract review `/root/g2_homebrew_contract` |
 | g3-action-roles | Read-only evidence written; G3 contract incomplete | Thread `01a0ba7b-57a5-7623-bd92-d0666a02b96e`; reusable publisher/runtime gaps remain |

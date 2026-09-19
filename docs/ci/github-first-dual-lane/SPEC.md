@@ -63,15 +63,17 @@ required-check change.
 ### User native-version amendment
 
 For every Velnor workload that runs on GitHub-hosted macOS, select the newest
-actual supported macOS major available at dispatch time. `macos-27` and
-`macos-26` are current examples, not a ceiling; a future newest major such as
-`macos-28` supersedes them when available. Never select `macos-15` or any
-other older major as a fallback, and do not treat a lagging `macos-latest`
-alias as proof of the newest actual major. Record the resolved runner label,
-host/image identity, Xcode/Swift and SDK versions, deployment target, and
-architecture in the revision-bound evidence. If the newest actual major cannot
-execute an applicable native workload, fail explicitly with the incompatible
-constraint and its evidence; do not skip, downgrade, or silently reroute it.
+actual supported macOS major and architecture available at dispatch. The
+current verified arm64 mapping is macOS 27 via the exact hosted label
+`xcode-27`; that label is an observed mapping, not a ceiling. A future newest
+actual major and its exact label supersede it. macOS 27 Intel has no supported
+hosted label in the current evidence; fail explicitly rather than downgrade to
+`macos-26`, `macos-26-intel`, another older major, or a lagging
+`macos-latest` alias. Record the resolved runner label, host/image identity,
+Xcode/Swift and SDK versions, deployment target, and architecture in the
+revision-bound evidence. If the newest actual major cannot execute an
+applicable native workload, fail explicitly with the incompatible constraint
+and its evidence; do not skip, downgrade, or silently reroute it.
 
 This policy does not weaken immutable action references, container image
 references, release assets, or digest pins. Pin changes require a reviewed
@@ -110,6 +112,12 @@ sources under one recorded owner and review boundary.
 
 The following are external, revision-bound observations captured around
 `2026-09-19T22:47:37Z`; they are not source-tree attestations or gate results.
+A separate current-main reconciliation observed live `main` at
+`1048337062ea625fada1b4f7c07f2feed75f60c7` on 2026-09-20, parent
+`b5a4b4afaa6ca807927cacc03659b570a895dd5c`; it reports generator-rendering
+reproducibility only. The candidate rows below remain timestamped `b5`-bound
+observations and are not silently relabelled as current-main proof. See
+external `G1/bootstrap-transition/VALIDATOR-ONLY-DESIGN-2026-09-20.md`.
 
 - PR957 source `9e06` (revision `53`) has bounded source approval in
   `G0/native-review/review-pr957-92387e88.md`: 1,888 source tests plus fmt,
@@ -123,10 +131,14 @@ The following are external, revision-bound observations captured around
   `94b43578cad9720e569780d18dc966370ed47c11` on that same base; its observed
   `Control / Required`, `ci-required`, and Velnor-workflow hosted checks
   include failures. Neither PR is merge approval or gate evidence.
-- The signed replacement integration path is a new branch from current main
-  with signed source units only; redundant unsigned `857` is excluded, and
-  force/override is forbidden. PR961 remains open until DCO and complete
-  review/CI evidence are re-established.
+- PR961 remains a historical open path at head
+  `5b9a16a620951b65bbfe0a5cf7b1ffe04a317303` on base `b5a4b4af`; its history
+  contains unsigned `857` and DCO is `action_required`. It is not repaired or
+  approved. PR963 is the separate signed replacement at head
+  `fb78d85d464fd5082e5c161922afd7942380fabc`; external comparison records its
+  tree-equivalent replacement with `857` excluded. Its hosted checks were
+  observed successful, but exact-head independent review rejects source
+  admission. Force/override is forbidden; neither PR is merge or gate proof.
 - Secure CAS/sourcegraph handling and collector/checker binding remain
   unresolved. The external checker candidates report CAS/sourcegraph CLI
   rejection, nested-child/collector gaps, and credential-provider/mapping
@@ -453,9 +465,11 @@ Determine native capability from dependencies and code. Preserve Apple checks
 for Jackin, Tablerock, and the playground; verify macOS version, Xcode/Swift,
 SDK, deployment target, and architecture. A Linux Swift compiler or a macOS
 label alone is not evidence. For GitHub-hosted macOS Velnor jobs, the native
-version amendment above is mandatory: use the newest actual major available
-(current examples are `macos-27`/`macos-26`; future majors supersede them),
-never `macos-15` or a lagging alias; incompatible constraints fail explicitly
+version amendment above is mandatory: use the newest actual major and
+architecture available (current verified arm64 mapping: exact label `xcode-27`
+for macOS 27; future newest labels supersede it). macOS 27 Intel has no
+supported label and cannot fall back to `macos-26`, `macos-26-intel`,
+`macos-15`, or a lagging alias; incompatible constraints fail explicitly
 rather than skipping or falling back. Migrate in dependency-aware waves and
 record out-of-scope image/product dependencies.
 
@@ -481,12 +495,13 @@ VMs. Do not impose per-container CPU/RAM limits; enforce one host-wide
 containers, volumes, services, or projects.
 
 The hosted-runner native policy remains separate from this actual-host pilot:
-hosted macOS Velnor jobs must use the newest actual supported major (current
-examples are `macos-27`/`macos-26`; a future newest major supersedes them),
-never `macos-15` or an older fallback. The pilot must record the actual host
-separately. An incompatible native constraint is a named failure with a
-reproduction and evidence; it is never a skip, downgrade, or silent provider
-fallback.
+hosted macOS Velnor jobs must use the newest actual supported major and
+architecture (current verified arm64 mapping: exact label `xcode-27` for macOS
+27; a future newest label supersedes it). macOS 27 Intel has no supported
+hosted label; do not downgrade to `macos-26`, `macos-26-intel`, `macos-15`, or
+an older fallback. The pilot must record the actual host separately. An
+incompatible native constraint is a named failure with a reproduction and
+evidence; it is never a skip, downgrade, or silent provider fallback.
 
 Begin with existing `velnorctl host`; verify registration scope/labels/groups,
 shared capacity, trust policy, Docker resolution, and daemon defaults. Extend
@@ -727,10 +742,11 @@ The final report may say complete only if every applicable item passes:
 - Coverage: all required behavior has generated replacement; missing categories,
   native routing, feed automation, and action behavior are resolved.
 - Native version policy: every hosted macOS Velnor workload uses the newest
-  actual supported major (current examples are `macos-27`/`macos-26`; future
-  newest majors supersede them), with explicit failure for incompatible
-  constraints and no older fallback/skip; immutable action/image/assets pins
-  remain revision-bound.
+  actual supported major and architecture (current verified arm64 mapping:
+  exact label `xcode-27` for macOS 27; future newest labels supersede it),
+  with explicit failure for macOS 27 Intel until an exact hosted label exists;
+  no `macos-26`, `macos-26-intel`, older fallback, or skip; immutable
+  action/image/assets pins remain revision-bound.
 - Hosted CI: final migration PR and main jobs pass in every repository; no hidden
   Velnor prerequisite remains.
 - Velnor CI: eligible jobs pass in OrbStack Docker on same contract; native-only

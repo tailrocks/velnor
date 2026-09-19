@@ -98,15 +98,16 @@ sources under one recorded owner and review boundary.
 ## Native macOS version amendment
 
 Every Velnor workload on a GitHub-hosted macOS runner must use the newest
-actual supported major available at dispatch. `macos-27` and `macos-26` are
-current examples, not a ceiling; a future newest major such as `macos-28`
-supersedes them when available. `macos-15`, older majors, and a lagging
-`macos-latest` alias are never fallback choices. Capture the resolved label,
-host/image identity, Xcode/Swift, SDK, deployment target, and architecture.
-An incompatible native constraint fails explicitly with evidence; it is never
-skipped, downgraded, or silently routed to another provider. This amendment
-does not loosen immutable action, container-image, release-asset, or digest
-pins; pin updates require reviewed immutable identities.
+actual supported major and architecture available at dispatch. The current
+verified arm64 mapping is macOS 27 via the exact hosted label `xcode-27`; that
+label is an observed mapping, not a ceiling. A future newest actual major and
+its exact label supersede it. macOS 27 Intel has no supported hosted label in
+the current evidence; it must fail explicitly, never downgrade to
+`macos-26`, `macos-26-intel`, another older major, or a lagging
+`macos-latest` alias. Capture the resolved label, host/image identity,
+Xcode/Swift, SDK, deployment target, and architecture. This amendment does
+not loosen immutable action, container-image, release-asset, or digest pins;
+pin updates require reviewed immutable identities.
 
 The isolated `latest_macos_policy` task owns the AGENTS rule and official
 runner-label research/PR. `g3-native-routing` owns generator policy, and
@@ -118,13 +119,19 @@ G0→G1→G2→G3→G4/G5 sequencing.
 
 These are external, revision-bound observations captured around
 `2026-09-19T22:47:37Z`; they do not advance a gate.
+A separate 2026-09-20 reconciliation observed live `main` at
+`1048337062ea625fada1b4f7c07f2feed75f60c7`, parent `b5a4b4af`; it reports
+generator-rendering reproducibility only. The rows below remain timestamped
+`b5`-bound observations, not current-main proof. See external
+`G1/bootstrap-transition/VALIDATOR-ONLY-DESIGN-2026-09-20.md`.
 
 | Candidate | Observed state | Boundary/blocker |
 | --- | --- | --- |
 | PR957, source `9e06`, revision `53` | Source-only approval in `G0/native-review/review-pr957-92387e88.md`; 1,888 source tests plus fmt/clippy/check pass | Merge/live not ready; D19 unpublished; Policy `35473052923` candidate acquisition failed; separate typed-validator dependency unresolved |
 | PR960, head `2c810f1b46ce8eddb5906fd4bdcc8ae23e78ed40`, base `b5a4b4afaa6ca807927cacc03659b570a895dd5c` | Open; Policy observed in progress; no review decision or merge | Candidate checks/review remain incomplete |
 | PR962, head `94b43578cad9720e569780d18dc966370ed47c11`, base `b5a4b4afaa6ca807927cacc03659b570a895dd5c` | Open; required and Velnor-workflow hosted failures observed | Not merge-ready; no gate evidence |
-| PR961 replacement path | New branch from current main, signed source units only; redundant unsigned `857` excluded | No force/override; DCO and complete review/CI proof required |
+| PR961 historical path | Open head `5b9a16a620951b65bbfe0a5cf7b1ffe04a317303` on base `b5a4b4afaa6ca807927cacc03659b570a895dd5c`; its history contains unsigned `857`, and DCO is `action_required` | Historical record only; not repaired, approved, merged, or a gate result |
+| PR963 signed replacement | Open head `fb78d85d464fd5082e5c161922afd7942380fabc` on the same observed base; external comparison records the tree-equivalent signed replacement with redundant `857` excluded | Hosted checks observed successful, but exact-head independent review rejects source admission; no merge/override/gate |
 
 The selected G2 design is a separately typed validator-only product/publisher,
 owned by `/root/g0_inventory` and reviewed by `/root/g0_reviewer`. It must not
@@ -272,7 +279,7 @@ reviewer. Unknown thread/worktree metadata stays `unknown` until observed.
 | `G2-distribution-review` | Independent APT/Homebrew product contract review | `/root/g2_distribution_review` (Luna/max) | `G2-native-product`, `G0-distribution` | Thread `01a0ba81-1af6-7f11-9f24-3ff115b8f314`; review worktree unknown | `[observed]` package identity/publication/install blockers recorded | `G0/distribution-review/report.md` | `/root/g0-reviewer` |
 | `g3-skills-adapter` | Eight skills repositories: `tailrocks/tailrocks-typescript-skills`, `tailrocks/tailrocks-skill-authoring-skills`, `tailrocks/tailrocks-rust-skills`, `tailrocks/tailrocks-roadmap-skills`, `tailrocks/tailrocks-pull-request-skills`, `tailrocks/tailrocks-open-source-skills`, `tailrocks/tailrocks-macos-skills`, `tailrocks/tailrocks-code-quality-skills` | `/root/g3_skills_adapter` (Luna/max) | `G0-inventory`; operationally G3 depends on G2 | Thread `01a0ba7b-0152-7a70-8d18-c2387f1c9469`; external read-only source inspection | `[observed]` catalog/frontmatter/template inventory; central scanner fix required | `G0/skills-adapter/report.md`; no G3 rollout | `/root/g3_distribution_consumers` |
 | `latest_macos_policy` | GitHub-hosted macOS version/label policy and official label research | `/root/latest_macos_policy` | `G0-inventory`; rollout remains sequenced through G3/G4 | Isolated AGENTS-rule/research worktree; exact path/thread external | `[pending]` official label/availability research and revision-bound policy PR | `G0/native-macos-policy/` plus review/PR identity | `/root/g2_homebrew_contract` |
-| `g3-native-routing` | Native Apple capability/routing: `tailrocks/tablerock`, `tailrocks/parallax-telemetry-playground`, `jackin-project/jackin` | `/root/g3_native_routing` (Luna/max) | `G0-inventory`; operationally G3 depends on G2 | Thread `01a0ba7b-32f1-7af1-a25f-4cde73f1f075`; worktree `dual-lane-native-routing` | `[observed]` actual routing gaps recorded; generator policy must honor newest actual major (current examples `macos-27`/`macos-26`, future majors supersede), explicit incompatibility failures, and no old fallback/skip; no rollout before G2 | `G0/native-routing/report.md`; no G3 rollout | `/root/g3_native_review`; native/package contract `/root/g2_homebrew_contract` |
+| `g3-native-routing` | Native Apple capability/routing: `tailrocks/tablerock`, `tailrocks/parallax-telemetry-playground`, `jackin-project/jackin` | `/root/g3_native_routing` (Luna/max) | `G0-inventory`; operationally G3 depends on G2 | Thread `01a0ba7b-32f1-7af1-a25f-4cde73f1f075`; worktree `dual-lane-native-routing` | `[observed]` actual routing gaps recorded; generator policy must honor newest actual major (current verified arm64 label `xcode-27` for macOS 27; future labels supersede), reject macOS 27 Intel without an exact label, and never fall back/skip; no rollout before G2 | `G0/native-routing/report.md`; no G3 rollout | `/root/g3_native_review`; native/package contract `/root/g2_homebrew_contract` |
 | `g3-action-roles` | Action/role images: `jackin-project/jackin-role-action`, `jackin-project/jackin-the-architect`, `jackin-project/jackin-sentinel` | `/root/g3_action_roles` (Luna/max) | `G0-inventory`; operationally G3 depends on G2 | Thread `01a0ba7b-57a5-7623-bd92-d0666a02b96e`; worktree `dual-lane-action-scanner` | `[observed]` action/role contract gaps recorded; scanner implementation pending | `G0/action-roles/findings.md`; no G3 rollout | `/root/g0_runtime` |
 | `g3-rust-consumers` | Eight Rust/product consumers: `tailrocks/parallax`, `tailrocks/tracing-request-level`, `tailrocks/termrock`, `tailrocks/termpane`, `tailrocks/schemalane`, `tailrocks/ruxel`, `tailrocks/pg-bigdecimal`, `tailrocks/holla` | `/root/g3_rust_consumers` (Luna/max) | `G0-inventory`; operationally G3 depends on G2 | Thread `01a0ba7d-bb3f-78c3-84c8-eb0b2d75e5d0`; worktree `dual-lane-rust-scan` for central fix | `[observed]` manifests, tests, publishing, dependency-closure gaps recorded; termrock fix pending | `G0/rust-consumers/{report.md,inventory.tsv}`; no G3 rollout | `/root/g0-reviewer` |
 | `g3-distribution-consumers` | Six non-Velnor feeds/taps: `tailrocks/homebrew-tablerock`, `tailrocks/homebrew-ruxel`, `tailrocks/homebrew-parallax`, `tailrocks/homebrew-holla`, `tailrocks/holla-apt`, `jackin-project/homebrew-tap` | `/root/g3_distribution_consumers` (Luna/max) | `G0-inventory`, `G0-distribution`; operationally G3 depends on G2 | Thread `01a0ba7d-e457-7723-81ba-1f7ed038212c`; external read-only audit | `[observed]` formula/feed/signature/update and clean-client gaps recorded; G3 blocked | `G0/distribution-consumers/{report.md,consumer-inventory.json}`; no G3 rollout | `/root/g0-reviewer` |
@@ -330,10 +337,11 @@ singular publication. Keep runtime artifacts out of application discovery.
 Inventory then migrate by dependency-aware waves. Extend generic scanner and
 primitives for missing categories; preserve native Apple checks and package,
 feed, skill, action, and image behavior. Apply the newest-actual-major hosted
-macOS policy (current examples `macos-27`/`macos-26`; future newest majors
-supersede them) to every applicable Velnor workload; `macos-15`, lagging
-aliases, skips, and older fallback are invalid, and incompatible constraints
-must fail explicitly. For every row prove
+macOS policy (current verified arm64 mapping: exact label `xcode-27` for macOS
+27; future newest labels supersede it) to every applicable Velnor workload;
+macOS 27 Intel has no supported label and cannot fall back to `macos-26`,
+`macos-26-intel`, `macos-15`, lagging aliases, skips, or other older labels.
+Incompatible constraints must fail explicitly. For every row prove
 deterministic regeneration, migration PR, full workload hosted run, reviewed
 merge, and main.
 
@@ -343,9 +351,11 @@ Install the published package on the authorized Mac, record identity and
 OrbStack/Docker data, prove routing, trust, capacity, nested Docker isolation,
 cache, cancellation, recovery, connectivity, observability, parity, and
 packaged lifecycle. Hosted macOS Velnor jobs still use the newest actual
-supported major (current examples `macos-27`/`macos-26`; future newest majors
-supersede them) and explicitly fail on incompatible constraints; the actual
-pilot host is recorded separately. For
+supported major and architecture (current verified arm64 mapping: exact label
+`xcode-27` for macOS 27; future newest labels supersede it) and explicitly fail
+on incompatible constraints; macOS 27 Intel cannot fall back to `macos-26`,
+`macos-26-intel`, or an older label. The actual pilot host is recorded
+separately. For
 every defect create reproduction/fix/regression/review
 and rerun the affected hosted and Velnor canaries, then republish and reinstall.
 
