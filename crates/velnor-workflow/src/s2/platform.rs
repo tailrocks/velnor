@@ -130,6 +130,7 @@ pub(crate) fn valid_artifact_path(value: &str) -> bool {
         && value.len() <= 4096
         && !value.starts_with('-')
         && !value.contains('\\')
+        && !value.contains("//")
         && !value.chars().any(char::is_control)
         && Path::new(value)
             .components()
@@ -283,9 +284,9 @@ fn validate_artifact_prerequisite(
             prerequisite.producer, prerequisite.product, producer.id, unit.id
         )));
     }
-    if artifact.kind == ProductArtifactKind::Xcframework && prerequisite.task.is_some() {
+    if prerequisite.task.is_some() {
         return Err(GeneratorError::usage(format!(
-            "XCFramework prerequisite `{}:{}` cannot override the producer task; declare the canonical artifact-producing task on the producer product",
+            "artifact prerequisite `{}:{}` cannot override the producer task; declare the canonical artifact-producing task on the producer product",
             prerequisite.producer, prerequisite.product
         )));
     }
@@ -293,6 +294,8 @@ fn validate_artifact_prerequisite(
 }
 
 fn validate_prerequisite_edges(config: &ProjectConfig) -> Result<(), GeneratorError> {
+    let mut artifact_inputs: BTreeMap<(String, String), (String, BTreeMap<String, String>)> =
+        BTreeMap::new();
     for unit in &config.units {
         for prerequisite in &unit.prerequisites {
             let Some(producer) = config
@@ -335,6 +338,22 @@ fn validate_prerequisite_edges(config: &ProjectConfig) -> Result<(), GeneratorEr
                 )));
             };
             validate_artifact_prerequisite(config, unit, producer, prerequisite, product)?;
+            if product.artifact.is_some()
+                && let Some(task) = prerequisite.effective_task(product)
+            {
+                let key = (producer.id.clone(), product.name.clone());
+                let candidate = (task.to_owned(), prerequisite.env.clone());
+                if let Some(existing) = artifact_inputs.get(&key) {
+                    if existing != &candidate {
+                        return Err(GeneratorError::usage(format!(
+                            "artifact product `{}:{}` is requested with conflicting producer task inputs; one canonical task/input map is required for every consumer",
+                            producer.id, product.name
+                        )));
+                    }
+                } else {
+                    artifact_inputs.insert(key, candidate);
+                }
+            }
         }
     }
     Ok(())
@@ -538,6 +557,7 @@ mod tests {
         assert!(!valid_artifact_path("../outside"));
         assert!(!valid_artifact_path("/tmp/product"));
         assert!(!valid_artifact_path("target\\product"));
+        assert!(!valid_artifact_path("target//product"));
     }
 
     #[test]
