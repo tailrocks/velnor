@@ -2530,9 +2530,9 @@ fn apply_unit_row(
             unit.platform = provider::Platform::MacosArm64;
         }
         unit.apple_native = Some(match unit.apple_native.take() {
-            Some(detected) => detected
-                .strengthen_with(&explicit)
-                .map_err(|error| GeneratorError::usage(format!("[[units]] {id}.native: {error}")))?,
+            Some(detected) => detected.strengthen_with(&explicit).map_err(|error| {
+                GeneratorError::usage(format!("[[units]] {id}.native: {error}"))
+            })?,
             None => explicit,
         });
     }
@@ -2989,9 +2989,7 @@ fn validate_native_host_contract(config: &mut ProjectConfig) -> Result<(), Gener
         .providers
         .contains(&provider::ProviderId::GithubHosted);
     for unit in &mut config.units {
-        if unit.apple_native.is_none()
-            && unit.platform == provider::Platform::MacosArm64
-        {
+        if unit.apple_native.is_none() && unit.platform == provider::Platform::MacosArm64 {
             unit.apple_native = Some(crate::native_contract::AppleNativeContract::new(
                 crate::native_contract::AppleSdkFamily::Macos,
                 None,
@@ -8869,6 +8867,7 @@ mod tests {
             docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
             mbx: None,
+            apple_native: None,
             prepared_tools: Vec::new(),
         };
         let mut config = ProjectConfig {
@@ -11063,6 +11062,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
             mbx: None,
+            apple_native: None,
             prepared_tools: Vec::new(),
         });
         config.units.push(Unit {
@@ -11089,6 +11089,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
             mbx: None,
+            apple_native: None,
             prepared_tools: Vec::new(),
         });
         config.units.push(Unit {
@@ -11115,6 +11116,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
             mbx: None,
+            apple_native: None,
             prepared_tools: Vec::new(),
         });
         let ir = WorkflowIr::from_config(&config);
@@ -15226,6 +15228,7 @@ lockfile = true
                 docker_contexts: Vec::new(),
                 env: std::collections::BTreeMap::new(),
                 mbx: None,
+                apple_native: None,
                 prepared_tools: Vec::new(),
             };
             if kind == UnitKind::Swift {
@@ -15313,6 +15316,7 @@ lockfile = true
             docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
             mbx: None,
+            apple_native: None,
             prepared_tools: Vec::new(),
         };
         let config = ProjectConfig {
@@ -17186,6 +17190,7 @@ lockfile = true
             docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
             mbx: None,
+            apple_native: None,
             prepared_tools: Vec::new(),
         });
         let kind = must_some(
@@ -17513,6 +17518,7 @@ lockfile = true
             docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
             mbx: None,
+            apple_native: None,
             prepared_tools: Vec::new(),
         });
         let ir = WorkflowIr::from_config(&config);
@@ -17633,6 +17639,7 @@ lockfile = true
             docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
             mbx: None,
+            apple_native: None,
             prepared_tools: Vec::new(),
         });
         let ir = WorkflowIr::from_config(&config);
@@ -17733,6 +17740,7 @@ lockfile = true
             docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
             mbx: None,
+            apple_native: None,
             prepared_tools: Vec::new(),
         };
         let independent = Unit {
@@ -17836,6 +17844,7 @@ lockfile = true
             docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
             mbx: None,
+            apple_native: None,
             prepared_tools: Vec::new(),
         };
         let config = ProjectConfig {
@@ -17942,6 +17951,7 @@ lockfile = true
             docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
             mbx: None,
+            apple_native: None,
             prepared_tools: Vec::new(),
         };
         let config = ProjectConfig {
@@ -18100,6 +18110,7 @@ lockfile = true
                     docker_contexts: Vec::new(),
                     env: std::collections::BTreeMap::new(),
                     mbx: None,
+                    apple_native: None,
                     prepared_tools: Vec::new(),
                 },
                 Unit {
@@ -18126,6 +18137,7 @@ lockfile = true
                     docker_contexts: Vec::new(),
                     env: std::collections::BTreeMap::new(),
                     mbx: None,
+                    apple_native: None,
                     prepared_tools: Vec::new(),
                 },
             ],

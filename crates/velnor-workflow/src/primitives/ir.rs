@@ -181,6 +181,7 @@ mod tests {
             docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
             mbx: None,
+            apple_native: None,
             prepared_tools: Vec::new(),
         }
     }
@@ -4831,9 +4832,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         self.render_collapsed_prepared_tool_steps(output, members, &facts);
         self.render_kind_level_tool_steps(output, lane, &kind_tools, cache_save);
         render_ci_tool_bootstrap_end_marker(output);
-        if github_lane
-            && let Some(contract) = native_contract.as_ref()
-        {
+        if github_lane && let Some(contract) = native_contract.as_ref() {
             output.push_str(&crate::native_contract::render_preflight_step(contract));
         }
 

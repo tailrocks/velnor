@@ -18,10 +18,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
+use crate::native_contract::{hosted_apple_offer, offer_mismatches, AppleNativeContract};
 use crate::{GeneratorError, ProjectConfig, RunnerMode, Unit, UnitKind};
-use crate::native_contract::{
-    hosted_apple_offer, offer_mismatches, AppleNativeContract,
-};
 
 /// The SDK capability an Xcode scheme build needs. Only a macOS executor
 /// offers it, so ordinary `SwiftPM` units must never declare it: they verify
@@ -750,6 +748,7 @@ mod tests {
             docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
             mbx: None,
+            apple_native: None,
             prepared_tools: Vec::new(),
         }
     }

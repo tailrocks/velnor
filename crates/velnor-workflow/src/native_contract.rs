@@ -36,7 +36,10 @@ impl AppleVersion {
         let major = parts.next()?.parse().ok()?;
         let minor = parts.next().map_or(Some(0), |part| part.parse().ok())?;
         let patch = parts.next().map_or(Some(0), |part| part.parse().ok())?;
-        parts.next().is_none().then_some(Self::new(major, minor, patch))
+        parts
+            .next()
+            .is_none()
+            .then_some(Self::new(major, minor, patch))
     }
 }
 
@@ -45,13 +48,7 @@ impl fmt::Display for AppleVersion {
         if self.patch == 0 {
             write!(formatter, "{}.{}", self.major, self.minor)
         } else {
-            write!(
-                formatter,
-                "{}.{}.{}",
-                self.major,
-                self.minor,
-                self.patch
-            )
+            write!(formatter, "{}.{}.{}", self.major, self.minor, self.patch)
         }
     }
 }
@@ -172,6 +169,7 @@ pub(crate) struct AppleNativeContract {
     pub(crate) macos: AppleVersionConstraint,
     pub(crate) sdk: AppleSdkRequirement,
     pub(crate) xcode: AppleVersionConstraint,
+    pub(crate) swift: AppleVersionConstraint,
     pub(crate) requires_full_xcode: bool,
     /// Architecture that must execute the job itself.
     pub(crate) execution_arch: AppleArch,
@@ -186,12 +184,18 @@ pub(crate) struct AppleNativeContract {
 
 impl AppleNativeContract {
     pub(crate) fn new(family: AppleSdkFamily, minimum: Option<AppleVersion>) -> Self {
-        let version = minimum.map_or_else(AppleVersionConstraint::default, AppleVersionConstraint::minimum);
-        let macos = (family == AppleSdkFamily::Macos).then_some(version).unwrap_or_default();
+        let version = minimum.map_or_else(
+            AppleVersionConstraint::default,
+            AppleVersionConstraint::minimum,
+        );
+        let macos = (family == AppleSdkFamily::Macos)
+            .then_some(version)
+            .unwrap_or_default();
         Self {
             macos,
             sdk: AppleSdkRequirement { family, version },
             xcode: AppleVersionConstraint::default(),
+            swift: AppleVersionConstraint::default(),
             requires_full_xcode: true,
             execution_arch: AppleArch::Arm64,
             build_arches: BTreeSet::from([AppleArch::Arm64]),
@@ -226,6 +230,9 @@ impl AppleNativeContract {
                     .strengthen(other.sdk.version, "SDK version")?,
             },
             xcode: self.xcode.strengthen(other.xcode, "Xcode version")?,
+            swift: self
+                .swift
+                .strengthen(other.swift, "Swift toolchain version")?,
             requires_full_xcode: self.requires_full_xcode || other.requires_full_xcode,
             execution_arch: self.execution_arch,
             build_arches,
@@ -275,20 +282,26 @@ impl AppleNativeContract {
             .map(|arch| arch.as_str())
             .collect::<Vec<_>>()
             .join(",");
+        let swift = if self.swift.minimum.is_some() || self.swift.exact.is_some() {
+            format!(" + Swift {}", format_constraint(self.swift))
+        } else {
+            String::new()
+        };
         format!(
-            "{} SDK ({}) + {} execution + build [{}]{}",
+            "{} SDK ({}) + {} execution + build [{}]{}{}",
             self.sdk.family.as_str(),
-            self.sdk
-                .version
-                .minimum
-                .map_or_else(|| "any version".to_owned(), |version| format!(">={version}")),
+            self.sdk.version.minimum.map_or_else(
+                || "any version".to_owned(),
+                |version| format!(">={version}")
+            ),
             self.execution_arch.as_str(),
             build_arches,
             if self.conflicts.is_empty() {
                 String::new()
             } else {
                 format!(" + conflicts: {}", self.conflicts.join("; "))
-            }
+            },
+            swift
         )
     }
 }
@@ -305,6 +318,8 @@ pub(crate) struct AppleNativeSection {
     pub(crate) macos_minimum: Option<String>,
     pub(crate) xcode_minimum: Option<String>,
     pub(crate) xcode_exact: Option<String>,
+    pub(crate) swift_minimum: Option<String>,
+    pub(crate) swift_exact: Option<String>,
     pub(crate) execution_arch: Option<String>,
     pub(crate) build_arches: Option<Vec<String>>,
 }
@@ -321,11 +336,16 @@ impl AppleNativeSection {
                 ));
             }
         };
-        let sdk_minimum = parse_config_version(self.sdk_minimum.as_deref(), context, "sdk_minimum")?;
+        let sdk_minimum =
+            parse_config_version(self.sdk_minimum.as_deref(), context, "sdk_minimum")?;
         let sdk_exact = parse_config_version(self.sdk_exact.as_deref(), context, "sdk_exact")?;
-        let mut sdk_version = sdk_minimum.map_or_else(AppleVersionConstraint::default, AppleVersionConstraint::minimum);
+        let mut sdk_version = sdk_minimum.map_or_else(
+            AppleVersionConstraint::default,
+            AppleVersionConstraint::minimum,
+        );
         if let Some(exact) = sdk_exact {
-            sdk_version = sdk_version.strengthen(AppleVersionConstraint::exact(exact), "SDK version")?;
+            sdk_version =
+                sdk_version.strengthen(AppleVersionConstraint::exact(exact), "SDK version")?;
         }
         let explicit_macos = parse_constraint(
             self.macos_minimum.as_deref(),
@@ -343,6 +363,12 @@ impl AppleNativeSection {
             self.xcode_exact.as_deref(),
             context,
             "Xcode version",
+        )?;
+        let swift = parse_constraint(
+            self.swift_minimum.as_deref(),
+            self.swift_exact.as_deref(),
+            context,
+            "Swift toolchain version",
         )?;
         let execution_arch = match self.execution_arch.as_deref().unwrap_or("arm64") {
             "arm64" => AppleArch::Arm64,
@@ -376,6 +402,7 @@ impl AppleNativeSection {
                 version: sdk_version,
             },
             xcode,
+            swift,
             requires_full_xcode: true,
             execution_arch,
             build_arches,
@@ -412,7 +439,10 @@ fn parse_constraint(
 ) -> Result<AppleVersionConstraint, String> {
     let minimum = parse_config_version(minimum, context, &format!("{name}.minimum"))?;
     let exact = parse_config_version(exact, context, &format!("{name}.exact"))?;
-    let minimum_constraint = minimum.map_or_else(AppleVersionConstraint::default, AppleVersionConstraint::minimum);
+    let minimum_constraint = minimum.map_or_else(
+        AppleVersionConstraint::default,
+        AppleVersionConstraint::minimum,
+    );
     match exact {
         Some(exact) => minimum_constraint.strengthen(AppleVersionConstraint::exact(exact), name),
         None => Ok(minimum_constraint),
@@ -427,12 +457,20 @@ pub(crate) struct HostedAppleOffer {
     pub(crate) label: &'static str,
     pub(crate) host_macos: AppleVersion,
     pub(crate) xcode: AppleVersion,
-    pub(crate) sdk: AppleVersion,
+    pub(crate) sdk_versions: &'static [(AppleSdkFamily, AppleVersion)],
+    /// The image table does not publish a Swift compiler row; preflight still
+    /// verifies a source-pinned Swift toolchain on the selected host.
+    pub(crate) swift: Option<AppleVersion>,
     pub(crate) execution_arch: AppleArch,
     pub(crate) build_arches: &'static [AppleArch],
 }
 
 const UNIVERSAL_BUILD_ARCHES: &[AppleArch] = &[AppleArch::Arm64, AppleArch::X86_64];
+const MACOS_26_SDKS: &[(AppleSdkFamily, AppleVersion)] = &[
+    (AppleSdkFamily::Macos, AppleVersion::new(26, 5, 0)),
+    (AppleSdkFamily::IosDevice, AppleVersion::new(26, 5, 0)),
+    (AppleSdkFamily::IosSimulator, AppleVersion::new(26, 5, 0)),
+];
 
 /// Current GitHub-hosted macOS 26 offers, verified from the public runner and
 /// image readmes. The image ships Xcode 26.6 and macOS/iOS SDK 26.5 families.
@@ -441,7 +479,8 @@ pub(crate) fn hosted_apple_offer(label: &str) -> Option<HostedAppleOffer> {
         label,
         host_macos: AppleVersion::new(26, 6, 1),
         xcode: AppleVersion::new(26, 6, 0),
-        sdk: AppleVersion::new(26, 5, 0),
+        sdk_versions: MACOS_26_SDKS,
+        swift: None,
         execution_arch,
         build_arches,
     };
@@ -500,15 +539,32 @@ pub(crate) fn offer_mismatches(
             offer.execution_arch.as_str()
         ));
     }
-    // The image table's SDK value is the newest SDK family version it proves.
-    // A future family-specific offer must replace this check with its own
-    // family map; never use one generic SDK number for all destinations.
-    if !contract.sdk.version.accepts(offer.sdk) {
-        missing.push(format!(
+    let offered_sdk = offer
+        .sdk_versions
+        .iter()
+        .find(|(family, _)| *family == contract.sdk.family)
+        .map(|(_, version)| *version);
+    match offered_sdk {
+        Some(version) if contract.sdk.version.accepts(version) => {}
+        Some(version) => missing.push(format!(
             "{} SDK {} does not satisfy {}",
             contract.sdk.family.as_str(),
-            offer.sdk,
+            version,
             format_constraint(contract.sdk.version)
+        )),
+        None => missing.push(format!(
+            "hosted label {} does not publish the required {} SDK family",
+            offer.label,
+            contract.sdk.family.as_str()
+        )),
+    }
+    if let Some(actual) = offer.swift
+        && !contract.swift.accepts(actual)
+    {
+        missing.push(format!(
+            "Swift toolchain {} does not satisfy {}",
+            actual,
+            format_constraint(contract.swift)
         ));
     }
     missing
@@ -548,6 +604,14 @@ pub(crate) fn render_preflight_step(contract: &AppleNativeContract) -> String {
         .xcode
         .exact
         .map_or_else(String::new, |version| version.to_string());
+    let swift_minimum = contract
+        .swift
+        .minimum
+        .map_or_else(String::new, |version| version.to_string());
+    let swift_exact = contract
+        .swift
+        .exact
+        .map_or_else(String::new, |version| version.to_string());
     let build_arches = contract
         .build_arches
         .iter()
@@ -557,8 +621,10 @@ pub(crate) fn render_preflight_step(contract: &AppleNativeContract) -> String {
     let sdk_name = contract.sdk.family.sdk_name();
     let family = contract.sdk.family.as_str();
     format!(
-        "      - name: Verify Apple native host contract\n        shell: bash\n        env:\n          APPLE_MACOS_MINIMUM: {macos_minimum:?}\n          APPLE_SDK_FAMILY: {family:?}\n          APPLE_SDK_NAME: {sdk_name:?}\n          APPLE_SDK_MINIMUM: {sdk_minimum:?}\n          APPLE_SDK_EXACT: {sdk_exact:?}\n          APPLE_XCODE_MINIMUM: {xcode_minimum:?}\n          APPLE_XCODE_EXACT: {xcode_exact:?}\n          APPLE_EXECUTION_ARCH: {execution_arch:?}\n          APPLE_BUILD_ARCHES: {build_arches:?}\n        run: |\n{script}",
+        "      - name: Verify Apple native host contract\n        shell: bash\n        env:\n          APPLE_MACOS_MINIMUM: {macos_minimum:?}\n          APPLE_SDK_FAMILY: {family:?}\n          APPLE_SDK_NAME: {sdk_name:?}\n          APPLE_SDK_MINIMUM: {sdk_minimum:?}\n          APPLE_SDK_EXACT: {sdk_exact:?}\n          APPLE_XCODE_MINIMUM: {xcode_minimum:?}\n          APPLE_XCODE_EXACT: {xcode_exact:?}\n          APPLE_SWIFT_MINIMUM: {swift_minimum:?}\n          APPLE_SWIFT_EXACT: {swift_exact:?}\n          APPLE_EXECUTION_ARCH: {execution_arch:?}\n          APPLE_BUILD_ARCHES: {build_arches:?}\n        run: |\n{script}",
         execution_arch = contract.execution_arch.as_str(),
+        swift_minimum = swift_minimum,
+        swift_exact = swift_exact,
         script = indent_script(&preflight_script()),
     )
 }
@@ -638,6 +704,11 @@ fi
 xcode_version="$(xcodebuild -version | awk '$1 == "Xcode" { print $2; exit }')"
 [[ -n "$xcode_version" ]] || fail "xcodebuild did not report an Xcode version"
 require_version "Xcode" "$xcode_version" "$APPLE_XCODE_MINIMUM" "$APPLE_XCODE_EXACT"
+swift_version="$(swift --version 2>/dev/null | awk '$1 == "Apple" && $2 == "Swift" && $3 == "version" { print $4; exit } $1 == "Swift" && $2 == "version" { print $3; exit }')"
+if [[ -n "$APPLE_SWIFT_MINIMUM" || -n "$APPLE_SWIFT_EXACT" ]]; then
+  [[ -n "$swift_version" ]] || fail "swift --version did not report a Swift toolchain version"
+  require_version "Swift toolchain" "$swift_version" "$APPLE_SWIFT_MINIMUM" "$APPLE_SWIFT_EXACT"
+fi
 sdk_listing="$(xcodebuild -showsdks)"
 grep -F "$APPLE_SDK_NAME" <<<"$sdk_listing" >/dev/null \
   || fail "selected Xcode does not list required $APPLE_SDK_FAMILY SDK ($APPLE_SDK_NAME)"
@@ -661,25 +732,23 @@ echo "Apple native host verified: macOS $actual_macos, Xcode $xcode_version, $AP
 #[cfg(test)]
 mod tests {
     use super::{
-        hosted_apple_offer, offer_mismatches, render_preflight_step, AppleArch, AppleNativeContract,
-        AppleSdkFamily, AppleVersion,
+        hosted_apple_offer, offer_mismatches, render_preflight_step, AppleArch,
+        AppleNativeContract, AppleSdkFamily, AppleVersion,
     };
     use std::collections::BTreeSet;
 
     #[test]
     fn verified_images_distinguish_execution_from_build_architecture() {
-        let mut contract = AppleNativeContract::new(
-            AppleSdkFamily::Macos,
-            Some(AppleVersion::new(26, 0, 0)),
-        );
+        let mut contract =
+            AppleNativeContract::new(AppleSdkFamily::Macos, Some(AppleVersion::new(26, 0, 0)));
         contract.xcode = super::AppleVersionConstraint::exact(AppleVersion::new(26, 6, 0));
         contract.build_arches = BTreeSet::from([AppleArch::Arm64, AppleArch::X86_64]);
         let arm = hosted_apple_offer("macos-26").expect("verified arm image");
         assert!(offer_mismatches(&contract, arm).is_empty());
         let intel = hosted_apple_offer("macos-26-intel").expect("verified intel image");
-        assert!(offer_mismatches(&contract, intel).iter().any(|message| {
-            message.contains("execution architecture arm64")
-        }));
+        assert!(offer_mismatches(&contract, intel)
+            .iter()
+            .any(|message| { message.contains("execution architecture arm64") }));
         assert!(hosted_apple_offer("macos-15").is_none());
     }
 

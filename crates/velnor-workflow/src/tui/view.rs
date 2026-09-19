@@ -732,6 +732,7 @@ mod tests {
             docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
             mbx: None,
+            apple_native: None,
             prepared_tools: Vec::new(),
         };
         let config = crate::ProjectConfig {
