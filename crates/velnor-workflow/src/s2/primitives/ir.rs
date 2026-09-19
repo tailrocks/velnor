@@ -555,7 +555,7 @@ mod tests {
         );
         let swift_workflow = must_some(swift_rendered, "swift kind has members").1;
         assert!(
-            swift_workflow.contains("runs-on: macos-26"),
+            swift_workflow.contains("runs-on: xcode-27"),
             "{swift_workflow}"
         );
         assert!(
@@ -573,7 +573,8 @@ mod tests {
         );
         assert!(
             !rust_workflow.contains("runs-on: macos-15")
-                && !rust_workflow.contains("runs-on: macos-26"),
+                && !rust_workflow.contains("runs-on: macos-26")
+                && !rust_workflow.contains("runs-on: xcode-27"),
             "{rust_workflow}"
         );
     }
