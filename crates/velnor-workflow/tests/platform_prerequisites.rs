@@ -99,6 +99,10 @@ fn generate_fail(root: &Path) -> String {
     )
 }
 
+fn hosted_apple_runner_marker() -> String {
+    format!("runs-on: {}", velnor_workflow::LATEST_HOSTED_APPLE_RUNNER)
+}
+
 fn write_config(root: &Path, body: &str) {
     fs::create_dir_all(root.join(".github-gen")).unwrap();
     fs::write(
@@ -224,7 +228,7 @@ fn swiftpm_verifies_on_the_default_executor_while_xcode_needs_macos() {
         "the default partition admits only portable callers: {default}"
     );
     assert!(
-        apple.contains("runs-on: macos-15"),
+        apple.contains(hosted_apple_runner_marker().as_str()),
         "the Apple partition reaches macOS: {apple}"
     );
     assert!(
@@ -290,7 +294,7 @@ fn ffi_prerequisite_selects_the_consumer_and_prepares_the_product() {
     );
     let kind = generated.workflow("ci-unit-swift.yml");
     assert!(
-        kind.contains("runs-on: macos-15"),
+        kind.contains(hosted_apple_runner_marker().as_str()),
         "the xcframework capability resolves to macOS: {kind}"
     );
     assert!(
@@ -410,7 +414,7 @@ fn capability_override_moves_a_unit_to_macos() {
     let generated = generate(&root);
     let kind = generated.workflow("ci-unit-rust.yml");
     assert!(
-        kind.contains("runs-on: macos-15"),
+        kind.contains(hosted_apple_runner_marker().as_str()),
         "an Apple capability resolves to the macOS executor: {kind}"
     );
     assert!(

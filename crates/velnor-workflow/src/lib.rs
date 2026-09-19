@@ -40,6 +40,13 @@ mod template_memory;
 #[cfg(feature = "tui")]
 mod tui;
 
+/// Exact GitHub-hosted Apple runner selected by the native capability policy.
+///
+/// This is re-exported at the crate root so integration fixtures can assert
+/// the same selector as the generator, rather than carrying a second label
+/// literal that can drift from native routing.
+pub const LATEST_HOSTED_APPLE_RUNNER: &str = native_contract::LATEST_HOSTED_APPLE_RUNNER;
+
 use crate::primitives::prepared_tools::PreparedToolNeed;
 use crate::primitives::{WorkflowIr, WorkflowKind};
 use crate::scan::file_walk::is_test_support_path;
