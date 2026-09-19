@@ -5795,11 +5795,15 @@ fn render_actionlint_config(config: &ProjectConfig) -> String {
             .iter()
             .any(|target| target.ends_with("-apple-darwin"))
     });
+    let runtime_products_owner = config.repository == workflow_setup_action_repository();
+    // The owner-only runtime-products workflow always emits a macOS ARM64
+    // matrix lane, even when the scanned project has no Apple unit.
     let macos = (config
         .units
         .iter()
         .any(|unit| unit.platform == provider::Platform::MacosArm64)
-        || apple_release)
+        || apple_release
+        || runtime_products_owner)
         .then_some(MACOS_HOSTED_RUNS_ON.to_owned());
     // Universe-scoped: scan defaults seed selectors for providers outside
     // the repo's universe, but only universe routing can reach a `runs-on`.
@@ -14739,6 +14743,17 @@ lockfile = true
             actionlint.contains("    - self-hosted\n")
                 && actionlint.contains("    - example-runner-label\n"),
             "{actionlint}"
+        );
+    }
+
+    #[test]
+    fn generated_actionlint_config_covers_runtime_product_apple_builder() {
+        let mut config = scanned_fixture(provider_set([ProviderId::GithubHosted]));
+        config.repository = workflow_setup_action_repository().to_owned();
+        let actionlint = render_actionlint_config(&config);
+        assert!(
+            actionlint.contains("    - macos-26\n"),
+            "the owner runtime-product matrix needs the macos label: {actionlint}"
         );
     }
 
