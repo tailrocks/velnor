@@ -4324,7 +4324,7 @@ fn render_apt_discovery_feed(config: &ProjectConfig, contract: &crate::apt::AptC
     );
     output.push_str(&signer);
     output.push_str(
-        "\n          if [ \"$CHANNEL\" = stable ]; then verify_args+=(--verify-oci true); fi\n          velnor-workflow release apt-verify \"${verify_args[@]}\"\n          printf 'version=%s\\ncommit=%s\\nchannel=%s\\n' \"$apt_version\" \"$selected_commit\" \"$CHANNEL\" >> \"$GITHUB_OUTPUT\"\n      - name: Upload verified feed inputs\n        uses: ",
+        ")\n          if [ \"$CHANNEL\" = stable ]; then verify_args+=(--verify-oci true); fi\n          velnor-workflow release apt-verify \"${verify_args[@]}\"\n          printf 'version=%s\\ncommit=%s\\nchannel=%s\\n' \"$apt_version\" \"$selected_commit\" \"$CHANNEL\" >> \"$GITHUB_OUTPUT\"\n      - name: Upload verified feed inputs\n        uses: ",
     );
     output.push_str(upload);
     output.push_str(
@@ -4336,7 +4336,7 @@ fn render_apt_discovery_feed(config: &ProjectConfig, contract: &crate::apt::AptC
     );
     output.push_str(&runner);
     output.push_str(
-        "\n    timeout-minutes: 30\n    environment: package-feed\n    permissions:\n      contents: write\n    steps:\n      - name: Checkout\n        uses: ",
+        "\n    timeout-minutes: 30\n    outputs:\n      channel: ${{ needs.verify.outputs.channel }}\n    environment: package-feed\n    permissions:\n      contents: write\n    steps:\n      - name: Checkout\n        uses: ",
     );
     output.push_str(checkout);
     output.push_str("\n        with:\n          persist-credentials: false\n");
@@ -8117,7 +8117,17 @@ mod tests {
                 release.contains("apt-verify \"${verify_args[@]}\""),
                 "{release}"
             );
+            assert!(
+                release.contains(
+                    "--expect-signer '0123456789ABCDEF0123456789ABCDEF01234567')\n          if [ \"$CHANNEL\" = stable ]"
+                ),
+                "verify_args must be closed before generated shell continues: {release}"
+            );
             assert!(release.contains("apt-publish \"${args[@]}\""), "{release}");
+            assert!(
+                release.contains("outputs:\n      channel: ${{ needs.verify.outputs.channel }}"),
+                "publish must export the channel consumed by deploy: {release}"
+            );
             assert!(
                 release.contains("apt-channel-update --selection"),
                 "{release}"
