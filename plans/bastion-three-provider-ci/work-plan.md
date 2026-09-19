@@ -279,10 +279,10 @@ A later generic fix returns to its affected author/verifier pair. Tooling is pub
    export VERSION
    /usr/bin/flock --exclusive --nonblock --no-fork /run/velnor/package-transaction.lock \
      /bin/bash -euo pipefail -c '
+       holds=$(apt-mark showhold)
        was_held=0
-       if apt-mark showhold | grep -qx velnor-runner; then
+       if printf "%s\n" "$holds" | grep -qx velnor-runner; then
          was_held=1
-         apt-mark unhold velnor-runner
        fi
        rehold_runner() {
          rc=$?
@@ -295,6 +295,9 @@ A later generic fix returns to its affected author/verifier pair. Tooling is pub
          exit "$rc"
        }
        trap rehold_runner EXIT
+       if [ "$was_held" = 1 ]; then
+         apt-mark unhold velnor-runner
+       fi
        apt-get install "velnor-runner=${VERSION}"
        apt-mark hold velnor-runner
        trap - EXIT

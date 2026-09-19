@@ -268,17 +268,43 @@ Before install, the public signing-key fingerprint is authenticated against a se
 
 The package lock and release activation contract is retained: `/run/velnor/package-transaction.lock`, compatible package/manifest/binary record, and `release verify-installed` before starting services. Affected jobs are drained, config/secrets are preserved, and package installation is never assumed to start the fleet.
 
-After these prerequisites, the root installation transaction has this shape:
+There is no unattended bastion package updater in this repository. After C1,
+`velnor-runner` is held so ordinary `apt upgrade` does not float it to another
+candidate. An operator updates it by exact version through the hold-aware
+transaction below; hold detection, unhold, APT install, and re-hold stay under
+one exclusive package lock.
 
 ```sh
 # VERSION is the independently verified candidate from the signed repository.
 : "${VERSION:?Set the verified exact Debian package version}"
+export VERSION
 install -d -m 0750 /run/velnor
 apt-get update
 apt-cache policy velnor-runner
-/usr/bin/flock --exclusive --nonblock --no-fork \
-  /run/velnor/package-transaction.lock \
+/usr/bin/flock --exclusive --nonblock --no-fork /run/velnor/package-transaction.lock /bin/bash -euo pipefail -c '
+  holds=$(apt-mark showhold)
+  was_held=0
+  if printf "%s\n" "$holds" | grep -qx velnor-runner; then
+    was_held=1
+  fi
+  rehold_runner() {
+    rc=$?
+    trap - EXIT
+    set +e
+    status=$(dpkg-query -W -f="\${Status}" velnor-runner 2>/dev/null)
+    if [ "$was_held" = 1 ] || printf "%s\n" "$status" | grep -Eq " (installed|unpacked|half-configured|half-installed)$"; then
+      apt-mark hold velnor-runner || rc=1
+    fi
+    exit "$rc"
+  }
+  trap rehold_runner EXIT
+  if [ "$was_held" = 1 ]; then
+    apt-mark unhold velnor-runner
+  fi
   apt-get install "velnor-runner=${VERSION}"
+  apt-mark hold velnor-runner
+  trap - EXIT
+'
 dpkg-query -W velnor-runner
 ```
 

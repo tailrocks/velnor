@@ -189,6 +189,7 @@ FAKE_BIN="$FAKE_TMP/bin"
 mkdir -p "$FAKE_BIN"
 export FAKE_HOLDS_FILE="$FAKE_TMP/holds"
 export FAKE_TRACE="$FAKE_TMP/trace"
+export FAKE_FAIL_SHOWHOLD="$FAKE_TMP/fail-showhold"
 printf 'docker-ce\ncontainerd.io\n' > "$FAKE_HOLDS_FILE"
 : > "$FAKE_TRACE"
 
@@ -199,6 +200,7 @@ action="$1"
 pkg="${2:-}"
 case "$action" in
   showhold)
+    [[ ! -e "$FAKE_FAIL_SHOWHOLD" ]] || exit 42
     cat "$FAKE_HOLDS_FILE"
     ;;
   unhold)
@@ -251,3 +253,25 @@ grep -Fqx 'unhold docker-ce' "$FAKE_TRACE"
 grep -Fqx 'unhold containerd.io' "$FAKE_TRACE"
 grep -Fq 'apt-get install -y docker-ce=' "$FAKE_TRACE"
 printf 'PASS package hold transaction unholds, installs, and re-holds under one lock\n'
+
+: > "$FAKE_TRACE"
+touch "$FAKE_FAIL_SHOWHOLD"
+holds_before="$(cat "$FAKE_HOLDS_FILE")"
+assert_status 'Docker install aborts when apt-mark showhold fails' 2 \
+  step_docker_packages
+assert_equal 'failed hold query preserves existing package holds' \
+  "$holds_before" "$(cat "$FAKE_HOLDS_FILE")"
+[[ ! -s "$FAKE_TRACE" ]] \
+  || { printf 'FAIL hold-query failure reached unhold or package install\n' >&2; exit 1; }
+
+step_holds_failure_guard() (
+  step_holds
+)
+assert_status 'hold reconciliation aborts when apt-mark showhold fails' 1 \
+  step_holds_failure_guard
+assert_equal 'hold reconciliation failure preserves package holds' \
+  "$holds_before" "$(cat "$FAKE_HOLDS_FILE")"
+[[ ! -s "$FAKE_TRACE" ]] \
+  || { printf 'FAIL hold reconciliation changed package state after query failure\n' >&2; exit 1; }
+rm -f -- "$FAKE_FAIL_SHOWHOLD"
+printf 'PASS hold-query failures stop before package mutation and preserve holds\n'
