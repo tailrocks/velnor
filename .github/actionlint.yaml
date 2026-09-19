@@ -7,3 +7,4 @@ self-hosted-runner:
     - self-hosted
     - ubuntu-24.04
     - velnor-target-mvp
+    - xcode-27

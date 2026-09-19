@@ -70,7 +70,7 @@ pub(crate) fn canonical_runtime_products_side_file(primitive: &str) -> Option<&'
 /// silently reselect them.
 const LINUX_X64_RUNNER: &str = "ubuntu-24.04";
 const LINUX_ARM64_RUNNER: &str = "ubuntu-24.04-arm";
-const MACOS_ARM64_RUNNER: &str = "xcode-27";
+const MACOS_ARM64_RUNNER: &str = crate::s2::MACOS_HOSTED_RUNS_ON;
 
 /// The manifest acceptance filter, exactly as the setup action evaluates it:
 /// full closure, a well-formed source revision, release profile, empty
@@ -1289,12 +1289,17 @@ mod tests {
             fs::read_to_string(&mapping_file),
             "read the producer renderer",
         );
-        for runner in [LINUX_X64_RUNNER, LINUX_ARM64_RUNNER, MACOS_ARM64_RUNNER] {
+        for runner in [LINUX_X64_RUNNER, LINUX_ARM64_RUNNER] {
             assert!(
                 mapping_source.contains(&format!("\"{runner}\"")),
                 "the fixed mapping lives in the producer renderer: {runner}"
             );
         }
+        assert!(
+            mapping_source
+                .contains("const MACOS_ARM64_RUNNER: &str = crate::s2::MACOS_HOSTED_RUNS_ON;"),
+            "the macOS mapping uses the shared hosted-label authority"
+        );
         let root = must(
             std::process::Command::new("git")
                 .arg("-C")

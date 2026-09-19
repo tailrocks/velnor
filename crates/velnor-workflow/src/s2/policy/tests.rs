@@ -813,6 +813,26 @@ fn ungated_trusted_velnor_job_fails_the_trusted_runners_rule() {
     let _ = fs::remove_dir_all(ungated);
 }
 
+#[test]
+fn hosted_macos_label_allowlist_is_exact_and_current() {
+    assert_eq!(crate::s2::MACOS_HOSTED_RUNS_ON, "xcode-27");
+    assert!(is_github_owned_label(crate::s2::MACOS_HOSTED_RUNS_ON));
+    for rejected in [
+        "macos-15",
+        "macos-26",
+        "macos-26-intel",
+        "xcode-26",
+        "xcode-27-intel",
+        "xcode-27-large",
+        "xcode-28",
+    ] {
+        assert!(
+            !is_github_owned_label(rejected),
+            "stale, wrong-architecture, or invented label was admitted: {rejected}"
+        );
+    }
+}
+
 /// The generated provider gate admits a provider-selecting dispatch on any
 /// ref — dispatch authorship is write-authorized — or the automatic events,
 /// with the trusted-event conjunct. A dispatch selecting another provider is

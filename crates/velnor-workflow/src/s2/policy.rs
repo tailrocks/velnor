@@ -2116,7 +2116,9 @@ fn static_local_provider(job: &Mapping, velnor_policy: &VelnorPolicyContract) ->
 /// Selectors for local capacity are caller-managed and never carry these
 /// prefixes.
 fn is_github_owned_label(label: &str) -> bool {
-    label.starts_with("ubuntu-") || label.starts_with("macos-") || label.starts_with("windows-")
+    label.starts_with("ubuntu-")
+        || label == super::MACOS_HOSTED_RUNS_ON
+        || label.starts_with("windows-")
 }
 
 fn has_safe_runner_gate(

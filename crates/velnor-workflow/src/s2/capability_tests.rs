@@ -288,7 +288,10 @@ mod tests {
             (
                 ProviderId::GithubHosted,
                 ProviderSelector {
-                    runs_on: vec!["ubuntu-24.04".to_owned(), "macos-15".to_owned()],
+                    runs_on: vec![
+                        "ubuntu-24.04".to_owned(),
+                        crate::s2::MACOS_HOSTED_RUNS_ON.to_owned(),
+                    ],
                 },
             ),
             (

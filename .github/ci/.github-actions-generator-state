@@ -5,7 +5,7 @@ config	ff06cd48adfa74db
 scan	8d96315cc857133b
 generator	52
 [outputs]
-.github/actionlint.yaml	ec35f48ae7e90e0e
+.github/actionlint.yaml	d302cde0109ed366
 .github/actions/report-velnor-ci-outcomes/action.yml	238dbd0d0b802739
 .github/actions/setup-velnor-workflow/action.yml	da8fae1bb9e2226b
 .github/ci/project.toml	8025f19b38e1cad3
