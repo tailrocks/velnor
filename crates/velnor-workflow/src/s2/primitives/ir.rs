@@ -832,6 +832,8 @@ mod tests {
         assert!(producer.contains("--pid=private"), "{producer}");
         assert!(producer.contains("--cap-drop=ALL"), "{producer}");
         assert!(producer.contains("--pull=never"), "{producer}");
+        assert!(producer.contains("docker_cmd()"), "{producer}");
+        assert!(producer.contains("env -i PATH=\"$PATH\""), "{producer}");
         assert!(
             producer.contains("--mount \"type=bind,src=$source,dst=/src,readonly"),
             "{producer}"
@@ -3154,16 +3156,19 @@ impl WorkflowIr {
           command -v jq >/dev/null
           command -v sha256sum >/dev/null
           command -v timeout >/dev/null
-          docker info >/dev/null
-          test "$(docker info --format '{{{{.OSType}}}}')" = linux
+          docker_cmd() {{
+            env -i PATH="$PATH" HOME=/tmp/candidate-home DOCKER_CONFIG="$RUNNER_TEMP/docker-config" docker "$@"
+          }}
+          docker_cmd info >/dev/null
+          test "$(docker_cmd info --format '{{{{.OSType}}}}')" = linux
           builder_image="$CANDIDATE_BUILD_IMAGE_REPOSITORY@$CANDIDATE_BUILD_IMAGE_DIGEST"
-          docker buildx imagetools inspect --raw "$builder_image" > "$RUNNER_TEMP/candidate-builder-index.json"
+          docker_cmd buildx imagetools inspect --raw "$builder_image" > "$RUNNER_TEMP/candidate-builder-index.json"
           jq -e '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64") | select((.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest")] | length == 1' "$RUNNER_TEMP/candidate-builder-index.json" >/dev/null
           builder_platform_digest="$(jq -er '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64") | select((.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest") | .digest] | if length == 1 then .[0] else error("builder platform digest is not unique") end' "$RUNNER_TEMP/candidate-builder-index.json")"
           case "$builder_platform_digest" in sha256:[0-9a-f]{{64}}) ;; *) exit 1 ;; esac
           builder_platform_image="$CANDIDATE_BUILD_IMAGE_REPOSITORY@$builder_platform_digest"
-          docker pull --quiet --platform linux/amd64 "$builder_platform_image"
-          docker image inspect "$builder_platform_image" --format '{{{{json .}}}}' > "$RUNNER_TEMP/candidate-builder-local.json"
+          docker_cmd pull --quiet --platform linux/amd64 "$builder_platform_image"
+          docker_cmd image inspect "$builder_platform_image" --format '{{{{json .}}}}' > "$RUNNER_TEMP/candidate-builder-local.json"
           jq -e --arg ref "$builder_platform_image" '.[0].RepoDigests | index($ref) != null' "$RUNNER_TEMP/candidate-builder-local.json" >/dev/null
           jq -e '.[0].Os == "linux" and .[0].Architecture == "amd64" and ((.[0].Config.Env // []) | all(test("^(GITHUB_|ACTIONS_|RUNNER_|GH_TOKEN|AWS_|AZURE_|GOOGLE_|CARGO_REGISTRIES_).*" ) | not))' "$RUNNER_TEMP/candidate-builder-local.json" >/dev/null
           stage="$RUNNER_TEMP/velnor-workflow-candidate"
@@ -3174,16 +3179,16 @@ impl WorkflowIr {
           test -z "$(find -P "$source" -type l -print -quit)"
           test -z "$(find -P "$source" ! -type f ! -type d ! -type l -print -quit)"
           uid="$(id -u)"; gid="$(id -g)"; test "$uid" -ne 0; test "$gid" -ge 0
-          cid="$(docker create --name "velnor-candidate-build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --platform linux/amd64 --pull=never --network=none --read-only --pid=private --cap-drop=ALL --security-opt no-new-privileges=true --pids-limit=256 --memory=4096m --memory-swap=4096m --cpus=2 --ulimit fsize=268435456:268435456 --ulimit nofile=2048:2048 --ulimit core=0 --shm-size=64m --stop-timeout=10 --log-driver=none --user "$uid:$gid" --workdir /src --tmpfs /tmp:rw,noexec,nosuid,nodev,size=256m,nr_inodes=8192,mode=700,uid=$uid,gid=$gid --tmpfs /target:rw,nosuid,nodev,size=2048m,nr_inodes=200000,mode=700,uid=$uid,gid=$gid --tmpfs /output:rw,noexec,nosuid,nodev,size=64m,nr_inodes=4096,mode=700,uid=$uid,gid=$gid --mount "type=bind,src=$source,dst=/src,readonly,bind-propagation=rprivate" --env CANDIDATE_HEAD_SHA="$CANDIDATE_HEAD_SHA" --env CARGO_HOME=/tmp/cargo --env CARGO_NET_OFFLINE=true --env CARGO_TERM_COLOR=never --env HOME=/tmp/home --env PATH=/usr/local/cargo/bin:/usr/local/rustup/toolchain/stable-x86_64-unknown-linux-gnu/bin:/usr/bin:/bin --entrypoint /bin/sh "$builder_platform_image" -ceu 'cargo build --locked --offline -p velnor-workflow && install -m 0555 target/debug/velnor-workflow /output/velnor-workflow')"
+          cid="$(docker_cmd create --name "velnor-candidate-build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --platform linux/amd64 --pull=never --network=none --read-only --pid=private --cap-drop=ALL --security-opt no-new-privileges=true --pids-limit=256 --memory=4096m --memory-swap=4096m --cpus=2 --ulimit fsize=268435456:268435456 --ulimit nofile=2048:2048 --ulimit core=0 --shm-size=64m --stop-timeout=10 --log-driver=none --user "$uid:$gid" --workdir /src --tmpfs /tmp:rw,noexec,nosuid,nodev,size=256m,nr_inodes=8192,mode=700,uid=$uid,gid=$gid --tmpfs /target:rw,nosuid,nodev,size=2048m,nr_inodes=200000,mode=700,uid=$uid,gid=$gid --tmpfs /output:rw,noexec,nosuid,nodev,size=64m,nr_inodes=4096,mode=700,uid=$uid,gid=$gid --mount "type=bind,src=$source,dst=/src,readonly,bind-propagation=rprivate" --env CANDIDATE_HEAD_SHA="$CANDIDATE_HEAD_SHA" --env CARGO_HOME=/tmp/cargo --env CARGO_NET_OFFLINE=true --env CARGO_TERM_COLOR=never --env HOME=/tmp/home --env PATH=/usr/local/cargo/bin:/usr/local/rustup/toolchain/stable-x86_64-unknown-linux-gnu/bin:/usr/bin:/bin --entrypoint /bin/sh "$builder_platform_image" -ceu 'cargo build --locked --offline -p velnor-workflow && install -m 0555 target/debug/velnor-workflow /output/velnor-workflow')"
           cleanup() {{
             status=$?
-            if [[ -n "${{cid:-}}" ]]; then docker rm -f "$cid" >/dev/null 2>&1 || status=1; fi
+            if [[ -n "${{cid:-}}" ]]; then docker_cmd rm -f "$cid" >/dev/null 2>&1 || status=1; fi
             rm -rf "$stage" || status=1
             trap - EXIT
             exit "$status"
           }}
           trap cleanup EXIT
-          docker inspect "$cid" > "$stage/container.json"
+          docker_cmd inspect "$cid" > "$stage/container.json"
           jq -e --arg user "$uid:$gid" --arg source "$source" '
             .[0].HostConfig.NetworkMode == "none" and .[0].HostConfig.ReadonlyRootfs == true and
             .[0].HostConfig.Privileged == false and ((.[0].HostConfig.CapDrop // []) | index("ALL") != null) and
@@ -3198,14 +3203,14 @@ impl WorkflowIr {
             ([.[0].Mounts[] | select(.Type == "bind")] | length == 1) and
             ([.[0].Mounts[] | select(.Type == "tmpfs" and (.Destination == "/tmp" or .Destination == "/target" or .Destination == "/output"))] | length == 3)
           ' "$stage/container.json" >/dev/null
-          docker start "$cid" >/dev/null
-          if ! timeout --foreground --kill-after=10s 900s docker wait "$cid" > "$stage/exit"; then
-            docker kill "$cid" >/dev/null 2>&1 || true
+          docker_cmd start "$cid" >/dev/null
+          if ! timeout --foreground --kill-after=10s 900s env -i PATH="$PATH" HOME=/tmp/candidate-home DOCKER_CONFIG="$RUNNER_TEMP/docker-config" docker wait "$cid" > "$stage/exit"; then
+            docker_cmd kill "$cid" >/dev/null 2>&1 || true
             exit 1
           fi
-          docker inspect "$cid" > "$stage/after.json"
+          docker_cmd inspect "$cid" > "$stage/after.json"
           jq -e '.[0].State.Status == "exited" and .[0].State.ExitCode == 0 and .[0].State.OOMKilled == false and .[0].State.Error == ""' "$stage/after.json" >/dev/null
-          docker cp "$cid:/output/velnor-workflow" "$stage/velnor-workflow"
+          docker_cmd cp "$cid:/output/velnor-workflow" "$stage/velnor-workflow"
           test -f "$stage/velnor-workflow"
           test ! -L "$stage/velnor-workflow"
           chmod 0555 "$stage/velnor-workflow"
