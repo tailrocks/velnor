@@ -29,6 +29,8 @@ struct PackageReleaseSpec {
     supporting_assets: Vec<String>,
     channel: String,
     release_tag: String,
+    github_release_type: String,
+    publish_environment: String,
     release_title_prefix: String,
     consumer_repository: String,
     consumer_branch: String,
@@ -52,9 +54,11 @@ impl Primitive for PackageRelease {
             "concurrency_group",
             "consumer_branch",
             "consumer_repository",
+            "github_release_type",
             "manifest_schema",
             "package_dir",
             "payloads",
+            "publish_environment",
             "release_tag",
             "release_title_prefix",
             "source_ref",
@@ -335,6 +339,21 @@ fn parse_spec(args: &Args<'_>) -> Result<PackageReleaseSpec, GeneratorError> {
             "package-release release_tag must be a portable tag token",
         ));
     }
+    let github_release_type = required_string(args, "github_release_type")?;
+    if !matches!(github_release_type.as_str(), "prerelease" | "release") {
+        return Err(GeneratorError::usage(
+            "package-release github_release_type must be `prerelease` or `release` from the target repository policy",
+        ));
+    }
+    let publish_environment = required_string(args, "publish_environment")?;
+    if publish_environment.len() > 255
+        || publish_environment.chars().any(char::is_control)
+        || publish_environment.contains("${{")
+    {
+        return Err(GeneratorError::usage(
+            "package-release publish_environment must be a literal GitHub environment name of at most 255 bytes",
+        ));
+    }
     let release_title_prefix = args
         .string("release_title_prefix")?
         .filter(|value| !value.is_empty())
@@ -376,6 +395,8 @@ fn parse_spec(args: &Args<'_>) -> Result<PackageReleaseSpec, GeneratorError> {
         supporting_assets,
         channel,
         release_tag,
+        github_release_type,
+        publish_environment,
         release_title_prefix,
         consumer_repository,
         consumer_branch,
@@ -871,6 +892,10 @@ fn render_rolling_refresh_script(
 ) -> String {
     let mut script = String::from(
         r#"set -Eeuo pipefail
+case "$RELEASE_PRERELEASE" in
+  true|false) ;;
+  *) echo "::error::invalid configured GitHub release type" >&2; exit 1 ;;
+esac
 rolling_tag="$RELEASE_TAG"
 staged_tag="$RELEASE_TAG-$EXPECTED_SOURCE_COMMIT"
 published_dir="$GITHUB_WORKSPACE/published-package"
@@ -914,8 +939,8 @@ validate_existing_rolling_release() {
   local downloaded_assets="$transaction_dir/live-downloaded-assets"
   local name expected_digest actual_digest api_digest
 
-  jq -e --arg tag "$rolling_tag" '
-    (.draft | type == "boolean") and .prerelease == true and .tag_name == $tag and
+  jq -e --arg tag "$rolling_tag" --argjson prerelease "$RELEASE_PRERELEASE" '
+    (.draft | type == "boolean") and .prerelease == $prerelease and .tag_name == $tag and
     (.id | type == "number") and
     (.assets | type == "array" and length > 0) and
     ((.assets | map(.name)) as $names |
@@ -1179,7 +1204,7 @@ if ! staged_body="$(gh api --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY
   echo "::error::verified immutable staging release is missing" >&2
   exit 1
 fi
-jq -e --arg tag "$staged_tag" '(.draft | not) and .prerelease == true and .tag_name == $tag' <<<"$staged_body" >/dev/null
+jq -e --arg tag "$staged_tag" --argjson prerelease "$RELEASE_PRERELEASE" '(.draft | not) and .prerelease == $prerelease and .tag_name == $tag' <<<"$staged_body" >/dev/null
 jq -r '.assets[].name' <<<"$staged_body" | LC_ALL=C sort > "$staged_assets"
 cmp -s "$expected_assets" "$staged_assets" || { echo "::error::immutable staging release asset set is not exact" >&2; exit 1; }
 staged_tag_sha="$(remote_tag_sha "$staged_tag")"
@@ -1207,7 +1232,7 @@ case "$rolling_http" in
         echo "::error::rolling release tag is not a commit ref" >&2
         exit 1
       fi
-    elif [ "$old_draft" = true ] && [ "$old_prerelease" != true ]; then
+    elif [ "$old_draft" = true ] && [ "$old_prerelease" != "$RELEASE_PRERELEASE" ]; then
       discard_stale_rolling_draft
     elif ! mkdir -p "$rollback_dir" || ! gh release download "$rolling_tag" --repo "$GITHUB_REPOSITORY" --dir "$rollback_dir" --clobber; then
       if [ "$old_draft" = true ]; then
@@ -1254,7 +1279,7 @@ if [ "$had_release" = 0 ]; then
     -f "tag_name=$rolling_tag" -f "target_commitish=$EXPECTED_SOURCE_COMMIT" \
     -f "name=$RELEASE_TITLE_PREFIX $candidate_version" \
     -f "body=Verified package release from $EXPECTED_SOURCE_COMMIT" \
-    -F draft=true -F prerelease=true -F make_latest=false)"
+    -F draft=true -F "prerelease=$RELEASE_PRERELEASE" -F make_latest=false)"
   rolling_release_id="$(jq -er '.id' <<<"$create_json")"
 else
   mutated=1
@@ -1272,7 +1297,7 @@ gh release upload "$rolling_tag" --repo "$GITHUB_REPOSITORY" --clobber \
         r#"
 
 rolling_stage_json="$(gh api --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id")"
-jq -e --arg tag "$rolling_tag" '.draft == true and .prerelease == true and .tag_name == $tag' <<<"$rolling_stage_json" >/dev/null
+jq -e --arg tag "$rolling_tag" --argjson prerelease "$RELEASE_PRERELEASE" '.draft == true and .prerelease == $prerelease and .tag_name == $tag' <<<"$rolling_stage_json" >/dev/null
 jq -r '.assets[].name' <<<"$rolling_stage_json" | LC_ALL=C sort > "$rolling_staged_assets"
 cmp -s "$expected_assets" "$rolling_staged_assets" || { echo "::error::staged rolling release asset set is not exact" >&2; exit 1; }
 
@@ -1282,12 +1307,12 @@ fi
 gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" \
   -f "name=$RELEASE_TITLE_PREFIX $candidate_version" \
   -f "body=Verified package release from $EXPECTED_SOURCE_COMMIT" \
-  -F draft=false -F prerelease=true -F make_latest=false >/dev/null
+  -F draft=false -F "prerelease=$RELEASE_PRERELEASE" -F make_latest=false >/dev/null
 
 new_tag_sha="$(remote_tag_sha "$rolling_tag")"
 [ "$new_tag_sha" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::rolling tag does not resolve to the verified source commit" >&2; exit 1; }
 rolling_post_json="$(gh api --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/tags/$rolling_tag")"
-jq -e --arg tag "$rolling_tag" '(.draft | not) and .prerelease == true and .tag_name == $tag' <<<"$rolling_post_json" >/dev/null
+jq -e --arg tag "$rolling_tag" --argjson prerelease "$RELEASE_PRERELEASE" '(.draft | not) and .prerelease == $prerelease and .tag_name == $tag' <<<"$rolling_post_json" >/dev/null
 jq -r '.assets[].name' <<<"$rolling_post_json" | LC_ALL=C sort > "$rolling_published_assets"
 cmp -s "$expected_assets" "$rolling_published_assets" || { echo "::error::rolling release asset set is not exact after publication" >&2; exit 1; }
 rm -rf -- "$transaction_dir/rolling-published"
@@ -1305,13 +1330,17 @@ export VELNOR_VERIFIED_PACKAGE_DIR="$transaction_dir/rolling-published"
     script
 }
 
-/// Stage the immutable source-bound release as a draft, verify every staged
-/// byte, then make the complete asset set public in one visibility transition.
-/// Existing public releases are read-only: a partial or divergent one fails
-/// closed instead of being repaired with an overwrite.
-fn render_immutable_publish_script_setup(spec: &PackageReleaseSpec) -> String {
-    let mut script = String::from(
-        r#"set -euo pipefail
+/// Common verification helpers and initialization for immutable publication.
+fn immutable_publish_script_prelude() -> &'static str {
+    r#"set -euo pipefail
+case "$RELEASE_PRERELEASE" in
+  true|false) ;;
+  *) echo "::error::invalid configured GitHub release type" >&2; exit 1 ;;
+esac
+release_flags=(--latest=false)
+if [ "$RELEASE_PRERELEASE" = true ]; then
+  release_flags+=(--prerelease)
+fi
 tag="$RELEASE_TAG-$EXPECTED_SOURCE_COMMIT"
 version="$(jq -er '.version | strings' "$PACKAGE_DIR/release-manifest.json")"
 title="$RELEASE_TITLE_PREFIX $version"
@@ -1362,23 +1391,18 @@ verify_asset_bytes() {
 }
 
 {
-"#,
-    );
+"#
+}
+
+fn render_immutable_publish_script(spec: &PackageReleaseSpec) -> String {
+    let mut script = String::from(immutable_publish_script_prelude());
     for name in release_asset_names(spec) {
         let _ = writeln!(script, "  printf '%s\\n' {}", shell_quote(&name));
     }
     script.push_str(
         r#"} | LC_ALL=C sort > "$expected_assets"
 
-"#,
-    );
-    script
-}
-
-fn render_immutable_publish_script(spec: &PackageReleaseSpec) -> String {
-    let mut script = render_immutable_publish_script_setup(spec);
-    script.push_str(
-        r#"tag_sha="$(remote_tag_sha "$tag")"
+tag_sha="$(remote_tag_sha "$tag")"
 if [ -n "$tag_sha" ] && [ "$tag_sha" != "$EXPECTED_SOURCE_COMMIT" ]; then
   echo "::error::immutable release tag resolves to an unexpected source commit" >&2
   exit 1
@@ -1391,17 +1415,17 @@ response_http="$(awk 'NR == 1 {print $2; exit}' "$release_json")"
 case "$response_http" in
   404)
     if [ -n "$tag_sha" ]; then
-      gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --prerelease --latest=false --title "$title" --notes "Verified immutable package release $version from $EXPECTED_SOURCE_COMMIT"
+      gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag --draft "${release_flags[@]}" --title "$title" --notes "Verified immutable package release $version from $EXPECTED_SOURCE_COMMIT"
     else
-      gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$EXPECTED_SOURCE_COMMIT" --draft --prerelease --latest=false --title "$title" --notes "Verified immutable package release $version from $EXPECTED_SOURCE_COMMIT"
+      gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$EXPECTED_SOURCE_COMMIT" --draft "${release_flags[@]}" --title "$title" --notes "Verified immutable package release $version from $EXPECTED_SOURCE_COMMIT"
     fi
     tag_sha="$(remote_tag_sha "$tag")"
     [ "$tag_sha" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::new immutable release tag does not resolve to the verified source commit" >&2; exit 1; }
     ;;
   200)
     live_body="$(awk 'body {print; next} /^\r?$/ {body = 1}' "$release_json")"
-    jq -e --arg tag "$tag" --arg title "$title" \
-      '.tag_name == $tag and .name == $title and .prerelease == true' <<<"$live_body" >/dev/null \
+    jq -e --arg tag "$tag" --arg title "$title" --argjson prerelease "$RELEASE_PRERELEASE" \
+      '.tag_name == $tag and .name == $title and .prerelease == $prerelease' <<<"$live_body" >/dev/null \
       || { echo "::error::immutable release identity does not match the verified candidate" >&2; exit 1; }
     test -n "$tag_sha" || { echo "::error::existing immutable release has no exact source tag" >&2; exit 1; }
     [ "$tag_sha" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::existing immutable release tag moved" >&2; exit 1; }
@@ -1440,8 +1464,8 @@ if [ "$immutable_public" = 0 ]; then
   done < "$expected_assets"
 
   staged_body="$(gh api --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/tags/$tag")"
-  jq -e --arg tag "$tag" --arg title "$title" \
-    '.draft == true and .prerelease == true and .tag_name == $tag and .name == $title' <<<"$staged_body" >/dev/null \
+  jq -e --arg tag "$tag" --arg title "$title" --argjson prerelease "$RELEASE_PRERELEASE" \
+    '.draft == true and .prerelease == $prerelease and .tag_name == $tag and .name == $title' <<<"$staged_body" >/dev/null \
     || { echo "::error::immutable staging release is not still a draft with the expected identity" >&2; exit 1; }
   jq -r '.assets[].name' <<<"$staged_body" | LC_ALL=C sort > "$existing_assets"
   cmp -s "$expected_assets" "$existing_assets" || {
@@ -1451,12 +1475,12 @@ if [ "$immutable_public" = 0 ]; then
   verify_asset_bytes "$tag" "$expected_assets" "$PACKAGE_DIR" "$download_dir"
   gh api --method PATCH --repo "$GITHUB_REPOSITORY" \
     "repos/$GITHUB_REPOSITORY/releases/$(jq -er '.id' <<<"$staged_body")" \
-    -F draft=false -F prerelease=true -F make_latest=false >/dev/null
+    -F draft=false -F "prerelease=$RELEASE_PRERELEASE" -F make_latest=false >/dev/null
 fi
 
 immutable_body="$(gh api --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/tags/$tag")"
-jq -e --arg tag "$tag" --arg title "$title" \
-  '(.draft | not) and .prerelease == true and .tag_name == $tag and .name == $title' <<<"$immutable_body" >/dev/null \
+jq -e --arg tag "$tag" --arg title "$title" --argjson prerelease "$RELEASE_PRERELEASE" \
+  '(.draft | not) and .prerelease == $prerelease and .tag_name == $tag and .name == $title' <<<"$immutable_body" >/dev/null \
   || { echo "::error::immutable release was not published with the expected identity" >&2; exit 1; }
 jq -r '.assets[].name' <<<"$immutable_body" | LC_ALL=C sort > "$existing_assets"
 cmp -s "$expected_assets" "$existing_assets" || {
@@ -1466,7 +1490,7 @@ cmp -s "$expected_assets" "$existing_assets" || {
 final_tag_sha="$(remote_tag_sha "$tag")"
 [ "$final_tag_sha" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::immutable tag does not resolve to the verified source commit" >&2; exit 1; }
 printf 'immutable_tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
-"#,
+"#
     );
     script
 }
@@ -1500,6 +1524,13 @@ fn render_publish_job(
     message_yaml: &str,
     concurrency_yaml: &str,
 ) -> String {
+    let publish_environment_yaml = crate::s2::yaml_scalar(&spec.publish_environment);
+    let release_prerelease_yaml =
+        crate::s2::yaml_scalar(if spec.github_release_type == "prerelease" {
+            "true"
+        } else {
+            "false"
+        });
     let mut payload_names = String::new();
     for (index, name) in spec.payloads.iter().enumerate() {
         let suffix = if index + 1 == spec.payloads.len() {
@@ -1551,7 +1582,9 @@ fn render_publish_job(
     output.push('\n');
     output.push_str("    runs-on: ");
     output.push_str(runner);
-    output.push_str("\n    timeout-minutes: 30\n    environment: github-preview\n");
+    output.push_str("\n    timeout-minutes: 30\n    environment: ");
+    output.push_str(&publish_environment_yaml);
+    output.push('\n');
     output.push_str(
         "    permissions:\n      contents: write\n      pull-requests: write\n      attestations: read\n",
     );
@@ -1576,6 +1609,8 @@ fn render_publish_job(
     output.push_str("/source");
     output.push_str("\n      RELEASE_TAG: ");
     output.push_str(tag_yaml);
+    output.push_str("\n      RELEASE_PRERELEASE: ");
+    output.push_str(&release_prerelease_yaml);
     output.push_str("\n      RELEASE_TITLE_PREFIX: ");
     output.push_str(title_yaml);
     output.push_str("\n      CONSUMER_REPOSITORY: ");
@@ -1707,6 +1742,8 @@ payloads = ["a.tar.gz", "b.tar.gz", "c.tar.gz", "d.tar.gz", "e.tar.gz", "f.tar.g
 supporting_assets = ["SHA256SUMS", "a.tar.gz.bundle", "capsule-manifest.json"]
 channel = "preview"
 release_tag = "preview"
+github_release_type = "prerelease"
+publish_environment = "github-preview"
 consumer_repository = "example/tap"
 consumer_branch = "main"
 release_title_prefix = "Preview"
@@ -1752,6 +1789,8 @@ payloads = ["a.tar.gz", "b.tar.gz", "c.tar.gz", "d.tar.gz", "e.tar.gz", "f.tar.g
 supporting_assets = ["SHA256SUMS", "a.tar.gz.bundle", "capsule-manifest.json"]
 channel = "preview"
 release_tag = "preview"
+github_release_type = "prerelease"
+publish_environment = "github-preview"
 release_title_prefix = "Preview"
 consumer_repository = "example/tap"
 consumer_branch = "main"
@@ -1769,6 +1808,8 @@ concurrency_group = "package-release-preview"
         let spec = parse_spec(&Args(row.args())).expect("complete package contract");
         assert_eq!(spec.package_dir, "dist/package");
         assert_eq!(spec.payloads.len(), 6);
+        assert_eq!(spec.github_release_type, "prerelease");
+        assert_eq!(spec.publish_environment, "github-preview");
         assert_eq!(spec.release_title_prefix, "Preview");
         assert_eq!(spec.consumer_branch, "main");
         assert_eq!(spec.concurrency_group, "package-release-preview");
@@ -1782,6 +1823,42 @@ concurrency_group = "package-release-preview"
             "0.1.2-preview.3+01234567",
             "preview"
         ));
+    }
+
+    #[test]
+    fn release_type_and_publish_environment_come_from_target_config() {
+        let mut values = args();
+        values.insert(
+            "github_release_type".to_owned(),
+            toml::Value::String("release".to_owned()),
+        );
+        values.insert(
+            "publish_environment".to_owned(),
+            toml::Value::String("package-production".to_owned()),
+        );
+        let spec = parse_spec(&Args(&values)).expect("valid target publication policy");
+        let workflow = render_workflow(&render_config(), &spec, "package-release.yml");
+        assert!(workflow.contains("environment: package-production"));
+        assert!(workflow.contains("RELEASE_PRERELEASE: \"false\""));
+        assert!(workflow.contains(r#"-F "prerelease=$RELEASE_PRERELEASE""#));
+        assert!(workflow.contains(r#"--argjson prerelease "$RELEASE_PRERELEASE""#));
+        assert!(!workflow.contains("environment: github-preview"));
+        assert!(!workflow.contains("-F prerelease=true"));
+        assert!(!workflow.contains("--draft --prerelease"));
+
+        let mut invalid_type = values.clone();
+        invalid_type.insert(
+            "github_release_type".to_owned(),
+            toml::Value::String("rolling".to_owned()),
+        );
+        assert!(parse_spec(&Args(&invalid_type)).is_err());
+
+        let mut invalid_environment = values;
+        invalid_environment.insert(
+            "publish_environment".to_owned(),
+            toml::Value::String("${{ github.event.inputs.environment }}".to_owned()),
+        );
+        assert!(parse_spec(&Args(&invalid_environment)).is_err());
     }
 
     #[test]
@@ -1800,6 +1877,7 @@ concurrency_group = "package-release-preview"
         );
         assert!(validate_workflow_file(Some("../release.yml")).is_err());
         assert!(validate_workflow_file(Some("release.txt")).is_err());
+        assert!(validate_workflow_file(Some("release.YML")).is_err());
     }
 
     #[test]
@@ -1827,8 +1905,9 @@ concurrency_group = "package-release-preview"
         assert!(workflow.contains(
             "(.draft | type == \"boolean\") and .tag_name == $tag and (.id | type == \"number\")"
         ));
-        assert!(workflow
-            .contains("if [ \"$old_draft\" = true ] && [ \"$old_prerelease\" != true ]; then"));
+        assert!(workflow.contains(
+            r#"if [ "$old_draft" = true ] && [ "$old_prerelease" != "$RELEASE_PRERELEASE" ]; then"#
+        ));
         assert!(workflow.contains("elif ! validate_existing_rolling_release"));
         assert!(workflow.contains("discard_stale_rolling_draft"));
         assert!(workflow.contains("discarding incomplete rolling draft and retrying publication"));
@@ -2070,6 +2149,56 @@ concurrency_group = "package-release-preview"
             .contains("--signer-workflow \"$GITHUB_REPOSITORY/.github/workflows/preview.yml\""));
         assert!(workflow.contains("--source-ref \"$EXPECTED_SOURCE_REF\""));
         assert!(workflow.contains("--source-digest \"$EXPECTED_SOURCE_COMMIT\""));
+        assert!(workflow.contains("PACKAGE_DIR: published-package"));
+        assert!(workflow.contains("Refresh rolling preview release"));
+        assert!(workflow.contains(
+            "gh release upload \"$rolling_tag\" --repo \"$GITHUB_REPOSITORY\" --clobber"
+        ));
+        assert!(workflow.contains("staged_tag=\"$RELEASE_TAG-$EXPECTED_SOURCE_COMMIT\""));
+        assert!(workflow.contains(
+            "merge-base --is-ancestor \"$old_source_commit\" \"$EXPECTED_SOURCE_COMMIT\""
+        ));
+        assert!(workflow.contains("candidate version is not newer than the live rolling version"));
+        assert!(workflow
+            .contains("immutable staging tag does not resolve to the verified source commit"));
+        assert!(workflow.contains("release_flags+=(--prerelease)"));
+        assert!(workflow.contains("immutable release is already public but incomplete"));
+        assert!(workflow.contains("verify_asset_bytes \"$tag\" \"$expected_assets\""));
+        assert!(workflow.contains(r#"-F draft=true -F "prerelease=$RELEASE_PRERELEASE""#));
+        assert!(workflow.contains("staged rolling release asset set is not exact"));
+        assert!(workflow.contains(r#"-F draft=false -F "prerelease=$RELEASE_PRERELEASE""#));
+        let rolling_stage = workflow
+            .find("releases/$rolling_release_id\" -F draft=true")
+            .expect("rolling draft staging");
+        let rolling_upload = workflow
+            .find("gh release upload \"$rolling_tag\"")
+            .expect("rolling staged upload");
+        let rolling_check = workflow
+            .find("staged rolling release asset set is not exact")
+            .expect("rolling asset check");
+        let rolling_publish = rolling_check
+            + workflow[rolling_check..]
+                .find("-f \"name=$RELEASE_TITLE_PREFIX $candidate_version\"")
+                .expect("rolling draft publish");
+        assert!(rolling_stage < rolling_upload);
+        assert!(rolling_upload < rolling_check);
+        assert!(rolling_check < rolling_publish);
+        let immutable_upload = workflow
+            .find("gh release upload \"$tag\" --repo \"$GITHUB_REPOSITORY\" \"$PACKAGE_DIR/$asset_name\"")
+            .expect("immutable resumable upload");
+        assert!(!workflow
+            .contains("gh release upload \"$tag\" --repo \"$GITHUB_REPOSITORY\" --clobber"));
+        let immutable_check = workflow
+            .find("immutable release asset set is not exact after publication")
+            .expect("immutable asset check");
+        assert!(immutable_upload < immutable_check);
+        serde_yaml::from_str::<serde_yaml::Value>(&workflow).expect("rendered workflow is YAML");
+    }
+
+    #[test]
+    fn rendered_workflow_limits_consumer_updates_to_verified_outputs() {
+        let spec = parse_spec(&Args(&args())).expect("valid fixture");
+        let workflow = render_workflow(&render_config(), &spec, "preview.yml");
         assert!(workflow.contains("gh pr create --repo \"$CONSUMER_REPOSITORY\""));
         assert!(workflow.contains("automation/package-release-$RELEASE_TAG"));
         assert!(workflow.contains("automation/package-release-$RELEASE_ASSET_TAG"));
@@ -2107,49 +2236,6 @@ concurrency_group = "package-release-preview"
             .find("git commit -s -m \"$UPDATE_COMMIT_MESSAGE\"")
             .expect("consumer commit");
         assert!(branch_rewrite_guard < consumer_commit);
-        assert!(workflow.contains("PACKAGE_DIR: published-package"));
-        assert!(workflow.contains("Refresh rolling preview release"));
-        assert!(workflow.contains(
-            "gh release upload \"$rolling_tag\" --repo \"$GITHUB_REPOSITORY\" --clobber"
-        ));
-        assert!(workflow.contains("staged_tag=\"$RELEASE_TAG-$EXPECTED_SOURCE_COMMIT\""));
-        assert!(workflow.contains(
-            "merge-base --is-ancestor \"$old_source_commit\" \"$EXPECTED_SOURCE_COMMIT\""
-        ));
-        assert!(workflow.contains("candidate version is not newer than the live rolling version"));
-        assert!(workflow
-            .contains("immutable staging tag does not resolve to the verified source commit"));
-        assert!(workflow.contains("--draft --prerelease"));
-        assert!(workflow.contains("immutable release is already public but incomplete"));
-        assert!(workflow.contains("verify_asset_bytes \"$tag\" \"$expected_assets\""));
-        assert!(workflow.contains("-F draft=true -F prerelease=true"));
-        assert!(workflow.contains("staged rolling release asset set is not exact"));
-        assert!(workflow.contains("-F draft=false -F prerelease=true"));
-        let rolling_stage = workflow
-            .find("releases/$rolling_release_id\" -F draft=true")
-            .expect("rolling draft staging");
-        let rolling_upload = workflow
-            .find("gh release upload \"$rolling_tag\"")
-            .expect("rolling staged upload");
-        let rolling_check = workflow
-            .find("staged rolling release asset set is not exact")
-            .expect("rolling asset check");
-        let rolling_publish = rolling_check
-            + workflow[rolling_check..]
-                .find("-f \"name=$RELEASE_TITLE_PREFIX $candidate_version\"")
-                .expect("rolling draft publish");
-        assert!(rolling_stage < rolling_upload);
-        assert!(rolling_upload < rolling_check);
-        assert!(rolling_check < rolling_publish);
-        let immutable_upload = workflow
-            .find("gh release upload \"$tag\" --repo \"$GITHUB_REPOSITORY\" \"$PACKAGE_DIR/$asset_name\"")
-            .expect("immutable resumable upload");
-        assert!(!workflow
-            .contains("gh release upload \"$tag\" --repo \"$GITHUB_REPOSITORY\" --clobber"));
-        let immutable_check = workflow
-            .find("immutable release asset set is not exact after publication")
-            .expect("immutable asset check");
-        assert!(immutable_upload < immutable_check);
         serde_yaml::from_str::<serde_yaml::Value>(&workflow).expect("rendered workflow is YAML");
     }
 
