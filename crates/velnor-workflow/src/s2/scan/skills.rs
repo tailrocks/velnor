@@ -65,31 +65,34 @@ fn verification_commands(bun: &str) -> Vec<String> {
 }
 
 fn central_bun_version() -> Result<String, GeneratorError> {
-    let mise = VELNOR_MISE_TOML.parse::<toml::Value>().map_err(|error| {
-        GeneratorError::usage(format!("invalid generator mise.toml Bun policy: {error}"))
-    })?;
-    let configured = mise
-        .get("tools")
-        .and_then(toml::Value::as_table)
-        .and_then(|tools| tools.get("aqua:oven-sh/bun"))
-        .and_then(toml::Value::as_str)
+    let configured = VELNOR_MISE_TOML
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("\"aqua:oven-sh/bun\" = \"")?
+                .strip_suffix('"')
+        })
         .ok_or_else(|| {
             GeneratorError::usage(
                 "generator mise.toml must pin aqua:oven-sh/bun to an exact version",
             )
         })?;
-    let lock = VELNOR_MISE_LOCK.parse::<toml::Value>().map_err(|error| {
-        GeneratorError::usage(format!("invalid generator mise.lock Bun policy: {error}"))
-    })?;
-    let locked = lock
-        .get("tools")
-        .and_then(toml::Value::as_table)
-        .and_then(|tools| tools.get("aqua:oven-sh/bun"))
-        .and_then(toml::Value::as_array)
-        .and_then(|entries| entries.first())
-        .and_then(toml::Value::as_table)
-        .and_then(|entry| entry.get("version"))
-        .and_then(toml::Value::as_str)
+    let mut in_bun_lock = false;
+    let locked = VELNOR_MISE_LOCK
+        .lines()
+        .find_map(|line| {
+            let line = line.trim();
+            if line.starts_with("[[") {
+                in_bun_lock = line == "[[tools.\"aqua:oven-sh/bun\"]]";
+                return None;
+            }
+            if in_bun_lock {
+                return line
+                    .strip_prefix("version = \"")
+                    .and_then(|value| value.strip_suffix('"'));
+            }
+            None
+        })
         .ok_or_else(|| {
             GeneratorError::usage(
                 "generator mise.lock must contain the pinned aqua:oven-sh/bun version",
