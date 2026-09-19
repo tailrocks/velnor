@@ -68,6 +68,7 @@ pub(crate) const OPENTOFU: &str = "opentofu-pipeline";
 pub(crate) const DOCKER_IMAGE: &str = "docker-image-pipeline";
 pub(crate) const HOMEBREW_TAP: &str = "homebrew-tap-pipeline";
 pub(crate) const DOCS_LINT: &str = "docs-lint-pipeline";
+pub(crate) const SKILLS_PLUGIN: &str = "skills-plugin-pipeline";
 /// The `docs.yml` documentation-site pipeline: build, link checks, spelling,
 /// Pages deployment, and post-deployment verification from one `[docs]`
 /// consumer contract.
@@ -586,6 +587,7 @@ pub(crate) fn pipeline_id(kind: UnitKind) -> &'static str {
         UnitKind::Docker => DOCKER_IMAGE,
         UnitKind::Homebrew => HOMEBREW_TAP,
         UnitKind::Docs => DOCS_LINT,
+        UnitKind::Skills => SKILLS_PLUGIN,
     }
 }
 
@@ -607,6 +609,7 @@ pub(crate) fn registry() -> Vec<Box<dyn Primitive>> {
         Box::new(pipeline::DockerImage),
         Box::new(pipeline::HomebrewTap),
         Box::new(pipeline::DocsLint),
+        Box::new(pipeline::SkillsPlugin),
         Box::new(release::Release),
         Box::new(release::Preview),
         Box::new(package_release::PackageRelease),
@@ -1064,6 +1067,7 @@ const PIPELINES: &[&str] = &[
     DOCKER_IMAGE,
     HOMEBREW_TAP,
     DOCS_LINT,
+    SKILLS_PLUGIN,
 ];
 
 fn is_pipeline(primitive: &str) -> bool {
