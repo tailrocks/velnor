@@ -225,6 +225,7 @@ pub(crate) enum Platform {
     LinuxX64,
     LinuxArm64,
     MacosArm64,
+    MacosX64,
 }
 
 impl Platform {
@@ -238,7 +239,12 @@ impl Platform {
             Self::LinuxX64 => "linux-x64",
             Self::LinuxArm64 => "linux-arm64",
             Self::MacosArm64 => "macos-arm64",
+            Self::MacosX64 => "macos-x64",
         }
+    }
+
+    pub(crate) const fn is_macos(self) -> bool {
+        matches!(self, Self::MacosArm64 | Self::MacosX64)
     }
 
     pub(crate) fn parse(value: &str) -> Result<Self, GeneratorError> {
@@ -246,8 +252,9 @@ impl Platform {
             "linux-x64" => Ok(Self::LinuxX64),
             "linux-arm64" => Ok(Self::LinuxArm64),
             "macos-arm64" => Ok(Self::MacosArm64),
+            "macos-x64" => Ok(Self::MacosX64),
             _ => Err(GeneratorError::usage(format!(
-                "unknown platform `{value}`; expected one of: linux-x64, linux-arm64, macos-arm64"
+                "unknown platform `{value}`; expected one of: linux-x64, linux-arm64, macos-arm64, macos-x64"
             ))),
         }
     }
@@ -905,6 +912,7 @@ mod tests {
             Platform::parse("macos-arm64").unwrap(),
             Platform::MacosArm64
         );
+        assert_eq!(Platform::parse("macos-x64").unwrap(), Platform::MacosX64);
         for unknown in ["macos-15", "ubuntu-24.04", "linux", ""] {
             let error = must_fail(Platform::parse(unknown), "unknown platform");
             assert!(error.contains("unknown platform"), "{error}");

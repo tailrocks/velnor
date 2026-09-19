@@ -13,6 +13,30 @@ use crate::s2::{
 };
 use crate::swift_capability::{package_evidence, xcode_native_contract};
 
+fn native_platform(
+    contract: Option<&crate::native_contract::AppleNativeContract>,
+) -> crate::s2::provider::Platform {
+    match contract.map(|contract| contract.execution_arch) {
+        Some(crate::native_contract::AppleArch::X86_64) => crate::s2::provider::Platform::MacosX64,
+        _ => crate::s2::provider::Platform::MacosArm64,
+    }
+}
+
+fn native_capabilities(
+    contract: Option<&crate::native_contract::AppleNativeContract>,
+) -> crate::s2::provider::Capabilities {
+    if contract
+        .is_none_or(|contract| contract.execution_arch == crate::native_contract::AppleArch::Arm64)
+    {
+        crate::s2::provider::Capabilities {
+            native_macos_arm64: true,
+            ..crate::s2::provider::Capabilities::default()
+        }
+    } else {
+        crate::s2::provider::Capabilities::default()
+    }
+}
+
 fn swift_package_unit(package_root: &str) -> Unit {
     let prefix = path_prefix(package_root);
     let command_prefix = shell_change_dir(package_root);
@@ -104,6 +128,8 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
             .find(|file| file.as_str() == format!("{container_root}/project.yml"))
             .and_then(|file| fs::read_to_string(root.join(file)).ok());
         let apple_native = xcode_native_contract(&project_contents, project_config.as_deref());
+        let platform = native_platform(apple_native.as_ref());
+        let capabilities = native_capabilities(apple_native.as_ref());
         let ios_destination = xcode_project_is_ios(&project_contents);
         let build_destination = if ios_destination {
             " -destination 'generic/platform=iOS Simulator'"
@@ -169,11 +195,8 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
             toolchain: None,
             services: Vec::new(),
             trust: crate::s2::provider::TrustReq::UntrustedOk,
-            platform: crate::s2::provider::Platform::MacosArm64,
-            capabilities: crate::s2::provider::Capabilities {
-                native_macos_arm64: true,
-                ..crate::s2::provider::Capabilities::default()
-            },
+            platform,
+            capabilities,
             apple_native,
             workspace_check: false,
             products: Vec::new(),
@@ -200,11 +223,11 @@ pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
         shape.detected.push(format!("swift-package:{package_root}"));
         let mut unit = swift_package_unit(package_root);
         let evidence = package_evidence(context.root, package_root, context.files, &package_roots);
-        if evidence.apple {
-            unit.platform = crate::s2::provider::Platform::MacosArm64;
-            unit.capabilities.native_macos_arm64 = true;
-        }
         unit.apple_native = evidence.native;
+        if evidence.apple {
+            unit.platform = native_platform(unit.apple_native.as_ref());
+            unit.capabilities = native_capabilities(unit.apple_native.as_ref());
+        }
         shape.units.push(unit);
     }
     let mut xcode_units = xcode_scheme_units(context.root, context.files);

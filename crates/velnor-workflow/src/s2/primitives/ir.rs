@@ -4388,9 +4388,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             // macOS-platform members only exist on hosted, and need the
             // GitHub-owned macOS image instead of the Linux selector.
             let macos = *provider == ProviderId::GithubHosted
-                && split
-                    .iter()
-                    .any(|unit| unit.platform == crate::s2::provider::Platform::MacosArm64);
+                && split.iter().any(|unit| unit.platform.is_macos());
             let runs_on = if macos {
                 yaml_scalar(crate::s2::MACOS_HOSTED_RUNS_ON)
             } else {

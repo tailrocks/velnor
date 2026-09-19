@@ -3364,9 +3364,7 @@ fn render_release_unit_job(
 /// selector, except macOS-platform units on hosted, which need the
 /// GitHub-owned macOS image.
 fn release_unit_runs_on(workflow: &WorkflowIr, provider: ProviderId, unit: &Unit) -> String {
-    if provider == ProviderId::GithubHosted
-        && unit.platform == crate::s2::provider::Platform::MacosArm64
-    {
+    if provider == ProviderId::GithubHosted && unit.platform.is_macos() {
         return yaml_scalar(MACOS_HOSTED_RUNS_ON);
     }
     workflow.runs_on_yaml(provider)

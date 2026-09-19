@@ -173,7 +173,7 @@ struct WorkflowSection {
     /// GitHub-hosted runner label for hosted lanes.
     github_runner: Option<String>,
     /// GitHub-hosted runner label for Apple (Swift/Xcode) lanes. Absent keeps
-    /// the generator's verified `macos-26` default.
+    /// the generator's latest verified `xcode-27` default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     macos_runner: Option<String>,
     /// Generated runner lanes. Absent keeps the generator's current default.

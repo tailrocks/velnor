@@ -9610,7 +9610,7 @@ mod tests {
             automatic: RunnerMode::Both,
             automatic_lanes: DEFAULT_AUTOMATIC_LANES.to_owned(),
             github_runner: "ubuntu-26.04".to_owned(),
-            macos_runner: "macos-26".to_owned(),
+            macos_runner: "xcode-27".to_owned(),
             velnor_labels: vec!["self-hosted".to_owned(), "example-velnor".to_owned()],
             pull_request_on_velnor: false,
             release_enabled: false,
@@ -9975,7 +9975,7 @@ mod tests {
         must(
             fs::write(
                 project.join("project.pbxproj"),
-                "SDKROOT = iphoneos;\nIPHONEOS_DEPLOYMENT_TARGET = 17.0;\n",
+                "SDKROOT = macosx;\nMACOSX_DEPLOYMENT_TARGET = 26.0;\n",
             ),
             "write project",
         );
@@ -10024,9 +10024,9 @@ mod tests {
         assert!(xcode
             .pr_commands
             .iter()
-            .any(|command| command.contains("platform=iOS Simulator")));
+            .all(|command| command.contains("xcodebuild") && !command.contains("iOS Simulator")));
         let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::PullRequest);
-        assert!(workflow.contains("runs-on: macos-26"));
+        assert!(workflow.contains("runs-on: xcode-27"));
         assert!(workflow.contains("CI_UNIT_ID: swift-xcodeproj-app"));
         let both_workflow = WorkflowIr::from_config(&ProjectConfig {
             runners: RunnerMode::Both,
@@ -10188,7 +10188,7 @@ mod tests {
             scan_repository(&root, RunnerMode::Github),
             "scan Swift repository",
         );
-        assert_eq!(config.macos_runner, "macos-26");
+        assert_eq!(config.macos_runner, "xcode-27");
         let package = must_some(
             config
                 .units
@@ -10216,7 +10216,7 @@ mod tests {
         let default_surface =
             WorkflowIr::from_config(&config).render_nested_unit(&xcode, WorkflowKind::Main);
         assert!(
-            default_surface.contains("runs-on: macos-26"),
+            default_surface.contains("runs-on: xcode-27"),
             "{default_surface}"
         );
         config.macos_runner = "macos-26-intel".to_owned();
@@ -10445,13 +10445,13 @@ mod tests {
 
     #[test]
     fn generation_config_macos_runner_reaches_the_apple_lane() {
-        let config = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nmacos_runner = \"macos-26\"\n";
+        let config = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nmacos_runner = \"xcode-27\"\n";
         let root = configured_repository("macos-runner-config", Some(config));
         let scanned = must(
             scan_target(&root, RunnerMode::Github, "main"),
             "scan configured repository",
         );
-        assert_eq!(scanned.config.macos_runner, "macos-26");
+        assert_eq!(scanned.config.macos_runner, "xcode-27");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -14993,7 +14993,7 @@ channel = "stable"
         });
         let actionlint = render_actionlint_config(&config);
         assert!(
-            actionlint.contains("    - macos-26\n"),
+            actionlint.contains("    - xcode-27\n"),
             "an apple release target needs the macos label: {actionlint}"
         );
         if let Some(release) = config.release.as_mut() {
@@ -15001,7 +15001,7 @@ channel = "stable"
         }
         let linux_only = render_actionlint_config(&config);
         assert!(
-            !linux_only.contains("macos-26"),
+            !linux_only.contains("xcode-27"),
             "linux-only releases must not allowlist the macos label: {linux_only}"
         );
     }
