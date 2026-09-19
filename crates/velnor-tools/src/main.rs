@@ -4789,7 +4789,10 @@ mod tests {
         for legacy in ["check-evidence", "evidence-verify", "verify-evidence"] {
             let mut args = canonical.to_vec();
             args[1] = legacy;
-            assert!(Cli::try_parse_from(args).is_err(), "legacy command accepted: {legacy}");
+            assert!(
+                Cli::try_parse_from(args).is_err(),
+                "legacy command accepted: {legacy}"
+            );
         }
     }
 

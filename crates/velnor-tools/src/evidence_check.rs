@@ -498,6 +498,19 @@ pub(crate) struct EvidenceDocument {
     pub g0_inventory: Option<G0InventoryEvidence>,
 }
 
+/// Immutable coverage subject for one evidence record.  Inventory is the
+/// only valid role for G0; execution stages must identify either the current
+/// default branch, a pull-request candidate, or a merge-group candidate.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum EvidenceRole {
+    #[default]
+    Inventory,
+    DefaultBranch,
+    PullRequest,
+    MergeGroup,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReviewerAttestation {
@@ -506,6 +519,18 @@ pub(crate) struct ReviewerAttestation {
     pub manifest_id: String,
     pub snapshot_id: String,
     pub attested_at_utc: String,
+    pub artifact: ReviewArtifact,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReviewArtifact {
+    pub source_repository: String,
+    pub source_revision: String,
+    pub source_tree_digest: String,
+    pub source_diff_digest: String,
+    pub run_manifest_digest: String,
+    pub source_url: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -513,6 +538,7 @@ pub(crate) struct ReviewerAttestation {
 pub(crate) struct EvidenceRecord {
     pub repository: String,
     pub repository_role: String,
+    pub evidence_role: EvidenceRole,
     pub default_branch: String,
     pub default_branch_sha: String,
     pub observed_at_utc: String,
@@ -1030,6 +1056,15 @@ fn check_documents(
             "G7 cannot pass from an offline fixture or caller-supplied snapshot",
         );
     }
+    if stage.needs_execution() {
+        finding(
+            &mut findings,
+            "authoritative-collector-required",
+            "",
+            "mode/coverage",
+            "execution stages remain blocked until the collector independently derives complete PR, main, run, check, job, and child coverage",
+        );
+    }
     sort_findings(&mut findings);
     CheckReport {
         schema_version: EVIDENCE_SCHEMA_VERSION,
@@ -1044,8 +1079,16 @@ fn check_documents(
 struct RecordKey {
     repository: String,
     provider: String,
+    evidence_role: EvidenceRole,
     event: String,
     pr_number: Option<u64>,
+    pr_head_sha: Option<String>,
+    pr_base_sha: Option<String>,
+    tested_merge_sha: Option<String>,
+    merge_group_sha: Option<String>,
+    trigger_source_sha: String,
+    run_id: u64,
+    run_attempt: u32,
 }
 
 impl RecordKey {
@@ -1053,8 +1096,16 @@ impl RecordKey {
         Self {
             repository: record.repository.clone(),
             provider: record.provider.clone(),
+            evidence_role: record.evidence_role,
             event: record.event.clone(),
             pr_number: record.pr_number,
+            pr_head_sha: record.pr_head_sha.clone(),
+            pr_base_sha: record.pr_base_sha.clone(),
+            tested_merge_sha: record.tested_merge_sha.clone(),
+            merge_group_sha: record.merge_group_sha.clone(),
+            trigger_source_sha: record.trigger_source_sha.clone(),
+            run_id: record.run_id,
+            run_attempt: record.run_attempt,
         }
     }
 }
@@ -1171,20 +1222,7 @@ fn check_headers(
             );
             return;
         };
-        if attestation.reviewer.trim().is_empty()
-            || !valid_digest(&attestation.report_digest)
-            || attestation.manifest_id != manifest.manifest_id
-            || attestation.snapshot_id != snapshot.snapshot_id
-            || !valid_timestamp(&attestation.attested_at_utc)
-        {
-            finding(
-                findings,
-                "invalid-review-attestation",
-                "",
-                "evidence.reviewer_attestation",
-                "reviewer attestation must bind exact identities and a content digest",
-            );
-        }
+        check_review_attestation(manifest, snapshot, attestation, findings);
     }
     if !valid_timestamp(&snapshot.observed_at_utc) {
         finding(
@@ -1193,6 +1231,35 @@ fn check_headers(
             "",
             "snapshot.observed_at_utc",
             "expected an RFC3339 UTC timestamp ending in Z",
+        );
+    }
+}
+
+fn check_review_attestation(
+    manifest: &ManifestDocument,
+    snapshot: &SnapshotDocument,
+    attestation: &ReviewerAttestation,
+    findings: &mut Vec<Finding>,
+) {
+    let artifact = &attestation.artifact;
+    if attestation.reviewer.trim().is_empty()
+        || !valid_digest(&attestation.report_digest)
+        || attestation.manifest_id != manifest.manifest_id
+        || attestation.snapshot_id != snapshot.snapshot_id
+        || !valid_timestamp(&attestation.attested_at_utc)
+        || artifact.source_repository != REVIEWED_SOURCE_REPOSITORY
+        || !valid_sha(&artifact.source_revision)
+        || !valid_digest(&artifact.source_tree_digest)
+        || !valid_digest(&artifact.source_diff_digest)
+        || !valid_digest(&artifact.run_manifest_digest)
+        || !nonempty_url(&artifact.source_url)
+    {
+        finding(
+            findings,
+            "invalid-review-attestation",
+            "",
+            "evidence.reviewer_attestation",
+            "reviewer attestation must bind an external source, tree, diff, run manifest, URL, and exact evidence identities",
         );
     }
 }
@@ -2010,11 +2077,17 @@ fn check_record_coverage(
             continue;
         }
         for provider in providers {
-            let has_main = records.keys().any(|key| {
-                key.repository == *name
-                    && key.provider == provider
-                    && key.pr_number.is_none()
-                    && key.event == "push"
+            let has_main = snapshot_repo.is_some_and(|snapshot_repo| {
+                records.values().any(|record| {
+                    record.repository == *name
+                        && record.provider == provider
+                        && record.evidence_role == EvidenceRole::DefaultBranch
+                        && record.event == "push"
+                        && record.pr_number.is_none()
+                        && record.default_branch_sha == snapshot_repo.default_branch_sha
+                        && record.trigger_source_sha == snapshot_repo.default_branch_sha
+                        && record.actual_checkout_sha == snapshot_repo.default_branch_sha
+                })
             });
             if !has_main {
                 finding(
@@ -2030,11 +2103,10 @@ fn check_record_coverage(
             };
             if stage.needs_all_prs() {
                 for pr in &snapshot_repo.open_prs {
-                    let has_pr = records.keys().any(|key| {
-                        key.repository == *name
-                            && key.provider == provider
-                            && key.pr_number == Some(pr.number)
-                            && key.event == "pull_request"
+                    let has_pr = records.values().any(|record| {
+                        record.repository == *name
+                            && record.provider == provider
+                            && record_matches_pr_subject(record, pr)
                     });
                     if !has_pr {
                         finding(
@@ -2051,6 +2123,30 @@ fn check_record_coverage(
     }
 }
 
+fn record_matches_pr_subject(record: &EvidenceRecord, pr: &SnapshotPullRequest) -> bool {
+    if record.pr_number != Some(pr.number)
+        || record.pr_head_sha.as_deref() != Some(pr.head_sha.as_str())
+        || record.pr_base_sha.as_deref() != Some(pr.base_sha.as_str())
+    {
+        return false;
+    }
+    match record.evidence_role {
+        EvidenceRole::PullRequest => {
+            record.event == "pull_request"
+                && pr.merge_sha.is_some()
+                && record.tested_merge_sha.as_deref() == pr.merge_sha.as_deref()
+                && record.merge_group_sha.is_none()
+        }
+        EvidenceRole::MergeGroup => {
+            record.event == "merge_group"
+                && pr.merge_group_sha.is_some()
+                && record.merge_group_sha.as_deref() == pr.merge_group_sha.as_deref()
+                && record.tested_merge_sha.is_none()
+        }
+        EvidenceRole::Inventory | EvidenceRole::DefaultBranch => false,
+    }
+}
+
 fn check_lane_parity(
     stage: Stage,
     records: &BTreeMap<RecordKey, &EvidenceRecord>,
@@ -2063,14 +2159,17 @@ fn check_lane_parity(
         if key.provider != "velnor" {
             continue;
         }
-        let github = records.iter().find_map(|(candidate_key, record)| {
-            (candidate_key.repository == key.repository
-                && candidate_key.event == key.event
-                && candidate_key.pr_number == key.pr_number
-                && candidate_key.provider == "github")
-                .then_some(*record)
-        });
+        let github = records
+            .values()
+            .find(|record| record.provider == "github" && same_qualifying_subject(velnor, record));
         let Some(github) = github else {
+            finding(
+                findings,
+                "lane-association",
+                &key.repository,
+                "evidence_role/pr/source/run",
+                "G6/G7 requires GitHub and Velnor records for the same immutable candidate or resulting-main subject",
+            );
             continue;
         };
         if velnor.trigger_source_sha != github.trigger_source_sha
@@ -2111,6 +2210,21 @@ fn check_lane_parity(
             }
         }
     }
+}
+
+fn same_qualifying_subject(left: &EvidenceRecord, right: &EvidenceRecord) -> bool {
+    left.repository == right.repository
+        && left.evidence_role == right.evidence_role
+        && left.event == right.event
+        && left.pr_number == right.pr_number
+        && left.pr_head_sha == right.pr_head_sha
+        && left.pr_base_sha == right.pr_base_sha
+        && left.tested_merge_sha == right.tested_merge_sha
+        && left.merge_group_sha == right.merge_group_sha
+        && left.trigger_source_sha == right.trigger_source_sha
+        && left.actual_checkout_sha == right.actual_checkout_sha
+        && left.run_id > 0
+        && right.run_id > 0
 }
 
 fn required_providers(stage: Stage, repo: &ManifestRepository) -> Vec<&str> {
@@ -2252,6 +2366,7 @@ fn check_record(
     );
     check_eligibility(repo, &record.provider_eligibility, findings);
     check_record_completion(stage, record, findings);
+    check_record_subject(stage, record, findings);
     if stage == Stage::G0 {
         check_g0_record(record, findings);
         return;
@@ -2320,6 +2435,92 @@ fn check_record(
                 "reviewer",
                 "owner and reviewer must differ",
             );
+        }
+    }
+}
+
+fn check_record_subject(stage: Stage, record: &EvidenceRecord, findings: &mut Vec<Finding>) {
+    let repo = &record.repository;
+    for (field, value) in [
+        ("pr_head_sha", record.pr_head_sha.as_deref()),
+        ("pr_base_sha", record.pr_base_sha.as_deref()),
+        ("tested_merge_sha", record.tested_merge_sha.as_deref()),
+        ("merge_group_sha", record.merge_group_sha.as_deref()),
+    ] {
+        if let Some(value) = value {
+            validate_sha(repo, field, value, findings);
+        }
+    }
+    if stage == Stage::G0 {
+        if record.evidence_role != EvidenceRole::Inventory {
+            finding(
+                findings,
+                "record-role",
+                repo,
+                "evidence_role",
+                "G0 records must use the inventory role",
+            );
+        }
+        return;
+    }
+    match record.evidence_role {
+        EvidenceRole::Inventory => finding(
+            findings,
+            "record-role",
+            repo,
+            "evidence_role",
+            "execution records cannot use the inventory role",
+        ),
+        EvidenceRole::DefaultBranch => {
+            if record.event != "push"
+                || record.pr_number.is_some()
+                || record.pr_head_sha.is_some()
+                || record.pr_base_sha.is_some()
+                || record.tested_merge_sha.is_some()
+                || record.merge_group_sha.is_some()
+            {
+                finding(
+                    findings,
+                    "record-subject",
+                    repo,
+                    "evidence_role/event/PR identity",
+                    "default-branch evidence must be a push with no PR or merge-group identity",
+                );
+            }
+        }
+        EvidenceRole::PullRequest => {
+            if record.event != "pull_request"
+                || record.pr_number.is_none()
+                || record.pr_head_sha.is_none()
+                || record.pr_base_sha.is_none()
+                || record.tested_merge_sha.is_none()
+                || record.merge_group_sha.is_some()
+            {
+                finding(
+                    findings,
+                    "record-subject",
+                    repo,
+                    "evidence_role/event/PR identity",
+                    "pull-request evidence must bind PR head/base and a tested merge SHA",
+                );
+            }
+        }
+        EvidenceRole::MergeGroup => {
+            if record.event != "merge_group"
+                || record.pr_number.is_none()
+                || record.pr_head_sha.is_none()
+                || record.pr_base_sha.is_none()
+                || record.merge_group_sha.is_none()
+                || record.tested_merge_sha.is_some()
+            {
+                finding(
+                    findings,
+                    "record-subject",
+                    repo,
+                    "evidence_role/event/merge_group_sha",
+                    "merge-group evidence must bind PR identity and a merge-group SHA",
+                );
+            }
         }
     }
 }
@@ -2519,12 +2720,16 @@ fn find_execution<'a>(
             .open_prs
             .iter()
             .find(|pr| pr.number == number)
-            .and_then(|pr| pr.executions.iter().find(|run| run.run_id == record.run_id))
+            .and_then(|pr| {
+                pr.executions.iter().find(|run| {
+                    run.run_id == record.run_id && run.run_attempt == record.run_attempt
+                })
+            })
     } else {
         snapshot
             .main_executions
             .iter()
-            .find(|run| run.run_id == record.run_id)
+            .find(|run| run.run_id == record.run_id && run.run_attempt == record.run_attempt)
     }
 }
 
@@ -2535,101 +2740,154 @@ fn check_source_semantics(
     findings: &mut Vec<Finding>,
 ) {
     let repo = &record.repository;
-    if record.pr_number.is_none() {
-        if execution.event != "push" {
+    match record.evidence_role {
+        EvidenceRole::DefaultBranch => {
+            if execution.event != "push" {
+                finding(
+                    findings,
+                    "event-source",
+                    repo,
+                    "event",
+                    "resulting-main evidence must use push; workflow_dispatch is diagnostic only",
+                );
+            }
+            if execution.trigger_source_sha != snapshot.default_branch_sha
+                || execution.actual_checkout_sha != snapshot.default_branch_sha
+            {
+                finding(
+                    findings,
+                    "stale-sha",
+                    repo,
+                    "trigger_source_sha/actual_checkout_sha",
+                    "main execution must check out the current default branch tip",
+                );
+            }
+        }
+        EvidenceRole::PullRequest | EvidenceRole::MergeGroup => {
+            let Some(number) = record.pr_number else {
+                finding(
+                    findings,
+                    "missing-pr",
+                    repo,
+                    "pr_number",
+                    "PR execution role requires a positive PR identity",
+                );
+                return;
+            };
+            let Some(pr) = snapshot.open_prs.iter().find(|pr| pr.number == number) else {
+                finding(
+                    findings,
+                    "missing-pr",
+                    repo,
+                    "pr_number",
+                    "PR is absent from the current authoritative open-PR inventory",
+                );
+                return;
+            };
+            if record.pr_head_sha.as_deref() != Some(pr.head_sha.as_str())
+                || record.pr_base_sha.as_deref() != Some(pr.base_sha.as_str())
+            {
+                finding(
+                    findings,
+                    "stale-sha",
+                    repo,
+                    "pr_head_sha/pr_base_sha",
+                    "record PR identity differs from current open PR",
+                );
+            }
+            match record.evidence_role {
+                EvidenceRole::PullRequest => {
+                    if execution.event != "pull_request" {
+                        finding(
+                            findings,
+                            "event-source",
+                            repo,
+                            "event",
+                            "pull-request evidence must use pull_request",
+                        );
+                    }
+                    if execution.trigger_source_sha != pr.head_sha {
+                        finding(
+                            findings,
+                            "source-mismatch",
+                            repo,
+                            "trigger_source_sha",
+                            "pull-request execution must bind contributor head SHA",
+                        );
+                    }
+                    let Some(merge_sha) = pr.merge_sha.as_deref() else {
+                        finding(
+                            findings,
+                            "missing-merge-candidate",
+                            repo,
+                            "open_prs.merge_sha",
+                            "authoritative PR snapshot has no tested merge candidate",
+                        );
+                        return;
+                    };
+                    if record.tested_merge_sha.as_deref() != Some(merge_sha)
+                        || execution.actual_checkout_sha != merge_sha
+                    {
+                        finding(
+                            findings,
+                            "source-mismatch",
+                            repo,
+                            "tested_merge_sha/actual_checkout_sha",
+                            "pull-request execution must bind the current synthetic merge candidate",
+                        );
+                    }
+                }
+                EvidenceRole::MergeGroup => {
+                    if execution.event != "merge_group" {
+                        finding(
+                            findings,
+                            "event-source",
+                            repo,
+                            "event",
+                            "merge-group evidence must use merge_group",
+                        );
+                    }
+                    let Some(merge_group_sha) = pr.merge_group_sha.as_deref() else {
+                        finding(
+                            findings,
+                            "missing-merge-group",
+                            repo,
+                            "open_prs.merge_group_sha",
+                            "authoritative PR snapshot has no merge-group candidate",
+                        );
+                        return;
+                    };
+                    if record.merge_group_sha.as_deref() != Some(merge_group_sha)
+                        || execution.trigger_source_sha != merge_group_sha
+                        || execution.actual_checkout_sha != merge_group_sha
+                    {
+                        finding(
+                            findings,
+                            "source-mismatch",
+                            repo,
+                            "merge_group_sha/actual_checkout_sha",
+                            "merge-group execution must bind the current immutable merge-group SHA",
+                        );
+                    }
+                }
+                EvidenceRole::Inventory | EvidenceRole::DefaultBranch => finding(
+                    findings,
+                    "record-role",
+                    repo,
+                    "evidence_role",
+                    "PR source validation received a non-PR evidence role",
+                ),
+            }
+        }
+        EvidenceRole::Inventory => {
             finding(
                 findings,
-                "event-source",
+                "record-role",
                 repo,
-                "event",
-                "resulting-main evidence must use push; workflow_dispatch is diagnostic only",
+                "evidence_role",
+                "inventory evidence cannot prove an execution source",
             );
         }
-        if execution.trigger_source_sha != snapshot.default_branch_sha
-            || execution.actual_checkout_sha != snapshot.default_branch_sha
-        {
-            finding(
-                findings,
-                "stale-sha",
-                repo,
-                "trigger_source_sha/actual_checkout_sha",
-                "main execution must check out the current default branch tip",
-            );
-        }
-    } else {
-        let number = record.pr_number.unwrap_or_default();
-        let Some(pr) = snapshot.open_prs.iter().find(|pr| pr.number == number) else {
-            finding(
-                findings,
-                "missing-pr",
-                repo,
-                "pr_number",
-                "PR is absent from the current authoritative open-PR inventory",
-            );
-            return;
-        };
-        if execution.event != "pull_request" && execution.event != "merge_group" {
-            finding(
-                findings,
-                "event-source",
-                repo,
-                "event",
-                "PR evidence must use pull_request or merge_group",
-            );
-        }
-        if record.pr_head_sha.as_deref() != Some(pr.head_sha.as_str())
-            || record.pr_base_sha.as_deref() != Some(pr.base_sha.as_str())
-        {
-            finding(
-                findings,
-                "stale-sha",
-                repo,
-                "pr_head_sha/pr_base_sha",
-                "record PR identity differs from current open PR",
-            );
-        }
-        if execution.trigger_source_sha != pr.head_sha {
-            finding(
-                findings,
-                "source-mismatch",
-                repo,
-                "trigger_source_sha",
-                "PR execution must bind contributor head SHA",
-            );
-        }
-        let Some(merge_sha) = pr.merge_sha.as_deref() else {
-            finding(
-                findings,
-                "missing-merge-candidate",
-                repo,
-                "open_prs.merge_sha",
-                "authoritative PR snapshot has no tested merge candidate",
-            );
-            return;
-        };
-        if record.tested_merge_sha.as_deref() != Some(merge_sha)
-            || execution.actual_checkout_sha != merge_sha
-        {
-            finding(
-                findings,
-                "source-mismatch",
-                repo,
-                "tested_merge_sha/actual_checkout_sha",
-                "PR execution must bind the current synthetic merge candidate",
-            );
-        }
-    }
-    if execution.event == "merge_group"
-        && (record.merge_group_sha.as_deref() != Some(execution.trigger_source_sha.as_str())
-            || execution.actual_checkout_sha != execution.trigger_source_sha)
-    {
-        finding(
-            findings,
-            "source-mismatch",
-            repo,
-            "merge_group_sha",
-            "merge-group execution must use one immutable source SHA",
-        );
     }
 }
 
@@ -4291,6 +4549,40 @@ mod tests {
         }
     }
 
+    fn minimal_pr() -> SnapshotPullRequest {
+        SnapshotPullRequest {
+            number: 7,
+            state: "open".to_owned(),
+            draft: false,
+            author: "author".to_owned(),
+            author_association: "CONTRIBUTOR".to_owned(),
+            head_repository: "owner/repo".to_owned(),
+            head_sha: sha('a'),
+            base_sha: sha('b'),
+            merge_sha: Some(sha('c')),
+            merge_group_sha: None,
+            source_url: "https://github.com/owner/repo/pull/7".to_owned(),
+            executions: Vec::new(),
+        }
+    }
+
+    fn minimal_snapshot_for_coverage(pr: SnapshotPullRequest) -> SnapshotRepository {
+        SnapshotRepository {
+            repository: "owner/repo".to_owned(),
+            repository_id: 1,
+            default_branch: "main".to_owned(),
+            default_branch_sha: sha('m'),
+            ruleset: RulesetObservation {
+                required_checks: Vec::new(),
+                source_url: "https://github.com/owner/repo/settings/rules".to_owned(),
+                pages_complete: true,
+            },
+            workflows: Vec::new(),
+            main_executions: Vec::new(),
+            open_prs: vec![pr],
+        }
+    }
+
     #[test]
     fn strict_schema_rejects_alias_and_unknown_fields() {
         let value = json!({
@@ -4299,6 +4591,191 @@ mod tests {
             "app_id": "123"
         });
         assert!(serde_json::from_value::<RequiredContext>(value).is_err());
+    }
+
+    #[test]
+    fn immutable_pr_subject_positive_and_head_mutation_negative() {
+        let pr = minimal_pr();
+        let record = EvidenceRecord {
+            repository: "owner/repo".to_owned(),
+            evidence_role: EvidenceRole::PullRequest,
+            provider: "github".to_owned(),
+            event: "pull_request".to_owned(),
+            pr_number: Some(pr.number),
+            pr_head_sha: Some(pr.head_sha.clone()),
+            pr_base_sha: Some(pr.base_sha.clone()),
+            tested_merge_sha: pr.merge_sha.clone(),
+            ..Default::default()
+        };
+        assert!(record_matches_pr_subject(&record, &pr));
+
+        let mut stale = record;
+        stale.pr_head_sha = Some(sha('z'));
+        assert!(!record_matches_pr_subject(&stale, &pr));
+    }
+
+    #[test]
+    fn coverage_requires_default_branch_and_each_pr_subject() {
+        let manifest_repo = ManifestRepository {
+            repository: "owner/repo".to_owned(),
+            provider_eligibility: BTreeMap::from([("github".to_owned(), Eligibility::Eligible)]),
+            ..Default::default()
+        };
+        let snapshot_repo = minimal_snapshot_for_coverage(minimal_pr());
+        let main = EvidenceRecord {
+            repository: "owner/repo".to_owned(),
+            evidence_role: EvidenceRole::DefaultBranch,
+            provider: "github".to_owned(),
+            event: "push".to_owned(),
+            default_branch_sha: sha('m'),
+            trigger_source_sha: sha('m'),
+            actual_checkout_sha: sha('m'),
+            ..Default::default()
+        };
+        let pr = minimal_pr();
+        let pull_request = EvidenceRecord {
+            repository: "owner/repo".to_owned(),
+            evidence_role: EvidenceRole::PullRequest,
+            provider: "github".to_owned(),
+            event: "pull_request".to_owned(),
+            pr_number: Some(pr.number),
+            pr_head_sha: Some(pr.head_sha.clone()),
+            pr_base_sha: Some(pr.base_sha.clone()),
+            tested_merge_sha: pr.merge_sha.clone(),
+            ..Default::default()
+        };
+        let manifest = BTreeMap::from([("owner/repo".to_owned(), &manifest_repo)]);
+        let snapshot = BTreeMap::from([("owner/repo".to_owned(), &snapshot_repo)]);
+        let mut records = BTreeMap::new();
+        records.insert(RecordKey::from_record(&main), &main);
+        records.insert(RecordKey::from_record(&pull_request), &pull_request);
+        let mut findings = Vec::new();
+        check_record_coverage(Stage::G1, &manifest, &snapshot, &records, &mut findings);
+        assert!(!findings
+            .iter()
+            .any(|finding| finding.code == "missing-main-evidence"
+                || finding.code == "missing-pr-evidence"));
+
+        let mut records_without_pr = BTreeMap::new();
+        records_without_pr.insert(RecordKey::from_record(&main), &main);
+        findings.clear();
+        check_record_coverage(
+            Stage::G1,
+            &manifest,
+            &snapshot,
+            &records_without_pr,
+            &mut findings,
+        );
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "missing-pr-evidence"));
+    }
+
+    #[test]
+    fn lane_pairing_requires_same_immutable_subject() {
+        let mut github = EvidenceRecord {
+            repository: "owner/repo".to_owned(),
+            evidence_role: EvidenceRole::PullRequest,
+            provider: "github".to_owned(),
+            event: "pull_request".to_owned(),
+            pr_number: Some(7),
+            pr_head_sha: Some(sha('a')),
+            pr_base_sha: Some(sha('b')),
+            tested_merge_sha: Some(sha('c')),
+            trigger_source_sha: sha('a'),
+            actual_checkout_sha: sha('c'),
+            run_id: 1,
+            ..Default::default()
+        };
+        let mut velnor = github.clone();
+        velnor.provider = "velnor".to_owned();
+        assert!(same_qualifying_subject(&github, &velnor));
+        github.actual_checkout_sha = sha('d');
+        assert!(!same_qualifying_subject(&github, &velnor));
+    }
+
+    #[test]
+    fn run_attempt_is_part_of_authoritative_lookup() {
+        let mut execution = minimal_execution();
+        execution.run_attempt = 2;
+        let snapshot = SnapshotRepository {
+            repository: "owner/repo".to_owned(),
+            repository_id: 1,
+            default_branch: "main".to_owned(),
+            default_branch_sha: sha('b'),
+            ruleset: RulesetObservation {
+                required_checks: Vec::new(),
+                source_url: "https://github.com/owner/repo/settings/rules".to_owned(),
+                pages_complete: true,
+            },
+            workflows: Vec::new(),
+            main_executions: vec![execution],
+            open_prs: Vec::new(),
+        };
+        let record = EvidenceRecord {
+            repository: "owner/repo".to_owned(),
+            evidence_role: EvidenceRole::DefaultBranch,
+            run_id: 1,
+            run_attempt: 1,
+            ..Default::default()
+        };
+        assert!(find_execution(&snapshot, &record).is_none());
+    }
+
+    #[test]
+    fn g7_attestation_requires_external_artifact_bindings() {
+        let manifest = ManifestDocument {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            manifest_id: REVIEWED_MANIFEST_ID.to_owned(),
+            source: SourceIdentity {
+                repository: REVIEWED_SOURCE_REPOSITORY.to_owned(),
+                revision: REVIEWED_SOURCE_REVISION.to_owned(),
+                digest: REVIEWED_SOURCE_DIGEST.to_owned(),
+                reviewed_by: "reviewer".to_owned(),
+            },
+            repositories: Vec::new(),
+        };
+        let snapshot = SnapshotDocument {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            snapshot_id: "snapshot".to_owned(),
+            manifest_id: REVIEWED_MANIFEST_ID.to_owned(),
+            observed_at_utc: "2026-09-20T00:00:00Z".to_owned(),
+            source: SnapshotSource {
+                collector: "fixture".to_owned(),
+                collector_revision: sha('a'),
+                api_base: "https://api.github.com".to_owned(),
+                captured_at_utc: "2026-09-20T00:00:00Z".to_owned(),
+                read_only: true,
+                page_count: 1,
+                permission_scopes: vec!["metadata:read".to_owned()],
+            },
+            repositories: Vec::new(),
+        };
+        let attestation = ReviewerAttestation {
+            reviewer: "independent-reviewer".to_owned(),
+            report_digest: digest('a'),
+            manifest_id: REVIEWED_MANIFEST_ID.to_owned(),
+            snapshot_id: "snapshot".to_owned(),
+            attested_at_utc: "2026-09-20T00:00:00Z".to_owned(),
+            artifact: ReviewArtifact {
+                source_repository: REVIEWED_SOURCE_REPOSITORY.to_owned(),
+                source_revision: REVIEWED_SOURCE_REVISION.to_owned(),
+                source_tree_digest: digest('b'),
+                source_diff_digest: digest('c'),
+                run_manifest_digest: digest('d'),
+                source_url: "https://github.com/tailrocks/velnor-review".to_owned(),
+            },
+        };
+        let mut findings = Vec::new();
+        check_review_attestation(&manifest, &snapshot, &attestation, &mut findings);
+        assert!(findings.is_empty());
+
+        let mut unbound = attestation;
+        unbound.artifact.run_manifest_digest = "unbound".to_owned();
+        check_review_attestation(&manifest, &snapshot, &unbound, &mut findings);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "invalid-review-attestation"));
     }
 
     #[test]
@@ -4344,9 +4821,10 @@ mod tests {
         let mut findings = Vec::new();
         check_manifest(&manifest, &mut findings);
         assert_eq!(manifest.repositories.len(), REQUIRED_REPOSITORIES);
-        assert!(!findings
-            .iter()
-            .any(|finding| matches!(finding.code.as_str(), "manifest-count" | "manifest-scope" | "manifest-duplicate")));
+        assert!(!findings.iter().any(|finding| matches!(
+            finding.code.as_str(),
+            "manifest-count" | "manifest-scope" | "manifest-duplicate"
+        )));
     }
 
     #[test]
@@ -4497,7 +4975,10 @@ mod tests {
     fn strict_digest_and_target_parsing_rejects_coercion() {
         assert!(valid_digest(&digest('a')));
         assert!(!valid_digest(&"a".repeat(DIGEST_LENGTH)));
-        assert!(!valid_digest(&format!("SHA256:{}", "a".repeat(DIGEST_LENGTH))));
+        assert!(!valid_digest(&format!(
+            "SHA256:{}",
+            "a".repeat(DIGEST_LENGTH)
+        )));
         assert!(valid_target("linux-amd64"));
         assert!(!valid_target("linux_amd64"));
         assert!(!valid_target(" LINUX-AMD64"));
@@ -4523,6 +5004,7 @@ mod tests {
         };
         let record = EvidenceRecord {
             repository: snapshot.repository.clone(),
+            evidence_role: EvidenceRole::DefaultBranch,
             pr_number: None,
             run_id: execution.run_id,
             event: "push".to_owned(),

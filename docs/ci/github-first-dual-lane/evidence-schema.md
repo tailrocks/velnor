@@ -127,7 +127,7 @@ the explicit checker stage, and records. A record repeats the section-10
 identity fields, but those repeats are compared to manifest/snapshot source:
 
 ```text
-repository, repository_role, default_branch, default_branch_sha,
+repository, repository_role, evidence_role, default_branch, default_branch_sha,
 observed_at_utc, generator_revision, runtime_product_id,
 generator_artifact_digest, configuration_digest, generated_tree_digest,
 scan_state_digest, runtime_release_version, runtime_source_sha,
@@ -143,10 +143,48 @@ child_run_links, required_checks,
 release, install, owner, reviewer, gate_status, blocker, next_action
 ```
 
+`evidence_role` is one of `inventory`, `default_branch`, `pull_request`, or
+`merge_group`. It is required; it is not inferred from a nullable PR number.
+Execution coverage is derived from the authoritative snapshot, never from the
+record list:
+
+| Role | Required immutable subject | Required event | Coverage obligation |
+| --- | --- | --- | --- |
+| `default_branch` | repository + current default-branch SHA + run ID/attempt | `push` | resulting current main, separately from every PR |
+| `pull_request` | PR number + head/base SHA + tested merge SHA + run ID/attempt | `pull_request` | every current open PR, including draft/bot/fork rows |
+| `merge_group` | PR number + head/base SHA + merge-group SHA + run ID/attempt | `merge_group` | every required merge-group candidate when captured |
+
+The checker rejects role/subject mismatches, duplicate immutable identities, and
+PR records that omit the current head/base/candidate. G6/G7 additionally pair
+GitHub and Velnor records only when role, PR subject, source SHA, checkout SHA,
+and event all match; two unrelated green rows are not a comparison. The
+collector must independently derive these subjects and the expected job/check/
+child sets before execution coverage can pass. Until that collector contract is
+complete, execution stages return an explicit authoritative-collector blocker.
+
+Coverage authority map (implementation boundary):
+
+| Gate | Authoritative source | Typed identity/reference | Collector obligation | Validator/negative fixture | Applicability |
+| --- | --- | --- | --- | --- | --- |
+| G0 | reviewed 32-row manifest + fresh GitHub inventory | repository ID, default SHA, every PR head/base, ruleset context/app, workflow/content SHA, graph/model/access artifact digests | paginate and retain raw query/page/provenance; no count-only summary | exact scope, missing PR/check/workflow/graph/model/access, stale snapshot | inventory only; no execution pass |
+| G1/G3 | fresh snapshot plus independently parsed workflow/run graph | `default_branch` and `pull_request`/`merge_group` subjects, run ID/attempt, source/event/checkout | derive expected jobs/checks/children from workflow revision and current ruleset | PR/main substitution, wrong head/base/merge, duplicate subject, queued/manual/unbound run | blocked until collector derivation is complete |
+| G6 | the same qualifying PR candidate and resulting main in both lanes | paired role + PR identity/source/workload/target contract; one publisher digest | independently associate both provider runs and native-only obligations | unrelated green rows, source/workload mismatch, publisher rebinding | blocked until cross-lane association is collected |
+| G7 | fresh live reconciliation plus independent review artifact | exact manifest/snapshot/evidence digest, source tree/diff/run-manifest digests | reread default branch and every PR head; bind reviewer artifact externally | owner/reviewer-only, stale digest, missing artifact binding | `--live` and external attestation required |
+
+The current read-only collector gap is recorded at
+`dual-lane-evidence/G0/fleet/collector-contract-gap.md` (SHA-256
+`186e6a1ed70bea2588df77f9566e4e56ad9a14b65e3654960aeebb738f45c071`): its v1
+REST output lacks raw query/auth/page provenance and complete ruleset,
+check-suite, job, artifact/log, workflow-graph, merge-group, and child-lineage
+objects. The checker therefore emits `authoritative-collector-required` for
+execution stages; this schema is not a claim that live collection is complete.
+
 The envelope also has optional `reviewer_attestation`; G7 requires
-`{reviewer, report_digest, manifest_id, snapshot_id, attested_at_utc}` with a
-valid digest and exact manifest/snapshot identities. The attestation is an
-external review artifact, not a `gate_status` claim from a result row.
+`{reviewer, report_digest, manifest_id, snapshot_id, attested_at_utc, artifact}`
+with an external artifact binding source repository/revision, source tree and
+diff digests, run-manifest digest, and immutable source URL. Distinct owner and
+reviewer strings are not an attestation. The attestation is an external review
+artifact, not a `gate_status` claim from a result row.
 
 Records must bind to an authoritative run by exact run ID and attempt. Main
 records check out the current default-branch SHA. PR records distinguish
