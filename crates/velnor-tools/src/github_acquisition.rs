@@ -23,6 +23,12 @@ use url::Url;
 
 pub type AcquisitionFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+/// Production GitHub transport and content-addressed raw-byte store.  Kept as
+/// a child module so the checker-owned binary module list remains untouched
+/// while the live collector integration is reviewed independently.
+#[path = "github_transport.rs"]
+pub mod live_transport;
+
 /// API family used by a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
@@ -256,7 +262,10 @@ impl fmt::Debug for AcquisitionRequest {
             .field("api", &self.api)
             .field("method", &self.method)
             .field("api_origin", &self.api_origin)
-            .field("endpoint_or_operation", &self.endpoint_or_operation)
+            .field(
+                "endpoint_or_operation",
+                &redacted_endpoint(&self.endpoint_or_operation),
+            )
             .field("query", &redacted_query(&self.query))
             .field("body", &self.body.as_ref().map(|_| "[REDACTED]"))
             .finish()
@@ -281,7 +290,10 @@ impl fmt::Debug for TransportResponse {
             .field("status", &self.status)
             .field("headers", &redacted_headers(&self.headers))
             .field("body", &format_args!("<{} bytes>", self.body.len()))
-            .field("effective_endpoint", &self.effective_endpoint)
+            .field(
+                "effective_endpoint",
+                &redacted_endpoint(&self.effective_endpoint),
+            )
             .finish()
     }
 }
@@ -315,6 +327,11 @@ pub struct RawObject {
     pub canonicalization: String,
     pub media_type: String,
     pub bytes: Vec<u8>,
+    /// Digest and length of the exact response bytes before any credential
+    /// masking or JSON canonicalization.  `retain_raw` recomputes these from
+    /// `bytes`; callers cannot assert them as authoritative metadata.
+    pub original_sha256: String,
+    pub original_byte_length: u64,
 }
 
 impl fmt::Debug for RawObject {
@@ -342,6 +359,11 @@ pub struct RawObjectRef {
     pub canonicalization: String,
     pub sha256: String,
     pub byte_length: u64,
+    /// Source-response digest pair.  `sha256`/`byte_length` describe the
+    /// immutable safe object in `storage_ref`; these fields describe the
+    /// exact network response captured before redaction.
+    pub original_sha256: String,
+    pub original_byte_length: u64,
     pub media_type: String,
     pub storage_ref: String,
 }
@@ -786,6 +808,8 @@ where
                 canonicalization: "raw-bytes-v1".to_owned(),
                 media_type,
                 bytes: response.body.clone(),
+                original_sha256: String::new(),
+                original_byte_length: 0,
             },
         )?;
         let raw_id = raw.raw_id.clone();
@@ -1201,6 +1225,8 @@ where
                 canonicalization: "raw-bytes-v1".to_owned(),
                 media_type,
                 bytes: response.body.clone(),
+                original_sha256: String::new(),
+                original_byte_length: 0,
             },
         )?;
         let raw_id = raw.raw_id.clone();
@@ -1868,7 +1894,8 @@ fn replace_bytes(input: &[u8], needle: &[u8], replacement: &[u8]) -> (Vec<u8>, b
 
 fn mask_known_credential_markers(input: &[u8]) -> (Vec<u8>, bool) {
     const AUTHORIZATION: &[u8] = b"authorization:";
-    const GH_TOKEN_PREFIXES: [&[u8]; 2] = [b"ghp_", b"github_pat_"];
+    const GH_TOKEN_PREFIXES: [&[u8]; 6] =
+        [b"ghp_", b"ghs_", b"gho_", b"ghu_", b"ghr_", b"github_pat_"];
     let mut output = Vec::with_capacity(input.len());
     let mut cursor = 0;
     let mut changed = false;
@@ -1910,13 +1937,13 @@ fn starts_case_insensitive(input: &[u8], offset: usize, needle: &[u8]) -> bool {
 }
 
 fn contains_unmasked_credential(input: &[u8]) -> bool {
-    if input
-        .windows(4)
-        .any(|window| window == b"ghp_" || window == b"GHP_")
-        || input
-            .windows(11)
-            .any(|window| window.eq_ignore_ascii_case(b"github_pat_"))
-    {
+    const GH_TOKEN_PREFIXES: [&[u8]; 6] =
+        [b"ghp_", b"ghs_", b"gho_", b"ghu_", b"ghr_", b"github_pat_"];
+    if GH_TOKEN_PREFIXES.iter().any(|prefix| {
+        input
+            .windows(prefix.len())
+            .any(|window| window.eq_ignore_ascii_case(prefix))
+    }) {
         return true;
     }
     let marker = b"authorization:";
@@ -1951,6 +1978,10 @@ fn retain_raw<S: RawObjectStore>(
     credentials: &CredentialRegistry,
     mut object: RawObject,
 ) -> Result<RawObjectRef, AcquisitionError> {
+    let original_sha256 = sha256_digest(&object.bytes);
+    let original_byte_length = object.bytes.len() as u64;
+    object.original_sha256 = original_sha256.clone();
+    object.original_byte_length = original_byte_length;
     let masked = mask_response_bytes(credentials, &object.bytes)?;
     object.bytes = masked.bytes;
     if masked.changed {
@@ -1963,6 +1994,8 @@ fn retain_raw<S: RawObjectStore>(
     let expected_kind = object.object_kind.clone();
     let expected_canonicalization = object.canonicalization.clone();
     let expected_media_type = object.media_type.clone();
+    let expected_original_sha256 = object.original_sha256.clone();
+    let expected_original_byte_length = object.original_byte_length;
     let reference = store.store(object).map_err(|error| match error {
         RawStorageError::Unavailable => AcquisitionError::StorageUnavailable,
         RawStorageError::Refused => AcquisitionError::StorageRefused,
@@ -1974,6 +2007,8 @@ fn retain_raw<S: RawObjectStore>(
         || reference.canonicalization != expected_canonicalization
         || reference.media_type != expected_media_type
         || reference.byte_length != expected_length
+        || reference.original_sha256 != expected_original_sha256
+        || reference.original_byte_length != expected_original_byte_length
     {
         return Err(AcquisitionError::RawReferenceMismatch);
     }
@@ -2290,6 +2325,44 @@ fn redacted_headers(headers: &BTreeMap<String, String>) -> BTreeMap<String, Stri
         .collect()
 }
 
+fn redacted_endpoint(endpoint: &str) -> String {
+    if looks_like_secret(endpoint) {
+        return "[REDACTED_ENDPOINT]".to_owned();
+    }
+    let Ok(mut url) = Url::parse(endpoint) else {
+        return "[INVALID_ENDPOINT]".to_owned();
+    };
+    if !url.username().is_empty() || url.password().is_some() {
+        return "[REDACTED_ENDPOINT]".to_owned();
+    }
+    let pairs = url
+        .query_pairs()
+        .map(|(key, value)| {
+            let key = key.into_owned();
+            let value = value.into_owned();
+            (
+                key.clone(),
+                if key_is_sensitive(&key) {
+                    "[REDACTED]".to_owned()
+                } else {
+                    value
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    if pairs.iter().any(|(_, value)| looks_like_secret(value)) {
+        return "[REDACTED_ENDPOINT]".to_owned();
+    }
+    url.set_query(None);
+    if !pairs.is_empty() {
+        let mut query = url.query_pairs_mut();
+        for (key, value) in pairs {
+            query.append_pair(&key, &value);
+        }
+    }
+    url.to_string()
+}
+
 fn key_is_sensitive(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
     [
@@ -2306,8 +2379,9 @@ fn key_is_sensitive(key: &str) -> bool {
 
 fn looks_like_secret(value: &str) -> bool {
     let value = value.to_ascii_lowercase();
-    value.contains("ghp_")
-        || value.contains("github_pat_")
+    ["ghp_", "ghs_", "gho_", "ghu_", "ghr_", "github_pat_"]
+        .iter()
+        .any(|prefix| value.contains(prefix))
         || value.contains("bearer ")
         || value.contains("authorization:")
         || value.contains("x-oauth-basic")
@@ -2384,6 +2458,8 @@ mod tests {
                 canonicalization: object.canonicalization,
                 sha256: sha256_digest(&bytes),
                 byte_length: bytes.len() as u64,
+                original_sha256: object.original_sha256,
+                original_byte_length: object.original_byte_length,
                 media_type: object.media_type,
                 storage_ref: content_addressed_storage_ref(&sha256_digest(&bytes)),
             };
@@ -2412,6 +2488,8 @@ mod tests {
                 canonicalization: object.canonicalization,
                 sha256: "sha256:tampered".to_owned(),
                 byte_length: object.bytes.len() as u64,
+                original_sha256: object.original_sha256,
+                original_byte_length: object.original_byte_length,
                 media_type: object.media_type,
                 storage_ref: "sha256://tampered".to_owned(),
             })
@@ -2434,6 +2512,8 @@ mod tests {
                 canonicalization: object.canonicalization,
                 sha256: digest,
                 byte_length: object.bytes.len() as u64,
+                original_sha256: object.original_sha256,
+                original_byte_length: object.original_byte_length,
                 media_type: object.media_type,
                 storage_ref: "store://unbound/caller-asserted".to_owned(),
             })
@@ -2924,5 +3004,45 @@ mod tests {
         let debug = format!("{request:?}");
         assert!(!debug.contains("github_pat_secret"));
         assert!(debug.contains("REDACTED"));
+    }
+
+    #[tokio::test]
+    async fn unknown_github_token_marker_is_redacted_and_digest_pair_is_retained() {
+        let body = br#"[{"token":"ghs_unregistered_secret"}]"#.to_vec();
+        let transport = FixtureTransport::new(vec![Ok(raw_response(
+            200,
+            &[],
+            body.clone(),
+            "https://api.github.com/items",
+        ))]);
+        let mut store = MemoryStore::default();
+        let request = RestCollectionRequest::new("items", "/items", None::<String>, "items");
+        let result = collect_rest(&transport, &mut store, &auth(), request)
+            .await
+            .unwrap();
+        assert!(result.complete);
+        assert!(!store.bytes[0].windows(4).any(|window| window == b"ghs_"));
+        assert_eq!(result.raw_objects[0].original_sha256, sha256_digest(&body));
+        assert_eq!(
+            result.raw_objects[0].original_byte_length,
+            body.len() as u64
+        );
+        assert_ne!(
+            result.raw_objects[0].sha256,
+            result.raw_objects[0].original_sha256
+        );
+    }
+
+    #[test]
+    fn response_debug_redacts_credential_bearing_effective_url() {
+        let response = raw_response(
+            200,
+            &[],
+            b"{}".to_vec(),
+            "https://api.github.com/items?token=ghs_hidden",
+        );
+        let debug = format!("{response:?}");
+        assert!(!debug.contains("ghs_hidden"));
+        assert!(debug.contains("REDACTED_ENDPOINT"));
     }
 }
