@@ -15,6 +15,7 @@ mod cache;
 pub(crate) mod check_profiles;
 pub(crate) mod docs_site;
 mod ir;
+pub(crate) mod native_product;
 mod pipeline;
 mod plan;
 pub(crate) mod prepared_tools;
@@ -79,6 +80,8 @@ pub(crate) const PREVIEW: &str = "preview";
 pub(crate) const MAINTENANCE: &str = "maintenance";
 /// The release artifact provenance signer.
 pub(crate) const RELEASE_SIGNER: &str = "release-signer";
+/// The producer-owned native application package and manifest lane.
+pub(crate) const NATIVE_PRODUCT: &str = "native-product";
 /// The self-hosted Renovate writer workflow.
 pub(crate) const RENOVATE: &str = "renovate";
 /// The Renovate configuration validation workflow.
@@ -444,7 +447,6 @@ pub(crate) struct RenderCtx<'a> {
     /// The pinned action references every emitted job uses. A primitive that
     /// spells an action reference itself takes it from here, never from a
     /// literal, so the reviewed pin table stays the single source.
-    #[expect(dead_code, reason = "primitives render pins through the lane context")]
     pub(crate) pins: &'a Pins,
     /// The resolved lane matrix and the toolchain environment behind it.
     pub(crate) providers: &'a providers::ResolvedProviders,
@@ -609,6 +611,7 @@ pub(crate) fn registry() -> Vec<Box<dyn Primitive>> {
         Box::new(release::Maintenance),
         Box::new(release::ReleaseSigner),
         Box::new(release::StaticWorkflow),
+        Box::new(native_product::NativeProduct),
         Box::new(renovate::Renovate),
         Box::new(renovate::RenovateValidate),
         Box::new(check_profiles::ScheduledChecks),
@@ -795,7 +798,8 @@ pub(crate) fn generate(
                 && !renovate::is_renovate_side(&row.primitive)
                 && !docs_site::is_docs_site_side(&row.primitive)
                 && !check_profiles::is_scheduled_checks_side(&row.primitive)
-                && !runtime_products::is_runtime_products_side(&row.primitive))
+                && !runtime_products::is_runtime_products_side(&row.primitive)
+                && !native_product::is_native_product_side(&row.primitive))
         {
             continue;
         }
@@ -1008,6 +1012,7 @@ fn rows_for(
             || docs_site::is_docs_site_side(&row.primitive)
             || check_profiles::is_scheduled_checks_side(&row.primitive)
             || runtime_products::is_runtime_products_side(&row.primitive)
+            || native_product::is_native_product_side(&row.primitive)
     }) {
         rows.push(ResolvedRow::declared(row));
     }
@@ -1290,6 +1295,7 @@ fn validate(
             || docs_site::is_docs_site_side(&row.primitive)
             || check_profiles::is_scheduled_checks_side(&row.primitive)
             || runtime_products::is_runtime_products_side(&row.primitive)
+            || native_product::is_native_product_side(&row.primitive)
     }) {
         if !row.units.is_empty() {
             return Err(GeneratorError::usage(format!(
@@ -1436,6 +1442,7 @@ mod tests {
             PREVIEW,
             MAINTENANCE,
             RELEASE_SIGNER,
+            NATIVE_PRODUCT,
             STATIC_WORKFLOW,
             RENOVATE,
             RENOVATE_VALIDATE,

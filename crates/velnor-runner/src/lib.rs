@@ -75,6 +75,9 @@ mod permit_guard;
 mod plan;
 mod platform;
 mod preflight;
+/// The producer-owned application release manifest and offline artifact
+/// verification contract.
+pub mod product;
 pub mod protocol;
 mod release;
 /// The compile-time build identity, shared with `velnorctl --version` so the

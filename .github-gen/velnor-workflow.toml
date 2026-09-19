@@ -220,6 +220,44 @@ command = "cd -- 'crates/velnor-workflow' && mbx run --locked --manifest-path 'C
 
 # Release-side surface: typed native release, rolling preview, and signer.
 
+[[declare]]
+primitive = "native-product"
+file = "native-product.yml"
+
+[declare.args]
+archive_component = "velnorctl"
+archive_identity_schema = "velnor.homebrew-install-identity/v1"
+archive_manifest_schema = "velnor.homebrew-install/v1"
+channel = "stable"
+manifest_schema = "velnor.product-manifest/v1"
+product_id = "velnor"
+source_repository = "tailrocks/velnor"
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin"]
+
+[declare.args.components]
+velnor-runner = ["velnor-runner", "velnor-runner", "release-build", "version"]
+velnor-workflow = ["velnor-workflow", "velnor-workflow", "", "revision"]
+velnorctl = ["velnorctl", "velnorctl", "release-build", "version"]
+
+[[declare]]
+primitive = "native-product"
+file = "native-product-preview.yml"
+
+[declare.args]
+archive_component = "velnorctl"
+archive_identity_schema = "velnor.homebrew-install-identity/v1"
+archive_manifest_schema = "velnor.homebrew-install/v1"
+channel = "preview"
+manifest_schema = "velnor.product-manifest/v1"
+product_id = "velnor"
+source_repository = "tailrocks/velnor"
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin"]
+
+[declare.args.components]
+velnor-runner = ["velnor-runner", "velnor-runner", "release-build", "version"]
+velnor-workflow = ["velnor-workflow", "velnor-workflow", "", "revision"]
+velnorctl = ["velnorctl", "velnorctl", "release-build", "version"]
+
 
 [[declare]]
 primitive = "release-signer"
