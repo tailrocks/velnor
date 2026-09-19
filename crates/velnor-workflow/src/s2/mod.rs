@@ -6234,6 +6234,8 @@ struct FileIdentity {
     device: u64,
     #[cfg(unix)]
     inode: u64,
+    #[cfg(unix)]
+    mode: u32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -7089,8 +7091,10 @@ fn rollback_generated_files(
                     ));
                 }
             },
-            FilePreimage::Regular { bytes, .. } => {
+            FilePreimage::Regular { bytes, identity } => {
                 let staged = stage_generated_bytes(&path, bytes)?;
+                #[cfg(unix)]
+                restore_file_mode(&staged, identity.mode)?;
                 if let Err(error) = fs::rename(&staged, &path) {
                     let _ = fs::remove_file(&staged);
                     return Err(GeneratorError::io(
@@ -7260,6 +7264,7 @@ fn file_identity(metadata: &fs::Metadata) -> FileIdentity {
             length: metadata.len(),
             device: metadata.dev(),
             inode: metadata.ino(),
+            mode: metadata.mode() & 0o7777,
         }
     }
     #[cfg(not(unix))]
@@ -7268,6 +7273,14 @@ fn file_identity(metadata: &fs::Metadata) -> FileIdentity {
             length: metadata.len(),
         }
     }
+}
+
+#[cfg(unix)]
+fn restore_file_mode(path: &Path, mode: u32) -> Result<(), GeneratorError> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .map_err(|error| GeneratorError::io("restore generated file mode", path, &error))
 }
 
 fn validate_plan_preimages(root: &Path, plan: &GeneratedWritePlan) -> Result<(), GeneratorError> {
@@ -7715,6 +7728,13 @@ where
         return Err(preimage_changed(relative));
     }
     let staged = stage_generated_file(path, content)?;
+    #[cfg(unix)]
+    if let FilePreimage::Regular { identity, .. } = expected {
+        // Preserve the reviewed mode across the atomic replacement. The mode
+        // is part of the preimage identity, so a concurrent chmod is caught
+        // before this point and never silently normalized.
+        restore_file_mode(&staged, identity.mode)?;
+    }
     match expected {
         FilePreimage::Missing => {
             if let Err(error) = fs::hard_link(&staged, path) {
@@ -19357,6 +19377,89 @@ lockfile = true
         assert!(error.to_string().contains("changed after preflight"));
         let _ = fs::remove_dir_all(root);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn reviewed_preimages_bind_file_mode_even_when_bytes_match() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let root = temporary_repository("reviewed-preimage-mode");
+        let relative = PathBuf::from(".github/workflows/ci-pr.yml");
+        let files = BTreeMap::from([(
+            relative.clone(),
+            format!("{GENERATED_HEADER}name: current\n"),
+        )]);
+        must(
+            write_generated(&root, &files, false, false, false),
+            "write generated layout",
+        );
+        let reviewed = must(
+            plan_generated_write(&root, &files, &GenerationInputs::parts(0, 0)),
+            "capture reviewed mode",
+        );
+        let path = root.join(&relative);
+        let current_mode = must(fs::metadata(&path), "read reviewed mode").mode() & 0o7777;
+        let changed_mode = current_mode ^ 0o100;
+        must(
+            fs::set_permissions(&path, fs::Permissions::from_mode(changed_mode)),
+            "change reviewed mode concurrently",
+        );
+
+        let error = must_some(
+            apply_generated_write_plan(
+                &root,
+                &files,
+                &GenerationInputs::parts(0, 0),
+                true,
+                false,
+                false,
+                &reviewed,
+            )
+            .err(),
+            "refuse concurrent mode change",
+        );
+        assert!(error.to_string().contains("changed after preflight"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_restores_reviewed_file_mode() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let root = temporary_repository("rollback-file-mode");
+        let relative = PathBuf::from(".github/workflows/ci-pr.yml");
+        let path = root.join(&relative);
+        must(
+            fs::create_dir_all(path.parent().unwrap_or(&root)),
+            "create workflow directory",
+        );
+        must(fs::write(&path, "old bytes\n"), "write old bytes");
+        must(
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o640)),
+            "set old mode",
+        );
+        let preimage = must(capture_file_preimage(&path, &relative), "capture old mode");
+        must(atomic_write(&path, "new bytes\n"), "write replacement");
+        must(
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)),
+            "change replacement mode",
+        );
+        must(
+            rollback_generated_files(&root, &[(relative.clone(), preimage)]),
+            "roll back reviewed file",
+        );
+        assert_eq!(
+            must(fs::read_to_string(&path), "read rolled back bytes"),
+            "old bytes\n"
+        );
+        assert_eq!(
+            must(fs::metadata(&path), "read rolled back mode").mode() & 0o7777,
+            0o640
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn reviewed_update_keeps_live_path_present_until_atomic_replace() {
         let root = temporary_repository("atomic-reviewed-replace");
