@@ -1319,28 +1319,89 @@ fn validate_product_manifest_selection(
             "discovery product manifest identity does not match selection",
         ));
     }
-    if manifest
+    let components = manifest
         .get("components")
         .and_then(serde_json::Value::as_array)
-        .is_none_or(|components| components.is_empty())
-        || manifest
-            .get("artifacts")
-            .and_then(serde_json::Value::as_array)
-            .is_none_or(|artifacts| artifacts.is_empty())
-    {
+        .ok_or_else(|| GeneratorError::usage("discovery components are not an array"))?;
+    if components.is_empty() {
         return Err(GeneratorError::usage(
-            "discovery product manifest has no component or artifact inventory",
+            "discovery product manifest has no component inventory",
         ));
+    }
+    let mut component_names = BTreeSet::new();
+    for component in components {
+        exact_object_keys(
+            component,
+            &["binary", "crate", "name", "targets", "version"],
+            "discovery product component",
+        )?;
+        let name = field(component, "name")?;
+        let crate_name = field(component, "crate")?;
+        let binary = field(component, "binary")?;
+        let version = field(component, "version")?;
+        let targets = component
+            .get("targets")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| GeneratorError::usage("discovery component targets are not an array"))?;
+        if !valid_package_name(name)
+            || !valid_package_name(crate_name)
+            || !valid_binary_name(binary)
+            || name != crate_name
+            || name != binary
+            || version.is_empty()
+            || version
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+            || targets.is_empty()
+            || !component_names.insert(name)
+        {
+            return Err(GeneratorError::usage(
+                "discovery product component identity is invalid or duplicated",
+            ));
+        }
+        for target in targets {
+            let target = target.as_str().ok_or_else(|| {
+                GeneratorError::usage("discovery component target is not a string")
+            })?;
+            if target.is_empty()
+                || target
+                    .bytes()
+                    .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+            {
+                return Err(GeneratorError::usage(
+                    "discovery component target is invalid",
+                ));
+            }
+        }
     }
     let artifacts = manifest
         .get("artifacts")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| GeneratorError::usage("discovery artifacts are not an array"))?;
+    if artifacts.is_empty() {
+        return Err(GeneratorError::usage(
+            "discovery product manifest has no artifact inventory",
+        ));
+    }
+    let mut artifact_names = BTreeSet::new();
     for artifact in artifacts {
+        exact_object_keys(
+            artifact,
+            &["kind", "name", "sha256", "size", "target"],
+            "discovery product artifact",
+        )?;
         let name = field(artifact, "name")?;
         if !valid_discovery_asset_name(name) {
             return Err(GeneratorError::usage(
                 "discovery product artifact has an unsafe name",
+            ));
+        }
+        if name == DISCOVERY_SELECTION_FILE
+            || name == PRODUCT_MANIFEST_ASSET
+            || !artifact_names.insert(name)
+        {
+            return Err(GeneratorError::usage(
+                "discovery product artifact name is reserved or duplicated",
             ));
         }
         let size = positive_field(artifact, "size")?;
@@ -1351,7 +1412,15 @@ fn validate_product_manifest_selection(
         }
         let kind = field(artifact, "kind")?;
         let target = field(artifact, "target")?;
-        if kind.is_empty() || target.is_empty() {
+        if kind.is_empty()
+            || target.is_empty()
+            || kind
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+            || target
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+        {
             return Err(GeneratorError::usage(
                 "discovery product artifact identity is empty",
             ));
@@ -1607,6 +1676,18 @@ pub(crate) fn read_discovery_selection(path: &Path) -> Result<DiscoverySelection
             state,
             browser_download_url,
         });
+    }
+    let manifest_artifacts = manifest
+        .get("artifacts")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| GeneratorError::usage("discovery product artifacts are not an array"))?;
+    for artifact in manifest_artifacts {
+        let name = field(artifact, "name")?;
+        if !seen_names.contains(name) {
+            return Err(GeneratorError::usage(format!(
+                "discovery product artifact is absent from release assets: {name}"
+            )));
+        }
     }
     for required in [
         PRODUCT_MANIFEST_ASSET,
@@ -4131,9 +4212,9 @@ pub(crate) fn parse_publication_record(
     let release_id = match document.get("release_id") {
         None => None,
         Some(value) => {
-            let release_id = value.as_str().ok_or_else(|| {
-                GeneratorError::usage("publication release ID is not a string")
-            })?;
+            let release_id = value
+                .as_str()
+                .ok_or_else(|| GeneratorError::usage("publication release ID is not a string"))?;
             if !valid_release_id(release_id) {
                 return Err(GeneratorError::usage(
                     "publication release ID has an invalid grammar",
@@ -4628,6 +4709,339 @@ mod tests {
 
     fn write_sidecar(path: &Path, digest: &str) {
         write_bytes(path, format!("{digest}  {}\n", path.display()).as_bytes());
+    }
+
+    struct DiscoveryFixture {
+        root: PathBuf,
+        selection_path: PathBuf,
+        incoming: PathBuf,
+        document: serde_json::Value,
+        assets: Vec<(u64, String, Vec<u8>)>,
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn discovery_fixture(name: &str) -> DiscoveryFixture {
+        let root = fixture_dir(name);
+        let selection_path = root.join("selection.json");
+        let incoming = root.join("incoming");
+        let amd64 = b"amd64-deb".to_vec();
+        let arm64 = b"arm64-deb".to_vec();
+        let manifest = serde_json::json!({
+            "schema": PRODUCT_MANIFEST_SCHEMA,
+            "product_id": "velnor",
+            "channel": "stable",
+            "version": "1.2.3",
+            "source_repository": FIXTURE_SOURCE,
+            "source_ref": "refs/tags/v1.2.3",
+            "source_commit": FIXTURE_COMMIT,
+            "release_tag": "v1.2.3",
+            "release_id": "provider/123",
+            "artifacts": [
+                {
+                    "name": "example-1.2.3-amd64.deb",
+                    "target": "x86_64-unknown-linux-gnu",
+                    "kind": "apt-package",
+                    "sha256": sha256_hex(&amd64),
+                    "size": amd64.len()
+                },
+                {
+                    "name": "example-1.2.3-arm64.deb",
+                    "target": "aarch64-unknown-linux-gnu",
+                    "kind": "apt-package",
+                    "sha256": sha256_hex(&arm64),
+                    "size": arm64.len()
+                }
+            ],
+            "components": [
+                {
+                    "name": "velnorctl",
+                    "crate": "velnorctl",
+                    "version": "1.2.3",
+                    "binary": "velnorctl",
+                    "targets": ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+                },
+                {
+                    "name": "velnor-runner",
+                    "crate": "velnor-runner",
+                    "version": "1.2.3",
+                    "binary": "velnor-runner",
+                    "targets": ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+                },
+                {
+                    "name": "velnor-workflow",
+                    "crate": "velnor-workflow",
+                    "version": "1.2.3",
+                    "binary": "velnor-workflow",
+                    "targets": ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+                }
+            ]
+        });
+        let manifest_bytes = must(
+            serde_json::to_vec(&manifest),
+            "serialize discovery product manifest",
+        );
+        let manifest_sha256 = sha256_hex(&manifest_bytes);
+        let mut raw_assets = vec![
+            (PRODUCT_MANIFEST_ASSET.to_owned(), manifest_bytes),
+            (
+                "product-manifest.json.sha256".to_owned(),
+                format!("{manifest_sha256}  product-manifest.json\n").into_bytes(),
+            ),
+            ("release-record.json".to_owned(), b"release-record".to_vec()),
+            (
+                "release-record.json.sha256".to_owned(),
+                b"release-record-sidecar".to_vec(),
+            ),
+            ("manifest.json".to_owned(), b"manifest".to_vec()),
+            (
+                "manifest.json.sha256".to_owned(),
+                b"manifest-sidecar".to_vec(),
+            ),
+            (
+                PREVIEW_MANIFEST_FILE.to_owned(),
+                b"preview-manifest".to_vec(),
+            ),
+            (SHA256SUMS_FILE.to_owned(), b"sha256sums".to_vec()),
+            ("example-1.2.3-amd64.deb".to_owned(), amd64),
+            ("example-1.2.3-arm64.deb".to_owned(), arm64),
+        ];
+        let mut release_assets = Vec::new();
+        let mut assets = Vec::new();
+        for (offset, (name, bytes)) in raw_assets.drain(..).enumerate() {
+            let id = 100 + offset as u64;
+            release_assets.push(serde_json::json!({
+                "id": id,
+                "name": name,
+                "size": bytes.len(),
+                "state": "uploaded",
+                "browser_download_url": format!(
+                    "https://github.com/{FIXTURE_SOURCE}/releases/download/v1.2.3/{name}"
+                )
+            }));
+            assets.push((id, name, bytes));
+        }
+        let document = serde_json::json!({
+            "channel": "stable",
+            "manifest": manifest,
+            "manifest_asset": PRODUCT_MANIFEST_ASSET,
+            "manifest_schema": PRODUCT_MANIFEST_SCHEMA,
+            "manifest_sha256": manifest_sha256,
+            "package": FIXTURE_PACKAGE,
+            "product_id": "velnor",
+            "provider_release_id": 123,
+            "published_at": "2026-09-20T00:00:00Z",
+            "release_assets": release_assets,
+            "release_id": "provider/123",
+            "release_tag": "v1.2.3",
+            "release_url": format!("https://github.com/{FIXTURE_SOURCE}/releases/tag/v1.2.3"),
+            "source_commit": FIXTURE_COMMIT,
+            "source_ref": "refs/tags/v1.2.3",
+            "source_ref_resolution": {
+                "method": "github-git-ref",
+                "proof_ref": "refs/tags/v1.2.3",
+                "resolved_commit": FIXTURE_COMMIT
+            },
+            "source_repository": FIXTURE_SOURCE,
+            "tag": "v1.2.3",
+            "target_commitish": "v1.2.3",
+            "version": "1.2.3"
+        });
+        let document_bytes = must(
+            serde_json::to_vec(&document),
+            "serialize discovery selection",
+        );
+        write_bytes(&selection_path, &document_bytes);
+        write_bytes(&incoming.join(DISCOVERY_SELECTION_FILE), &document_bytes);
+        for (_, name, bytes) in &assets {
+            write_bytes(&incoming.join(name), bytes);
+        }
+        write_bytes(&incoming.join(SENTINEL_FILE), b"armed\n");
+        DiscoveryFixture {
+            root,
+            selection_path,
+            incoming,
+            document,
+            assets,
+        }
+    }
+
+    fn discovery_gh_stub(fixture: &DiscoveryFixture) -> PathBuf {
+        let bin = fixture.root.join("bin");
+        let asset_root = fixture.root.join("asset-by-id");
+        must(std::fs::create_dir_all(&bin), "create gh stub bin");
+        must(std::fs::create_dir_all(&asset_root), "create gh asset root");
+        let log = fixture.root.join("gh.log");
+        let mut script = format!(
+            "#!/bin/sh\nendpoint=\"\"\nfor arg in \"$@\"; do endpoint=\"$arg\"; done\nprintf '%s\\n' \"$endpoint\" >> \"{}\"\ncase \"$endpoint\" in\n",
+            log.display()
+        );
+        for (id, _, bytes) in &fixture.assets {
+            write_bytes(&asset_root.join(format!("asset-{id}")), bytes);
+            script.push_str(&format!(
+                "  repos/{FIXTURE_SOURCE}/releases/assets/{id}) cat \"{}/asset-{id}\" ;;\n",
+                asset_root.display()
+            ));
+        }
+        script.push_str("  *) exit 1 ;;\nesac\n");
+        write_bytes(&bin.join("gh"), script.as_bytes());
+        make_executable(&bin.join("gh"));
+        bin
+    }
+
+    #[test]
+    fn discovery_selection_binds_asset_ids_and_preserves_hidden_sentinel() {
+        let fixture = discovery_fixture("discovery-immutable");
+        let bin = discovery_gh_stub(&fixture);
+        let fetched = fixture.root.join("fetched");
+        let selected = must(
+            run_fetch_selection(&fixture.selection_path, &fetched, Some(&bin)),
+            "fetch immutable selection",
+        );
+        let log = must(
+            std::fs::read_to_string(fixture.root.join("gh.log")),
+            "read gh asset log",
+        );
+        let expected = selected
+            .release_assets
+            .iter()
+            .map(|asset| format!("repos/{}/releases/assets/{}", FIXTURE_SOURCE, asset.id))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(log.trim_end(), expected);
+
+        write_bytes(&fetched.join(SENTINEL_FILE), b"armed\n");
+        must(
+            verify_discovery_incoming(&fixture.selection_path, &fetched),
+            "verify fetched selection",
+        );
+        assert!(fetched.join(SENTINEL_FILE).is_file());
+
+        let mut tampered = fixture.document.clone();
+        tampered["release_assets"][0]["id"] = serde_json::json!(9999);
+        write_bytes(
+            &fetched.join(DISCOVERY_SELECTION_FILE),
+            &must(serde_json::to_vec(&tampered), "serialize ID tamper"),
+        );
+        let error = must_fail(
+            verify_discovery_incoming(&fixture.selection_path, &fetched),
+            "reject persisted asset ID tamper",
+        );
+        assert!(
+            error.contains("differs from the selected release"),
+            "{error}"
+        );
+        write_bytes(
+            &fetched.join(DISCOVERY_SELECTION_FILE),
+            &must(
+                serde_json::to_vec(&fixture.document),
+                "restore persisted selection",
+            ),
+        );
+
+        write_bytes(&fetched.join("example-1.2.3-amd64.deb"), b"tamperxxx");
+        let error = must_fail(
+            verify_discovery_incoming(&fixture.selection_path, &fetched),
+            "reject selected artifact byte tamper",
+        );
+        assert!(
+            error.contains("differs from canonical inventory"),
+            "{error}"
+        );
+        write_bytes(&fetched.join("example-1.2.3-amd64.deb"), b"amd64-deb");
+        write_bytes(&fetched.join(".unexpected"), b"hidden");
+        let error = must_fail(
+            verify_discovery_incoming(&fixture.selection_path, &fetched),
+            "reject unknown hidden asset",
+        );
+        assert!(error.contains("absent from discovery"), "{error}");
+        let _ = std::fs::remove_dir_all(&fixture.root);
+    }
+
+    #[test]
+    fn discovery_selection_requires_every_manifest_artifact_asset() {
+        let fixture = discovery_fixture("discovery-inventory");
+        let mut tampered = fixture.document.clone();
+        let assets = tampered["release_assets"]
+            .as_array_mut()
+            .expect("fixture release assets array");
+        assets.retain(|asset| asset["name"] != "example-1.2.3-arm64.deb");
+        write_bytes(
+            &fixture.selection_path,
+            &must(
+                serde_json::to_vec(&tampered),
+                "serialize incomplete release inventory",
+            ),
+        );
+        let error = must_fail(
+            read_discovery_selection(&fixture.selection_path),
+            "reject incomplete release inventory",
+        );
+        assert!(error.contains("absent from release assets"), "{error}");
+        let _ = std::fs::remove_dir_all(&fixture.root);
+    }
+
+    #[test]
+    fn discovery_selection_rejects_component_and_release_url_drift() {
+        let fixture = discovery_fixture("discovery-identity");
+        let mut tampered = fixture.document.clone();
+        tampered["manifest"]["components"][0]["binary"] = serde_json::json!("other");
+        write_bytes(
+            &fixture.selection_path,
+            &must(
+                serde_json::to_vec(&tampered),
+                "serialize component identity tamper",
+            ),
+        );
+        let error = must_fail(
+            read_discovery_selection(&fixture.selection_path),
+            "reject component identity tamper",
+        );
+        assert!(error.contains("component identity"), "{error}");
+
+        tampered = fixture.document.clone();
+        tampered["release_url"] = serde_json::json!("https://evil.example/release");
+        write_bytes(
+            &fixture.selection_path,
+            &must(serde_json::to_vec(&tampered), "serialize URL tamper"),
+        );
+        let error = must_fail(
+            read_discovery_selection(&fixture.selection_path),
+            "reject release URL tamper",
+        );
+        assert!(error.contains("canonical GitHub release URL"), "{error}");
+        let _ = std::fs::remove_dir_all(&fixture.root);
+    }
+
+    #[test]
+    fn preview_source_proof_must_bind_main_ancestry() {
+        let tag = format!("preview-{FIXTURE_COMMIT}");
+        let proof = serde_json::json!({
+            "method": "github-git-ref",
+            "proof_ref": format!("refs/tags/{tag}"),
+            "resolved_commit": FIXTURE_COMMIT,
+            "declared_ref_provenance": {
+                "base_commit": "fedcba9876543210fedcba9876543210fedcba98",
+                "head_commit": FIXTURE_COMMIT,
+                "merge_base_commit": FIXTURE_COMMIT,
+                "method": "github-compare-ancestry",
+                "ref": PREVIEW_SOURCE_REF,
+                "relation": "ancestor",
+                "status": "behind"
+            }
+        });
+        let valid = serde_json::json!({"source_ref_resolution": proof});
+        must(
+            validate_source_ref_resolution(&valid, "preview", &tag, FIXTURE_COMMIT),
+            "accept proven preview ancestry",
+        );
+        let mut tampered = valid;
+        tampered["source_ref_resolution"]["declared_ref_provenance"]["merge_base_commit"] =
+            serde_json::json!("fedcba9876543210fedcba9876543210fedcba98");
+        let error = must_fail(
+            validate_source_ref_resolution(&tampered, "preview", &tag, FIXTURE_COMMIT),
+            "reject unproven preview branch",
+        );
+        assert!(error.contains("main ancestry"), "{error}");
     }
 
     fn apt_spec() -> ReleaseSpec {

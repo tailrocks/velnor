@@ -3754,10 +3754,7 @@ fn apt_result<T>(result: Result<T, crate::GeneratorError>) -> Result<T, Generato
     result.map_err(apt_error)
 }
 
-fn apt_flag_bool(
-    options: &BTreeMap<String, String>,
-    name: &str,
-) -> Result<bool, GeneratorError> {
+fn apt_flag_bool(options: &BTreeMap<String, String>, name: &str) -> Result<bool, GeneratorError> {
     match options.get(name).map(String::as_str) {
         None | Some("false") => Ok(false),
         Some("true") => Ok(true),
@@ -3767,38 +3764,32 @@ fn apt_flag_bool(
     }
 }
 
-fn parse_apt_arches(
-    options: &BTreeMap<String, String>,
-) -> Result<Vec<String>, GeneratorError> {
-    options
-        .get("apt-arches")
-        .map_or_else(
-            || Ok(Vec::new()),
-            |value| {
-                let arches = value
-                    .split(',')
-                    .filter(|arch| !arch.is_empty())
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>();
-                if arches.is_empty() {
-                    Err(GeneratorError::usage(
-                        "--apt-arches must contain at least one architecture",
-                    ))
-                } else {
-                    Ok(arches)
-                }
-            },
-        )
+fn parse_apt_arches(options: &BTreeMap<String, String>) -> Result<Vec<String>, GeneratorError> {
+    options.get("apt-arches").map_or_else(
+        || Ok(Vec::new()),
+        |value| {
+            let arches = value
+                .split(',')
+                .filter(|arch| !arch.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            if arches.is_empty() {
+                Err(GeneratorError::usage(
+                    "--apt-arches must contain at least one architecture",
+                ))
+            } else {
+                Ok(arches)
+            }
+        },
+    )
 }
 
 fn parse_retention(options: &BTreeMap<String, String>) -> Result<u32, GeneratorError> {
-    options
-        .get("retention")
-        .map_or(Ok(0), |value| {
-            value.parse::<u32>().map_err(|_| {
-                GeneratorError::usage("--retention must be a non-negative integer")
-            })
-        })
+    options.get("retention").map_or(Ok(0), |value| {
+        value
+            .parse::<u32>()
+            .map_err(|_| GeneratorError::usage("--retention must be a non-negative integer"))
+    })
 }
 
 fn s2_apt_spec(
@@ -3898,7 +3889,9 @@ fn apt_verify(arguments: &[OsString]) -> Result<(), GeneratorError> {
             "verify-oci",
         ],
     )?;
-    let selection = apt_result(crate::apt::read_discovery_selection(selection_path(&options)?))?;
+    let selection = apt_result(crate::apt::read_discovery_selection(selection_path(
+        &options,
+    )?))?;
     let suite = selection_context(&options, &selection)?;
     let incoming = Path::new(required_option(&options, "incoming")?);
     apt_result(crate::apt::verify_discovery_incoming(
@@ -4016,7 +4009,9 @@ fn apt_previous_pointer(arguments: &[OsString]) -> Result<(), GeneratorError> {
             "bootstrap",
         ],
     )?;
-    let selection = apt_result(crate::apt::read_discovery_selection(selection_path(&options)?))?;
+    let selection = apt_result(crate::apt::read_discovery_selection(selection_path(
+        &options,
+    )?))?;
     let suite = selection_context(&options, &selection)?;
     let bootstrap = apt_flag_bool(&options, "bootstrap")?;
     let pointer = match suite {
@@ -4096,14 +4091,19 @@ fn apt_channel_update(arguments: &[OsString]) -> Result<(), GeneratorError> {
         staging: Path::new(required_option(&options, "staging")?),
     };
     apt_result(crate::apt::run_channel_update(&inputs))?;
-    apt_result(crate::apt::bind_selection_channel_state(&selection, inputs.staging))?;
+    apt_result(crate::apt::bind_selection_channel_state(
+        &selection,
+        inputs.staging,
+    ))?;
     println!("{} channel state updated", inputs.suite.as_str());
     Ok(())
 }
 
 fn apt_deploy_guard(arguments: &[OsString]) -> Result<(), GeneratorError> {
     let options = parse_options(arguments, &["suite", "staged", "live-version"])?;
-    let suite = apt_result(crate::apt::Suite::parse(required_option(&options, "suite")?))?;
+    let suite = apt_result(crate::apt::Suite::parse(required_option(
+        &options, "suite",
+    )?))?;
     let staged = required_option(&options, "staged")?;
     let staged_text = fs::read_to_string(Path::new(staged).join(suite.last_publish_file()))
         .map_err(|error| {

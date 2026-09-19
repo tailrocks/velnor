@@ -5101,6 +5101,7 @@ mod tests {
             registry: String::new(),
             registry_username_secret: String::new(),
             registry_password_secret: String::new(),
+            ..ReleaseSpec::default()
         }
     }
 
@@ -5138,6 +5139,7 @@ mod tests {
             registry: String::new(),
             registry_username_secret: String::new(),
             registry_password_secret: String::new(),
+            ..ReleaseSpec::default()
         }
     }
 
@@ -5171,6 +5173,7 @@ mod tests {
             registry: String::new(),
             registry_username_secret: String::new(),
             registry_password_secret: String::new(),
+            ..ReleaseSpec::default()
         }
     }
 
@@ -7513,6 +7516,7 @@ mod tests {
                 registry: String::new(),
                 registry_username_secret: String::new(),
                 registry_password_secret: String::new(),
+                ..ReleaseSpec::default()
             });
             let surface = must(
                 super::super::generate(&root, &shape, &scanned, None),
@@ -7690,6 +7694,7 @@ mod tests {
                 registry: String::new(),
                 registry_username_secret: String::new(),
                 registry_password_secret: String::new(),
+                ..ReleaseSpec::default()
             });
             let surface = must(
                 super::super::generate(&root, &shape, &scanned, None),
@@ -7953,6 +7958,7 @@ mod tests {
             registry: String::new(),
             registry_username_secret: String::new(),
             registry_password_secret: String::new(),
+            ..ReleaseSpec::default()
         }
     }
 
