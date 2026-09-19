@@ -377,9 +377,8 @@ fn cache_statuses(active: bool) -> (u64, u64, u64, u64) {
             present_mask |= 1_u64 << index;
         }
         if let Ok(mut entries) = fs::read_dir(path) {
-            if entries.next().is_some_and(|entry| entry.is_ok()) {
-                readable_mask |= 1_u64 << index;
-            }
+            let _ = entries.next();
+            readable_mask |= 1_u64 << index;
         }
         if active
             && mount_write_status(&PathBuf::from(path).join(".velnor-hostile-cache"), active)
