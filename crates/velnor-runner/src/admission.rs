@@ -330,6 +330,7 @@ pub enum ActionMetadataSourceError {
         git_ref: String,
         detail: String,
     },
+    Internal(String),
 }
 
 #[derive(Debug)]
@@ -382,6 +383,12 @@ impl fmt::Display for ActionMetadataSourceError {
                 formatter,
                 "parse action metadata for {repository}@{git_ref}: {detail}"
             ),
+            Self::Internal(detail) => {
+                write!(
+                    formatter,
+                    "action metadata source failed internally: {detail}"
+                )
+            }
         }
     }
 }
@@ -451,6 +458,7 @@ impl AdmissionError {
             ActionMetadataSourceError::ManifestMalformed { .. } => {
                 (AdmissionFailureKind::ManifestMalformed, "action.yml")
             }
+            ActionMetadataSourceError::Internal(_) => (AdmissionFailureKind::Internal, "metadata"),
         };
         Self::with_kind(ancestry, field, error.to_string(), Vec::new(), kind)
     }
@@ -602,13 +610,13 @@ impl ActionMetadataSource for ContentsApiMetadataSource {
                 format!("{directory}/{file}")
             };
             let mut url = url::Url::parse(&self.api_url).map_err(|error| {
-                ActionMetadataSourceError::ApiTransport(format!(
+                ActionMetadataSourceError::Internal(format!(
                     "parse configured GitHub API URL: {error}"
                 ))
             })?;
             {
                 let mut segments = url.path_segments_mut().map_err(|_| {
-                    ActionMetadataSourceError::ApiTransport(
+                    ActionMetadataSourceError::Internal(
                         "cannot build GitHub Contents URL".to_string(),
                     )
                 })?;
@@ -632,7 +640,30 @@ impl ActionMetadataSource for ContentsApiMetadataSource {
                 &self.token,
                 MAX_ACTION_METADATA_BYTES,
             )
-            .map_err(|error| ActionMetadataSourceError::ApiTransport(format!("{error:#}")))?;
+            .map_err(|error| match error {
+                crate::protocol::GithubContentsRequestError::Transport(detail) => {
+                    ActionMetadataSourceError::ApiTransport(detail)
+                }
+                crate::protocol::GithubContentsRequestError::BodyTooLarge { max_body_bytes } => {
+                    ActionMetadataSourceError::ManifestMalformed {
+                        repository: repository.to_string(),
+                        git_ref: git_ref.to_string(),
+                        detail: format!(
+                            "GitHub Contents response body exceeds {max_body_bytes} bytes"
+                        ),
+                    }
+                }
+                crate::protocol::GithubContentsRequestError::BodyInvalidUtf8 => {
+                    ActionMetadataSourceError::ManifestMalformed {
+                        repository: repository.to_string(),
+                        git_ref: git_ref.to_string(),
+                        detail: "GitHub Contents response body is not valid UTF-8".to_string(),
+                    }
+                }
+                crate::protocol::GithubContentsRequestError::Internal(detail) => {
+                    ActionMetadataSourceError::Internal(detail)
+                }
+            })?;
             if (200..300).contains(&response.status) {
                 let contents = response.body;
                 return crate::action::parse_action_metadata(&contents).map_err(|error| {
@@ -656,7 +687,10 @@ impl ActionMetadataSource for ContentsApiMetadataSource {
 }
 
 #[cfg(test)]
-fn read_bounded_metadata_body<R: Read>(reader: R, content_length: Option<u64>) -> Result<String> {
+fn read_bounded_metadata_body<R: Read>(
+    reader: R,
+    content_length: Option<u64>,
+) -> std::result::Result<String, crate::protocol::GithubContentsRequestError> {
     crate::protocol::read_bounded_http_body(reader, content_length, MAX_ACTION_METADATA_BYTES)
 }
 
@@ -1913,6 +1947,11 @@ mod tests {
                 AdmissionFailureKind::ManifestMalformed,
                 "action.yml",
             ),
+            (
+                ActionMetadataSourceError::Internal("invalid API configuration".to_string()),
+                AdmissionFailureKind::Internal,
+                "metadata",
+            ),
         ];
 
         for (failure, expected_kind, expected_field) in cases {
@@ -2014,6 +2053,16 @@ mod tests {
 
     #[cfg(feature = "test-support")]
     fn contents_error_for_responses(responses: Vec<(u16, String)>) -> ActionMetadataSourceError {
+        contents_error_for_bytes(
+            responses
+                .into_iter()
+                .map(|(status, body)| (status, body.into_bytes()))
+                .collect(),
+        )
+    }
+
+    #[cfg(feature = "test-support")]
+    fn contents_error_for_bytes(responses: Vec<(u16, Vec<u8>)>) -> ActionMetadataSourceError {
         use std::io::{Read, Write};
         use std::net::TcpListener;
         use std::thread;
@@ -2049,10 +2098,11 @@ mod tests {
                 };
                 write!(
                     stream,
-                    "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 )
                 .unwrap();
+                let _ = stream.write_all(&body);
             }
         });
         let source = ContentsApiMetadataSource::new_for_test("test-token", api).unwrap();
@@ -2107,8 +2157,48 @@ mod tests {
 
         let malformed_error = contents_error_for_responses(vec![(200, "runs: [\n".to_string())]);
         assert!(matches!(
-            malformed_error,
+            &malformed_error,
             ActionMetadataSourceError::ManifestMalformed { .. }
+        ));
+
+        let oversized_error =
+            contents_error_for_bytes(vec![(200, vec![b'x'; MAX_ACTION_METADATA_BYTES + 1])]);
+        assert!(matches!(
+            &oversized_error,
+            ActionMetadataSourceError::ManifestMalformed { .. }
+        ));
+        assert_eq!(
+            AdmissionError::from_metadata_source(&Ancestry::default(), oversized_error)
+                .failure_kind(),
+            AdmissionFailureKind::ManifestMalformed
+        );
+
+        let invalid_utf8_error = contents_error_for_bytes(vec![(200, vec![0xff])]);
+        assert!(matches!(
+            &invalid_utf8_error,
+            ActionMetadataSourceError::ManifestMalformed { .. }
+        ));
+        assert_eq!(
+            AdmissionError::from_metadata_source(&Ancestry::default(), invalid_utf8_error)
+                .failure_kind(),
+            AdmissionFailureKind::ManifestMalformed
+        );
+
+        // The test holds the process-wide transport environment lock.
+        unsafe { std::env::set_var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV, "unsupported") };
+        let internal_source =
+            ContentsApiMetadataSource::new_for_test("test-token", "http://127.0.0.1:1".to_string())
+                .unwrap();
+        let internal_error = internal_source
+            .fetch_action_metadata(
+                "jackin-project/jackin-role-action",
+                "041f17a6d32f8fd2a8ef03c2a63be58346993136",
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            internal_error,
+            ActionMetadataSourceError::Internal(_)
         ));
     }
 
