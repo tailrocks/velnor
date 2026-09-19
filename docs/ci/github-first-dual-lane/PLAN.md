@@ -155,7 +155,7 @@ The conversion is strict and canonical: no CLI or serde aliases, flat-fleet
 coercion, merged release/install fallback, or conflict-precedence shim is
 permitted. Producers emit one representation and reject duplicates/conflicts;
 missing facts remain incomplete. The checker owner must publish the exact
-canonical command after schema review; no compatibility path is a substitute.
+canonical command after schema review; only that command is authoritative.
 
 The bounded external follow-ups are `/root/g0_fleet` in a new isolated tree
 for baseline scope reconciliation, `/root/g1_run_operations` in a new
@@ -212,9 +212,8 @@ in the named external G0 subdirectories.
 The checker workstream's contract is
 `docs/ci/github-first-dual-lane/evidence-schema.md` in its worktree. The
 canonical manifest fields are `schema_version: 1` and `manifest_id`; this
-manifest uses those names only. `manifest_version` and `schema` are not
-aliases accepted by this records contract. Preparation rows remain nullable
-and fail G0 until live workload evidence replaces the unknowns.
+manifest uses those names only. Preparation rows remain nullable and fail G0
+until live workload evidence replaces the unknowns.
 
 ## Ownership and mutation rules
 
