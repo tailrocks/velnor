@@ -5,7 +5,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 
-use proc_macro2::{TokenStream, TokenTree};
+use proc_macro2::{Spacing, TokenStream, TokenTree};
 use syn::parse::Parser;
 use syn::punctuated::Punctuated;
 use syn::token::Comma;
@@ -149,9 +149,12 @@ fn include_invocation(
         _ => return Ok(None),
     };
     // `foo::include_str!` is a user macro path, not the built-in include
-    // macro. A direct include invocation can still have comments/whitespace
-    // between its name, bang, and delimiter because tokens discard trivia.
-    if index > 0 && is_colon(&tokens[index - 1]) {
+    // macro. A field value has one preceding colon (`field: include_str!`),
+    // so only an actual token-glued `::` path qualification suppresses the
+    // invocation. A direct include invocation can still have comments/
+    // whitespace between its name, bang, and delimiter because tokens discard
+    // trivia.
+    if is_double_colon_before(tokens, index) {
         return Ok(None);
     }
     if !tokens
@@ -242,8 +245,22 @@ fn is_punct(token: &TokenTree, expected: char) -> bool {
     matches!(token, TokenTree::Punct(punct) if punct.as_char() == expected)
 }
 
-fn is_colon(token: &TokenTree) -> bool {
-    is_punct(token, ':')
+fn is_double_colon_before(tokens: &[TokenTree], index: usize) -> bool {
+    let Some(first_index) = index.checked_sub(2) else {
+        return false;
+    };
+    let Some(second_index) = index.checked_sub(1) else {
+        return false;
+    };
+    let (Some(TokenTree::Punct(first)), Some(TokenTree::Punct(second))) =
+        (tokens.get(first_index), tokens.get(second_index))
+    else {
+        return false;
+    };
+    first.as_char() == ':'
+        && first.spacing() == Spacing::Joint
+        && second.as_char() == ':'
+        && second.spacing() == Spacing::Alone
 }
 
 /// Path resolution errors stay structured so both schema scanners can render
@@ -470,6 +487,52 @@ mod tests {
                 "failed source: {source}"
             );
         }
+    }
+
+    #[test]
+    fn accepts_include_macros_in_struct_field_values() {
+        let source = r##"
+struct Holder {
+    text: &'static str,
+    raw: &'static str,
+    bytes: &'static [u8],
+}
+
+const _: Holder = Holder {
+    text: include_str!("data.txt"),
+    raw: include_str!(r#"raw.txt"#),
+    bytes: include_bytes!(concat!("assets/", r#"bytes.bin"#)),
+};
+
+const _: &str = crate::include_str!("user-macro.txt");
+"##;
+        assert_eq!(
+            parse_include_paths(source).ok(),
+            Some(vec![
+                IncludeString::Relative("data.txt".to_owned()),
+                IncludeString::Relative("raw.txt".to_owned()),
+                IncludeString::Relative("assets/bytes.bin".to_owned()),
+            ])
+        );
+    }
+
+    #[test]
+    fn rejects_dynamic_include_in_struct_field_value() {
+        let source = r#"
+const PATH: &str = "data.txt";
+
+struct Holder {
+    text: &'static str,
+}
+
+const _: Holder = Holder {
+    text: include_str!(PATH),
+};
+"#;
+        assert!(
+            matches!(&parse_include_paths(source), Err(error) if error.contains("static string expression")),
+            "dynamic field include was ignored or accepted with the wrong error"
+        );
     }
 
     #[test]
