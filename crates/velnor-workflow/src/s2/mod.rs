@@ -12495,6 +12495,7 @@ lockfile = true
         assert!(rendered.contains("jdx/mr-boxington-action@"));
         assert!(rendered.contains("run: |\n          mbx test --locked"));
         assert!(rendered.contains("mbx +\"${MSRV}\" check --locked"));
+        assert!(rendered.contains("version: 1.11.1"));
         assert!(rendered.contains("cargo install --locked --path ."));
         assert!(!rendered.contains("cargo test"));
         assert!(!rendered.contains("cargo check"));
@@ -12507,7 +12508,7 @@ lockfile = true
     /// because a keyless snapshot import restores nothing (§9.1 test 7).
     #[test]
     fn static_templates_reject_local_mbx_without_declared_persistence() {
-        let hosted_local = "name: CI\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0\n        with:\n          backend: local\n          version: 1.11.1\n";
+        let hosted_local = "name: CI\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1\n        with:\n          backend: local\n          version: 1.11.1\n";
         let rejected = must_fail(
             validate_static_template_cache_transports(hosted_local),
             "hosted local mbx must be rejected",
@@ -12516,19 +12517,19 @@ lockfile = true
         assert!(message.contains("build"), "{message}");
         assert!(message.contains("backend: local"), "{message}");
 
-        let self_hosted_local = "name: CI\njobs:\n  build:\n    runs-on: [self-hosted, pool]\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0\n        with:\n          backend: local\n";
+        let self_hosted_local = "name: CI\njobs:\n  build:\n    runs-on: [self-hosted, pool]\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1\n        with:\n          backend: local\n";
         must(
             validate_static_template_cache_transports(self_hosted_local),
             "local mbx on the persistent pool is accepted",
         );
 
-        let group_local = "name: CI\njobs:\n  build:\n    runs-on: ${{ fromJSON('{\"group\":\"ci\",\"labels\":[\"self-hosted\",\"pool\"]}') }}\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0\n        with:\n          backend: local\n";
+        let group_local = "name: CI\njobs:\n  build:\n    runs-on: ${{ fromJSON('{\"group\":\"ci\",\"labels\":[\"self-hosted\",\"pool\"]}') }}\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1\n        with:\n          backend: local\n";
         must(
             validate_static_template_cache_transports(group_local),
             "local mbx behind the persistent runner group is accepted",
         );
 
-        let keyless_github = "name: CI\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0\n        with:\n          backend: github\n          version: 1.11.1\n";
+        let keyless_github = "name: CI\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1\n        with:\n          backend: github\n          version: 1.11.1\n";
         let rejected = must_fail(
             validate_static_template_cache_transports(keyless_github),
             "keyless object-cache mbx must be rejected",
@@ -12539,7 +12540,7 @@ lockfile = true
         // A key that names compatibility but hashes no source state is the
         // frozen-snapshot defect itself: GitHub cache entries are immutable,
         // so the first save under that key refuses every later save.
-        let compatibility_only = "name: CI\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0\n        with:\n          backend: github\n          github-cache-mode: objects\n          version: 1.11.1\n          cache-key: example-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}\n          restore-keys: |\n            example-${{ runner.os }}-\n";
+        let compatibility_only = "name: CI\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1\n        with:\n          backend: github\n          github-cache-mode: objects\n          version: 1.11.1\n          cache-key: example-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}\n          restore-keys: |\n            example-${{ runner.os }}-\n";
         let rejected = must_fail(
             validate_static_template_cache_transports(compatibility_only),
             "a compatibility-only key must be rejected",
@@ -12549,7 +12550,7 @@ lockfile = true
 
         // A complete key with a freshness segment, and prefixes-only restore
         // keys, is the shape generation accepts.
-        let keyed_github = "name: CI\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0\n        with:\n          backend: github\n          github-cache-mode: objects\n          version: 1.11.1\n          cache-key: example-mbx-v3-a1b2c3d4e5f6-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('**/*.rs') }}\n          restore-keys: |\n            example-mbx-v3-a1b2c3d4e5f6-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-\n            example-mbx-v3-a1b2c3d4e5f6-${{ runner.os }}-\n";
+        let keyed_github = "name: CI\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1\n        with:\n          backend: github\n          github-cache-mode: objects\n          version: 1.11.1\n          cache-key: example-mbx-v3-a1b2c3d4e5f6-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('**/*.rs') }}\n          restore-keys: |\n            example-mbx-v3-a1b2c3d4e5f6-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-\n            example-mbx-v3-a1b2c3d4e5f6-${{ runner.os }}-\n";
         must(
             validate_static_template_cache_transports(keyed_github),
             "a freshness-carrying snapshot key is accepted",
@@ -12557,7 +12558,7 @@ lockfile = true
 
         // A complete generation on the restore list would shadow newer
         // compatible fallbacks, so generation refuses it.
-        let complete_restore_key = "name: CI\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0\n        with:\n          backend: github\n          github-cache-mode: objects\n          version: 1.11.1\n          cache-key: example-mbx-v3-a1b2c3d4e5f6-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('**/*.rs') }}\n          restore-keys: |\n            example-mbx-v3-a1b2c3d4e5f6-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('**/*.rs') }}\n";
+        let complete_restore_key = "name: CI\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1\n        with:\n          backend: github\n          github-cache-mode: objects\n          version: 1.11.1\n          cache-key: example-mbx-v3-a1b2c3d4e5f6-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('**/*.rs') }}\n          restore-keys: |\n            example-mbx-v3-a1b2c3d4e5f6-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('**/*.rs') }}\n";
         let rejected = must_fail(
             validate_static_template_cache_transports(complete_restore_key),
             "a complete generation on the restore list must be rejected",
@@ -12722,8 +12723,8 @@ lockfile = true
     #[test]
     fn hosted_store_budget_validator_requires_the_export_before_the_action() {
         let budget = mr_boxington_store_budget_step();
-        let action = "      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0\n        with:\n          backend: github\n          github-cache-mode: objects\n";
-        let local = "      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0\n        with:\n          backend: local\n";
+        let action = "      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1\n        with:\n          backend: github\n          github-cache-mode: objects\n";
+        let local = "      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1\n        with:\n          backend: local\n";
         let workflow = |steps: &str| {
             BTreeMap::from([(
                 PathBuf::from(".github/workflows/ci.yml"),

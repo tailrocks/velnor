@@ -13,10 +13,10 @@ exclude = ["migrations/**"]
 
 # Provider placement: `providers` is the available backends.
 # `automatic_providers` run on PR/push/schedule without a dispatch choice.
-# Recovery: both families automatically and in parallel.
+# Recovery: hosted runs automatically; Velnor is manual opt-in.
 [workflow]
 providers = ["github-hosted", "velnor"]
-automatic_providers = ["github-hosted", "velnor"]
+automatic_providers = ["github-hosted"]
 default_dispatch_providers = ["github-hosted", "velnor"]
 default_branch = "main"
 # Routing contract: the release-side guest-payload producer builds Linux
