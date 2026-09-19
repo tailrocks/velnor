@@ -16,7 +16,7 @@ use super::{
     Primitive, RenderCtx, Rendered, WorkflowIr, MAINTENANCE, PACKAGE_RELEASE, PREVIEW, RELEASE,
     RELEASE_SIGNER, STATIC_WORKFLOW,
 };
-use crate::s2::provider::{runs_on_for, ProviderId, ProviderSet};
+use crate::s2::provider::{self, runs_on_for, ProviderId, ProviderSet};
 use crate::s2::{
     github_expression, provider_supports_unit, rendered_cache_values, selector_arm64_runs_on_yaml,
     selector_runs_on_yaml, shell_quote, unit_display_label, workflow_runtime_setup,
@@ -182,6 +182,7 @@ impl Primitive for Release {
             "source_repository",
             "tag_pattern",
             "targets",
+            "verification_providers",
             "version_gate_tasks",
             "version_manifest",
             "version_prefix",
@@ -206,8 +207,17 @@ impl Primitive for Release {
             let content = render_versioned_tool_release(ctx.config, &spec);
             return render_file(ctx, file, content);
         }
+        let declared = !args.keys().is_empty();
         let spec = declared_or_configured_spec(ctx, args)?;
-        let content = render_release(ctx.config, &spec);
+        if declared {
+            validate_declared_verification_providers(ctx.config, ctx.family, &spec)?;
+        }
+        let content = if declared {
+            let render_config = config_with_release_spec(ctx.config, &spec);
+            render_release(&render_config, &spec)
+        } else {
+            render_release(ctx.config, &spec)
+        };
         render_file(ctx, "release.yml", content)
     }
 }
@@ -233,6 +243,7 @@ impl Primitive for Preview {
             "producer_workflow_id",
             "producer_workflow_path",
             "targets",
+            "verification_providers",
         ]
     }
 
@@ -246,7 +257,9 @@ impl Primitive for Preview {
             if !release_contract_complete(&spec) {
                 return Err(incomplete_contract(ctx.family, &spec));
             }
-            render_preview(ctx.config, Some(&spec))
+            validate_declared_verification_providers(ctx.config, ctx.family, &spec)?;
+            let render_config = config_with_release_spec(ctx.config, &spec);
+            render_preview(&render_config, Some(&spec))
         };
         render_file(ctx, "preview.yml", content)
     }
@@ -347,7 +360,7 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
     )?;
     Ok(ReleaseSpec {
         kind,
-        verification_providers: None,
+        verification_providers: declared_verification_providers(family, args)?,
         package: args.string("package")?.unwrap_or_default(),
         packages: args.strings("packages")?.unwrap_or_default(),
         binary: args.string("binary")?.unwrap_or_default(),
@@ -405,7 +418,7 @@ fn declared_preview_spec(args: &Args<'_>) -> Result<ReleaseSpec, GeneratorError>
     )?;
     Ok(ReleaseSpec {
         kind: "rust-binary".to_owned(),
-        verification_providers: None,
+        verification_providers: declared_verification_providers(family, args)?,
         package: args.string("package")?.unwrap_or_default(),
         packages: Vec::new(),
         binary: args.string("binary")?.unwrap_or_default(),
@@ -450,6 +463,41 @@ fn declared_preview_spec(args: &Args<'_>) -> Result<ReleaseSpec, GeneratorError>
         registry_password_secret: String::new(),
         jobs: Vec::new(),
     })
+}
+
+fn declared_verification_providers(
+    family: &str,
+    args: &Args<'_>,
+) -> Result<Option<ProviderSet>, GeneratorError> {
+    let Some(values) = args.strings("verification_providers")? else {
+        return Ok(None);
+    };
+    let field = format!("`{family}` verification_providers");
+    let providers = provider::parse_provider_set(&values, &field)?;
+    provider::require_non_empty(&providers, &field)?;
+    Ok(Some(providers))
+}
+
+fn validate_declared_verification_providers(
+    config: &ProjectConfig,
+    family: &str,
+    spec: &ReleaseSpec,
+) -> Result<(), GeneratorError> {
+    let Some(providers) = spec.verification_providers.as_ref() else {
+        return Ok(());
+    };
+    provider::require_subset(
+        providers,
+        &config.providers,
+        &format!("`{family}` verification_providers"),
+        "[workflow] providers",
+    )
+}
+
+fn config_with_release_spec(config: &ProjectConfig, spec: &ReleaseSpec) -> ProjectConfig {
+    let mut render_config = config.clone();
+    render_config.release = Some(spec.clone());
+    render_config
 }
 
 /// The main-branch-driven versioned publisher: a tool whose version comes
@@ -6746,6 +6794,47 @@ mod tests {
     }
 
     #[test]
+    fn declared_release_verification_lanes_are_exact() {
+        let root = scanned_root("declared-release-verification");
+        let config = config(&["preview.yml"], None);
+        let surface = generate(
+            &root,
+            &config,
+            Some(
+                r#"[[declare]]
+primitive = "release"
+file = "release.yml"
+
+[declare.args]
+kind = "rust-binary"
+package = "example"
+binary = "example"
+targets = ["x86_64-unknown-linux-gnu"]
+verification_providers = ["github-hosted"]
+"#,
+            ),
+        );
+        let release = rendered(&surface, "release.yml");
+        assert!(
+            release.contains("release-github-hosted-rust-example"),
+            "declared release must render the requested hosted verifier: {release}"
+        );
+        assert!(
+            !release.contains("release-github-self-hosted-")
+                && !release.contains("release-velnor-"),
+            "declared release must not fan out to unrelated providers: {release}"
+        );
+        let build = yaml_job(&release, "build");
+        assert!(
+            build.contains("release-github-hosted-rust-example")
+                && !build.contains("release-github-self-hosted-")
+                && !build.contains("release-velnor-"),
+            "release publication must depend on exactly the requested verifier: {build}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn schema2_tasks_release_renders_typed_desktop_jobs() {
         let root = scanned_root("tasks-release");
         must(
@@ -9579,6 +9668,21 @@ mod tests {
                 "kind = \"rust-binary\"\npackage = \"example\"\nbinary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\narchive_retention_days = 91\n",
                 "must be 1-90",
             ),
+            (
+                "empty-verification-providers",
+                "kind = \"rust-binary\"\npackage = \"example\"\nbinary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\nverification_providers = []\n",
+                "must name at least one provider",
+            ),
+            (
+                "duplicate-verification-providers",
+                "kind = \"rust-binary\"\npackage = \"example\"\nbinary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\nverification_providers = [\"github-hosted\", \"github-hosted\"]\n",
+                "more than once",
+            ),
+            (
+                "unknown-verification-provider",
+                "kind = \"rust-binary\"\npackage = \"example\"\nbinary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\nverification_providers = [\"unknown\"]\n",
+                "unknown provider",
+            ),
         ] {
             let error = match try_generate(
                 &root,
@@ -9595,6 +9699,38 @@ mod tests {
                 "`{name}` must name the problem: {error}"
             );
         }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn declared_verification_providers_must_be_available() {
+        let root = scanned_root("declared-verification-availability");
+        let mut config = config(&[], None);
+        config.providers = [ProviderId::GithubHosted].into_iter().collect();
+        let error = match try_generate(
+            &root,
+            &config,
+            Some(
+                r#"[[declare]]
+primitive = "release"
+file = "release.yml"
+
+[declare.args]
+kind = "rust-binary"
+package = "example"
+binary = "example"
+targets = ["x86_64-unknown-linux-gnu"]
+verification_providers = ["velnor"]
+"#,
+            ),
+        ) {
+            Ok(_) => panic!("an unavailable verification provider must fail closed"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("outside [workflow] providers"),
+            "availability errors must name the provider universe: {error}"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -9622,6 +9758,46 @@ mod tests {
                 && preview.contains("--members 'example-role'")
                 && preview.contains("          retention-days: 7\n"),
             "declared preview bindings must render: {preview}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn declared_preview_verification_lanes_are_exact() {
+        let root = scanned_root("declared-preview-verification");
+        let config = config(&[], None);
+        let surface = generate(
+            &root,
+            &config,
+            Some(
+                r#"[[declare]]
+primitive = "preview"
+file = "preview.yml"
+
+[declare.args]
+package = "example"
+binary = "example"
+targets = ["x86_64-unknown-linux-gnu"]
+verification_providers = ["github-hosted"]
+"#,
+            ),
+        );
+        let preview = rendered(&surface, "preview.yml");
+        assert!(
+            preview.contains("release-github-hosted-rust-example"),
+            "declared preview must render the requested hosted verifier: {preview}"
+        );
+        assert!(
+            !preview.contains("release-github-self-hosted-")
+                && !preview.contains("release-velnor-"),
+            "declared preview must not fan out to unrelated providers: {preview}"
+        );
+        let publish = yaml_job(&preview, "publish");
+        assert!(
+            publish.contains("release-github-hosted-rust-example")
+                && !publish.contains("release-github-self-hosted-")
+                && !publish.contains("release-velnor-"),
+            "preview publication must depend on exactly the requested verifier: {publish}"
         );
         let _ = fs::remove_dir_all(root);
     }
