@@ -1,5 +1,6 @@
 mod audit_ci;
 mod evidence_check;
+mod evidence_live;
 mod fleet_policy;
 mod fleet_policy_client;
 mod lane_compare;
@@ -546,7 +547,7 @@ async fn main() -> Result<()> {
         CommandKind::CheckFixtureLanes(args) => check_fixture_lanes(args).await,
         CommandKind::AuditCi(args) => audit_ci::audit_ci(args),
         CommandKind::Compare(args) => lane_compare::lane_compare(&root, args),
-        CommandKind::EvidenceCheck(args) => evidence_check::evidence_check(args),
+        CommandKind::EvidenceCheck(args) => evidence_check::evidence_check(args).await,
         CommandKind::LaneCompare(args) => lane_compare::lane_compare(&root, args),
         CommandKind::FleetPolicy(args) => fleet_policy::fleet_policy(args.command).await,
     }
