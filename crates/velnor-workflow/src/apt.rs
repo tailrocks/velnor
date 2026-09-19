@@ -317,9 +317,17 @@ pub(crate) fn parse_stable_tag(value: &str) -> Result<StableTag, GeneratorError>
 fn is_bare_version(value: &str) -> bool {
     let parts: Vec<&str> = value.split('.').collect();
     parts.len() == 3
-        && parts
-            .iter()
-            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && (part.len() == 1 || !part.starts_with('0'))
+                && part.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
+
+fn is_canonical_decimal(value: &str) -> bool {
+    !value.is_empty()
+        && (value.len() == 1 || !value.starts_with('0'))
+        && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// A preview version `X.Y.Z~preview.N+<7hex>` split into its parts. The `v`
@@ -348,8 +356,7 @@ pub(crate) fn parse_preview_version(value: &str) -> Result<PreviewVersion, Gener
         return Err(error());
     }
     let (seq, sha) = rest.split_once('+').ok_or_else(error)?;
-    if seq.is_empty()
-        || !seq.bytes().all(|byte| byte.is_ascii_digit())
+    if !is_canonical_decimal(seq)
         || !is_lower_hex(sha, 7)
         || sha.len() + seq.len() + 1 != rest.len()
     {
@@ -858,12 +865,14 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 
 /// The hex SHA-256 of a file.
 pub(crate) fn sha256_file(path: &Path) -> Result<String, GeneratorError> {
+    require_file(path)?;
     let bytes = std::fs::read(path).map_err(|error| GeneratorError::io("read", path, &error))?;
     Ok(sha256_hex(&bytes))
 }
 
 /// Read a JSON document, failing closed on IO or syntax errors.
 fn read_json(path: &Path) -> Result<serde_json::Value, GeneratorError> {
+    require_file(path)?;
     let bytes = std::fs::read(path).map_err(|error| GeneratorError::io("read", path, &error))?;
     serde_json::from_slice(&bytes).map_err(|error| {
         GeneratorError::usage(format!("{} is not valid JSON: {error}", path.display()))
@@ -895,6 +904,7 @@ fn positive_field(document: &serde_json::Value, name: &str) -> Result<u64, Gener
 /// The bare digest a detached sidecar carries: the first whitespace-separated
 /// field, which must be 64 lowercase hex.
 fn sidecar_digest(path: &Path) -> Result<String, GeneratorError> {
+    require_file(path)?;
     let bytes = std::fs::read(path).map_err(|error| GeneratorError::io("read", path, &error))?;
     let text = String::from_utf8(bytes)
         .map_err(|_| GeneratorError::usage(format!("{} is not UTF-8", path.display())))?;
@@ -913,14 +923,56 @@ fn sidecar_digest(path: &Path) -> Result<String, GeneratorError> {
 
 /// Require a coherence input to exist.
 fn require_file(path: &Path) -> Result<(), GeneratorError> {
-    if path.is_file() {
-        Ok(())
-    } else {
-        Err(GeneratorError::usage(format!(
-            "required file missing: {}",
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            GeneratorError::usage(format!("required file missing: {}", path.display()))
+        } else {
+            GeneratorError::io("stat required file", path, &error)
+        }
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(GeneratorError::usage(format!(
+            "required file is a symlink: {}",
             path.display()
-        )))
+        )));
     }
+    if !metadata.is_file() {
+        return Err(GeneratorError::usage(format!(
+            "required path is not a regular file: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn require_directory(path: &Path) -> Result<(), GeneratorError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            GeneratorError::usage(format!("required directory missing: {}", path.display()))
+        } else {
+            GeneratorError::io("stat required directory", path, &error)
+        }
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(GeneratorError::usage(format!(
+            "required directory is a symlink: {}",
+            path.display()
+        )));
+    }
+    if !metadata.is_dir() {
+        return Err(GeneratorError::usage(format!(
+            "required path is not a directory: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn regular_file_size(path: &Path) -> Result<u64, GeneratorError> {
+    require_file(path)?;
+    Ok(std::fs::symlink_metadata(path)
+        .map_err(|error| GeneratorError::io("stat regular file", path, &error))?
+        .len())
 }
 
 /// Whether a directory entry is a `.deb` file. The match is deliberately
@@ -933,6 +985,7 @@ fn is_deb_file(name: &str) -> bool {
 
 /// List the entries of a directory by file name.
 fn dir_names(dir: &Path) -> Result<Vec<String>, GeneratorError> {
+    require_directory(dir)?;
     let mut names = Vec::new();
     let entries =
         std::fs::read_dir(dir).map_err(|error| GeneratorError::io("list", dir, &error))?;
@@ -1278,10 +1331,7 @@ fn parse_product_preview_version(value: &str) -> Result<(String, String), Genera
         return Err(error());
     }
     let (sequence, sha) = rest.split_once('+').ok_or_else(error)?;
-    if sequence.is_empty()
-        || !sequence.bytes().all(|byte| byte.is_ascii_digit())
-        || !is_lower_hex(sha, 7)
-    {
+    if !is_canonical_decimal(sequence) || !is_lower_hex(sha, 7) {
         return Err(error());
     }
     Ok((format!("{base}~preview.{sequence}+{sha}"), sha.to_owned()))
@@ -1749,6 +1799,7 @@ pub(crate) fn run_fetch_selection(
     let selection = read_discovery_selection(selection_path)?;
     let selected_document = read_json(selection_path)?;
     if dir.exists() {
+        require_directory(dir)?;
         let existing = dir_names(dir)?;
         if existing.iter().any(|name| name != DISCOVERY_SELECTION_FILE) {
             return Err(GeneratorError::usage(
@@ -1816,6 +1867,7 @@ pub(crate) fn verify_discovery_incoming(
     selection_path: &Path,
     incoming: &Path,
 ) -> Result<DiscoverySelection, GeneratorError> {
+    require_directory(incoming)?;
     let selection_document = read_json(selection_path)?;
     let selection = read_discovery_selection(selection_path)?;
     let persisted = incoming.join(DISCOVERY_SELECTION_FILE);
@@ -1841,9 +1893,7 @@ pub(crate) fn verify_discovery_incoming(
     for asset in &selection.release_assets {
         let path = incoming.join(&asset.name);
         require_file(&path)?;
-        let observed = std::fs::metadata(&path)
-            .map_err(|error| GeneratorError::io("stat selected asset", &path, &error))?
-            .len();
+        let observed = regular_file_size(&path)?;
         if observed != asset.size {
             return Err(GeneratorError::usage(format!(
                 "incoming asset {} size differs from discovery",
@@ -1878,9 +1928,7 @@ pub(crate) fn verify_discovery_incoming(
         let path = incoming.join(name);
         require_file(&path)?;
         let expected_size = positive_field(artifact, "size")?;
-        let observed_size = std::fs::metadata(&path)
-            .map_err(|error| GeneratorError::io("stat product artifact", &path, &error))?
-            .len();
+        let observed_size = regular_file_size(&path)?;
         if observed_size != expected_size || sha256_file(&path)? != field(artifact, "sha256")? {
             return Err(GeneratorError::usage(format!(
                 "incoming product artifact {name} differs from canonical inventory"
@@ -4889,15 +4937,27 @@ mod tests {
         );
         for (id, _, bytes) in &fixture.assets {
             write_bytes(&asset_root.join(format!("asset-{id}")), bytes);
-            script.push_str(&format!(
-                "  repos/{FIXTURE_SOURCE}/releases/assets/{id}) cat \"{}/asset-{id}\" ;;\n",
-                asset_root.display()
-            ));
+            must(
+                writeln!(
+                    &mut script,
+                    "  repos/{FIXTURE_SOURCE}/releases/assets/{id}) cat \"{}/asset-{id}\" ;;",
+                    asset_root.display()
+                ),
+                "append gh stub case",
+            );
         }
         script.push_str("  *) exit 1 ;;\nesac\n");
         write_bytes(&bin.join("gh"), script.as_bytes());
         make_executable(&bin.join("gh"));
         bin
+    }
+
+    #[cfg(unix)]
+    fn make_symlink(target: &Path, link: &Path) {
+        must(
+            std::os::unix::fs::symlink(target, link),
+            "create fixture symlink",
+        );
     }
 
     #[test]
@@ -4969,13 +5029,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&fixture.root);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn discovery_incoming_rejects_symlinked_selection_paths() {
+        for (index, name) in [
+            DISCOVERY_SELECTION_FILE,
+            PRODUCT_MANIFEST_ASSET,
+            "product-manifest.json.sha256",
+            "example-1.2.3-amd64.deb",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let fixture = discovery_fixture(&format!("discovery-symlink-{index}"));
+            let selected_path = fixture.incoming.join(name);
+            let outside = fixture.root.join(format!("outside-{index}"));
+            let bytes = must(std::fs::read(&selected_path), "read symlink target bytes");
+            write_bytes(&outside, &bytes);
+            must(
+                std::fs::remove_file(&selected_path),
+                "remove selected regular file",
+            );
+            make_symlink(&outside, &selected_path);
+            let error = must_fail(
+                verify_discovery_incoming(&fixture.selection_path, &fixture.incoming),
+                "reject selected symlink",
+            );
+            assert!(error.contains("symlink"), "{error}");
+            let _ = std::fs::remove_dir_all(&fixture.root);
+        }
+    }
+
     #[test]
     fn discovery_selection_requires_every_manifest_artifact_asset() {
         let fixture = discovery_fixture("discovery-inventory");
         let mut tampered = fixture.document.clone();
         let assets = tampered["release_assets"]
             .as_array_mut()
-            .expect("fixture release assets array");
+            .ok_or("fixture release assets array");
+        let assets = must(assets, "fixture release assets array");
         assets.retain(|asset| asset["name"] != "example-1.2.3-arm64.deb");
         write_bytes(
             &fixture.selection_path,
@@ -4992,6 +5084,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&fixture.root);
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "hostile provenance mutations stay in one auditable fixture"
+    )]
     #[test]
     fn discovery_selection_rejects_component_and_release_url_drift() {
         let fixture = discovery_fixture("discovery-identity");
@@ -5021,6 +5117,88 @@ mod tests {
             "reject release URL tamper",
         );
         assert!(error.contains("canonical GitHub release URL"), "{error}");
+
+        tampered = fixture.document.clone();
+        tampered["release_id"] = serde_json::json!("bad?release");
+        write_bytes(
+            &fixture.selection_path,
+            &must(serde_json::to_vec(&tampered), "serialize release ID tamper"),
+        );
+        let error = must_fail(
+            read_discovery_selection(&fixture.selection_path),
+            "reject release ID grammar tamper",
+        );
+        assert!(error.contains("release_id"), "{error}");
+
+        tampered = fixture.document.clone();
+        tampered["source_ref"] = serde_json::json!("refs/tags/v9.9.9");
+        write_bytes(
+            &fixture.selection_path,
+            &must(serde_json::to_vec(&tampered), "serialize source ref tamper"),
+        );
+        let error = must_fail(
+            read_discovery_selection(&fixture.selection_path),
+            "reject source ref tamper",
+        );
+        assert!(
+            error.contains("source ref") || error.contains("source-ref"),
+            "{error}"
+        );
+
+        tampered = fixture.document.clone();
+        tampered["source_commit"] = serde_json::json!("f".repeat(40));
+        write_bytes(
+            &fixture.selection_path,
+            &must(
+                serde_json::to_vec(&tampered),
+                "serialize source commit tamper",
+            ),
+        );
+        let error = must_fail(
+            read_discovery_selection(&fixture.selection_path),
+            "reject source commit tamper",
+        );
+        assert!(
+            error.contains("identity") || error.contains("source-ref"),
+            "{error}"
+        );
+
+        write_bytes(
+            &fixture.selection_path,
+            &must(
+                serde_json::to_vec(&fixture.document),
+                "restore selected release",
+            ),
+        );
+        let mut persisted = fixture.document.clone();
+        let assets = persisted["release_assets"]
+            .as_array_mut()
+            .ok_or("fixture release assets array");
+        let assets = must(assets, "fixture release assets array");
+        assets.push(serde_json::json!({
+            "id": 999,
+            "name": "unlisted-extra.tar",
+            "size": 1,
+            "state": "uploaded",
+            "browser_download_url": format!(
+                "https://github.com/{FIXTURE_SOURCE}/releases/download/v1.2.3/unlisted-extra.tar"
+            )
+        }));
+        write_bytes(
+            &fixture.incoming.join(DISCOVERY_SELECTION_FILE),
+            &must(
+                serde_json::to_vec(&persisted),
+                "serialize extra persisted asset",
+            ),
+        );
+        let error = must_fail(
+            verify_discovery_incoming(&fixture.selection_path, &fixture.incoming),
+            "reject extra persisted release asset",
+        );
+        assert!(
+            error.contains("differs from the selected release"),
+            "{error}"
+        );
         let _ = std::fs::remove_dir_all(&fixture.root);
     }
 
@@ -5310,7 +5488,8 @@ mod tests {
         assert_eq!(tag.tag, "v1.2.3");
         assert_eq!(tag.version, "1.2.3");
         for invalid in [
-            "", "1.2.3", "v1.2", "v1.2.3.4", "vv1.2.3", "v1.2.x", "v 1.2.3",
+            "", "1.2.3", "v1.2", "v1.2.3.4", "vv1.2.3", "v1.2.x", "v 1.2.3", "v01.2.3", "v1.02.3",
+            "v1.2.03",
         ] {
             let error = must_fail(parse_stable_tag(invalid), "bad stable tag");
             assert!(error.contains("vX.Y.Z"), "{error}");
@@ -5327,6 +5506,18 @@ mod tests {
         assert_eq!(parsed.seq, "41");
         assert_eq!(parsed.sha, "0123456");
         for invalid in [
+            "01.2.3-preview.1+0123456",
+            "1.02.3-preview.1+0123456",
+            "1.2.03-preview.1+0123456",
+            "1.2.3-preview.01+0123456",
+        ] {
+            let error = must_fail(
+                parse_product_preview_version(invalid),
+                "bad product preview version",
+            );
+            assert!(error.contains("X.Y.Z-preview.N"), "{error}");
+        }
+        for invalid in [
             "",
             "v1.2.3~preview.41+0123456",
             "1.2.3",
@@ -5338,6 +5529,10 @@ mod tests {
             "1.2.3-preview.41+0123456",
             "1.2.3~preview.41+0123456+extra",
             "1.2~preview.41+0123456",
+            "01.2.3~preview.41+0123456",
+            "1.02.3~preview.41+0123456",
+            "1.2.03~preview.41+0123456",
+            "1.2.3~preview.01+0123456",
         ] {
             let error = must_fail(parse_preview_version(invalid), "bad preview version");
             assert!(error.contains("X.Y.Z~preview.N"), "{error}");
