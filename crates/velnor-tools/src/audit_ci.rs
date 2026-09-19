@@ -3704,6 +3704,7 @@ mod tests {
 
         assert!(error.contains("observed 33"), "{error}");
         assert!(error.contains("tailrocks/out-of-scope"), "{error}");
+        assert!(error.contains("unexpected"), "{error}");
     }
 
     #[test]
@@ -4818,6 +4819,15 @@ jobs:
             accepted_repository.concerns["rust-ci"].classification,
             ConcernClassification::Required
         ));
+        let root = TestRepo::new();
+        let findings =
+            audit_concern_contract(accepted_repository, &accepted.defaults, &root.path).unwrap();
+        assert!(findings.iter().any(|finding| {
+            finding.rule == "missing-required" && finding.message.contains("rust-ci")
+        }));
+        assert!(!findings.iter().any(|finding| {
+            finding.rule == "non-applicable" && finding.path.contains("rust-ci")
+        }));
         assert!(validate_auxiliary_contract_binding(&caller, &accepted).is_err());
     }
 
