@@ -72,18 +72,15 @@ impl MessageSessionClient {
                 Some(body),
             )
             .await
-            .map_err(|error| {
-                ScaleSetError::Local(format!("failed to do the session request: {error}"))
-            })?;
+            .map_err(|error| error.context("failed to do the session request"))?;
         if response.status != StatusCode::OK {
-            return Err(ScaleSetError::Local(format!(
-                "failed to do the session request: unexpected status code {}",
-                response.status
-            )));
+            return Err(
+                response.failed(None, &format!("unexpected status code {}", response.status))
+            );
         }
-        let created: ScaleSetSession = response.decode("session response").map_err(|error| {
-            ScaleSetError::Local(format!("failed to unmarshal response body: {error}"))
-        })?;
+        let created: ScaleSetSession = response
+            .decode("session response")
+            .map_err(|error| error.context("failed to unmarshal response body"))?;
         Ok(Self {
             inner: Arc::new(SessionInner {
                 client: client.clone(),
@@ -152,18 +149,15 @@ impl MessageSessionClient {
                 None,
             )
             .await
-            .map_err(|error| {
-                ScaleSetError::Local(format!("failed to do the session request: {error}"))
-            })?;
+            .map_err(|error| error.context("failed to do the session request"))?;
         if response.status != StatusCode::OK {
-            return Err(ScaleSetError::Local(format!(
-                "failed to do the session request: unexpected status code {}",
-                response.status
-            )));
+            return Err(
+                response.failed(None, &format!("unexpected status code {}", response.status))
+            );
         }
-        let refreshed: ScaleSetSession = response.decode("session response").map_err(|error| {
-            ScaleSetError::Local(format!("failed to unmarshal response body: {error}"))
-        })?;
+        let refreshed: ScaleSetSession = response
+            .decode("session response")
+            .map_err(|error| error.context("failed to unmarshal response body"))?;
         *self.inner.session.write().await = refreshed;
         Ok(())
     }
@@ -181,15 +175,13 @@ impl MessageSessionClient {
             .await
         {
             Ok(message) => Ok(message),
-            Err(error) if !error.is_token_expired() => Err(ScaleSetError::Local(format!(
-                "failed to get next message: {error}"
-            ))),
+            Err(error) if !error.is_token_expired() => {
+                Err(error.context("failed to get next message"))
+            }
             Err(_) => {
                 self.refresh_message_session(&session)
                     .await
-                    .map_err(|error| {
-                        ScaleSetError::Local(format!("failed to refresh message session: {error}"))
-                    })?;
+                    .map_err(|error| error.context("failed to refresh message session"))?;
                 let renewed = self.session().await;
                 self.get_message_inner(&renewed, last_message_id, max_capacity)
                     .await
@@ -203,13 +195,10 @@ impl MessageSessionClient {
         last_message_id: i32,
         max_capacity: i32,
     ) -> Result<Option<ParsedMessage>, ScaleSetError> {
-        let mut url = Url::parse(&session.message_queue_url).map_err(|error| {
+        let url = Url::parse(&session.message_queue_url).map_err(|error| {
             ScaleSetError::Local(format!("failed to parse message queue url: {error}"))
         })?;
-        if last_message_id > 0 {
-            url.query_pairs_mut()
-                .append_pair("lastMessageId", &last_message_id.to_string());
-        }
+        let url = set_last_message_id(url, last_message_id);
         let user_agent = self.inner.client.user_agent().await;
         let response = self
             .inner
@@ -234,9 +223,7 @@ impl MessageSessionClient {
                 ],
             )
             .await
-            .map_err(|error| {
-                ScaleSetError::Local(format!("failed to issue the request: {error}"))
-            })?;
+            .map_err(|error| error.context("failed to issue the request"))?;
         match response.status {
             StatusCode::ACCEPTED => Ok(None),
             StatusCode::OK => parse_message_response(&response.body)
@@ -260,15 +247,13 @@ impl MessageSessionClient {
         let session = self.session().await;
         match self.delete_message_inner(&session, message_id).await {
             Ok(()) => Ok(()),
-            Err(error) if !error.is_token_expired() => Err(ScaleSetError::Local(format!(
-                "failed to delete message: {error}"
-            ))),
+            Err(error) if !error.is_token_expired() => {
+                Err(error.context("failed to delete message"))
+            }
             Err(_) => {
                 self.refresh_message_session(&session)
                     .await
-                    .map_err(|error| {
-                        ScaleSetError::Local(format!("failed to refresh message session: {error}"))
-                    })?;
+                    .map_err(|error| error.context("failed to refresh message session"))?;
                 let renewed = self.session().await;
                 self.delete_message_inner(&renewed, message_id).await
             }
@@ -284,10 +269,7 @@ impl MessageSessionClient {
             ScaleSetError::Local(format!("failed to parse message queue url: {error}"))
         })?;
         // Mirror `u.Path = fmt.Sprintf("%s/%d", u.Path, messageID)`.
-        url.set_path(&format!(
-            "{}/{message_id}",
-            url.path().trim_end_matches('/')
-        ));
+        url = append_message_id_to_queue_url(url, message_id);
         let user_agent = self.inner.client.user_agent().await;
         let response = self
             .inner
@@ -305,9 +287,7 @@ impl MessageSessionClient {
                 ],
             )
             .await
-            .map_err(|error| {
-                ScaleSetError::Local(format!("failed to issue the request: {error}"))
-            })?;
+            .map_err(|error| error.context("failed to issue the request"))?;
         if response.status == StatusCode::NO_CONTENT {
             return Ok(());
         }
@@ -329,15 +309,11 @@ impl MessageSessionClient {
         let session = self.session().await;
         match self.acquire_jobs_inner(&session, request_ids).await {
             Ok(ids) => Ok(ids),
-            Err(error) if !error.is_token_expired() => Err(ScaleSetError::Local(format!(
-                "failed to acquire jobs: {error}"
-            ))),
+            Err(error) if !error.is_token_expired() => Err(error.context("failed to acquire jobs")),
             Err(_) => {
                 self.refresh_message_session(&session)
                     .await
-                    .map_err(|error| {
-                        ScaleSetError::Local(format!("failed to refresh message session: {error}"))
-                    })?;
+                    .map_err(|error| error.context("failed to refresh message session"))?;
                 let renewed = self.session().await;
                 self.acquire_jobs_inner(&renewed, request_ids).await
             }
@@ -366,9 +342,7 @@ impl MessageSessionClient {
                 &session.message_queue_access_token,
             )
             .await
-            .map_err(|error| {
-                ScaleSetError::Local(format!("failed to issue acquire jobs request: {error}"))
-            })?;
+            .map_err(|error| error.context("failed to issue acquire jobs request"))?;
         if response.status == StatusCode::UNAUTHORIZED {
             return Err(response.failed(
                 Some(ScaleSetFault::MessageQueueTokenExpired),
@@ -459,19 +433,47 @@ pub fn parse_message_response(body: &[u8]) -> Result<ParsedMessage, String> {
     Ok(message)
 }
 
+/// Go's `url.Values.Set` removes duplicate values for the selected key while
+/// leaving every other query parameter intact.
+fn set_last_message_id(mut url: Url, last_message_id: i32) -> Url {
+    if last_message_id <= 0 {
+        return url;
+    }
+    let other_pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| key != "lastMessageId")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.set_query(None);
+    {
+        let mut query = url.query_pairs_mut();
+        for (key, value) in other_pairs {
+            query.append_pair(&key, &value);
+        }
+        query.append_pair("lastMessageId", &last_message_id.to_string());
+    }
+    url
+}
+
+fn append_message_id_to_queue_url(mut url: Url, message_id: i32) -> Url {
+    url.set_path(&format!("{}/{message_id}", url.path()));
+    url
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct BatchedKind {
-    #[serde(rename = "messageType")]
+    #[serde(default, rename = "messageType")]
     message_type: BatchedMessageType,
 }
 
 /// Batched dispatch lenient on unknown types (upstream ignores them).
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Default, serde::Deserialize)]
 enum BatchedMessageType {
     JobAvailable,
     JobAssigned,
     JobStarted,
     JobCompleted,
+    #[default]
     #[serde(other)]
     Unknown,
 }
@@ -523,6 +525,42 @@ mod tests {
     }
 
     #[test]
+    fn last_message_id_replaces_duplicate_query_values_like_go_set() {
+        let original = Url::parse(
+            "https://queue.example/messages?z=last&lastMessageId=old&lastMessageId=older&a=first",
+        )
+        .unwrap();
+        let updated = set_last_message_id(original, 42);
+        let pairs: Vec<(String, String)> = updated
+            .query_pairs()
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        let message_ids: Vec<&str> = pairs
+            .iter()
+            .filter(|(key, _)| key == "lastMessageId")
+            .map(|(_, value)| value.as_str())
+            .collect();
+        assert_eq!(message_ids, vec!["42"]);
+        assert!(pairs.contains(&("a".into(), "first".into())));
+        assert!(pairs.contains(&("z".into(), "last".into())));
+
+        let no_change =
+            Url::parse("https://queue.example/messages?lastMessageId=old&lastMessageId=older")
+                .unwrap();
+        assert_eq!(
+            set_last_message_id(no_change.clone(), 0).as_str(),
+            no_change.as_str()
+        );
+    }
+
+    #[test]
+    fn delete_message_appends_id_without_normalizing_queue_path() {
+        let queue_url = Url::parse("https://queue.example/messages/").unwrap();
+        let delete_url = append_message_id_to_queue_url(queue_url, 17);
+        assert_eq!(delete_url.path(), "/messages//17");
+    }
+
+    #[test]
     fn batch_dispatches_all_four_kinds() {
         let mut available = job_base("JobAvailable", 1);
         available["acquireJobUrl"] = serde_json::json!("https://a.example/acquire");
@@ -562,5 +600,18 @@ mod tests {
         assert_eq!(parsed.job_completed_messages.len(), 1);
         assert_eq!(parsed.job_completed_messages[0].result, "succeeded");
         assert_eq!(parsed.statistics.unwrap().desired_runners(), 2);
+    }
+
+    #[test]
+    fn batched_message_without_type_uses_go_zero_string_and_is_ignored() {
+        let envelope = serde_json::json!({
+            "messageId": 9,
+            "messageType": "RunnerScaleSetJobMessages",
+            "body": "[{\"runnerRequestId\":5}]"
+        });
+        let parsed = parse_message_response(&serde_json::to_vec(&envelope).unwrap()).unwrap();
+        assert!(parsed.job_available_messages.is_empty());
+        assert!(parsed.job_assigned_messages.is_empty());
+        assert_eq!(parsed.unknown_message_types, vec!["?"]);
     }
 }
