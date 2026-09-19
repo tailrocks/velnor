@@ -1,0 +1,47 @@
+{
+  "schema": "velnor.external-evidence-update.v1",
+  "update_id": "20260919T182822Z",
+  "captured_at_utc": "2026-09-19T18:28:22Z",
+  "repository": "tailrocks/velnor",
+  "ref": "refs/heads/evidence/github-first-dual-lane-20260919T181508Z",
+  "parent_checkpoint_commit": "cc683fc934d80bf18e7f87bc585950edb0540508",
+  "source_base_revision": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+  "attestation": "none",
+  "gate_status": "not-evaluated",
+  "gate_statement": "This appended evidence update does not establish G0, G1, G2, G3, G4, G5, G6, or G7 success.",
+  "original_evidence_root": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence",
+  "previous_snapshot_preserved": {
+    "checkpoint_path": "evidence/github-first-dual-lane/checkpoint.json",
+    "manifest_path": "evidence/github-first-dual-lane/SHA256SUMS",
+    "commit": "cc683fc934d80bf18e7f87bc585950edb0540508"
+  },
+  "integrity": {
+    "sha256_manifest": "SHA256SUMS",
+    "inventory": "INVENTORY.tsv",
+    "manifest_scope": "All files in this update directory except this update SHA256SUMS file"
+  },
+  "included_file_count_before_manifests": 38,
+  "included_categories": [
+    "New checker-v2, skills, bootstrap, Homebrew, APT, and preview review records",
+    "New APT exact-review synthetic fixtures and compact adversarial-v2 result summaries",
+    "Stable reports omitted from the first package but completed in the same evidence batch"
+  ],
+  "time_boundary": {
+    "previous_checkpoint_captured_at_utc": "2026-09-19T18:17:51Z",
+    "selection_rule": "Selected post-boundary reports plus stable compact reports from the same completed batch that were not in the prior package",
+    "source_reconciliation": "All selected source files must match INVENTORY.tsv at publication; no source writes are performed here"
+  },
+  "excluded_live_writes": [
+    {
+      "source": "G0/fleet/pushes.json",
+      "reason": "Changed between copy and source-to-package hash reconciliation; excluded from this frozen update rather than representing a moving fleet census"
+    }
+  ],
+  "excluded_boundaries": [
+    "The mutable external session ledger, credentials, tokens, private keys, and live operational state",
+    "Research trees, cloned repositories, build targets, generated binaries, debug outputs, dependency caches, and node_modules",
+    "Raw or huge logs, full synthetic fixture asset trees, transient command output, and unselected source files",
+    "Any evidence file written after the capture timestamp or changed during source reconciliation; such live writes remain outside this update"
+  ],
+  "reproducibility_note": "The included APT and checker fixtures are synthetic review inputs/results. Interpret them only with their cited source revisions and review reports. This update is an external ledger snapshot, not a source release or gate approval."
+}

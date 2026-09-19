@@ -1,0 +1,172 @@
+{
+  "channel": "stable",
+  "manifest": {
+    "artifacts": [
+      {
+        "kind": "apt-package",
+        "name": "velnor-runner-1.2.3-amd64.deb",
+        "sha256": "b00c951f88b7f830eeb357ebb7003cc5f9bff2e08de731a361b7030a430ac8c2",
+        "size": 14,
+        "target": "x86_64-unknown-linux-gnu"
+      },
+      {
+        "kind": "apt-package",
+        "name": "velnor-runner-1.2.3-arm64.deb",
+        "sha256": "243fd4311d37b14148281b183d3f3826fb6a4911bebca17f450962f01936e7f0",
+        "size": 14,
+        "target": "aarch64-unknown-linux-gnu"
+      }
+    ],
+    "channel": "stable",
+    "components": [
+      {
+        "binary": "velnor-runner",
+        "crate": "velnor-runner",
+        "name": "velnor-runner",
+        "targets": [
+          "x86_64-unknown-linux-gnu",
+          "aarch64-unknown-linux-gnu",
+          "aarch64-apple-darwin"
+        ],
+        "version": "0.1.277"
+      },
+      {
+        "binary": "velnorctl",
+        "crate": "velnorctl",
+        "name": "velnorctl",
+        "targets": [
+          "x86_64-unknown-linux-gnu",
+          "aarch64-unknown-linux-gnu",
+          "aarch64-apple-darwin"
+        ],
+        "version": "0.1.0"
+      },
+      {
+        "binary": "velnor-workflow",
+        "crate": "velnor-workflow",
+        "name": "velnor-workflow",
+        "targets": [
+          "x86_64-unknown-linux-gnu",
+          "aarch64-unknown-linux-gnu",
+          "aarch64-apple-darwin"
+        ],
+        "version": "0.1.0"
+      }
+    ],
+    "product_id": "velnor",
+    "release_id": "release-77",
+    "release_tag": "v1.2.3",
+    "schema": "velnor.product-manifest/v1",
+    "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "source_ref": "refs/tags/v1.2.3",
+    "source_repository": "tailrocks/velnor",
+    "version": "1.2.3"
+  },
+  "manifest_asset": "product-manifest.json",
+  "manifest_schema": "velnor.product-manifest/v1",
+  "manifest_sha256": "3776be91af766146de5c9684d695601702be54ec66ac1a09e585b75b5c9f09fb",
+  "package": "velnor-runner",
+  "product_id": "velnor",
+  "provider_release_id": 77,
+  "published_at": "2026-09-20T00:00:00Z",
+  "release_assets": [
+    {
+      "browser_download_url": "https://github.com/tailrocks/velnor/releases/download/v1.2.3/SHA256SUMS",
+      "id": 15,
+      "name": "SHA256SUMS",
+      "size": 1,
+      "state": "uploaded"
+    },
+    {
+      "browser_download_url": "https://github.com/tailrocks/velnor/releases/download/v1.2.3/manifest.json",
+      "id": 14,
+      "name": "manifest.json",
+      "size": 1,
+      "state": "uploaded"
+    },
+    {
+      "browser_download_url": "https://github.com/tailrocks/velnor/releases/download/v1.2.3/manifest.json.sha256",
+      "id": 141,
+      "name": "manifest.json.sha256",
+      "size": 1,
+      "state": "uploaded"
+    },
+    {
+      "browser_download_url": "https://github.com/tailrocks/velnor/releases/download/v1.2.3/product-manifest.json",
+      "id": 10,
+      "name": "product-manifest.json",
+      "size": 1,
+      "state": "uploaded"
+    },
+    {
+      "browser_download_url": "https://github.com/tailrocks/velnor/releases/download/v1.2.3/product-manifest.json.sha256",
+      "id": 11,
+      "name": "product-manifest.json.sha256",
+      "size": 1,
+      "state": "uploaded"
+    },
+    {
+      "browser_download_url": "https://github.com/tailrocks/velnor/releases/download/v1.2.3/release-manifest.json",
+      "id": 13,
+      "name": "release-manifest.json",
+      "size": 1,
+      "state": "uploaded"
+    },
+    {
+      "browser_download_url": "https://github.com/tailrocks/velnor/releases/download/v1.2.3/release-record.json",
+      "id": 12,
+      "name": "release-record.json",
+      "size": 1,
+      "state": "uploaded"
+    },
+    {
+      "browser_download_url": "https://github.com/tailrocks/velnor/releases/download/v1.2.3/release-record.json.sha256",
+      "id": 121,
+      "name": "release-record.json.sha256",
+      "size": 1,
+      "state": "uploaded"
+    },
+    {
+      "browser_download_url": "https://github.com/tailrocks/velnor/releases/download/v1.2.3/velnor-runner-1.2.3-amd64.deb",
+      "id": 17,
+      "name": "velnor-runner-1.2.3-amd64.deb",
+      "size": 14,
+      "state": "uploaded"
+    },
+    {
+      "browser_download_url": "https://github.com/tailrocks/velnor/releases/download/v1.2.3/velnor-runner-1.2.3-amd64.deb.sha256",
+      "id": 16,
+      "name": "velnor-runner-1.2.3-amd64.deb.sha256",
+      "size": 1,
+      "state": "uploaded"
+    },
+    {
+      "browser_download_url": "https://github.com/tailrocks/velnor/releases/download/v1.2.3/velnor-runner-1.2.3-arm64.deb",
+      "id": 19,
+      "name": "velnor-runner-1.2.3-arm64.deb",
+      "size": 14,
+      "state": "uploaded"
+    },
+    {
+      "browser_download_url": "https://github.com/tailrocks/velnor/releases/download/v1.2.3/velnor-runner-1.2.3-arm64.deb.sha256",
+      "id": 18,
+      "name": "velnor-runner-1.2.3-arm64.deb.sha256",
+      "size": 1,
+      "state": "uploaded"
+    }
+  ],
+  "release_id": "release-77",
+  "release_tag": "v1.2.3",
+  "release_url": "https://github.com/tailrocks/velnor/releases/tag/v1.2.3",
+  "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "source_ref": "refs/tags/v1.2.3",
+  "source_ref_resolution": {
+    "method": "github-git-ref",
+    "proof_ref": "refs/tags/v1.2.3",
+    "resolved_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "source_repository": "tailrocks/velnor",
+  "tag": "v1.2.3",
+  "target_commitish": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "version": "1.2.3"
+}

@@ -1,0 +1,10 @@
+baseline	expected=pass	exit=0
+binary-name-drift	expected=fail	exit=1
+sha256-sums-tamper	expected=fail	exit=1
+release-manifest-assets-tamper	expected=fail	exit=1
+release-record-census	expected=fail	exit=1
+homebrew-digest-tamper	expected=fail	exit=1
+asset-url-missing	expected=fail	exit=1
+source-ref-mismatch	expected=fail	exit=1
+ambiguous-version	expected=fail	exit=5
+release-id-grammar	expected=fail	exit=1
