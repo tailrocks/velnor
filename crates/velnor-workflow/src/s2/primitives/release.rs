@@ -1459,7 +1459,7 @@ fn release_metadata_artifact_name(preview: bool) -> &'static str {
 fn release_metadata_download_path(steps: &str) -> String {
     steps.replace(
         "path: metadata\n",
-        "path: ${{ runner.temp }}/velnor-release-metadata\n",
+        "path: ${{ runner.temp }}/release-metadata\n",
     )
 }
 
@@ -1467,11 +1467,11 @@ fn release_metadata_in_temp_dir(steps: &str) -> String {
     let mut steps = steps.replace("metadata/", "$metadata_dir/");
     steps = steps.replace(
         "        run: |\n          set -euo pipefail\n          test -s $metadata_dir/",
-        "        run: |\n          set -euo pipefail\n          metadata_dir=\"$RUNNER_TEMP/velnor-release-metadata\"\n          test -s $metadata_dir/",
+        "        run: |\n          set -euo pipefail\n          metadata_dir=\"$RUNNER_TEMP/release-metadata\"\n          test -s $metadata_dir/",
     );
     steps.replace(
         "      - name: Stage the deb's own package record\n        run: |\n          set -euo pipefail\n",
-        "      - name: Stage the deb's own package record\n        run: |\n          set -euo pipefail\n          metadata_dir=\"$RUNNER_TEMP/velnor-release-metadata\"\n",
+        "      - name: Stage the deb's own package record\n        run: |\n          set -euo pipefail\n          metadata_dir=\"$RUNNER_TEMP/release-metadata\"\n",
     )
 }
 
@@ -5519,11 +5519,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "dda4fe0ecf3711890a1daa84b48b2f9517e57b07dad6c06783cb34bfcaa08559",
+                "18fcc15b40274901e95d3c82365f19e6e5cd2e041760daf7484f4e30cfeecfc3",
             ),
             (
                 "preview.yml",
-                "4922e8b7aded3ec357e776fec51fad0ef4d408db8117801c87ec7dfeefb36368",
+                "509c914560a5101b4dc526a2919afe4fb57ae21726eef50e32501bb97352ac55",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -7421,12 +7421,12 @@ mod tests {
         );
         let debian = yaml_job(&preview, "debian");
         assert!(
-            debian.contains("path: ${{ runner.temp }}/velnor-release-metadata"),
+            debian.contains("path: ${{ runner.temp }}/release-metadata"),
             "release metadata must stay outside the source checkout: {debian}"
         );
         assert!(!debian.contains("path: metadata\n"), "{debian}");
         assert!(
-            debian.contains("metadata_dir=\"$RUNNER_TEMP/velnor-release-metadata\""),
+            debian.contains("metadata_dir=\"$RUNNER_TEMP/release-metadata\""),
             "identity staging must resolve the temp metadata directory: {debian}"
         );
         assert!(debian.contains("needs: [identity, metadata]"), "{debian}");
