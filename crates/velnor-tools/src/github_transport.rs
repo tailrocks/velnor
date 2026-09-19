@@ -11,6 +11,7 @@ use super::{
     RawStorageError, TransportFailure,
 };
 use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
 use reqwest::redirect::Policy;
 use serde_json::json;
@@ -351,6 +352,7 @@ impl RawObjectStore for RawObjectFileStore {
             byte_length: object.bytes.len() as u64,
             original_sha256: object.original_sha256,
             original_byte_length: object.original_byte_length,
+            bytes_base64: BASE64.encode(&object.bytes),
             media_type: object.media_type,
             storage_ref: content_addressed_storage_ref(&digest),
         };
@@ -364,6 +366,7 @@ impl RawObjectStore for RawObjectFileStore {
             "byte_length": reference.byte_length,
             "original_sha256": reference.original_sha256,
             "original_byte_length": reference.original_byte_length,
+            "bytes_base64": reference.bytes_base64,
             "media_type": reference.media_type,
             "storage_ref": reference.storage_ref,
         }))
@@ -391,6 +394,9 @@ impl RawObjectStore for RawObjectFileStore {
         {
             return Err(RawStorageError::Unbound);
         }
+        if BASE64.encode(&bytes) != reference.bytes_base64 {
+            return Err(RawStorageError::Unbound);
+        }
         if reference.storage_ref != content_addressed_storage_ref(&reference.sha256) {
             return Err(RawStorageError::Unbound);
         }
@@ -405,6 +411,7 @@ impl RawObjectStore for RawObjectFileStore {
             "byte_length": reference.byte_length,
             "original_sha256": reference.original_sha256,
             "original_byte_length": reference.original_byte_length,
+            "bytes_base64": reference.bytes_base64,
             "media_type": reference.media_type,
             "storage_ref": reference.storage_ref,
         }))

@@ -11,6 +11,7 @@
     reason = "collector wiring is a follow-up integration scope"
 )]
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -28,6 +29,12 @@ pub type AcquisitionFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>
 /// while the live collector integration is reviewed independently.
 #[path = "github_transport.rs"]
 pub mod live_transport;
+
+/// Current GitHub facts collector and typed observation mapping.  It remains
+/// behind this acquisition namespace until the checker owner approves the
+/// final `g0_contract` adapter seam.
+#[path = "github_live_collector.rs"]
+pub mod live_collector;
 
 /// API family used by a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -364,6 +371,9 @@ pub struct RawObjectRef {
     /// exact network response captured before redaction.
     pub original_sha256: String,
     pub original_byte_length: u64,
+    /// Base64 of the safe/redacted bytes held at `storage_ref`.  This is the
+    /// exact payload the typed checker can independently hash and verify.
+    pub bytes_base64: String,
     pub media_type: String,
     pub storage_ref: String,
 }
@@ -436,6 +446,8 @@ pub struct RequestRecord {
     pub api: ApiKind,
     pub method: HttpMethod,
     pub endpoint_or_operation: String,
+    pub query_base64: String,
+    pub variables_base64: String,
     pub query_sha256: Option<String>,
     pub variables_sha256: Option<String>,
     pub redacted_variables: Option<Value>,
@@ -445,6 +457,7 @@ pub struct RequestRecord {
     pub http_status: Option<u16>,
     pub api_request_id: Option<String>,
     pub rate_limit: Option<RateLimitObservation>,
+    pub safe_scopes: Option<Vec<String>>,
     pub page: PageState,
     pub response_raw_ref: Option<String>,
     pub error_raw_ref: Option<String>,
@@ -683,6 +696,37 @@ pub fn github_workflow_jobs_request(
         "workflow_jobs",
     )
     .with_query("per_page", "100")
+    .with_query("filter", "all")
+}
+
+pub fn github_workflow_attempts_request(
+    collection_id: impl Into<String>,
+    repository: &str,
+    run_id: u64,
+) -> RestCollectionRequest {
+    RestCollectionRequest::new(
+        collection_id,
+        format!("/repos/{repository}/actions/runs/{run_id}/attempts"),
+        Some("workflow_runs"),
+        "workflow_attempts",
+    )
+    .with_query("per_page", "100")
+}
+
+pub fn github_workflow_attempt_jobs_request(
+    collection_id: impl Into<String>,
+    repository: &str,
+    run_id: u64,
+    attempt: u64,
+) -> RestCollectionRequest {
+    RestCollectionRequest::new(
+        collection_id,
+        format!("/repos/{repository}/actions/runs/{run_id}/attempts/{attempt}/jobs"),
+        Some("jobs"),
+        "workflow_attempt_jobs",
+    )
+    .with_query("per_page", "100")
+    .with_query("filter", "all")
 }
 
 pub fn github_workflow_artifacts_request(
@@ -697,6 +741,40 @@ pub fn github_workflow_artifacts_request(
         "workflow_artifacts",
     )
     .with_query("per_page", "100")
+}
+
+pub fn github_check_suite_runs_request(
+    collection_id: impl Into<String>,
+    repository: &str,
+    suite_id: u64,
+) -> RestCollectionRequest {
+    RestCollectionRequest::new(
+        collection_id,
+        format!("/repos/{repository}/check-suites/{suite_id}/check-runs"),
+        Some("check_runs"),
+        "check_suite_runs",
+    )
+    .with_query("filter", "all")
+    .with_query("per_page", "100")
+}
+
+/// Acquire one JSON object while preserving the same request/raw provenance
+/// contract as list acquisition.  This is used for `/user`, repository,
+/// workflow, ruleset-detail, PR-detail, and commit objects.  The object is
+/// represented as one item in `CollectionResult.items`; an empty/malformed
+/// response is never converted into a successful empty collection.
+pub fn github_single_object_request(
+    collection_id: impl Into<String>,
+    endpoint: impl Into<String>,
+    object_kind: impl Into<String>,
+) -> RestCollectionRequest {
+    RestCollectionRequest::new(
+        collection_id,
+        endpoint,
+        Some("$object".to_owned()),
+        object_kind,
+    )
+    .with_per_page(1)
 }
 
 /// Acquire a REST list until GitHub's Link relation declares the terminal
@@ -1060,7 +1138,7 @@ where
             continue;
         }
 
-        if page_items_len == request.per_page {
+        if page_items_len == request.per_page && request.item_field.as_deref() != Some("$object") {
             result.requests.push(make_record(
                 &request_id,
                 &acquisition_request,
@@ -1824,6 +1902,9 @@ fn graphql_body(
 }
 
 fn rest_items(body: &Value, item_field: Option<&str>) -> Result<Vec<Value>, AcquisitionError> {
+    if item_field == Some("$object") {
+        return Ok(vec![body.clone()]);
+    }
     let array = item_field.map_or(Some(body), |field| body.get(field));
     array
         .and_then(Value::as_array)
@@ -1996,6 +2077,7 @@ fn retain_raw<S: RawObjectStore>(
     let expected_media_type = object.media_type.clone();
     let expected_original_sha256 = object.original_sha256.clone();
     let expected_original_byte_length = object.original_byte_length;
+    let expected_bytes_base64 = BASE64.encode(&object.bytes);
     let reference = store.store(object).map_err(|error| match error {
         RawStorageError::Unavailable => AcquisitionError::StorageUnavailable,
         RawStorageError::Refused => AcquisitionError::StorageRefused,
@@ -2009,6 +2091,7 @@ fn retain_raw<S: RawObjectStore>(
         || reference.byte_length != expected_length
         || reference.original_sha256 != expected_original_sha256
         || reference.original_byte_length != expected_original_byte_length
+        || reference.bytes_base64 != expected_bytes_base64
     {
         return Err(AcquisitionError::RawReferenceMismatch);
     }
@@ -2044,29 +2127,44 @@ fn make_record(
     graphql_inputs: Option<(&Value, &str)>,
     rate_limit: Option<RateLimitObservation>,
 ) -> RequestRecord {
-    let (query_sha256, variables_sha256, redacted_variables) = match graphql_inputs {
-        Some((variables, query)) => (
-            Some(request_digest(&request.endpoint_or_operation, query)),
-            Some(canonical_json_bytes(variables).map_or_else(
-                |_| "sha256:serialization-error".to_owned(),
-                |bytes| sha256_digest(&bytes),
-            )),
-            Some(redact_value(variables)),
-        ),
-        None => (
-            Some(request_digest(
-                &request.endpoint_or_operation,
-                &canonical_query(&request.query),
-            )),
-            None,
-            None,
-        ),
-    };
+    let (query_base64, variables_base64, query_sha256, variables_sha256, redacted_variables) =
+        match graphql_inputs {
+            Some((variables, query)) => {
+                let variable_bytes = canonical_json_bytes(variables);
+                (
+                    BASE64.encode(query.as_bytes()),
+                    variable_bytes
+                        .as_ref()
+                        .map_or_else(|_| String::new(), |bytes| BASE64.encode(bytes)),
+                    Some(request_digest(&request.endpoint_or_operation, query)),
+                    Some(variable_bytes.map_or_else(
+                        |_| "sha256:serialization-error".to_owned(),
+                        |bytes| sha256_digest(&bytes),
+                    )),
+                    Some(redact_value(variables)),
+                )
+            }
+            None => {
+                let canonical_query = canonical_query(&request.query);
+                (
+                    BASE64.encode(canonical_query.as_bytes()),
+                    String::new(),
+                    Some(request_digest(
+                        &request.endpoint_or_operation,
+                        &canonical_query,
+                    )),
+                    None,
+                    None,
+                )
+            }
+        };
     RequestRecord {
         request_id: request_id.to_owned(),
         api: request.api,
         method: request.method,
         endpoint_or_operation: request.endpoint_or_operation.clone(),
+        query_base64,
+        variables_base64,
         query_sha256,
         variables_sha256,
         redacted_variables,
@@ -2084,7 +2182,19 @@ fn make_record(
         state,
         complete,
         truncation_reason,
+        safe_scopes: headers.and_then(parse_safe_scopes),
     }
+}
+
+fn parse_safe_scopes(headers: &BTreeMap<String, String>) -> Option<Vec<String>> {
+    let value = header_value(headers, "x-oauth-scopes")?;
+    let scopes = value
+        .split(',')
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty() && !looks_like_secret(scope))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    (!scopes.is_empty()).then_some(scopes)
 }
 
 fn canonical_query(query: &BTreeMap<String, String>) -> String {
@@ -2460,6 +2570,7 @@ mod tests {
                 byte_length: bytes.len() as u64,
                 original_sha256: object.original_sha256,
                 original_byte_length: object.original_byte_length,
+                bytes_base64: BASE64.encode(&bytes),
                 media_type: object.media_type,
                 storage_ref: content_addressed_storage_ref(&sha256_digest(&bytes)),
             };
@@ -2490,6 +2601,7 @@ mod tests {
                 byte_length: object.bytes.len() as u64,
                 original_sha256: object.original_sha256,
                 original_byte_length: object.original_byte_length,
+                bytes_base64: BASE64.encode(&object.bytes),
                 media_type: object.media_type,
                 storage_ref: "sha256://tampered".to_owned(),
             })
@@ -2514,6 +2626,7 @@ mod tests {
                 byte_length: object.bytes.len() as u64,
                 original_sha256: object.original_sha256,
                 original_byte_length: object.original_byte_length,
+                bytes_base64: BASE64.encode(&object.bytes),
                 media_type: object.media_type,
                 storage_ref: "store://unbound/caller-asserted".to_owned(),
             })
