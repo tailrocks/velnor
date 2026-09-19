@@ -347,6 +347,13 @@ in the authoritative checker, including unmatched pairs; helper output or self-a
 close G0/G7. Keep current unknowns and rejected exact candidates linked in the
 external session record.
 
+Use one canonical checker schema and command. Do not add or accept CLI/serde
+aliases, flat-fleet coercion, merged release/install fallbacks, or precedence
+shims for conflicting records. Collectors must migrate to canonical typed
+records, emit one representation, reject duplicate/conflicting inputs, and
+retain missing facts as incomplete. The exact invocation remains pending the
+checker owner's committed schema/path contract; no guessed flags are verified.
+
 ## Recovery and rollback rules
 
 1. Stop at the first invalidated dependency; record exact source/run/release

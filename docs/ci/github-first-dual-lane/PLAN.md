@@ -121,6 +121,26 @@ functional results; it may not downgrade a required applicable dependency to
 [`SPEC.md`](./SPEC.md#evidence-schema-and-checker-contract); the separate
 checker schema and examples must adopt them before authoritative use.
 
+The external fleet evidence has 32 populated `main` branch/SHA rows at
+`2026-09-19T16:34:19Z` and again in `G0/fleet/main-revisions.tsv` at
+`2026-09-19T17:05:57Z`. PR identity snapshots are 78 baseline rows at
+`2026-09-19T16:34:19Z` and 77 later current rows in `requirements.json`
+generated at `2026-09-19T17:03:32Z`; neither is asserted fresh beyond its
+timestamp. The committed scope inventory still has 32/32 null workload,
+required-check/App, platform/architecture, and provider-eligibility fields,
+31/32 access rows unknown, and no structured graph. These are explicit G0
+blockers, not reasons to invent values.
+
+`G0/check-contract/check-contract.json` is Velnor-only (current main plus
+PR948/952/953/954); the 78-row `open-prs.tsv` identity list has no per-PR
+check/App/run rows for the other 31 repositories. Do not treat that contract as
+fleet-wide coverage. Collection outputs are assigned externally:
+`check-contexts-full.json` (all 32 checks/Apps/current PR/main) to
+`/root/g3_distribution_consumers`, `dependencies-and-access.json` to
+`/root/g0_runtime`, and `workloads-full.json` to `/root/g0_inventory`.
+`/root/g0_records` imports only validated source-SHA/UTC/explicit-unknown
+outputs; each path and exact producer invocation remains pending.
+
 `fleet.json` remains a flat nullable scope inventory. Its static count/uniqueness
 check is not a G0 result, and `gate_status: "pending"` is not success. The
 conversion boundary is explicit: enrich the inventory into the checker-owned
@@ -130,6 +150,12 @@ into `evidence/records.json`. These paths are outside this source tree and are
 not yet verified or populated here. `/root/g0_checker` must publish the strict
 schema conversion and exact working invocation; no guessed command, synthesized
 fact, or self-attested record can satisfy G0.
+
+The conversion is strict and canonical: no CLI or serde aliases, flat-fleet
+coercion, merged release/install fallback, or conflict-precedence shim is
+permitted. Producers emit one representation and reject duplicates/conflicts;
+missing facts remain incomplete. The checker owner must publish the exact
+canonical command after schema review; no compatibility path is a substitute.
 
 The bounded external follow-ups are `/root/g0_fleet` in a new isolated tree
 for baseline scope reconciliation, `/root/g1_run_operations` in a new

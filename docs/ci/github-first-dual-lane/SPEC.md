@@ -144,6 +144,30 @@ working invocation and strict schema validation before implementation review;
 until then, no command or path is claimed verified and no G0 result may use
 these artifacts.
 
+The current external check-contract scope is narrower than the fleet:
+`G0/check-contract/check-contract.json` covers Velnor current main and PRs
+948/952/953/954 only, bound to its own snapshot. The baseline
+`G0/fleet/open-prs.tsv` contains 78 PR identities, but does not contain
+per-PR checks, producing Apps, runs, or child graphs for the other 31
+repositories. Never reuse the Velnor-only contract as fleet-wide check
+coverage. The all-32 collector must be independently reviewed before those
+claims can enter `current-snapshot.json` or `records.json`.
+
+The bounded collection handoff is: `/root/g3_distribution_consumers` produces
+external `G0/fleet/check-contexts-full.json` for all 32 current PR/main rows;
+`/root/g0_runtime` produces `G0/fleet/dependencies-and-access.json`; and
+`/root/g0_inventory` produces `G0/fleet/workloads-full.json` with source-bound
+workload/platform/provider facts. `/root/g0_records` ingests only validated
+outputs carrying source SHA, UTC observation, and explicit unknowns; owners do
+not overlap edits. These are pending external outputs, not present facts.
+
+The no-legacy rule permits one canonical checker schema and command only.
+Collectors and record producers must migrate to the typed canonical fields;
+CLI aliases, serde aliases, flat-fleet coercion, merged release/install
+fallbacks, and conflict-precedence shims are rejected. A conversion emits one
+canonical representation and rejects duplicate or conflicting representations;
+missing facts remain incomplete.
+
 ### Canonical repository names
 
 The fixed names are:
@@ -645,8 +669,18 @@ configuration, and explicit blockers; verbose jobs stay in the immutable ledger.
 
 At G0 start, the following are pending and must not be inferred green:
 
-- Live default branches, SHAs, open PRs, checks, workflows, workload matrices,
-  and access gaps for all 32 repositories.
+- External inventory snapshots recorded 32 `main` default branches with SHAs
+  at `2026-09-19T16:34:19Z` and again in `G0/fleet/main-revisions.tsv` at
+  `2026-09-19T17:05:57Z`; the PR snapshots record 78 baseline identities at
+  `2026-09-19T16:34:19Z` and 77 current rows in the later
+  `requirements.json` snapshot (`2026-09-19T17:03:32Z`). These are timestamped
+  external observations, not a fresh current-state claim. Source `fleet.json`
+  remains a static manifest; all 32 workload IDs, check/App fields,
+  platform/architecture, and provider-eligibility fields are null, 31 access
+  rows remain unknown, and the structured dependency graph is absent.
+- Full per-PR checks/Apps/runs/child graphs and all-32 workload/dependency/access
+  collection remain pending; the Velnor-only check contract cannot stand in for
+  the other 31 repositories.
 - Current Velnor hosted failure/recovery state and post-merge evidence.
 - Preview/stable product artifacts, APT signed feeds, Homebrew formulas, and
   clean-client installation/upgrade evidence.

@@ -7,13 +7,16 @@ Overall status: **in progress; no gate passed**.
 Last source snapshot: `2026-09-19T16:18:44Z`, Velnor revision
 `abe9ad82a2d4d01b706bbc6122ab6ccb150faad9`.
 
-Fleet baseline checkpoint: `2026-09-19T16:34:19Z` UTC. All 32 default
-branches were observed as `main`; the baseline had 78 open PR rows (75 ready,
-3 drafts) across 12 repositories, 23 generator configs, 22 repositories with
-nonempty generated workflow sets, and 10 with empty/no workflow output. A later
-current reconciliation at `2026-09-19T17:05:57Z` has 77 current PR rows after
-`jackin-project/homebrew-tap#494` merged and `tailrocks/velnor#953` changed
-head. Baseline records remain under external
+Fleet snapshots are timestamped external observations, not a fresh gate claim.
+The inventory at `2026-09-19T16:34:19Z` recorded 32 `main` default branches
+with branch/SHA rows and 78 baseline open-PR identities (75 ready, 3 drafts)
+across 12 repositories, 23 generator configs, 22 nonempty workflow sets, and
+10 empty/no-workflow sets. `G0/fleet/main-revisions.tsv` records 32 `main`
+branch/SHA rows again at `2026-09-19T17:05:57Z`. The later PR reconciliation
+snapshot generated at `2026-09-19T17:03:32Z` contains 77 current rows versus
+78 baseline rows after `jackin-project/homebrew-tap#494` merged and
+`tailrocks/velnor#953` changed head; it is not asserted fresh beyond that
+timestamp. Baseline records remain under external
 `G0/fleet/{inventory.md,configs.tsv,open-prs.tsv}`; current records are
 `G0/fleet/{main-revisions.tsv,pr-checks.tsv,requirements.json,context-pages.json,main-verification.json,handoff.json}`.
 This is inventory evidence only. It does not prove workload completeness,
@@ -41,9 +44,12 @@ required-check success, migration, or a gate exit.
   `35452270126` and `35445034780` were force-canceled; PR954 run
   `35454970877` has hosted work progressing while Velnor is queued; PR953 run
   `35453601367` has a cache-contract failure. No rules changed.
-- The complete 32-row fleet baseline branch snapshot is populated in
-  `fleet.json`; current PR/head revisions remain in the external refresh TSVs
-  so the source tree does not duplicate mutable baseline/current ledgers.
+- The committed `fleet.json` is a static 32-row scope manifest, not the live
+  enriched checker input. Its 32 workload-ID, required-check/App,
+  platform/architecture, and provider-eligibility fields are null; 31 access
+  rows are unknown; dependency/access structure is not embedded. External
+  `main-revisions.tsv` has 32 timestamped branch/SHA rows, while current PR
+  and check semantics remain snapshot-bound and incomplete.
 - The current read-only workload projection is external at
   `G0/workload-matrix.json`: all 32 rows align to the latest main-revision
   snapshot, observed responsibilities are separated from unsupported/native/
@@ -86,6 +92,11 @@ package delivery, fleet migration, Mac operation, or any gate exit.
 | Evidence root | `/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/` | Policy; live records pending |
 | Session registry | Stable external `session.json` path; current hash recorded per checkpoint | Actual Luna/max worker threads, evidence paths, graph amendments, and no gate pass |
 | Final ledger | Immutable artifact/evidence ref outside source | Pending |
+| External fleet branch snapshot | 32 `main` rows with nonempty SHAs at `2026-09-19T16:34:19Z`; `main-revisions.tsv` repeats 32 rows at `2026-09-19T17:05:57Z` | External read-only observations; not a fresh current-state or G0 pass |
+| External PR snapshot | 78 baseline identities at `2026-09-19T16:34:19Z`; 77 current rows in `requirements.json` generated `2026-09-19T17:03:32Z`; heads rechecked `2026-09-19T17:02:04Z` | Historical/current snapshot distinction preserved; no fresh claim |
+| Committed fleet semantic fields | 32/32 expected workloads null; 32/32 required check/App fields null; 32/32 platform/architecture null; 32/32 provider eligibility null; 31/32 access rows unknown | Explicit G0 incompleteness; do not fill nulls or treat static branch rows as enriched evidence |
+| Check-contract scope | `G0/check-contract/check-contract.json` covers only Velnor current main and PR948/952/953/954; `open-prs.tsv` has 78 identities without per-PR check/App/run rows for the other 31 | Velnor-only contract cannot be reused fleet-wide; all-32 collector pending |
+| Collection handoff | `/root/g3_distribution_consumers` → `G0/fleet/check-contexts-full.json`; `/root/g0_runtime` → `G0/fleet/dependencies-and-access.json`; `/root/g0_inventory` → `G0/fleet/workloads-full.json` | `/root/g0_records` ingests only validated source-SHA/UTC/explicit-unknown outputs; files pending |
 | PR952 source/integration chronology | Exact PR head `a5c1c0bd5c92c4c52d58ccb21042b1b2c0b08637` had 1858 tests before regeneration; integrated source `12cc87b629802c294da9840325cb21087c020df` has 1736 tests, fmt, and clippy pass; generated snapshot failure remains until regeneration | Separate observations; not a gate pass |
 | PR954 current head | `f16592ea165ced141bf0bb1c43466a95d7df8b2e` | Observed; current run still pending/partial |
 | PR953 cache result | Run `35453601367` failed cache contract | Observed; cache diagnosis reopened |
