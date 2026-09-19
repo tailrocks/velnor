@@ -159,17 +159,17 @@ pub(crate) fn verify_action(
 /// one function prevents generation and runtime verification from auditing
 /// different files.
 fn discover_action_sources(files: &[String]) -> Vec<ActionSource> {
-    let mut metadata_yml = BTreeMap::new();
-    let mut metadata_yaml = BTreeMap::new();
+    let mut preferred_metadata = BTreeMap::new();
+    let mut alternate_metadata = BTreeMap::new();
     let mut dockerfiles = BTreeMap::new();
     for file in files.iter().filter(|file| !is_test_support_path(file)) {
         let root = parent_path(file);
         match file.rsplit('/').next() {
             Some("action.yml") => {
-                metadata_yml.insert(root, file.clone());
+                preferred_metadata.insert(root, file.clone());
             }
             Some("action.yaml") => {
-                metadata_yaml.insert(root, file.clone());
+                alternate_metadata.insert(root, file.clone());
             }
             Some("Dockerfile") => {
                 dockerfiles.insert(root, file.clone());
@@ -180,21 +180,27 @@ fn discover_action_sources(files: &[String]) -> Vec<ActionSource> {
             _ => {}
         }
     }
-    let roots = metadata_yml
+    let roots = preferred_metadata
         .keys()
-        .chain(metadata_yaml.keys())
+        .chain(alternate_metadata.keys())
         .chain(dockerfiles.keys())
         .cloned()
         .collect::<BTreeSet<_>>();
     roots
         .into_iter()
         .filter_map(|root| {
-            if let Some(path) = metadata_yml.get(&root).or_else(|| metadata_yaml.get(&root)) {
+            if let Some(path) = preferred_metadata
+                .get(&root)
+                .or_else(|| alternate_metadata.get(&root))
+            {
                 return Some(ActionSource {
                     root,
                     path: path.clone(),
                     kind: ActionSourceKind::Metadata,
                 });
+            }
+            if !is_bare_dockerfile_action_candidate(&root, files) {
+                return None;
             }
             dockerfiles.get(&root).map(|path| ActionSource {
                 root,
@@ -203,6 +209,42 @@ fn discover_action_sources(files: &[String]) -> Vec<ActionSource> {
             })
         })
         .collect()
+}
+
+/// A repository-level Dockerfile is also the normal project container input.
+/// Runner fallback applies when that tree is consumed as an action, but a
+/// project scanner has no caller context with which to distinguish the two.
+/// Keep the fallback for Dockerfile-only action trees while avoiding a second
+/// GitHub Action unit for a manifest-backed project (the Docker detector owns
+/// that project already).
+fn is_bare_dockerfile_action_candidate(root: &str, files: &[String]) -> bool {
+    files
+        .iter()
+        .filter(|file| parent_path(file) == root)
+        .all(|file| {
+            let name = file.rsplit('/').next().unwrap_or(file);
+            !is_project_manifest_name(name)
+        })
+}
+
+fn is_project_manifest_name(name: &str) -> bool {
+    matches!(
+        name,
+        "Cargo.toml"
+            | "Package.swift"
+            | "Gemfile"
+            | "Makefile"
+            | "go.mod"
+            | "mix.exs"
+            | "package.json"
+            | "composer.json"
+            | "pom.xml"
+            | "pyproject.toml"
+            | "setup.py"
+            | "build.gradle"
+            | "build.gradle.kts"
+    ) || name.ends_with(".csproj")
+        || name.ends_with(".sln")
 }
 
 fn inspect_action_source(
@@ -385,7 +427,7 @@ fn resolve_action_path_expression(value: &str) -> String {
         };
         let end = expression_start + relative_end + 2;
         let expression = value[expression_start..end - 2].trim();
-        if expression == "github.action_path" {
+        if expression.eq_ignore_ascii_case("github.action_path") {
             resolved.push('.');
         } else {
             resolved.push_str(&value[start..end]);
@@ -974,6 +1016,134 @@ mod tests {
             "{error}"
         );
         let _ = fs::remove_dir_all(mutable);
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "runner compatibility matrix keeps all action fixtures in one auditable test"
+    )]
+    fn runner_matrix_covers_node_hooks_container_images_and_dynamic_paths() {
+        let node = fixture("node-hooks");
+        must(
+            fs::create_dir_all(node.join("dist")),
+            "create Node action dist",
+        );
+        must(
+            fs::write(
+                node.join("action.yaml"),
+                "runs:\n  using: node20\n  main: dist/main.js\n  pre: dist/pre.js\n  post: dist/post.js\n",
+            ),
+            "write Node hook metadata",
+        );
+        for file in ["main.js", "pre.js", "post.js"] {
+            must(
+                fs::write(node.join("dist").join(file), "process.exit(0)\n"),
+                "write Node hook entrypoint",
+            );
+        }
+        let shape = must(
+            super::super::scan_shape(&node, &providers(), "main", &[]),
+            "scan Node hook action",
+        );
+        let node_unit = shape
+            .units
+            .iter()
+            .find(|unit| unit.kind == crate::s2::UnitKind::GithubAction)
+            .unwrap_or_else(|| panic!("Node action unit missing"));
+        for file in ["dist/main.js", "dist/pre.js", "dist/post.js"] {
+            assert!(
+                node_unit
+                    .pr_commands
+                    .iter()
+                    .any(|command| command == &format!("test -f '{file}'")),
+                "Node hook was not watched: {file}"
+            );
+        }
+        let _ = fs::remove_dir_all(node);
+
+        let images = fixture("image-matrix");
+        must(
+            fs::create_dir_all(images.join("local")),
+            "create local Docker action",
+        );
+        must(
+            fs::create_dir_all(images.join("remote")),
+            "create remote Docker action",
+        );
+        must(
+            fs::write(
+                images.join("local/action.yml"),
+                "runs:\n  using: docker\n  image: ./Dockerfile\n",
+            ),
+            "write local Docker metadata",
+        );
+        must(
+            fs::write(images.join("local/Dockerfile"), "FROM scratch\n"),
+            "write local Dockerfile",
+        );
+        must(
+            fs::write(
+                images.join("remote/action.yml"),
+                "runs:\n  using: docker\n  image: docker://ubuntu:24.04\n  entrypoint: /inside-image.sh\n",
+            ),
+            "write remote Docker metadata",
+        );
+        let shape = must(
+            super::super::scan_shape(&images, &providers(), "main", &[]),
+            "scan Docker image matrix",
+        );
+        let local = shape
+            .units
+            .iter()
+            .find(|unit| unit.root == "local" && unit.kind == crate::s2::UnitKind::GithubAction)
+            .unwrap_or_else(|| panic!("local Docker action missing"));
+        assert!(
+            local
+                .pr_commands
+                .iter()
+                .any(|command| command == "test -f 'local/Dockerfile'"),
+            "local Docker commands: {:?}",
+            local.pr_commands
+        );
+        let remote = shape
+            .units
+            .iter()
+            .find(|unit| unit.root == "remote" && unit.kind == crate::s2::UnitKind::GithubAction)
+            .unwrap_or_else(|| panic!("remote Docker action missing"));
+        assert_eq!(remote.pr_commands.len(), 1);
+        let _ = fs::remove_dir_all(images);
+
+        let missing_shell = fixture("missing-shell");
+        must(
+            fs::write(
+                missing_shell.join("action.yml"),
+                "runs:\n  using: composite\n  steps:\n    - run: echo missing-shell\n",
+            ),
+            "write missing-shell metadata",
+        );
+        let error = super::super::scan_shape(&missing_shell, &providers(), "main", &[])
+            .err()
+            .unwrap_or_else(|| panic!("composite run without shell must fail"));
+        assert!(error.to_string().contains("must declare shell"), "{error}");
+        let _ = fs::remove_dir_all(missing_shell);
+
+        let dynamic = fixture("dynamic-action-path");
+        must(
+            fs::write(
+                dynamic.join("action.yml"),
+                "runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: ${{ inputs.script }}/entrypoint.sh\n",
+            ),
+            "write dynamic action path metadata",
+        );
+        let error = super::super::scan_shape(&dynamic, &providers(), "main", &[])
+            .err()
+            .unwrap_or_else(|| panic!("dynamic action path must fail closed"));
+        assert!(
+            error.to_string().contains("static relative path"),
+            "{error}"
+        );
+        let _ = fs::remove_dir_all(dynamic);
     }
 
     #[test]

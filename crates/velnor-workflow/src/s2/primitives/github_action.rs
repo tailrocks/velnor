@@ -211,6 +211,7 @@ mod tests {
             fs::write(root.join("action.yml"), action_metadata()),
             "write action metadata",
         );
+        write_nested_consumer_actions(&root);
         must(
             fs::write(root.join("tests/success.sh"), "exit 0\n"),
             "write success fixture",
@@ -337,13 +338,63 @@ mod tests {
     }
 
     fn action_metadata() -> &'static str {
-        "name: consumer\ninputs:\n  mode:\n    default: success\n  skip-build:\n    default: 'false'\noutputs:\n  result:\n    value: ${{ steps.emit.outputs.result }}\nruns:\n  using: composite\n  steps:\n    - id: emit\n      shell: bash\n      env:\n        ACTION_MODE: ${{ inputs.mode }}\n      run: |\n        test -d \"${{ github.action_path }}\"\n        test \"$ACTION_MODE\" = success\n        printf 'result=%s\\n' \"$ACTION_MODE\" >> \"$GITHUB_OUTPUT\"\n    - id: external\n      uses: octo/example@0123456789abcdef0123456789abcdef01234567\n      with:\n        mode: ${{ inputs.mode }}\n      env:\n        ACTION_MODE: ${{ inputs.mode }}\n    - id: build\n      if: ${{ inputs.skip-build != 'true' }}\n      shell: bash\n      run: printf build >> \"$ACTION_MARKER\"\n    - id: downstream\n      shell: bash\n      run: printf downstream >> \"$DOWNSTREAM_MARKER\"\n"
+        "name: consumer\ninputs:\n  mode:\n    default: success\n  skip-build:\n    default: 'false'\n  marker:\n    default: action-consumer.log\noutputs:\n  result:\n    value: ${{ steps.downloader.outputs.result }}\nruns:\n  using: composite\n  steps:\n    - id: downloader\n      uses: ./downloader\n      with:\n        mode: ${{ inputs.mode }}\n        marker: ${{ inputs.marker }}\n    - id: validator\n      uses: ./validator\n      with:\n        mode: ${{ inputs.mode }}\n        marker: ${{ inputs.marker }}\n    - id: external\n      if: ${{ inputs.mode == 'external' }}\n      uses: octo/example@0123456789abcdef0123456789abcdef01234567\n      with:\n        mode: ${{ inputs.mode }}\n      env:\n        ACTION_MODE: ${{ inputs.mode }}\n    - id: hadolint\n      if: ${{ inputs.skip-build != 'true' }}\n      shell: bash\n      env:\n        CONSUMER_MODE: ${{ inputs.mode }}\n        CONSUMER_MARKER: ${{ inputs.marker }}\n      run: |\n        printf 'hadolint\\n' >> \"$CONSUMER_MARKER\"\n        if [ \"$CONSUMER_MODE\" = hadolint-failure ]; then exit 17; fi\n    - id: buildx\n      if: ${{ inputs.skip-build != 'true' }}\n      shell: bash\n      env:\n        CONSUMER_MODE: ${{ inputs.mode }}\n        CONSUMER_MARKER: ${{ inputs.marker }}\n      run: |\n        printf 'buildx\\n' >> \"$CONSUMER_MARKER\"\n        if [ \"$CONSUMER_MODE\" = buildx-failure ]; then exit 19; fi\n    - id: downstream\n      uses: ./downstream\n      with:\n        mode: ${{ inputs.mode }}\n        marker: ${{ inputs.marker }}\n"
+    }
+
+    fn nested_action_metadata(name: &str) -> String {
+        let body = match name {
+            "downloader" => {
+                "printf 'downloader\\n' >> \"$ACTION_MARKER\"\nif [ \"$ACTION_MODE\" = download-failure ]; then exit 11; fi\nprintf 'result=downloaded\\n' >> \"$GITHUB_OUTPUT\"\n"
+            }
+            "validator" => {
+                "printf 'validator\\n' >> \"$ACTION_MARKER\"\nif [ \"$ACTION_MODE\" = validate-failure ]; then exit 13; fi\n"
+            }
+            "downstream" => {
+                "printf 'downstream\\n' >> \"$ACTION_MARKER\"\nif [ \"$ACTION_MODE\" = downstream-failure ]; then exit 23; fi\n"
+            }
+            other => panic!("unknown nested consumer action: {other}"),
+        };
+        let output = if name == "downloader" {
+            "outputs:\n  result:\n    value: ${{ steps.run.outputs.result }}\n"
+        } else {
+            ""
+        };
+        let body = body
+            .lines()
+            .enumerate()
+            .map(|(index, line)| {
+                if index == 0 {
+                    line.to_owned()
+                } else {
+                    format!("        {line}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "name: {name}\ninputs:\n  mode:\n    default: success\n  marker:\n    default: action-consumer.log\n{output}runs:\n  using: composite\n  steps:\n    - id: run\n      shell: bash\n      env:\n        ACTION_MODE: ${{{{ inputs.mode }}}}\n        ACTION_MARKER: ${{{{ inputs.marker }}}}\n      run: |\n        {body}"
+        )
+    }
+
+    fn write_nested_consumer_actions(root: &Path) {
+        for name in ["downloader", "validator", "downstream"] {
+            let directory = root.join(name);
+            must(
+                fs::create_dir_all(&directory),
+                "create nested consumer action directory",
+            );
+            must(
+                fs::write(directory.join("action.yml"), nested_action_metadata(name)),
+                "write nested consumer action metadata",
+            );
+        }
     }
 
     fn expanded_invocations(
         root: &Path,
         mode: &str,
         skip_build: bool,
+        marker: &Path,
     ) -> Vec<velnor_runner::action_contract::CompositeActionInvocation> {
         use velnor_runner::action_contract::{
             composite_action_invocations, parse_action_metadata, LocalActionPlan,
@@ -365,11 +416,12 @@ mod tests {
                             "skip-build".to_owned(),
                             if skip_build { "true" } else { "false" }.to_owned(),
                         ),
+                        ("marker".to_owned(), marker.to_string_lossy().into_owned()),
                     ]),
                 },
                 &metadata,
                 &root.to_string_lossy(),
-                &root.join("downloaded-actions"),
+                root,
             ),
             "expand runner composite action",
         )
@@ -436,8 +488,16 @@ mod tests {
             fs::write(action_dir.join("action.yml"), action_metadata()),
             "write runner action metadata",
         );
+        must(
+            fs::write(root.join("action.yml"), action_metadata()),
+            "write scanned consumer action metadata",
+        );
+        write_nested_consumer_actions(&root);
 
-        let success = expanded_invocations(&root, "success", false);
+        let success_marker = root.join("success.log");
+        let success_downstream = root.join("success.downstream");
+        let success_output = root.join("success.output");
+        let success = expanded_invocations(&root, "success", false, &success_marker);
         let repository = success
             .iter()
             .find_map(|invocation| match invocation {
@@ -464,11 +524,8 @@ mod tests {
             .unwrap_or_else(|| panic!("runner graph lost action outputs"));
         assert_eq!(
             outputs.outputs.get("result").map(String::as_str),
-            Some("${{ steps.consumer-emit.outputs.result }}")
+            Some("${{ steps.consumer-downloader-run.outputs.result }}")
         );
-        let success_marker = root.join("success.build");
-        let success_downstream = root.join("success.downstream");
-        let success_output = root.join("success.output");
         let success_result = execute_local_action_scripts(
             &root,
             &success,
@@ -477,56 +534,73 @@ mod tests {
             &success_output,
         );
         assert!(success_result.status.success());
-        assert_eq!(
-            must(
-                fs::read_to_string(&success_marker),
-                "read success build marker"
-            ),
-            "build"
-        );
-        assert_eq!(
-            must(
-                fs::read_to_string(&success_downstream),
-                "read success downstream marker"
-            ),
-            "downstream"
-        );
+        let success_log = must(fs::read_to_string(&success_marker), "read success marker");
+        for stage in [
+            "downloader",
+            "validator",
+            "hadolint",
+            "buildx",
+            "downstream",
+        ] {
+            assert!(
+                success_log.contains(stage),
+                "success action graph omitted {stage}: {success_log}"
+            );
+        }
         assert!(
             must(fs::read_to_string(&success_output), "read success output")
-                .contains("result=success")
+                .contains("result=downloaded")
         );
 
-        let failure = expanded_invocations(&root, "failure", false);
-        let failure_marker = root.join("failure.build");
-        let failure_downstream = root.join("failure.downstream");
-        let failure_output = root.join("failure.output");
-        let failure_result = execute_local_action_scripts(
-            &root,
-            &failure,
-            &failure_marker,
-            &failure_downstream,
-            &failure_output,
-        );
-        assert!(!failure_result.status.success(), "failure must propagate");
-        assert!(!failure_marker.exists(), "failure must prevent build");
-        assert!(
-            !failure_downstream.exists(),
-            "failure must prevent downstream work"
-        );
+        for (mode, completed_stage) in [
+            ("download-failure", "downloader"),
+            ("validate-failure", "validator"),
+            ("hadolint-failure", "hadolint"),
+            ("buildx-failure", "buildx"),
+            ("downstream-failure", "downstream"),
+        ] {
+            let marker = root.join(format!("{mode}.log"));
+            let downstream = root.join(format!("{mode}.downstream"));
+            let output_file = root.join(format!("{mode}.output"));
+            let invocations = expanded_invocations(&root, mode, false, &marker);
+            let result = execute_local_action_scripts(
+                &root,
+                &invocations,
+                &marker,
+                &downstream,
+                &output_file,
+            );
+            assert!(!result.status.success(), "{mode} failure must propagate");
+            let log = must(fs::read_to_string(&marker), "read failure marker");
+            assert!(
+                log.contains(completed_stage),
+                "{mode} did not reach expected stub: {log}"
+            );
+            if mode != "downstream-failure" {
+                assert!(
+                    !log.contains("downstream"),
+                    "{mode} must prevent downstream work"
+                );
+                assert!(
+                    !downstream.exists(),
+                    "{mode} must prevent downstream marker"
+                );
+            }
+        }
 
-        let skip = expanded_invocations(&root, "success", true);
+        let skip_marker = root.join("skip.log");
+        let skip_downstream = root.join("skip.downstream");
+        let skip_output = root.join("skip.output");
+        let skip = expanded_invocations(&root, "success", true, &skip_marker);
         let skip_build = skip
             .iter()
             .filter_map(|invocation| match invocation {
                 CompositeActionInvocation::Script(step) => Some(step),
                 _ => None,
             })
-            .find(|step| step.id.ends_with("-build"))
-            .unwrap_or_else(|| panic!("runner graph lost conditional build step"));
+            .find(|step| step.id.ends_with("-buildx"))
+            .unwrap_or_else(|| panic!("runner graph lost conditional Buildx step"));
         assert!(!condition_runs(skip_build.condition.as_deref()));
-        let skip_marker = root.join("skip.build");
-        let skip_downstream = root.join("skip.downstream");
-        let skip_output = root.join("skip.output");
         let skip_result = execute_local_action_scripts(
             &root,
             &skip,
@@ -535,11 +609,12 @@ mod tests {
             &skip_output,
         );
         assert!(skip_result.status.success());
-        assert!(!skip_marker.exists(), "skip-build must not run build");
-        assert!(
-            skip_downstream.exists(),
-            "skip-build must preserve downstream work"
-        );
+        let skip_log = must(fs::read_to_string(&skip_marker), "read skip marker");
+        assert!(skip_log.contains("downloader"));
+        assert!(skip_log.contains("validator"));
+        assert!(skip_log.contains("downstream"));
+        assert!(!skip_log.contains("hadolint"));
+        assert!(!skip_log.contains("buildx"));
         let _ = fs::remove_dir_all(root);
     }
 }
