@@ -3,6 +3,8 @@ set -e
 
 PACKAGE_TRANSACTION_LOCK=/run/velnor/package-transaction.lock
 WORKER_UNIT_GLOB=velnor-job@*.service
+JOBS_SLICE_DROPIN_DIR=/etc/systemd/system/velnor-jobs.slice.d
+JOBS_SLICE_DROPIN=$JOBS_SLICE_DROPIN_DIR/10-host-cpu.conf
 
 fail() {
   echo "velnor-runner postrm: $1" >&2
@@ -71,6 +73,16 @@ verify_jobs_slice_inactive() {
   esac
 }
 
+remove_stale_jobs_cpu_quota_dropin() {
+  # Older packages generated this exact host-scaled ceiling outside dpkg's
+  # file list. Delete only that Velnor-owned file; preserve operator drop-ins.
+  if [ -e "$JOBS_SLICE_DROPIN" ]; then
+    rm -f "$JOBS_SLICE_DROPIN"
+    echo "Removed stale velnor-jobs.slice CPU quota drop-in $JOBS_SLICE_DROPIN."
+  fi
+  rmdir "$JOBS_SLICE_DROPIN_DIR" 2>/dev/null || true
+}
+
 case "$1" in
   remove|purge)
     require_package_transaction_lock
@@ -112,8 +124,9 @@ case "$1" in
       # pre-stop check permits a job started in the gap to outlive removal.
       verify_jobs_slice_inactive \
         || fail "velnor-jobs.slice is not provably inactive; aborting removal"
+      remove_stale_jobs_cpu_quota_dropin
       systemctl daemon-reload || {
-        echo "velnor-runner postrm: daemon-reload failed after stopping the fleet" >&2
+        echo "velnor-runner postrm: daemon-reload failed after removing the stale job-slice quota drop-in" >&2
         exit 1
       }
 

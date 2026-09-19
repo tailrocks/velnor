@@ -9,7 +9,7 @@
 )]
 //! Packaging tests for the unbounded job cgroup boundary: the workload
 //! slice is identity-only, the retired quota drop-in is deleted and never
-//! recreated, and removal keeps generic unit cleanup without quota logic.
+//! recreated, and removal deletes it only after inactive proofs.
 
 use std::path::PathBuf;
 
@@ -135,10 +135,11 @@ fn postrm_keeps_unit_cleanup_without_quota_logic() {
     assert!(postrm.contains("--property=LoadState --value velnor-jobs.slice"));
     assert!(postrm.contains("--property=ActiveState --value velnor-jobs.slice"));
 
-    // No quota removal logic remains.
-    assert!(!postrm.contains("JOBS_SLICE_DROPIN"));
-    assert!(!postrm.contains("10-host-cpu.conf"));
-    assert!(!postrm.contains("keeping CPU quota"));
+    // Removal deletes only the old generated file, preserving operator
+    // drop-ins. It runs after both inactive proofs and before daemon-reload.
+    assert!(postrm.contains("JOBS_SLICE_DROPIN=$JOBS_SLICE_DROPIN_DIR/10-host-cpu.conf"));
+    assert!(postrm.contains("remove_stale_jobs_cpu_quota_dropin"));
+    assert!(postrm.contains("rm -f \"$JOBS_SLICE_DROPIN\""));
     assert!(!postrm.contains("CPUQuota"));
 
     // Ordering: enumerate < mask < disable < stop < proofs < reload < proofs.
@@ -160,6 +161,9 @@ fn postrm_keeps_unit_cleanup_without_quota_logic() {
         .map(|(offset, _)| offset)
         .collect();
     let daemon_reload = lifecycle.find("systemctl daemon-reload").unwrap();
+    let remove_dropin = lifecycle
+        .find("remove_stale_jobs_cpu_quota_dropin")
+        .unwrap();
     assert_eq!(worker_proofs.len(), 2);
     assert_eq!(slice_proofs.len(), 2);
     assert!(unit_enumeration < unit_mask);
@@ -168,7 +172,63 @@ fn postrm_keeps_unit_cleanup_without_quota_logic() {
     assert!(worker_stop < worker_proofs[0]);
     assert!(worker_proofs[0] < daemon_reload);
     assert!(slice_proofs[0] < daemon_reload);
+    assert!(worker_proofs[0] < remove_dropin);
+    assert!(slice_proofs[0] < remove_dropin);
+    assert!(remove_dropin < daemon_reload);
     assert!(daemon_reload < worker_proofs[1]);
     assert!(worker_proofs[1] < slice_proofs[1]);
     assert!(daemon_reload < slice_proofs[1]);
+}
+
+#[test]
+fn postrm_removes_only_the_legacy_dropin_and_is_idempotent() {
+    use std::process::Command;
+
+    let postrm = include_str!("../debian/postrm");
+    let function_start = postrm.find("remove_stale_jobs_cpu_quota_dropin()").unwrap();
+    let function_end = postrm[function_start..]
+        .find("\ncase \"$1\" in")
+        .map(|offset| function_start + offset)
+        .unwrap();
+    let function = &postrm[function_start..function_end];
+    let dir = temp_dir("postrm-dropin");
+    let dropin = dir.join("10-host-cpu.conf");
+    let operator_dropin = dir.join("99-operator.conf");
+    std::fs::write(&dropin, "[Slice]\nCPUQuota=1520%\n").unwrap();
+    std::fs::write(&operator_dropin, "[Slice]\nCPUWeight=200\n").unwrap();
+
+    let script = format!(
+        "set -eu\nJOBS_SLICE_DROPIN_DIR=\"$TEST_DROPIN_DIR\"\nJOBS_SLICE_DROPIN=\"$TEST_DROPIN_DIR/10-host-cpu.conf\"\n{function}\nremove_stale_jobs_cpu_quota_dropin\nremove_stale_jobs_cpu_quota_dropin\n"
+    );
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .env("TEST_DROPIN_DIR", &dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "postrm drop-in cleanup must execute: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!dropin.exists());
+    assert!(operator_dropin.exists());
+    assert!(dir.exists(), "operator drop-ins keep the directory intact");
+
+    std::fs::remove_file(operator_dropin).unwrap();
+    let script = format!(
+        "set -eu\nJOBS_SLICE_DROPIN_DIR=\"$TEST_DROPIN_DIR\"\nJOBS_SLICE_DROPIN=\"$TEST_DROPIN_DIR/10-host-cpu.conf\"\n{function}\nremove_stale_jobs_cpu_quota_dropin\n"
+    );
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .env("TEST_DROPIN_DIR", &dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "postrm should remove its empty drop-in directory: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!dir.exists());
 }
