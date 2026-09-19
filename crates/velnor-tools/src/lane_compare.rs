@@ -174,14 +174,13 @@ struct PairEvidence {
     velnor_html: BTreeMap<u64, HtmlStep>,
     github_log: String,
     github_content: LaneLogStats,
-    velnor_content: LaneLogStats,
 }
 
 #[derive(Debug, Clone)]
 struct ValidatedRun {
     summary: RunSummary,
     census: PairingCensus,
-    velnor_content: String,
+    velnor_logs: BTreeMap<u64, String>,
     pair_evidence: BTreeMap<(u64, u64), PairEvidence>,
 }
 
@@ -381,23 +380,24 @@ pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
             run_dir.join(format!("github-job-{}.log", github.id)),
             &evidence.github_log,
         )?;
+        let velnor_log = validated
+            .velnor_logs
+            .get(&velnor.id)
+            .with_context(|| format!("missing Velnor log for job {}", velnor.id))?;
+        fs::write(
+            run_dir.join(format!("velnor-job-{}.log", velnor.id)),
+            velnor_log,
+        )?;
         let (section, worse) = compare_pair(
             github,
             velnor,
             &evidence.github_html,
             &evidence.velnor_html,
             evidence.github_content,
-            evidence.velnor_content,
+            analyze_lane_log(velnor_log),
         )?;
         worse_total += worse;
         report.push_str(&section);
-    }
-    if !validated.velnor_content.is_empty() {
-        fs::write(
-            run_dir.join("velnor-job-log.log"),
-            &validated.velnor_content,
-        )
-        .context("save velnor job-log artifact content")?;
     }
 
     writeln!(report, "\n## Result")?;
@@ -454,13 +454,8 @@ fn lane_compare_watch(root: &Path, args: LaneCompareArgs) -> Result<()> {
         bail!("--regress-threshold must be non-negative");
     }
 
-    let run_ids = recent_completed_run_ids(&args.repo, &args.workflow, args.since)?;
-    if run_ids.len() < 2 {
-        bail!(
-            "need at least two completed both-lane runs for --watch; found {}",
-            run_ids.len()
-        );
-    }
+    let run_items = recent_run_items(&args.repo, &args.workflow, args.since)?;
+    validate_watch_runs(&run_items)?;
 
     let out_dir = if args.output_dir.is_absolute() {
         args.output_dir.clone()
@@ -472,8 +467,8 @@ fn lane_compare_watch(root: &Path, args: LaneCompareArgs) -> Result<()> {
         .with_context(|| format!("create output directory {}", watch_dir.display()))?;
 
     let mut samples = Vec::new();
-    for run_id in run_ids {
-        samples.push(lane_stats_for_run(&args.repo, run_id)?);
+    for run in &run_items {
+        samples.push(lane_stats_for_run(&args.repo, run.database_id)?);
     }
     let current = samples
         .first()
@@ -494,7 +489,7 @@ fn lane_compare_watch(root: &Path, args: LaneCompareArgs) -> Result<()> {
     println!("report: {}", report_path.display());
     println!("stats: {}", json_path.display());
 
-    if verdict.regression {
+    if verdict.regression || verdict.not_proven {
         bail!(
             "lane-compare regression gate failed: {}",
             verdict.reasons.join("; ")
@@ -503,7 +498,7 @@ fn lane_compare_watch(root: &Path, args: LaneCompareArgs) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct RunListItem {
     #[serde(rename = "databaseId")]
     database_id: u64,
@@ -511,7 +506,7 @@ struct RunListItem {
     conclusion: Option<String>,
 }
 
-fn recent_completed_run_ids(repo: &str, workflow: &str, limit: usize) -> Result<Vec<u64>> {
+fn recent_run_items(repo: &str, workflow: &str, limit: usize) -> Result<Vec<RunListItem>> {
     let output = Command::new("gh")
         .args([
             "run",
@@ -535,17 +530,32 @@ fn recent_completed_run_ids(repo: &str, workflow: &str, limit: usize) -> Result<
     }
     let runs: Vec<RunListItem> =
         serde_json::from_slice(&output.stdout).context("parse gh run list output")?;
-    Ok(runs
-        .into_iter()
-        .filter(|run| {
-            run.status.eq_ignore_ascii_case("completed")
-                && run
-                    .conclusion
-                    .as_deref()
-                    .is_some_and(|conclusion| conclusion.eq_ignore_ascii_case("success"))
-        })
-        .map(|run| run.database_id)
-        .collect())
+    Ok(runs)
+}
+
+fn validate_watch_runs(run_items: &[RunListItem]) -> Result<()> {
+    if run_items.len() < 2 {
+        bail!(
+            "need at least two recent both-lane runs for --watch; found {}",
+            run_items.len()
+        );
+    }
+    for run in run_items {
+        if !run.status.eq_ignore_ascii_case("completed")
+            || !run
+                .conclusion
+                .as_deref()
+                .is_some_and(|conclusion| conclusion.eq_ignore_ascii_case("success"))
+        {
+            bail!(
+                "recent run {} is not a successful completed run (status `{}`, conclusion `{}`); watch sample is not proven",
+                run.database_id,
+                run.status,
+                run.conclusion.as_deref().unwrap_or("missing")
+            );
+        }
+    }
+    Ok(())
 }
 
 fn save_jobs_json(run_dir: &Path, jobs: &[Job]) -> Result<()> {
@@ -706,7 +716,7 @@ fn assess_run_evidence(
     jobs: &[Job],
     census: PairingCensus,
     summary: RunSummary,
-    velnor_content: String,
+    velnor_logs: BTreeMap<u64, String>,
     pair_evidence: BTreeMap<(u64, u64), PairEvidence>,
 ) -> Result<ValidatedRun> {
     validate_run_summary(&summary, run_id)?;
@@ -714,6 +724,27 @@ fn assess_run_evidence(
     let job_ids: BTreeSet<u64> = jobs.iter().map(|job| job.id).collect();
     if job_ids.len() != jobs.len() {
         bail!("run {run_id} jobs census contains duplicate job identities");
+    }
+    let expected_velnor_job_ids: BTreeSet<u64> = census
+        .matched
+        .iter()
+        .map(|(_, velnor, _)| velnor.id)
+        .collect();
+    let actual_velnor_job_ids: BTreeSet<u64> = velnor_logs.keys().copied().collect();
+    if actual_velnor_job_ids != expected_velnor_job_ids {
+        let missing = expected_velnor_job_ids
+            .difference(&actual_velnor_job_ids)
+            .map(u64::to_string)
+            .collect::<Vec<_>>();
+        let unexpected = actual_velnor_job_ids
+            .difference(&expected_velnor_job_ids)
+            .map(u64::to_string)
+            .collect::<Vec<_>>();
+        bail!(
+            "run {run_id} Velnor job-log evidence IDs do not match the validated pair census (missing: [{}]; unexpected: [{}])",
+            missing.join(", "),
+            unexpected.join(", ")
+        );
     }
     for (github, velnor, _) in &census.matched {
         if !job_ids.contains(&github.id) || !job_ids.contains(&velnor.id) {
@@ -740,10 +771,26 @@ fn assess_run_evidence(
                 velnor.id
             );
         }
+        validate_html_step_coverage(github, &evidence.github_html).with_context(|| {
+            format!(
+                "validate GitHub job {} HTML evidence for run {run_id}",
+                github.id
+            )
+        })?;
+        validate_html_step_coverage(velnor, &evidence.velnor_html).with_context(|| {
+            format!(
+                "validate Velnor job {} HTML evidence for run {run_id}",
+                velnor.id
+            )
+        })?;
         require_nonempty_evidence(
             &format!("GitHub job {} log", github.id),
             &evidence.github_log,
         )?;
+        let velnor_log = velnor_logs
+            .get(&velnor.id)
+            .with_context(|| format!("missing Velnor job {} log evidence", velnor.id))?;
+        require_nonempty_evidence(&format!("Velnor job {} log", velnor.id), velnor_log)?;
     }
     if pair_evidence.len() != census.matched.len() {
         bail!(
@@ -752,14 +799,10 @@ fn assess_run_evidence(
             census.matched.len()
         );
     }
-    require_nonempty_evidence(
-        &format!("Velnor job-log artifacts for run {run_id}"),
-        &velnor_content,
-    )?;
     Ok(ValidatedRun {
         summary,
         census,
-        velnor_content,
+        velnor_logs,
         pair_evidence,
     })
 }
@@ -782,11 +825,7 @@ fn validate_run_evidence(
         .iter()
         .map(|(_, velnor, _)| velnor.id)
         .collect();
-    let velnor_content = fetch_velnor_job_log_artifacts(repo, run_id, &expected_velnor_job_ids)?;
-    let velnor_stats = analyze_lane_log(&velnor_content);
-    if velnor_stats.lines == 0 {
-        bail!("run {run_id} Velnor job-log artifacts were present but empty");
-    }
+    let velnor_logs = fetch_velnor_job_log_artifacts(repo, run_id, &expected_velnor_job_ids)?;
 
     let mut pair_evidence = BTreeMap::new();
     for (github, velnor, _) in &census.matched {
@@ -822,11 +861,10 @@ fn validate_run_evidence(
                 velnor_html,
                 github_log,
                 github_content,
-                velnor_content: velnor_stats,
             },
         );
     }
-    assess_run_evidence(run_id, jobs, census, summary, velnor_content, pair_evidence)
+    assess_run_evidence(run_id, jobs, census, summary, velnor_logs, pair_evidence)
 }
 
 /// `gh api` subprocess: bypasses the reqwest TLS-fingerprint throttling GitHub
@@ -877,51 +915,384 @@ fn fetch_job_html_steps(job: &Job) -> Result<BTreeMap<u64, HtmlStep>> {
         );
     }
     let html = String::from_utf8_lossy(&output.stdout);
-    let steps = parse_check_steps(&html);
+    let steps = parse_check_steps(&html)?;
     if steps.is_empty() {
         bail!("job {} page contained no check-step evidence", job.id);
     }
+    validate_html_step_coverage(job, &steps)?;
     Ok(steps)
 }
 
 /// Extract `<check-step …>` elements: `data-number` plus whether
 /// `data-log-url` is non-empty (that attribute is exactly what makes a step
 /// expandable in the UI).
-fn parse_check_steps(html: &str) -> BTreeMap<u64, HtmlStep> {
+fn parse_check_steps(html: &str) -> Result<BTreeMap<u64, HtmlStep>> {
     let mut steps = BTreeMap::new();
-    let mut rest = html;
-    while let Some(start) = rest.find("<check-step") {
-        let element = &rest[start..];
-        let Some(end) = element.find('>') else {
+    let mut cursor = 0usize;
+    let mut template_depth = 0usize;
+    let mut select_depth = 0usize;
+    let mut foreign_content_stack = Vec::new();
+    while cursor < html.len() {
+        let Some(offset) = html[cursor..].find('<') else {
             break;
         };
-        let element = &element[..end];
-        if let Some(number) =
-            attr_value(element, "data-number").and_then(|value| value.parse::<u64>().ok())
-        {
-            steps.insert(
-                number,
-                HtmlStep {
-                    number,
-                    expandable: attr_value(element, "data-log-url")
-                        .is_some_and(|value| !value.is_empty()),
-                    external_id: attr_value(element, "data-external-id")
-                        .unwrap_or_default()
-                        .to_string(),
-                },
-            );
+        let start = cursor + offset;
+        let rest = &html[start..];
+        if rest.starts_with("<!--") {
+            let end = rest
+                .find("-->")
+                .context("unterminated HTML comment in job page")?;
+            cursor = start + end + 3;
+            continue;
         }
-        rest = &rest[start + end..];
+        if rest.starts_with("<![CDATA[") {
+            let end = rest
+                .find("]]>")
+                .context("unterminated CDATA section in job page")?;
+            cursor = start + end + 3;
+            continue;
+        }
+        if rest.starts_with("<!") || rest.starts_with("<?") {
+            let end = find_html_tag_end(rest).context("unterminated declaration in job page")?;
+            cursor = start + end + 1;
+            continue;
+        }
+
+        let after_open = rest
+            .strip_prefix('<')
+            .context("HTML tag scanner lost its opening delimiter")?;
+        let closing = after_open.starts_with('/');
+        let name_text = if closing {
+            &after_open[1..]
+        } else {
+            after_open
+        };
+        if !name_text
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_alphabetic())
+        {
+            cursor = start + 1;
+            continue;
+        }
+        let name_end = name_text
+            .find(|character: char| {
+                character.is_ascii_whitespace() || matches!(character, '/' | '>')
+            })
+            .unwrap_or(name_text.len());
+        let tag_name = name_text[..name_end].to_ascii_lowercase();
+        let end = find_html_tag_end(rest)
+            .with_context(|| format!("unterminated <{tag_name}> element in job page"))?;
+        let element = &rest[..=end];
+        if foreign_content_stack.is_empty() && tag_name == "template" {
+            if closing {
+                template_depth = template_depth
+                    .checked_sub(1)
+                    .context("job page contains an unmatched closing template element")?;
+            } else {
+                template_depth = template_depth
+                    .checked_add(1)
+                    .context("job page contains too many nested template elements")?;
+            }
+        }
+        if foreign_content_stack.is_empty() && tag_name == "select" {
+            if closing {
+                select_depth = select_depth
+                    .checked_sub(1)
+                    .context("job page contains an unmatched closing select element")?;
+            } else {
+                select_depth = select_depth
+                    .checked_add(1)
+                    .context("job page contains too many nested select elements")?;
+            }
+        }
+        if matches!(tag_name.as_str(), "svg" | "math") {
+            if closing {
+                let open_tag = foreign_content_stack
+                    .pop()
+                    .context("job page contains an unmatched foreign-content closing tag")?;
+                if open_tag != tag_name {
+                    bail!(
+                        "job page closes foreign-content <{tag_name}> while <{open_tag}> is open"
+                    );
+                }
+            } else if !html_tag_is_self_closing(element) {
+                foreign_content_stack.push(tag_name.clone());
+            }
+        }
+        if !closing
+            && template_depth == 0
+            && select_depth == 0
+            && foreign_content_stack.is_empty()
+            && tag_name == "check-step"
+        {
+            let attributes = parse_check_step_attributes(element)?;
+            let number_text = attributes
+                .get("data-number")
+                .and_then(Option::as_deref)
+                .context(
+                    "check-step HTML element has a missing or malformed data-number attribute",
+                )?;
+            let number = number_text.parse::<u64>().with_context(|| {
+                format!("check-step HTML element has invalid step number `{number_text}`")
+            })?;
+            if number == 0 {
+                bail!("check-step HTML element has invalid zero step number");
+            }
+            let step = HtmlStep {
+                number,
+                expandable: attributes
+                    .get("data-log-url")
+                    .and_then(Option::as_deref)
+                    .is_some_and(|value| !value.is_empty()),
+                external_id: attributes
+                    .get("data-external-id")
+                    .and_then(Option::as_deref)
+                    .unwrap_or_default()
+                    .to_string(),
+            };
+            if steps.insert(number, step).is_some() {
+                bail!("job page contains duplicate check-step number {number}");
+            }
+        }
+        cursor = start + end + 1;
+        if !closing && is_raw_text_element(&tag_name) {
+            if tag_name == "plaintext" {
+                break;
+            }
+            let after_close = find_raw_text_close(html, cursor, &tag_name)
+                .with_context(|| format!("unterminated raw-text <{tag_name}> element"))?;
+            cursor = after_close;
+        }
     }
-    steps
+    if template_depth != 0 {
+        bail!("job page contains an unterminated template element");
+    }
+    if select_depth != 0 {
+        bail!("job page contains an unterminated select element");
+    }
+    if let Some(open_tag) = foreign_content_stack.last() {
+        bail!("job page contains an unterminated foreign-content <{open_tag}> element");
+    }
+    Ok(steps)
 }
 
-fn attr_value<'a>(element: &'a str, name: &str) -> Option<&'a str> {
-    let marker = format!("{name}=\"");
-    let start = element.find(&marker)? + marker.len();
-    let rest = &element[start..];
-    let end = rest.find('"')?;
-    Some(&rest[..end])
+fn find_html_tag_end(tag: &str) -> Option<usize> {
+    let mut quote = None;
+    for (index, character) in tag.char_indices().skip(1) {
+        if let Some(open_quote) = quote {
+            if character == open_quote {
+                quote = None;
+            }
+        } else if matches!(character, '\'' | '"') {
+            quote = Some(character);
+        } else if character == '>' {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn html_tag_is_self_closing(element: &str) -> bool {
+    let Some(tag) = element
+        .strip_prefix('<')
+        .and_then(|element| element.strip_suffix('>'))
+    else {
+        return false;
+    };
+    let name_end = tag
+        .find(|character: char| character.is_ascii_whitespace() || character == '/')
+        .unwrap_or(tag.len());
+    let mut rest = &tag[name_end..];
+    loop {
+        rest = rest.trim_start();
+        if let Some(after_slash) = rest.strip_prefix('/') {
+            return after_slash.is_empty();
+        }
+        if rest.is_empty() {
+            return false;
+        }
+        let name_end = rest
+            .find(|character: char| {
+                character.is_ascii_whitespace() || matches!(character, '=' | '/' | '>')
+            })
+            .unwrap_or(rest.len());
+        if name_end == 0 {
+            return false;
+        }
+        rest = &rest[name_end..];
+        rest = rest.trim_start();
+        if let Some(after_equals) = rest.strip_prefix('=') {
+            rest = after_equals.trim_start();
+            let Some(quote) = rest.chars().next() else {
+                return false;
+            };
+            if matches!(quote, '\'' | '"') {
+                let after_quote = &rest[quote.len_utf8()..];
+                let Some(value_end) = after_quote.find(quote) else {
+                    return false;
+                };
+                rest = &after_quote[value_end + quote.len_utf8()..];
+            } else {
+                let value_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+                if value_end == 0 {
+                    return false;
+                }
+                rest = &rest[value_end..];
+            }
+        }
+    }
+}
+
+fn is_raw_text_element(tag_name: &str) -> bool {
+    matches!(
+        tag_name,
+        "script"
+            | "style"
+            | "textarea"
+            | "title"
+            | "xmp"
+            | "iframe"
+            | "noembed"
+            | "noframes"
+            | "noscript"
+            | "plaintext"
+    )
+}
+
+fn find_raw_text_close(html: &str, start: usize, tag_name: &str) -> Option<usize> {
+    let needle = format!("</{tag_name}");
+    let lowercase_html = html.to_ascii_lowercase();
+    let mut search = start;
+    while let Some(offset) = lowercase_html[search..].find(&needle) {
+        let close_start = search + offset;
+        let after_name = close_start + needle.len();
+        if lowercase_html[after_name..]
+            .chars()
+            .next()
+            .is_some_and(|character| {
+                character.is_ascii_whitespace() || matches!(character, '/' | '>')
+            })
+        {
+            let end = find_html_tag_end(&html[close_start..])?;
+            return Some(close_start + end + 1);
+        }
+        search = after_name;
+    }
+    None
+}
+
+fn parse_check_step_attributes(element: &str) -> Result<BTreeMap<String, Option<String>>> {
+    let tag = element
+        .strip_prefix('<')
+        .context("malformed check-step HTML element")?;
+    let name_end = tag
+        .find(|character: char| character.is_ascii_whitespace() || matches!(character, '/' | '>'))
+        .unwrap_or(tag.len());
+    if !tag[..name_end].eq_ignore_ascii_case("check-step") {
+        bail!("malformed check-step HTML element name");
+    }
+    let attributes = tag[name_end..]
+        .strip_suffix('>')
+        .context("malformed check-step HTML element")?;
+    let mut rest = attributes;
+    let mut parsed = BTreeMap::new();
+    loop {
+        rest = rest.trim_start();
+        if rest.is_empty() || rest == "/" {
+            break;
+        }
+        let name_end = rest
+            .find(|character: char| {
+                character.is_ascii_whitespace() || matches!(character, '=' | '/' | '>')
+            })
+            .unwrap_or(rest.len());
+        if name_end == 0 {
+            bail!("malformed check-step HTML attribute near `{rest}`");
+        }
+        let name = rest[..name_end].to_ascii_lowercase();
+        rest = &rest[name_end..];
+        rest = rest.trim_start();
+        let value =
+            if let Some(after_equals) = rest.strip_prefix('=') {
+                rest = after_equals.trim_start();
+                let quote = rest
+                    .chars()
+                    .next()
+                    .context("missing check-step attribute value")?;
+                if matches!(quote, '\'' | '"') {
+                    let after_quote = &rest[quote.len_utf8()..];
+                    let value_end = after_quote
+                        .find(quote)
+                        .context("unterminated quoted check-step attribute value")?;
+                    let value = after_quote[..value_end].to_string();
+                    rest = &after_quote[value_end + quote.len_utf8()..];
+                    if rest.chars().next().is_some_and(|character| {
+                        !character.is_ascii_whitespace() && character != '/'
+                    }) {
+                        bail!("malformed check-step HTML attribute separator");
+                    }
+                    Some(value)
+                } else {
+                    let value_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+                    if value_end == 0 {
+                        bail!("missing check-step attribute value");
+                    }
+                    let value = rest[..value_end].to_string();
+                    rest = &rest[value_end..];
+                    Some(value)
+                }
+            } else {
+                None
+            };
+        if parsed.insert(name.clone(), value).is_some() {
+            bail!("check-step HTML element contains duplicate `{name}` attributes");
+        }
+    }
+    Ok(parsed)
+}
+
+fn validate_html_step_coverage(job: &Job, html_steps: &BTreeMap<u64, HtmlStep>) -> Result<()> {
+    let mut api_step_numbers = BTreeSet::new();
+    for step in &job.steps {
+        if step.number == 0 || !api_step_numbers.insert(step.number) {
+            bail!(
+                "job {} ({}) API steps contain invalid or duplicate step number {}",
+                job.id,
+                job.name,
+                step.number
+            );
+        }
+    }
+    if html_steps
+        .iter()
+        .any(|(number, step)| *number == 0 || *number != step.number)
+    {
+        bail!(
+            "job {} ({}) HTML check-step evidence has malformed step identity",
+            job.id,
+            job.name
+        );
+    }
+    let html_step_numbers: BTreeSet<u64> = html_steps.keys().copied().collect();
+    if html_step_numbers != api_step_numbers {
+        let missing = api_step_numbers
+            .difference(&html_step_numbers)
+            .map(u64::to_string)
+            .collect::<Vec<_>>();
+        let unexpected = html_step_numbers
+            .difference(&api_step_numbers)
+            .map(u64::to_string)
+            .collect::<Vec<_>>();
+        bail!(
+            "job {} ({}) HTML check-step IDs do not exactly match API steps (missing: [{}]; unexpected: [{}])",
+            job.id,
+            job.name,
+            missing.join(", "),
+            unexpected.join(", ")
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -995,6 +1366,18 @@ fn collect_job_log_artifacts(
             missing.join(", ")
         );
     }
+    let mut artifact_ids = BTreeMap::new();
+    for (name, artifact) in &collected {
+        if artifact.id == 0 {
+            bail!("Velnor artifact {name} has invalid id 0");
+        }
+        if let Some(other_name) = artifact_ids.insert(artifact.id, name) {
+            bail!(
+                "Velnor artifacts `{other_name}` and `{name}` share artifact id {}",
+                artifact.id
+            );
+        }
+    }
     Ok(collected)
 }
 
@@ -1005,7 +1388,7 @@ fn fetch_velnor_job_log_artifacts(
     repo: &str,
     run_id: u64,
     expected_job_ids: &[u64],
-) -> Result<String> {
+) -> Result<BTreeMap<u64, String>> {
     let mut pages = Vec::new();
     let mut page_number = 1u32;
     let mut observed = 0u64;
@@ -1036,7 +1419,7 @@ fn fetch_velnor_job_log_artifacts(
         page_number += 1;
     }
     let artifacts = collect_job_log_artifacts(pages, expected_job_ids)?;
-    let mut content = String::new();
+    let mut logs = BTreeMap::new();
     for job_id in expected_job_ids {
         let name = format!("job-log-{job_id}");
         let artifact = artifacts
@@ -1046,28 +1429,44 @@ fn fetch_velnor_job_log_artifacts(
             "repos/{repo}/actions/artifacts/{}/zip",
             artifact.id
         ))?;
-        let cursor = std::io::Cursor::new(zip_bytes);
-        let mut zip =
-            zip::ZipArchive::new(cursor).with_context(|| format!("open {name} artifact zip"))?;
-        let mut artifact_content = String::new();
-        for index in 0..zip.len() {
-            let mut file = zip
-                .by_index(index)
-                .with_context(|| format!("read {name} artifact entry"))?;
-            if file.is_dir() {
-                continue;
-            }
-            let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes)
-                .with_context(|| format!("read {name} artifact file"))?;
-            artifact_content.push_str(&String::from_utf8_lossy(&bytes));
-            artifact_content.push('\n');
+        let artifact_content = extract_job_log_from_zip(&name, &zip_bytes)?;
+        if logs.insert(*job_id, artifact_content).is_some() {
+            bail!("Velnor job-log artifact {name} was selected more than once");
         }
-        require_nonempty_evidence(&format!("Velnor artifact {name}"), &artifact_content)?;
-        content.push_str(&artifact_content);
     }
+    Ok(logs)
+}
+
+fn extract_job_log_from_zip(artifact_name: &str, zip_bytes: &[u8]) -> Result<String> {
+    let cursor = std::io::Cursor::new(zip_bytes);
+    let mut zip = zip::ZipArchive::new(cursor)
+        .with_context(|| format!("open {artifact_name} artifact zip"))?;
+    let mut content = None;
+    for index in 0..zip.len() {
+        let mut file = zip
+            .by_index(index)
+            .with_context(|| format!("read {artifact_name} artifact entry"))?;
+        if file.is_dir() {
+            continue;
+        }
+        if file.name() != "job-log.txt" {
+            bail!(
+                "Velnor artifact {artifact_name} contains unexpected file `{}`; expected only `job-log.txt`",
+                file.name()
+            );
+        }
+        if content.is_some() {
+            bail!("Velnor artifact {artifact_name} contains duplicate `job-log.txt` entries");
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .with_context(|| format!("read {artifact_name}/job-log.txt"))?;
+        content = Some(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    let content = content
+        .with_context(|| format!("Velnor artifact {artifact_name} is missing `job-log.txt`"))?;
     require_nonempty_evidence(
-        &format!("Velnor job-log artifacts for run {run_id}"),
+        &format!("Velnor artifact {artifact_name}/job-log.txt"),
         &content,
     )?;
     Ok(content)
@@ -1449,6 +1848,7 @@ impl JobClassStats {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegressionVerdict {
     pub regression: bool,
+    pub not_proven: bool,
     pub reasons: Vec<String>,
 }
 
@@ -1458,10 +1858,26 @@ pub fn is_regression(
     threshold_pct: f64,
 ) -> RegressionVerdict {
     let mut reasons = Vec::new();
+    let mut not_proven = false;
     if current.parity_worse_rows > 0 {
         reasons.push(format!(
             "parity diff: {} worse row(s)",
             current.parity_worse_rows
+        ));
+    }
+
+    let baseline_classes: BTreeSet<&String> = baseline.jobs.keys().collect();
+    let current_classes: BTreeSet<&String> = current.jobs.keys().collect();
+    for job_class in current_classes.difference(&baseline_classes) {
+        not_proven = true;
+        reasons.push(format!(
+            "new workload class `{job_class}` has no baseline sample"
+        ));
+    }
+    for job_class in baseline_classes.difference(&current_classes) {
+        not_proven = true;
+        reasons.push(format!(
+            "baseline workload class `{job_class}` is missing from the current run"
         ));
     }
 
@@ -1487,7 +1903,8 @@ pub fn is_regression(
     }
 
     RegressionVerdict {
-        regression: !reasons.is_empty(),
+        regression: !reasons.is_empty() && !not_proven,
+        not_proven,
         reasons,
     }
 }
@@ -1513,13 +1930,17 @@ fn lane_stats_for_run(repo: &str, run_id: u64) -> Result<LaneStats> {
                     github.id, velnor.id
                 )
             })?;
+        let velnor_log = validated
+            .velnor_logs
+            .get(&velnor.id)
+            .with_context(|| format!("missing Velnor log for job {}", velnor.id))?;
         let (_section, worse) = compare_pair(
             github,
             velnor,
             &evidence.github_html,
             &evidence.velnor_html,
             evidence.github_content,
-            evidence.velnor_content,
+            analyze_lane_log(velnor_log),
         )?;
         stats.parity_worse_rows += worse;
         let (Some(github_seconds), Some(velnor_seconds)) =
@@ -1531,13 +1952,19 @@ fn lane_stats_for_run(repo: &str, run_id: u64) -> Result<LaneStats> {
                 velnor.id
             );
         };
-        stats.jobs.insert(
-            key.clone(),
-            JobClassStats {
-                github_seconds: github_seconds as f64,
-                velnor_seconds: velnor_seconds as f64,
-            },
-        );
+        if stats
+            .jobs
+            .insert(
+                key.clone(),
+                JobClassStats {
+                    github_seconds: github_seconds as f64,
+                    velnor_seconds: velnor_seconds as f64,
+                },
+            )
+            .is_some()
+        {
+            bail!("run {run_id} contains duplicate workload class `{key}`");
+        }
     }
     Ok(stats)
 }
@@ -1615,8 +2042,10 @@ fn regression_report(
         report,
         "|-----------|-------------|-----------------|------------|----------------|-------------|"
     )?;
-    for (job_class, current_stats) in &current.jobs {
+    let job_classes: BTreeSet<&String> = baseline.jobs.keys().chain(current.jobs.keys()).collect();
+    for job_class in job_classes {
         let baseline_stats = baseline.jobs.get(job_class).copied();
+        let current_stats = current.jobs.get(job_class).copied();
         let (baseline_github, baseline_velnor, baseline_ratio) = match baseline_stats {
             Some(stats) => (
                 format!("{:.1}s", stats.github_seconds),
@@ -1627,14 +2056,19 @@ fn regression_report(
             ),
             None => ("—".to_string(), "—".to_string(), "—".to_string()),
         };
-        let current_ratio = current_stats
-            .velnor_ratio()
-            .map_or_else(|| "—".to_string(), |ratio| format!("{ratio:.2}"));
+        let (current_github, current_velnor, current_ratio) = match current_stats {
+            Some(stats) => (
+                format!("{:.1}s", stats.github_seconds),
+                format!("{:.1}s", stats.velnor_seconds),
+                stats
+                    .velnor_ratio()
+                    .map_or_else(|| "—".to_string(), |ratio| format!("{ratio:.2}")),
+            ),
+            None => ("—".to_string(), "—".to_string(), "—".to_string()),
+        };
         writeln!(
             report,
-            "| {job_class} | {baseline_github} | {baseline_velnor} | {:.1}s | {:.1}s | {baseline_ratio} -> {current_ratio} |",
-            current_stats.github_seconds,
-            current_stats.velnor_seconds,
+            "| {job_class} | {baseline_github} | {baseline_velnor} | {current_github} | {current_velnor} | {baseline_ratio} -> {current_ratio} |",
         )?;
     }
     writeln!(report)?;
@@ -1644,7 +2078,17 @@ fn regression_report(
         current.parity_worse_rows
     )?;
     writeln!(report)?;
-    if verdict.regression {
+    if verdict.not_proven {
+        writeln!(report, "## Result")?;
+        writeln!(report)?;
+        writeln!(
+            report,
+            "**NOT PROVEN** — workload/evidence sets are not comparable."
+        )?;
+        for reason in &verdict.reasons {
+            writeln!(report, "- {reason}")?;
+        }
+    } else if verdict.regression {
         writeln!(report, "## Result")?;
         writeln!(report)?;
         writeln!(report, "**FAIL**")?;
@@ -2104,8 +2548,11 @@ mod tests {
             ),
             github_log: "github log\n".to_owned(),
             github_content: analyze_lane_log("github log\n"),
-            velnor_content: analyze_lane_log("velnor log\n"),
         }
+    }
+
+    fn fixture_velnor_logs() -> BTreeMap<u64, String> {
+        BTreeMap::from([(2, "velnor log\n".to_owned())])
     }
 
     fn valid_pair_fixture() -> (Vec<Job>, PairingCensus, BTreeMap<(u64, u64), PairEvidence>) {
@@ -2129,6 +2576,35 @@ mod tests {
         let census = pair_lane_census(&jobs);
         let evidence = BTreeMap::from([((github.id, velnor.id), pair_evidence(&github, &velnor))]);
         (jobs, census, evidence)
+    }
+
+    #[test]
+    fn watch_requires_all_recent_runs_to_be_successful() {
+        let successful = |database_id| RunListItem {
+            database_id,
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+        };
+        assert!(validate_watch_runs(&[successful(1), successful(2)]).is_ok());
+        assert!(validate_watch_runs(&[successful(1)]).is_err());
+
+        for (status, conclusion) in [
+            ("in_progress", None),
+            ("completed", None),
+            ("completed", Some("failure")),
+        ] {
+            let runs = [
+                successful(1),
+                RunListItem {
+                    database_id: 2,
+                    status: status.to_owned(),
+                    conclusion: conclusion.map(str::to_owned),
+                },
+            ];
+            let error = validate_watch_runs(&runs)
+                .expect_err("incomplete and failed recent samples cannot be skipped");
+            assert!(error.to_string().contains("watch sample is not proven"));
+        }
     }
 
     #[test]
@@ -2336,7 +2812,7 @@ mod tests {
             &jobs,
             census,
             successful_summary(),
-            "velnor log\n".to_owned(),
+            fixture_velnor_logs(),
             evidence,
         )
         .unwrap();
@@ -2358,7 +2834,7 @@ mod tests {
             &jobs,
             census,
             successful_summary(),
-            "velnor log\n".to_owned(),
+            fixture_velnor_logs(),
             evidence,
         )
         .unwrap();
@@ -2369,13 +2845,14 @@ mod tests {
                 .pair_evidence
                 .get(&(github.id, velnor.id))
                 .unwrap();
+            let velnor_log = validated.velnor_logs.get(&velnor.id).unwrap();
             worse += compare_pair(
                 &github,
                 &velnor,
                 &pair.github_html,
                 &pair.velnor_html,
                 pair.github_content,
-                pair.velnor_content,
+                analyze_lane_log(velnor_log),
             )
             .unwrap()
             .1;
@@ -2400,7 +2877,7 @@ mod tests {
             &jobs,
             census,
             successful_summary(),
-            "velnor log\n".to_owned(),
+            BTreeMap::new(),
             BTreeMap::new(),
         )
         .is_err());
@@ -2415,7 +2892,7 @@ mod tests {
             &jobs,
             census,
             successful_summary(),
-            "velnor log\n".to_owned(),
+            BTreeMap::new(),
             BTreeMap::new(),
         )
         .is_err());
@@ -2442,7 +2919,7 @@ mod tests {
                 &jobs,
                 census,
                 successful_summary(),
-                "velnor log\n".to_owned(),
+                fixture_velnor_logs(),
                 evidence,
             )
             .expect_err("non-success job cannot be accepted");
@@ -2455,15 +2932,9 @@ mod tests {
         let (jobs, census, evidence) = valid_pair_fixture();
         let mut summary = successful_summary();
         summary.conclusion = Some("failure".to_owned());
-        let error = assess_run_evidence(
-            42,
-            &jobs,
-            census,
-            summary,
-            "velnor log\n".to_owned(),
-            evidence,
-        )
-        .expect_err("failed run cannot be accepted");
+        let error =
+            assess_run_evidence(42, &jobs, census, summary, fixture_velnor_logs(), evidence)
+                .expect_err("failed run cannot be accepted");
         assert!(error.to_string().contains("not success"), "{error:#}");
     }
 
@@ -2476,7 +2947,7 @@ mod tests {
             &jobs,
             census.clone(),
             successful_summary(),
-            "velnor log\n".to_owned(),
+            fixture_velnor_logs(),
             evidence,
         )
         .is_err());
@@ -2488,10 +2959,112 @@ mod tests {
             &jobs,
             census,
             successful_summary(),
-            "velnor log\n".to_owned(),
+            fixture_velnor_logs(),
             evidence,
         )
         .is_err());
+    }
+
+    #[test]
+    fn velnor_log_ids_must_match_the_validated_pair_census() {
+        let (jobs, census, evidence) = valid_pair_fixture();
+        let error = assess_run_evidence(
+            42,
+            &jobs,
+            census,
+            successful_summary(),
+            BTreeMap::from([(999, "unrelated job log\n".to_owned())]),
+            evidence,
+        )
+        .expect_err("a log from another job cannot satisfy this pair");
+
+        assert!(error.to_string().contains("IDs do not match"), "{error:#}");
+    }
+
+    #[test]
+    fn both_lanes_missing_the_same_api_step_fails_evidence_validation() {
+        let (mut jobs, _, mut evidence) = valid_pair_fixture();
+        for job in &mut jobs {
+            job.steps.push(step(2, "Run second check", "success"));
+        }
+        let pair = evidence.get_mut(&(1, 2)).unwrap();
+        pair.github_html.remove(&2);
+        pair.velnor_html.remove(&2);
+        let census = pair_lane_census(&jobs);
+
+        let error = assess_run_evidence(
+            42,
+            &jobs,
+            census,
+            successful_summary(),
+            fixture_velnor_logs(),
+            evidence,
+        )
+        .expect_err("matching truncation must not compare as complete evidence");
+
+        assert!(format!("{error:#}").contains("missing: [2]"), "{error:#}");
+    }
+
+    #[test]
+    fn velnor_log_evidence_stays_bound_to_its_job_pair() {
+        let mut github_a = named_job(1, "Rust · unit-a / GitHub");
+        let mut velnor_a = named_job(2, "Rust · unit-a / Velnor");
+        let mut github_b = named_job(3, "Rust · unit-b / GitHub");
+        let mut velnor_b = named_job(4, "Rust · unit-b / Velnor");
+        for job in [&mut github_a, &mut velnor_a, &mut github_b, &mut velnor_b] {
+            job.steps = vec![step(1, "Run check", "success")];
+        }
+        let jobs = vec![
+            github_a.clone(),
+            velnor_a.clone(),
+            github_b.clone(),
+            velnor_b.clone(),
+        ];
+        let census = pair_lane_census(&jobs);
+        let enriched_log = "2026-06-11T07:34:33.1187693Z ##[group]check\n\
+                           2026-06-11T07:34:33.1187693Z \u{1b}[36mcheck\u{1b}[0m\n";
+        let mut evidence_a = pair_evidence(&github_a, &velnor_a);
+        evidence_a.github_log = enriched_log.to_owned();
+        evidence_a.github_content = analyze_lane_log(&evidence_a.github_log);
+        let mut evidence_b = pair_evidence(&github_b, &velnor_b);
+        evidence_b.github_log = enriched_log.to_owned();
+        evidence_b.github_content = analyze_lane_log(&evidence_b.github_log);
+        let pair_evidence = BTreeMap::from([((1, 2), evidence_a), ((3, 4), evidence_b)]);
+        let velnor_logs = BTreeMap::from([
+            (2, "plain Velnor unit-a log\n".to_owned()),
+            (4, enriched_log.to_owned()),
+        ]);
+        let validated = assess_run_evidence(
+            42,
+            &jobs,
+            census,
+            successful_summary(),
+            velnor_logs,
+            pair_evidence,
+        )
+        .unwrap();
+
+        let compare_job = |github_id, velnor_id| {
+            let github = jobs.iter().find(|job| job.id == github_id).unwrap();
+            let velnor = jobs.iter().find(|job| job.id == velnor_id).unwrap();
+            let pair = validated
+                .pair_evidence
+                .get(&(github_id, velnor_id))
+                .unwrap();
+            compare_pair(
+                github,
+                velnor,
+                &pair.github_html,
+                &pair.velnor_html,
+                pair.github_content,
+                analyze_lane_log(validated.velnor_logs.get(&velnor_id).unwrap()),
+            )
+            .unwrap()
+            .1
+        };
+
+        assert_eq!(compare_job(1, 2), 3);
+        assert_eq!(compare_job(3, 4), 0);
     }
 
     #[test]
@@ -2564,7 +3137,7 @@ mod tests {
             total_count: 101,
             artifacts: (0..100)
                 .map(|id| ArtifactRef {
-                    id,
+                    id: id + 1,
                     name: format!("unrelated-{id}"),
                 })
                 .collect(),
@@ -2587,7 +3160,7 @@ mod tests {
             total_count: 101,
             artifacts: (0..100)
                 .map(|id| ArtifactRef {
-                    id,
+                    id: id + 1,
                     name: format!("unrelated-{id}"),
                 })
                 .collect(),
@@ -2617,8 +3190,83 @@ mod tests {
             }],
         };
         assert!(collect_job_log_artifacts(vec![Ok(absent)], &[9001]).is_err());
+
+        let shared_id = ArtifactsResponse {
+            total_count: 2,
+            artifacts: vec![
+                ArtifactRef {
+                    id: 7,
+                    name: "job-log-9001".to_owned(),
+                },
+                ArtifactRef {
+                    id: 7,
+                    name: "job-log-9002".to_owned(),
+                },
+            ],
+        };
+        let error = collect_job_log_artifacts(vec![Ok(shared_id)], &[9001, 9002])
+            .expect_err("different jobs cannot reuse one artifact payload");
+        assert!(
+            error.to_string().contains("share artifact id 7"),
+            "{error:#}"
+        );
+
+        let stale_alias = ArtifactsResponse {
+            total_count: 2,
+            artifacts: vec![
+                ArtifactRef {
+                    id: 7,
+                    name: "job-log-9001".to_owned(),
+                },
+                ArtifactRef {
+                    id: 7,
+                    name: "unrelated-stale-artifact".to_owned(),
+                },
+            ],
+        };
+        let error = collect_job_log_artifacts(vec![Ok(stale_alias)], &[9001])
+            .expect_err("a required artifact cannot alias a stale artifact id");
+        assert!(
+            error.to_string().contains("share artifact id 7"),
+            "{error:#}"
+        );
+
         let api_error: Vec<Result<ArtifactsResponse>> = vec![Err(anyhow::anyhow!("rate limit"))];
         assert!(collect_job_log_artifacts(api_error, &[9001]).is_err());
+    }
+
+    #[test]
+    fn velnor_log_artifact_requires_the_exact_job_log_entry() {
+        use std::io::Write;
+
+        let zip_bytes = |entries: &[(&str, &[u8])]| {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            for (name, content) in entries {
+                zip.start_file(*name, zip::write::FileOptions::<()>::default())
+                    .unwrap();
+                zip.write_all(content).unwrap();
+            }
+            zip.finish().unwrap().into_inner()
+        };
+
+        let valid = zip_bytes(&[("job-log.txt", b"Velnor job 2 log\n")]);
+        assert_eq!(
+            extract_job_log_from_zip("job-log-2", &valid).unwrap(),
+            "Velnor job 2 log\n"
+        );
+
+        let unrelated = zip_bytes(&[("metrics.txt", b"nonempty but not the job log\n")]);
+        let error = extract_job_log_from_zip("job-log-2", &unrelated).unwrap_err();
+        assert!(error.to_string().contains("unexpected file"), "{error:#}");
+
+        let mixed = zip_bytes(&[
+            ("job-log.txt", b"expected log\n"),
+            ("metrics.txt", b"unrelated payload\n"),
+        ]);
+        assert!(extract_job_log_from_zip("job-log-2", &mixed).is_err());
+
+        let empty = zip_bytes(&[("job-log.txt", b" \n")]);
+        assert!(extract_job_log_from_zip("job-log-2", &empty).is_err());
     }
 
     #[test]
@@ -2641,7 +3289,7 @@ mod tests {
   <check-step data-name="Skipped" data-number="3" data-conclusion="skipped" data-log-url="">
   </check-step>
 </check-steps>"#;
-        let steps = parse_check_steps(html);
+        let steps = parse_check_steps(html).unwrap();
         assert_eq!(steps.len(), 2);
         assert!(steps[&1].expandable);
         assert_eq!(
@@ -2649,6 +3297,111 @@ mod tests {
             "e7cf94ab-32aa-4712-be84-b4521dcbad16"
         );
         assert!(!steps[&3].expandable);
+
+        let mixed_case =
+            parse_check_steps("<CHECK-STEP DATA-NUMBER='4' DATA-LOG-URL='/logs/4'></CHECK-STEP>")
+                .unwrap();
+        assert!(mixed_case[&4].expandable);
+    }
+
+    #[test]
+    fn html_step_evidence_must_exactly_cover_api_steps() {
+        let api_job = job(vec![
+            step(1, "Set up job", "success"),
+            step(3, "Skipped", "skipped"),
+        ]);
+        let complete_html = parse_check_steps(
+            r#"<check-steps><check-step data-number="1" data-log-url="/logs/1"></check-step><check-step data-number="3" data-log-url=""></check-step></check-steps>"#,
+        )
+        .unwrap();
+        assert!(validate_html_step_coverage(&api_job, &complete_html).is_ok());
+
+        let truncated_html = parse_check_steps(
+            r#"<check-steps><check-step data-number="1" data-log-url="/logs/1"></check-step></check-steps>"#,
+        )
+        .unwrap();
+        let error = validate_html_step_coverage(&api_job, &truncated_html).unwrap_err();
+        assert!(error.to_string().contains("missing: [3]"), "{error:#}");
+
+        let unexpected_html = parse_check_steps(
+            r#"<check-steps><check-step data-number="1"></check-step><check-step data-number="3"></check-step><check-step data-number="4"></check-step></check-steps>"#,
+        )
+        .unwrap();
+        let error = validate_html_step_coverage(&api_job, &unexpected_html).unwrap_err();
+        assert!(error.to_string().contains("unexpected: [4]"), "{error:#}");
+
+        let duplicate_api_job = job(vec![
+            step(1, "First step", "success"),
+            step(1, "Duplicate step", "success"),
+        ]);
+        let error = validate_html_step_coverage(&duplicate_api_job, &complete_html).unwrap_err();
+        assert!(
+            error.to_string().contains("duplicate step number 1"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn html_step_parser_rejects_malformed_and_duplicate_ids() {
+        for html in [
+            "<check-step></check-step>",
+            "<check-step data-number></check-step>",
+            "<check-step data-number=\"\"></check-step>",
+            "<check-step data-number=\"zero\"></check-step>",
+            "<check-step data-number=\"0\"></check-step>",
+            "<check-step data-number=\"1\" data-number=\"2\"></check-step>",
+            "<check-step data-number=\"1\"",
+        ] {
+            assert!(
+                parse_check_steps(html).is_err(),
+                "accepted malformed HTML: {html}"
+            );
+        }
+
+        let duplicate_numeric_id = parse_check_steps(
+            r#"<check-steps><check-step data-number="3"></check-step><check-step data-number="03"></check-step></check-steps>"#,
+        );
+        assert!(duplicate_numeric_id.is_err());
+        assert!(parse_check_steps("<check-steps></check-steps>")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn html_step_parser_ignores_markup_in_comments_scripts_and_attributes() {
+        let hidden_markup = r#"<!-- <check-step data-number="1"></check-step> -->
+<script>const template = '<check-step data-number="1"></check-step>';</script>
+<template><check-step data-number="1" data-log-url="/logs/1"></check-step></template>
+<svg><check-step data-number="1" data-log-url="/logs/1"></check-step></svg>
+<select><check-step data-number="1" data-log-url="/logs/1"></check-step></select>
+<div data-template="<check-step data-number='1'></check-step>"></div>"#;
+
+        let steps = parse_check_steps(hidden_markup).unwrap();
+
+        assert!(steps.is_empty());
+        let api_job = job(vec![step(1, "Visible step", "success")]);
+        assert!(validate_html_step_coverage(&api_job, &steps).is_err());
+
+        let with_real_step = format!(
+            "{hidden_markup}\n<check-steps><check-step data-number=\"1\"></check-step></check-steps>"
+        );
+        assert_eq!(parse_check_steps(&with_real_step).unwrap().len(), 1);
+
+        assert!(
+            parse_check_steps("<check-step data-number=\"1\"></check-step><script>truncated")
+                .is_err()
+        );
+        assert!(
+            parse_check_steps("<template><check-step data-number=\"1\"></check-step>").is_err()
+        );
+        assert!(parse_check_steps("<svg><check-step data-number=\"1\"></check-step>").is_err());
+        assert!(parse_check_steps("<select><check-step data-number=\"1\"></check-step>").is_err());
+        assert_eq!(
+            parse_check_steps("<svg viewBox='0 0 1 1'/><check-step data-number='1'></check-step>")
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -2921,13 +3674,47 @@ mod tests {
     }
 
     #[test]
-    fn is_regression_skips_job_without_baseline_timing() {
+    fn is_regression_flags_new_workload_class_without_baseline_timing() {
         let baseline = LaneStats::default();
         let current = lane_stats(100.0, 140.0, 0);
 
         let verdict = is_regression(&baseline, &current, 0.0);
 
-        assert!(!verdict.regression, "{:?}", verdict.reasons);
+        assert!(!verdict.regression);
+        assert!(verdict.not_proven);
+        assert!(verdict.reasons[0].contains("new workload class"));
+        assert!(verdict.reasons[0].contains("compat (app-a"));
+    }
+
+    #[test]
+    fn is_regression_reports_added_and_missing_workload_classes() {
+        let mut baseline = lane_stats(100.0, 100.0, 0);
+        baseline.jobs.insert(
+            "compat (app-b".to_owned(),
+            JobClassStats {
+                github_seconds: 100.0,
+                velnor_seconds: 100.0,
+            },
+        );
+        let mut current = lane_stats(100.0, 100.0, 0);
+        current.jobs.insert(
+            "compat (app-c".to_owned(),
+            JobClassStats {
+                github_seconds: 100.0,
+                velnor_seconds: 100.0,
+            },
+        );
+
+        let verdict = is_regression(&baseline, &current, 0.0);
+
+        assert!(!verdict.regression);
+        assert!(verdict.not_proven);
+        assert!(verdict.reasons.iter().any(|reason| {
+            reason.contains("new workload class") && reason.contains("compat (app-c")
+        }));
+        assert!(verdict.reasons.iter().any(|reason| {
+            reason.contains("missing from the current run") && reason.contains("compat (app-b")
+        }));
     }
 
     #[test]
@@ -2959,6 +3746,34 @@ mod tests {
         .expect("report should render");
 
         assert!(report.contains("| compat (app-a | — | — | 100.0s | 140.0s | — -> 1.40 |"));
+        assert!(report.contains("**NOT PROVEN**"));
         assert!(!report.contains("| 0.0s |"));
+    }
+
+    #[test]
+    fn regression_report_lists_baseline_classes_missing_from_current_run() {
+        let mut baseline = lane_stats(100.0, 100.0, 0);
+        baseline.jobs.insert(
+            "compat (app-b".to_owned(),
+            JobClassStats {
+                github_seconds: 80.0,
+                velnor_seconds: 96.0,
+            },
+        );
+        let current = lane_stats(100.0, 100.0, 0);
+        let verdict = is_regression(&baseline, &current, 25.0);
+
+        let report = regression_report(
+            "tailrocks/velnor",
+            "compat.yml",
+            &baseline,
+            &current,
+            &verdict,
+        )
+        .expect("report should render workload-set regression");
+
+        assert!(report.contains("| compat (app-b | 80.0s | 96.0s | — | — | 1.20 -> — |"));
+        assert!(report
+            .contains("baseline workload class `compat (app-b` is missing from the current run"));
     }
 }
