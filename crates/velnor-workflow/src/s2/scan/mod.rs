@@ -44,8 +44,8 @@ pub(crate) fn scan_shape(
     scan_shape_with_owned_paths(root, providers, default_branch, exclude, &BTreeSet::new())
 }
 
-/// Run the detector pipeline while excluding only ownership paths that the
-/// caller has independently verified against the current renderer.
+/// Run the detector pipeline while excluding only paths independently
+/// verified against immutable baseline bytes or exact current-render bytes.
 pub(crate) fn scan_shape_with_owned_paths(
     root: &Path,
     providers: &ProviderSet,

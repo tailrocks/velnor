@@ -684,6 +684,8 @@ mod tests {
                 dry_run: false,
                 check: false,
                 force: false,
+                baseline_revision: None,
+                local_no_baseline: false,
                 plain: false,
                 pin_build: false,
             },
