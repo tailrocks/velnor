@@ -103,11 +103,13 @@ The snapshot must contain `schema_version: 2`, `snapshot_id`, the exact
 }
 ```
 
-Source metadata is provenance, not proof by itself. `--live` performs a fresh
-read-only API collection and reconciles current facts; it fails on inaccessible
+Source metadata is provenance, not proof by itself. The producer-owned live
+collector must perform the fresh read-only API collection before writing the
+typed capture consumed by `--live`; the checker then rejects inaccessible
 permissions, rate limits, malformed responses, missing pagination, or a
-revision/PR/ruleset/run/job mismatch. G7 always requires `--live`. Offline
-validation is a fixture/schema check and can never establish G7.
+revision/PR/ruleset/run/job mismatch in that capture. G7 always requires
+`--live`. Offline validation is a fixture/schema check and can never establish
+G7.
 
 Every repository row records the GitHub numeric repository ID, actual default
 branch and SHA, complete ruleset status-check/app-ID inventory, workflow path
@@ -176,7 +178,7 @@ Coverage authority map (implementation boundary):
 | G0 | reviewed 32-row manifest + fresh GitHub inventory | repository ID, default SHA, every PR head/base, ruleset context/app, workflow/content SHA, graph/model/access artifact digests | paginate and retain raw query/page/provenance; no count-only summary | exact scope, missing PR/check/workflow/graph/model/access, stale snapshot | inventory only; no execution pass |
 | G1/G3 | fresh snapshot plus independently parsed workflow/run graph | `default_branch` and `pull_request`/`merge_group` subjects, run ID/attempt, source/event/checkout | derive expected jobs/checks/children from workflow revision and current ruleset | PR/main substitution, wrong head/base/merge, duplicate subject, queued/manual/unbound run | blocked until collector derivation is complete |
 | G6 | the same qualifying PR candidate and resulting main in both lanes | paired role + PR identity/source/workload/target contract; one publisher digest | independently associate both provider runs and native-only obligations | unrelated green rows, source/workload mismatch, publisher rebinding | blocked until cross-lane association is collected |
-| G7 | fresh live reconciliation plus independent review artifact | exact manifest/snapshot/evidence digest, source tree/diff/run-manifest digests | reread default branch and every PR head; bind reviewer artifact externally | owner/reviewer-only, stale digest, missing artifact binding | `--live` and external attestation required |
+| G7 | producer fresh-live capture plus independent review artifact | exact manifest/snapshot/evidence digest, source tree/diff/run-manifest digests | producer rereads default branch and every PR head; checker binds the typed capture and reviewer artifact externally | owner/reviewer-only, stale digest, missing artifact binding | `--live` and external attestation required |
 
 The current read-only collector gap is recorded at
 `dual-lane-evidence/G0/fleet/collector-contract-gap.md` (SHA-256
@@ -273,10 +275,17 @@ edges must also preserve the source repository and workload identity; a node
 from another repository is not a valid endpoint merely because its digest and
 ID are present.
 
-The live API collector is not yet wired to this contract. The checker retains
-`g0-authoritative-proof-missing` for structurally valid typed fixtures;
-offline fixtures prove schema/rejection behavior only and cannot declare G0 or
-G7 completion.
+`--live` has one canonical input path: a producer-owned typed live capture in
+`evidence.g0_inventory`, plus the explicit `--evidence-root` CAS. The checker
+revalidates the capture identity, request/page chain, raw response bindings,
+source-derived workflow graph, current repository/PR/check inventory, and
+measured CAS bytes. It does not run or retain a second lightweight API
+collector, and it rejects a missing capture rather than treating the supplied
+snapshot or result records as live proof. The producer must obtain the
+capture through its read-only API client; offline fixtures prove only parser
+and rejection behavior and cannot declare G0 or G7 completion. Execution
+stages remain explicitly blocked until the producer supplies the separately
+derived run/job/check/child coverage contract.
 
 The envelope also has optional `reviewer_attestation`; G7 requires
 `{reviewer, report_digest, manifest_id, snapshot_id, attested_at_utc, artifact}`

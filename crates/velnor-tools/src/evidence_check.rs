@@ -3,8 +3,9 @@
 //! The checker has three deliberately separate inputs: a reviewed workload
 //! manifest, an independently collected GitHub snapshot, and result records.
 //! Result records never define the scope, expected jobs, current revision, or
-//! required checks.  `--live` replaces the snapshot facts with a fresh
-//! read-only API collection before verification; G7 always requires it.
+//! required checks.  `--live` consumes a producer-owned typed live capture and
+//! reopens its immutable CAS objects before verification; G7 always requires
+//! that mode.  The checker does not contain a second, weaker API collector.
 
 use crate::g0_contract::*;
 use crate::g0_workflow::{derive_workflow_plan, DerivedWorkflowPlan};
@@ -17,7 +18,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
@@ -162,7 +162,8 @@ pub struct EvidenceCheckArgs {
     /// Reviewed external exact-scope workload manifest.
     #[arg(long)]
     pub manifest: PathBuf,
-    /// Independently captured snapshot. Live mode reconciles it to GitHub.
+    /// Independently captured snapshot. Live mode reconciles it to the typed
+    /// producer capture embedded in `--evidence`.
     #[arg(long)]
     pub snapshot: PathBuf,
     /// Evidence records for the snapshot.
@@ -171,8 +172,10 @@ pub struct EvidenceCheckArgs {
     /// Independent producer-owned canonical application manifest for G2+.
     #[arg(long)]
     pub release_manifest: Option<PathBuf>,
-    /// Reconcile current revisions, PRs, rulesets, runs, checks, and jobs
-    /// through the read-only GitHub API. G7 always enables this mode.
+    /// Require and validate a producer-owned current live capture. The
+    /// capture must include typed G0 inventory, request/page/raw provenance,
+    /// source-derived graph data, and an explicit CAS root. G7 always enables
+    /// this mode. The checker never falls back to a weaker API collector.
     #[arg(long)]
     pub live: bool,
     /// Explicit local root of the immutable CAS evidence store. G0 storage
@@ -847,7 +850,7 @@ pub async fn evidence_check(args: EvidenceCheckArgs) -> Result<()> {
         evidence_root: args.evidence_root,
     };
     let report = if input.live {
-        check_paths_live(&input).await?
+        check_paths_live(&input)?
     } else {
         check_paths(&input)?
     };
@@ -913,10 +916,14 @@ pub fn check_paths(input: &EvidenceCheckInput) -> Result<CheckReport> {
     Ok(report)
 }
 
-/// Live mode uses the existing typed GitHub transport. The supplied snapshot
-/// remains an audit artifact, but current facts are collected independently
-/// and any mismatch fails the gate.
-pub async fn check_paths_live(input: &EvidenceCheckInput) -> Result<CheckReport> {
+/// Live mode consumes a producer-owned typed capture.  The capture is carried
+/// in `EvidenceDocument.g0_inventory`; its request/page/raw identities and
+/// source-derived graph are checked independently of result records, and all
+/// referenced bytes are reopened from the explicit CAS root.  A missing or
+/// incomplete capture is a hard failure.  The former lightweight API collector
+/// is intentionally removed because it could not bind workflow source,
+/// checkout, check-suite, and child-run identities strongly enough.
+pub fn check_paths_live(input: &EvidenceCheckInput) -> Result<CheckReport> {
     let stage = Stage::parse(&input.stage)?;
     if stage == Stage::G7 && !input.live {
         bail!("G7 requires --live");
@@ -925,35 +932,35 @@ pub async fn check_paths_live(input: &EvidenceCheckInput) -> Result<CheckReport>
     let supplied_snapshot: SnapshotDocument = read_json(&input.snapshot, "snapshot")?;
     let evidence: EvidenceDocument = read_json(&input.evidence, "evidence")?;
     let release = read_release_manifest(stage, input.release_manifest.as_deref())?;
-    let token = env::var("GITHUB_TOKEN")
-        .or_else(|_| env::var("GH_TOKEN"))
-        .context("live evidence checking requires GITHUB_TOKEN or GH_TOKEN")?;
-    if token.trim().is_empty() {
-        bail!("live evidence checking requires a non-empty GitHub token");
+    let Some(inventory) = evidence.g0_inventory.as_ref() else {
+        bail!("--live requires evidence.g0_inventory from the producer-owned typed live capture");
+    };
+    if input.evidence_root.is_none() {
+        bail!("--live requires --evidence-root for producer CAS verification");
     }
-    let client = crate::fleet_policy_client::ReqwestFleetHttp::new(
-        crate::fleet_policy_client::DEFAULT_GITHUB_API_URL,
-        &token,
-    )?;
-    let live_snapshot = crate::evidence_live::collect_live_snapshot(
-        &client,
-        &manifest,
-        supplied_snapshot.snapshot_id.clone(),
-    )
-    .await?;
     let mut report = check_documents(
         stage,
         &manifest,
-        &live_snapshot,
+        &supplied_snapshot,
         &evidence,
         release.as_ref(),
         "live",
     );
-    compare_snapshot_facts(&supplied_snapshot, &live_snapshot, &mut report.findings);
-    check_live_freshness(&live_snapshot, &mut report.findings);
+    // G0 is checked by check_documents itself. Execution/review stages still
+    // need the same independently captured inventory as their source of
+    // current branch/PR/workflow/ruleset facts.
+    if stage != Stage::G0 {
+        check_g0_inventory(
+            &manifest,
+            &supplied_snapshot,
+            Some(inventory),
+            &mut report.findings,
+        );
+    }
+    check_collector_freshness(inventory, &mut report.findings);
     check_g0_external_storage(
         stage,
-        evidence.g0_inventory.as_ref(),
+        Some(inventory),
         input.evidence_root.as_deref(),
         &mut report.findings,
     );
@@ -1896,17 +1903,6 @@ fn check_g0_inventory(
     check_g0_dependency_graph(manifest, collector, &raw_ids, findings);
     check_g0_model_session(collector, &raw_ids, findings);
     check_g0_access(collector, &raw_ids, findings);
-    // Counts and caller-provided digests are not the required authoritative
-    // G0 proof. Until the collector records typed workflow/PR/check,
-    // dependency-graph, and access/model observations, G0 must remain
-    // fail-closed instead of treating this summary as a completed gate.
-    finding(
-        findings,
-        "g0-authoritative-proof-missing",
-        "",
-        "evidence.g0_inventory",
-        "G0 requires independently collected typed workflow, PR/check, dependency-graph, access, and model evidence; summary counts/digests are insufficient",
-    );
 }
 
 /// Reopen every content-addressed object from an explicitly approved local
@@ -7086,148 +7082,45 @@ fn check_eligibility(
     }
 }
 
-fn compare_snapshot_facts(
-    supplied: &SnapshotDocument,
-    live: &SnapshotDocument,
-    findings: &mut Vec<Finding>,
-) {
-    let supplied_by_repo = supplied
-        .repositories
-        .iter()
-        .map(|repo| (repo.repository.as_str(), repo))
-        .collect::<BTreeMap<_, _>>();
-    let live_names = live
-        .repositories
-        .iter()
-        .map(|repo| repo.repository.as_str())
-        .collect::<BTreeSet<_>>();
-    let supplied_names = supplied_by_repo.keys().copied().collect::<BTreeSet<_>>();
-    if supplied_names != live_names {
+fn check_collector_freshness(inventory: &G0InventoryEvidence, findings: &mut Vec<Finding>) {
+    let collector = &inventory.collector_snapshot;
+    let Ok(observed) = OffsetDateTime::parse(&collector.observed_at_utc, &Rfc3339) else {
         finding(
             findings,
-            "live-mismatch",
+            "collector-freshness",
             "",
-            "snapshot.repositories",
-            "supplied and freshly collected repository inventories differ",
-        );
-    }
-    for live_repo in &live.repositories {
-        let Some(supplied_repo) = supplied_by_repo.get(live_repo.repository.as_str()) else {
-            finding(
-                findings,
-                "live-mismatch",
-                &live_repo.repository,
-                "snapshot.repositories",
-                "live collector found a repository absent from supplied snapshot",
-            );
-            continue;
-        };
-        if supplied_repo.default_branch != live_repo.default_branch
-            || supplied_repo.default_branch_sha != live_repo.default_branch_sha
-            || supplied_repo.ruleset.required_checks != live_repo.ruleset.required_checks
-            || supplied_repo.workflows.len() != live_repo.workflows.len()
-            || supplied_repo.main_executions.len() != live_repo.main_executions.len()
-            || supplied_repo.open_prs.len() != live_repo.open_prs.len()
-        {
-            finding(
-                findings,
-                "live-mismatch",
-                &live_repo.repository,
-                "default_branch/open_prs",
-                "supplied snapshot differs from fresh GitHub revision/PR facts",
-            );
-        }
-        let supplied_workflows = supplied_repo
-            .workflows
-            .iter()
-            .map(|workflow| (&workflow.path, &workflow.revision, &workflow.source_sha))
-            .collect::<BTreeSet<_>>();
-        let live_workflows = live_repo
-            .workflows
-            .iter()
-            .map(|workflow| (&workflow.path, &workflow.revision, &workflow.source_sha))
-            .collect::<BTreeSet<_>>();
-        if supplied_workflows != live_workflows {
-            finding(
-                findings,
-                "live-mismatch",
-                &live_repo.repository,
-                "workflows",
-                "supplied snapshot differs from fresh workflow/source inventory",
-            );
-        }
-        if execution_ids(&supplied_repo.main_executions)
-            != execution_ids(&live_repo.main_executions)
-        {
-            finding(
-                findings,
-                "live-mismatch",
-                &live_repo.repository,
-                "main_executions",
-                "supplied snapshot differs from fresh main run inventory",
-            );
-        }
-        let supplied_prs = supplied_repo
-            .open_prs
-            .iter()
-            .map(|pr| (pr.number, pr))
-            .collect::<BTreeMap<_, _>>();
-        for live_pr in &live_repo.open_prs {
-            match supplied_prs.get(&live_pr.number) {
-                Some(supplied_pr)
-                    if supplied_pr.head_sha == live_pr.head_sha
-                        && supplied_pr.base_sha == live_pr.base_sha
-                        && supplied_pr.merge_sha == live_pr.merge_sha
-                        && execution_ids(&supplied_pr.executions)
-                            == execution_ids(&live_pr.executions) => {}
-                _ => finding(
-                    findings,
-                    "live-mismatch",
-                    &live_repo.repository,
-                    "open_prs",
-                    format!(
-                        "supplied snapshot differs for current PR #{}",
-                        live_pr.number
-                    ),
-                ),
-            }
-        }
-    }
-}
-
-fn execution_ids(executions: &[ExecutionObservation]) -> BTreeSet<(u64, u32, String, String)> {
-    executions
-        .iter()
-        .map(|execution| {
-            (
-                execution.run_id,
-                execution.run_attempt,
-                execution.status.clone(),
-                execution.conclusion.clone(),
-            )
-        })
-        .collect()
-}
-
-fn check_live_freshness(snapshot: &SnapshotDocument, findings: &mut Vec<Finding>) {
-    let Ok(captured) = OffsetDateTime::parse(&snapshot.source.captured_at_utc, &Rfc3339) else {
-        finding(
-            findings,
-            "snapshot-freshness",
-            "",
-            "snapshot.source.captured_at_utc",
-            "live collector timestamp is invalid",
+            "evidence.g0_inventory.collector_snapshot.observed_at_utc",
+            "producer capture observation time is invalid",
         );
         return;
     };
-    let age = OffsetDateTime::now_utc() - captured;
+    let Ok(completed) = OffsetDateTime::parse(&collector.completed_at_utc, &Rfc3339) else {
+        finding(
+            findings,
+            "collector-freshness",
+            "",
+            "evidence.g0_inventory.collector_snapshot.completed_at_utc",
+            "producer capture completion time is invalid",
+        );
+        return;
+    };
+    if completed < observed {
+        finding(
+            findings,
+            "collector-freshness",
+            "",
+            "evidence.g0_inventory.collector_snapshot.observed_at_utc/completed_at_utc",
+            "producer capture completion cannot precede observation",
+        );
+    }
+    let age = OffsetDateTime::now_utc() - completed;
     if age.whole_seconds() < 0 || age.whole_seconds() > LIVE_FRESHNESS_SECONDS {
         finding(
             findings,
-            "snapshot-freshness",
+            "collector-freshness",
             "",
-            "snapshot.source.captured_at_utc",
-            "live snapshot is not fresh enough for final reconciliation",
+            "evidence.g0_inventory.collector_snapshot.completed_at_utc",
+            "producer live capture is not fresh enough for reconciliation",
         );
     }
 }
@@ -8138,11 +8031,7 @@ mod tests {
         let (manifest, snapshot, inventory) = complete_g0_fixture();
         let mut findings = Vec::new();
         check_g0_inventory(&manifest, &snapshot, Some(&inventory), &mut findings);
-        let unexpected = findings
-            .iter()
-            .filter(|finding| finding.code != "g0-authoritative-proof-missing")
-            .collect::<Vec<_>>();
-        assert!(unexpected.is_empty(), "unexpected findings: {unexpected:?}");
+        assert!(findings.is_empty(), "unexpected findings: {findings:?}");
 
         let mut raw_tampered = inventory.clone();
         raw_tampered.collector_snapshot.raw_objects[0].bytes_base64 = BASE64.encode(b"tampered");
@@ -8359,14 +8248,10 @@ mod tests {
             evidence_root: Some(store_root.clone()),
         })
         .expect("public checker accepts serialized fixture");
-        let unexpected = report
-            .findings
-            .iter()
-            .filter(|finding| finding.code != "g0-authoritative-proof-missing")
-            .collect::<Vec<_>>();
         assert!(
-            unexpected.is_empty(),
-            "unexpected CLI findings: {unexpected:?}"
+            report.findings.is_empty(),
+            "unexpected CLI findings: {:?}",
+            report.findings
         );
         assert_eq!(report.mode, "offline");
         let missing_store_report = check_paths(&EvidenceCheckInput {
@@ -9509,5 +9394,56 @@ mod tests {
             .findings
             .iter()
             .any(|finding| finding.code == "live-required"));
+    }
+
+    #[test]
+    fn live_checker_requires_producer_typed_capture() {
+        let (manifest, snapshot, _) = complete_g0_fixture();
+        let evidence = EvidenceDocument {
+            schema_version: EVIDENCE_SCHEMA_VERSION,
+            manifest_id: manifest.manifest_id.clone(),
+            snapshot_id: snapshot.snapshot_id.clone(),
+            stage: "G0".to_owned(),
+            records: Vec::new(),
+            reviewer_attestation: None,
+            g0_inventory: None,
+        };
+        let directory = std::env::temp_dir().join(format!(
+            "velnor-live-capture-required-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("create fixture directory");
+        let manifest_path = directory.join("manifest.json");
+        let snapshot_path = directory.join("snapshot.json");
+        let evidence_path = directory.join("evidence.json");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).expect("serialize manifest"),
+        )
+        .expect("write manifest");
+        std::fs::write(
+            &snapshot_path,
+            serde_json::to_vec(&snapshot).expect("serialize snapshot"),
+        )
+        .expect("write snapshot");
+        std::fs::write(
+            &evidence_path,
+            serde_json::to_vec(&evidence).expect("serialize evidence"),
+        )
+        .expect("write evidence");
+
+        let error = check_paths_live(&EvidenceCheckInput {
+            stage: "G0".to_owned(),
+            manifest: manifest_path,
+            snapshot: snapshot_path,
+            evidence: evidence_path,
+            release_manifest: None,
+            live: true,
+            evidence_root: None,
+        })
+        .expect_err("live mode must reject a result-only envelope");
+        assert!(error.to_string().contains("evidence.g0_inventory"));
+        let _ = std::fs::remove_dir_all(directory);
     }
 }
