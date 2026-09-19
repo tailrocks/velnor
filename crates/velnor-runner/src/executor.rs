@@ -5159,62 +5159,13 @@ where
             tier,
             container.repository.as_deref(),
         );
-        // Claim before first use, and record the claim for teardown in the
-        // same breath: a builder this job claimed but never recorded would
-        // leak its hold until slot repair. Claim failure is hard — an
-        // uncounted job sharing a counted builder is the one state in which
-        // another job's release could stop a daemon mid-build. Without a
-        // temp dir or run root there are no claims at all, so nobody stops
-        // and the builder only ever leaks (converged by the horizon path).
-        // Builders run unbounded: the claim records no CPU/memory
-        // entitlement and no daemon is ever sized or resized.
-        if let (Some(temp), Some(run_root)) = (
-            state.temp_host.as_deref(),
-            crate::buildkit::claims_run_root(),
-        ) {
-            crate::buildkit::record_job_builder(temp, &name)?;
-            crate::buildkit::claim_builder(
-                &run_root,
-                &name,
-                &crate::buildkit::BuilderIdentity {
-                    scope: &state.trust_scope,
-                    tier,
-                    repository: container.repository.as_deref(),
-                },
-                &job_scope_from_temp(Some(temp)),
-                &container.name,
-            )?;
-            // Cap the workflow-minted builders in this scope/tier/repository:
-            // per-victim failures are best-effort, but an over-cap group with
-            // no unclaimed victim fails setup loud — silently minting another
-            // daemon is how one job grew the fleet unbounded. The horizon
-            // pass stays best-effort so corpse-pinned and idle builders
-            // converge on long-lived daemons without startup or doctor.
-            let cap = crate::buildkit::enforce_builder_cap(
-                &run_root,
-                &state.trust_scope,
-                tier,
-                container.repository.as_deref(),
-                crate::buildkit::remove_builder,
-            )?;
-            for failure in &cap.failures {
-                eprintln!("buildx setup: cap enforcement: {failure}");
-            }
-            if let Some(report) =
-                crate::buildkit::maybe_reap_idle_builders(&run_root, std::time::SystemTime::now())
-            {
-                for failure in &report.failures {
-                    eprintln!("buildx setup: horizon reap: {failure}");
-                }
-                for claims in &report.unreadable_claims {
-                    eprintln!(
-                        "buildx setup: horizon reap: unreadable claim file {claims} pins its \
-                         builder as claimed; quiesce this daemon's jobs, delete the file, and \
-                         let the next claim recreate it"
-                    );
-                }
-            }
-        }
+        let run_root = crate::buildkit::claims_run_root()
+            .ok_or_else(|| anyhow::anyhow!("setup-buildx requires configured Velnor storage"))?;
+        let temp = state
+            .temp_host
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("setup-buildx requires a runner temp directory"))?;
+        crate::buildkit::record_job_builder(temp, &name)?;
         let driver = native_input_or(&action_state, action, "driver", "docker-container")?;
         let buildkitd_config_inline =
             native_input(action, &action_state, "buildkitd-config-inline")?;
@@ -5231,32 +5182,59 @@ where
                 .with_context(|| format!("write BuildKit config {}", config_host.display()))?;
             Some(format!("/__t/{config_name}"))
         };
-        let inspect_args = vec!["buildx".to_string(), "inspect".to_string(), name.clone()];
-        let inspect_result =
-            self.container_docker(container, &action_state, &inspect_args, None, timeout)?;
-        let result = if inspect_result.code == 0 {
-            let use_args = vec!["buildx".to_string(), "use".to_string(), name.clone()];
-            self.container_docker(container, &action_state, &use_args, None, timeout)?
-        } else {
-            // No `--driver-opt` resource sizing: the builder daemon runs
-            // unbounded like every other workload container.
-            let mut args = vec![
-                "buildx".to_string(),
-                "create".to_string(),
-                "--name".to_string(),
-                name.clone(),
-                "--driver".to_string(),
-                driver,
-                "--use".to_string(),
-            ];
-            if let Some(config) = buildkitd_config_container {
-                args.extend(["--config".to_string(), config]);
+        let result = {
+            // Setup claims and creates/reuses under the same filesystem-wide
+            // lifecycle gate the reaper takes exclusively. A job may be
+            // admitted while cleanup runs, but cannot claim or use a builder
+            // until its current-generation name is registered again.
+            let _coordinator = crate::capacity::FilesystemCoordinator::lock_shared(&run_root)
+                .context("lock BuildKit lifecycle for setup")?;
+            crate::buildkit::claim_builder(
+                &run_root,
+                &name,
+                &job_scope_from_temp(Some(temp)),
+                &container.name,
+            )?;
+            let inspect_args = vec!["buildx".to_string(), "inspect".to_string(), name.clone()];
+            let inspect_result =
+                self.container_docker(container, &action_state, &inspect_args, None, timeout)?;
+            if inspect_result.code == 0 {
+                let use_args = vec!["buildx".to_string(), "use".to_string(), name.clone()];
+                self.container_docker(container, &action_state, &use_args, None, timeout)?
+            } else {
+                // No `--driver-opt` resource sizing: the builder daemon runs
+                // unbounded like every other workload container.
+                let mut args = vec![
+                    "buildx".to_string(),
+                    "create".to_string(),
+                    "--name".to_string(),
+                    name.clone(),
+                    "--driver".to_string(),
+                    driver,
+                    "--use".to_string(),
+                ];
+                if let Some(config) = buildkitd_config_container {
+                    args.extend(["--config".to_string(), config]);
+                }
+                if input_truthy(&native_input_or(&action_state, action, "install", "false")?) {
+                    args.push("--bootstrap".to_string());
+                }
+                self.container_docker(container, &action_state, &args, None, timeout)?
             }
-            if input_truthy(&native_input_or(&action_state, action, "install", "false")?) {
-                args.push("--bootstrap".to_string());
-            }
-            self.container_docker(container, &action_state, &args, None, timeout)?
         };
+        if let Some(report) =
+            crate::buildkit::maybe_reap_idle_builders(&run_root, std::time::SystemTime::now())
+        {
+            for failure in &report.failures {
+                eprintln!("buildx setup: horizon reap: {failure}");
+            }
+            for record in &report.unreadable_claims {
+                eprintln!(
+                    "buildx setup: horizon reap: unreadable ownership state {record} pins its \
+                     builder; quiesce jobs and repair the record before retrying"
+                );
+            }
+        }
         Ok(native_command_result(
             result,
             StepCommandState {
@@ -19569,7 +19547,7 @@ type=sha,format=long,prefix=,enable=true"
         );
         assert_eq!(
             builder,
-            "velnor-builder-shared-trusted-unknown-unknown-repository"
+            "velnor-builder-shared-unbounded-v1-trusted-unknown-unknown-repository"
         );
         // Unbounded: the builder daemon is created with no resource
         // `--driver-opt` sizing (no cpu-*/memory= entries at all).
@@ -28649,7 +28627,7 @@ fi"#
         );
         assert_eq!(
             builder,
-            "velnor-builder-shared-untrusted-unknown-unknown-repository-jackin-construct"
+            "velnor-builder-shared-unbounded-v1-untrusted-unknown-unknown-repository-jackin-construct"
         );
         assert_eq!(results[0].exit_code, 0);
         assert_eq!(results[0].state.outputs["name"], builder);
@@ -28722,7 +28700,7 @@ fi"#
             assert_eq!(post.exit_code, 0);
             assert!(
                 post.stdout.contains(
-                    "Releasing builder velnor-builder-shared-untrusted-unknown-unknown-repository-builder"
+                    "Releasing builder velnor-builder-shared-unbounded-v1-untrusted-unknown-unknown-repository-builder"
                 ),
                 "post names the persistent builder: {:?}",
                 post.stdout
