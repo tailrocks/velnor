@@ -38,7 +38,7 @@ All four jobs use the explicit GitHub-hosted label ubuntu-24.04. The label is no
 
 | Job ID (exact) | Generated workflow | Trigger | Permissions | Allowed code and token ancestry | Candidate bytes |
 | --- | --- | --- | --- | --- | --- |
-| candidate_producer | .github/workflows/ci-candidate.yml | pull_request; same target/head numeric repository ID required for upload | {} | PR source may build a binary. No secrets, no write token, no ordinary CI/Velnor needs. The workflow asserts GITHUB_REPOSITORY_ID equals github.event.pull_request.head.repo.id before publishing. | Builds only; never receives a privileged token. |
+| candidate_producer | .github/workflows/ci-pr.yml | pull_request; same target/head numeric repository ID required for upload | {} at job scope (overrides the caller workflow's read-only default) | PR source may build a binary. No secrets, no write token, no ordinary CI/Velnor needs. The job asserts GITHUB_REPOSITORY_ID equals github.event.pull_request.head.repo.id before publishing. | Builds only; never receives a privileged token. |
 | policy_acquire | .github/workflows/ci-policy.yml | pull_request_target | contents: read, actions: read only | Base-pinned checkout/action and read-only GitHub API/archive operations. It may hold a read token in the fixed API step, but has no call site that executes candidate bytes. | Bytes are data; no execute bit is used. |
 | candidate_execute | .github/workflows/ci-policy.yml | pull_request_target, needs: policy_acquire | {} | Fresh hosted job. A fixed download action receives only the trusted handoff ID from needs; the action step ends before the wrapper starts. The wrapper has no GH_TOKEN, GITHUB_TOKEN, secret, socket, command-file, or host-workspace input. | Exactly one fixed candidate entrypoint inside the isolated container. |
 | policy | .github/workflows/ci-policy.yml | pull_request_target, needs: candidate_execute | contents: read, actions: read only | Fresh base-owned checkout, fresh target-object fetch, and independent API/artifact verification. Only this job invokes the policy command and emits the status. | Never executes candidate code. |
@@ -51,15 +51,15 @@ needs carries opaque expected IDs only. It never chooses the first result, passe
 
 | Current surface | Evidence path | Structural change after approval |
 | --- | --- | --- |
-| Candidate packaging | crates/velnor-workflow/src/s2/primitives/ir.rs:L1888-L1999, candidate_publish_steps | Remove the unit-job producer. Render one dedicated candidate_producer workflow with a fixed job ID, fixed artifact contract, exact head build, and no ordinary/Velnor dependency. |
+| Candidate packaging | crates/velnor-workflow/src/s2/primitives/ir.rs:L1888-L1999, candidate_publish_steps | Remove the unit-job producer. Render one dedicated candidate_producer job directly in ci-pr.yml with a fixed job ID, fixed artifact contract, exact head build, and no ordinary/Velnor dependency. |
 | Candidate provider selection | crates/velnor-workflow/src/s2/primitives/ir.rs:L4380-L4403 and L4780-L4805 | Delete the ProviderStepFacts.candidate_publish path after the dedicated producer is rendered; do not add a second legacy alias. |
-| PR aggregate | crates/velnor-workflow/src/s2/primitives/ir.rs:L3521-L3580, render_nested | Emit the dedicated workflow/job as a direct aggregate member; no hidden candidate step in reusable Rust CI. |
+| PR aggregate | crates/velnor-workflow/src/s2/primitives/ir.rs:L3521-L3580, render_nested | Emit the dedicated producer job in the authoritative ci-pr.yml aggregate; no separate producer workflow and no hidden candidate step in reusable Rust CI. |
 | Policy jobs/acquire | crates/velnor-workflow/src/s2/mod.rs:L4524-L4590 and L4565-L4703 | Render the four-role graph, exact API contract, handoff/result transport, and fail-closed checks. Separate acquire, execute, and verify jobs. |
 | Candidate comparison | crates/velnor-workflow/src/s2/policy.rs:L1435-L1473 and L1487-L1584 | Treat candidate render as untrusted bytes only. Verify source identity and handoff/result tuple before comparison against a separately archived target object. |
-| Generated caller coupling | .github/workflows/ci-pr.yml:L292-L340 and .github/workflows/ci-unit-rust.yml:L196-L490, L560-L628 | Regenerate callers after source changes. Remove the current candidate steps from the unit job and its ordinary check dependencies. |
+| Generated caller coupling | .github/workflows/ci-pr.yml:L37-L107, L292-L340 and .github/workflows/ci-unit-rust.yml:L196-L490, L560-L628 | Regenerate the authoritative PR workflow after source changes. Remove the current candidate steps from the unit job and its ordinary check dependencies. |
 | Generated policy | .github/workflows/ci-policy.yml:L1-L190 | Regenerate the four jobs. Never hand-edit generated YAML. |
 
-The current checked-in producer is appended to the hosted Rust unit job at .github/workflows/ci-unit-rust.yml:L560-L628; that coupling is why a blocked unit/Velnor gate can strand the only candidate artifact. The replacement workflow is .github/workflows/ci-candidate.yml, not a second producer hidden in the unit workflow. Existing PR952 source closure work and generated recovery work are separate dependencies; this design does not modify them or the APT tree.
+The current checked-in producer is appended to the hosted Rust unit job at .github/workflows/ci-unit-rust.yml:L560-L628; that coupling is why a blocked unit/Velnor gate can strand the only candidate artifact. The replacement is a direct candidate_producer job in the authoritative .github/workflows/ci-pr.yml, not a new producer workflow and not a second producer hidden in the unit workflow. The current PR workflow's plan/runtime surface is .github/workflows/ci-pr.yml:L37-L107 and the surrounding caller wiring through L124: job outputs begin at L41, checkout/setup and pinned runtime at L54-L67, event/head inputs at L71-L76, and its existing runtime upload is L101-L107. The new producer must not reuse the plan artifact or its needs; it gets its own fixed job-level permissions and static uploader contract. Existing PR952 source closure work and generated recovery work are separate dependencies; this design does not modify them or the APT tree.
 
 ## Trusted identity contract
 
@@ -68,7 +68,7 @@ Every producer, handoff, and result transport carries one immutable identity rec
 ~~~json
 {
   "role": "producer|handoff|result",
-  "workflow_path": ".github/workflows/ci-candidate.yml",
+  "workflow_path": ".github/workflows/ci-pr.yml",
   "workflow_id": 0,
   "run_id": 0,
   "run_attempt": 0,
@@ -104,6 +104,12 @@ Every producer, handoff, and result transport carries one immutable identity rec
 
 For a handoff, workflow_path, workflow_id, run_id, run_attempt, job_id, and job_name identify the base policy_acquire run in addition to the nested producer tuple. For a result, they identify the base candidate_execute run and stable candidate_execute job, in addition to the producer and handoff IDs. The result also records the base policy workflow and verify-job tuple when the verifier consumes it. Numeric repository IDs are mandatory even when names match. A missing, blank, non-numeric, or duplicate identity field rejects the transport.
 
+The JSON example shows the producer role. For a handoff or result, workflow_path
+is exactly .github/workflows/ci-policy.yml and its numeric workflow_id identifies
+that policy run; the nested producer_workflow_path is exactly
+.github/workflows/ci-pr.yml with its own numeric workflow_id. The verifier
+records both paths/IDs rather than overwriting the producer tuple.
+
 ### Artifact-to-job binding: current API limitation and required mechanism
 
 The artifact REST response supplies an artifact ID, name, expiry, service digest, and workflow_run association, but it does not supply an uploader job ID or run attempt. The jobs REST response supplies job IDs but does not supply artifact IDs. The observed correlation between producer job 105961562345 and run 10591573147 is therefore not API proof of artifact ownership. This design does not claim that it is.
@@ -117,11 +123,35 @@ The required binding is an explicit trusted unique-uploader workflow contract, o
 
 This is a concrete blocker from G1/bootstrap-artifact-feasibility-2026-09-20.md and must be resolved in source design before code. A future signed uploader attestation is acceptable only if the verifier checks its signer, exact run/attempt/job/artifact IDs, action archive digest, and raw bytes independently; a candidate-written unsigned manifest is not an attestation.
 
+### Producer-hostile build proof
+
+The actual generated ci-pr.yml candidate_producer job must run a hostile build
+fixture from crates/velnor-workflow/tests/fixtures/bootstrap-hostile-producer/.
+The fixture is compiled/executed by the same PR-head build command that creates
+the candidate binary; it is not a unit-test string or a synthetic manifest.
+It attempts to read ACTIONS_RUNTIME_TOKEN, ACTIONS_RUNTIME_URL,
+ACTIONS_ID_TOKEN_REQUEST_TOKEN, GITHUB_TOKEN, GITHUB_OUTPUT, GITHUB_ENV,
+GITHUB_PATH, GITHUB_STATE, and the runner command files; it attempts to call
+the Actions artifact runtime and upload a second artifact; and it attempts to
+impersonate the fixed candidate_upload step by changing output names and
+action-runtime variables. The expected result is that all runtime-token and
+command-file values are absent/unreachable, the artifact service is
+unreachable from the build boundary, only the fixed trusted upload action can
+publish, and exactly one static artifact exists.
+
+The candidate build must run under an explicit unprivileged env-i/container
+boundary with no ACTIONS_RUNTIME_TOKEN or uploader-service socket. The fixed
+uploader is a separate step after trusted output validation; its action archive
+and artifact service digest are checked as described above. A producer canary
+that finds any runtime token, can call the artifact service, or can create an
+extra uploader path is red. This test is mandatory evidence for H1/H2/H6 and
+must run on the actual generated ci-pr.yml job before source approval.
+
 ### API selection: exact, singular, and stale-safe
 
 policy_acquire uses the base-owned API client against the target repository; it never accepts a run/job/artifact selected by the candidate:
 
-1. Resolve .github/workflows/ci-candidate.yml through the target repository's workflows API and require exactly one matching path and one numeric workflow_id. A tag, display name, or candidate-provided workflow ID is not a substitute.
+1. Resolve .github/workflows/ci-pr.yml through the target repository's workflows API and require exactly one matching path and one numeric workflow_id. A tag, display name, or candidate-provided workflow ID is not a substitute. The normalized workflow contract must identify the sole candidate_producer/candidate_upload pair; the existing plan/runtime uploader is a different static artifact and cannot satisfy this contract.
 2. Enumerate every page of GET /repos/{target}/actions/workflows/{workflow_id}/runs filtered by event=pull_request and the exact head_sha. Require exactly one eligible run with status=completed, conclusion=success, exact path, exact workflow_id, exact target/head names and numeric IDs, exact event, exact head SHA, and a non-null run_id plus run_attempt. Multiple successful runs or attempts are ambiguous and reject; there is no “latest” or first-response rule.
 3. Enumerate GET /repos/{target}/actions/runs/{run_id}/jobs and require exactly one completed-success job with stable name candidate_producer, REST field id, exact run_id, exact head SHA, and the expected workflow path. databaseId, a display name alone, and a candidate-reported ID are not accepted.
 4. Enumerate GET /repos/{target}/actions/runs/{run_id}/artifacts and require exactly one non-empty, non-expired artifact named the trusted static contract velnor-workflow-candidate-linux-x64. Require exact workflow_run.id == run_id, artifact id, created_at/updated_at not older than the selected run, and a non-blank service digest matching sha256:[0-9a-f]{64}. A short closure prefix is never an artifact name or selector.
@@ -255,6 +285,9 @@ After the source implementation is separately approved, regeneration must prove 
 
 * exactly the four role IDs above, plus no hidden candidate invocation;
 * candidate_producer has no ordinary CI/Velnor needs and no privileged permission;
+* the actual candidate_producer build fixture proves no ACTIONS_RUNTIME_TOKEN,
+  ACTIONS_RUNTIME_URL, uploader socket, or command-file access and cannot create
+  an extra artifact or impersonate candidate_upload;
 * policy_acquire never invokes candidate bytes and has only read API scope;
 * candidate_execute is a fresh hosted job with {} permissions, fixed action/image references, no writable authoritative checkout, no socket, no command-file mount, and the complete sandbox flags;
 * policy is the only status writer and repeats API/source verification;
@@ -262,7 +295,7 @@ After the source implementation is separately approved, regeneration must prove 
 * all producer/handoff/result artifacts use static names, mandatory service/raw digests, and the unique-uploader binding; and
 * absent image, quota, timeout, action, API, artifact, source, or uploader proof is a hard failure.
 
-Generated output must be produced by the generator. Do not hand-edit .github/workflows/ci-candidate.yml, ci-policy.yml, ci-pr.yml, or ci-unit-rust.yml.
+Generated output must be produced by the generator. Do not hand-edit .github/workflows/ci-policy.yml, ci-pr.yml, or ci-unit-rust.yml.
 
 ## Implementation order after design approval
 
@@ -315,4 +348,3 @@ Post-implementation gates are cargo fmt --all -- --check, focused S2 generator/p
 * [Docker container runtime controls](https://docs.docker.com/engine/containers/run/) — private network/filesystem, capability, PID, and resource controls.
 
 This amended design remains conditional and blocked on the six mandatory review rows, the artifact-to-job binding mechanism, and the nine actual hostile canaries above.
-
