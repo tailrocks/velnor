@@ -8573,7 +8573,7 @@ mod tests {
         must(
             fs::write(
                 root.join("rust-toolchain.toml"),
-                "[toolchain]\nchannel = \"1.91.1\"\n",
+                "[toolchain]\nchannel = \"1.91.1\"\ntargets = [\"x86_64-unknown-linux-gnu\", \"aarch64-unknown-linux-gnu\"]\n",
             ),
             "write test toolchain pin",
         );
