@@ -4614,8 +4614,16 @@ fn policy_candidate_step(revision: &str) -> String {
           case "$HEAD_SHA" in [0-9a-f]{{40}}) ;; *) exit 1 ;; esac
           case "$BASE_SHA" in [0-9a-f]{{40}}) ;; *) exit 1 ;; esac
           case "$PR_NUMBER" in ''|*[!0-9]*) exit 1 ;; esac
-          head_tree_sha="$(git rev-parse "$HEAD_SHA^{{tree}}")"
-          base_tree_sha="$(git rev-parse "$BASE_SHA^{{tree}}")"
+          repository_api="$(gh api "repos/$GITHUB_REPOSITORY")"
+          jq -e --arg repo "$GITHUB_REPOSITORY" --argjson id "$TARGET_REPOSITORY_ID" '.id == $id and .full_name == $repo' <<<"$repository_api" >/dev/null
+          head_commit_api="$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA")"
+          jq -e --arg head "$HEAD_SHA" '.sha == $head and (.commit.tree.sha | strings | test("^[0-9a-f]{{40}}$"))' <<<"$head_commit_api" >/dev/null
+          head_tree_sha="$(jq -er '.commit.tree.sha' <<<"$head_commit_api")"
+          base_commit_api="$(gh api "repos/$GITHUB_REPOSITORY/commits/$BASE_SHA")"
+          jq -e --arg base "$BASE_SHA" '.sha == $base and (.commit.tree.sha | strings | test("^[0-9a-f]{{40}}$"))' <<<"$base_commit_api" >/dev/null
+          base_tree_sha="$(jq -er '.commit.tree.sha' <<<"$base_commit_api")"
+          test "$(git rev-parse "$HEAD_SHA^{{tree}}")" = "$head_tree_sha"
+          test "$(git rev-parse "$BASE_SHA^{{tree}}")" = "$base_tree_sha"
 
           contract="$RUNNER_TEMP/ci-pr-contract.yml"
           git show "$BASE_SHA:.github/workflows/ci-pr.yml" > "$contract"
@@ -5341,6 +5349,14 @@ fn policy_candidate_result_verification_step() -> String {
             (.binary_sha256 | strings | test("^[0-9a-f]{{64}}$"))
           ' "$producer_manifest" >/dev/null
           test "$(sha256sum "$producer_binary" | awk '{{print $1}}')" = "$(jq -er .binary_sha256 "$producer_manifest")"
+          repository_api="$(gh api "repos/$GITHUB_REPOSITORY")"
+          jq -e --arg repo "$GITHUB_REPOSITORY" --argjson id "$TARGET_REPOSITORY_ID" '.id == $id and .full_name == $repo' <<<"$repository_api" >/dev/null
+          head_commit_api="$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA")"
+          jq -e --arg head "$HEAD_SHA" '.sha == $head and (.commit.tree.sha | strings | test("^[0-9a-f]{{40}}$"))' <<<"$head_commit_api" >/dev/null
+          head_tree_sha="$(jq -er '.commit.tree.sha' <<<"$head_commit_api")"
+          base_commit_api="$(gh api "repos/$GITHUB_REPOSITORY/commits/$BASE_SHA")"
+          jq -e --arg base "$BASE_SHA" '.sha == $base and (.commit.tree.sha | strings | test("^[0-9a-f]{{40}}$"))' <<<"$base_commit_api" >/dev/null
+          base_tree_sha="$(jq -er '.commit.tree.sha' <<<"$base_commit_api")"
           workflow_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml")"
           jq -e --argjson id "$(jq -er .workflow_id "$handoff_json")" '.path == ".github/workflows/ci-pr.yml" and .id == $id' <<<"$workflow_api" >/dev/null
           run_id="$(jq -er .run_id "$handoff_json")"
@@ -5359,8 +5375,8 @@ fn policy_candidate_result_verification_step() -> String {
             .id == $id and .run_id == $run_id and .name == "candidate_producer" and .head_sha == $head and
             .status == "completed" and .conclusion == "success"
           ' <<<"$job_api" >/dev/null
-          head_tree_sha="$(git rev-parse "$HEAD_SHA^{{tree}}")"
-          base_tree_sha="$(git rev-parse "$BASE_SHA^{{tree}}")"
+          test "$(git rev-parse "$HEAD_SHA^{{tree}}")" = "$head_tree_sha"
+          test "$(git rev-parse "$BASE_SHA^{{tree}}")" = "$base_tree_sha"
           test "$head_tree_sha" = "$(jq -er .head_tree_sha "$handoff_json")"
           test "$base_tree_sha" = "$(jq -er .base_tree_sha "$handoff_json")"
           test "$(git show "$BASE_SHA:.github/workflows/ci-pr.yml" | sha256sum | awk '{{print $1}}')" = "$(jq -er .contract_sha256 "$handoff_json")"

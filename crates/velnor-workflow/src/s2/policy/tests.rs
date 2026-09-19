@@ -634,6 +634,9 @@ fn owner_entrypoint_renders_the_isolated_candidate_transport() {
         "{job}"
     );
     assert!(job.contains("actions/artifacts/$artifact_id/zip"), "{job}");
+    assert!(job.contains("/commits/$HEAD_SHA"), "{job}");
+    assert!(job.contains(".commit.tree.sha"), "{job}");
+    assert!(job.contains("repository_api"), "{job}");
     assert!(job.contains("artifact_raw_zip_sha256"), "{job}");
     assert!(job.contains("candidate_closure"), "{job}");
     assert!(
