@@ -3746,6 +3746,10 @@ fn selection_context(
     Ok(suite)
 }
 
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "map_err owns the source error and must preserve its message"
+)]
 fn apt_error(error: crate::GeneratorError) -> GeneratorError {
     GeneratorError::usage(error.to_string())
 }
@@ -3810,27 +3814,28 @@ fn s2_apt_spec(
     let identity = required_option(options, "identity-dir")?;
     let feed_url = required_option(options, "feed-url")?;
     let description = required_option(options, "description")?;
-    let mut spec = crate::s2::ReleaseSpec::default();
-    spec.kind = "apt".to_owned();
-    spec.package = selection.package.clone();
-    spec.binary = binary.to_owned();
-    spec.source_repository = selection.source_repository.clone();
-    spec.consumer_repository = consumer.to_owned();
-    spec.description = description.to_owned();
-    spec.manifest_schema = manifest_schema.to_owned();
-    spec.discovery_script = discovery_script.to_owned();
-    spec.canonical_manifest_asset = canonical_asset.to_owned();
-    spec.canonical_manifest_schema = canonical_schema.to_owned();
-    spec.apt_arches = parse_apt_arches(options)?;
-    spec.signer_fingerprint = signer.to_owned();
-    spec.passphrase_secret = passphrase.to_owned();
-    spec.signing_key_secret = signing_key.to_owned();
-    spec.keyring_path = keyring.to_owned();
-    spec.apt_origin = origin.to_owned();
-    spec.apt_identity_dir = identity.to_owned();
-    spec.apt_feed_url = feed_url.to_owned();
-    spec.retention = parse_retention(options)?;
-    Ok(spec)
+    Ok(crate::s2::ReleaseSpec {
+        kind: "apt".to_owned(),
+        package: selection.package.clone(),
+        binary: binary.to_owned(),
+        source_repository: selection.source_repository.clone(),
+        consumer_repository: consumer.to_owned(),
+        description: description.to_owned(),
+        manifest_schema: manifest_schema.to_owned(),
+        discovery_script: discovery_script.to_owned(),
+        canonical_manifest_asset: canonical_asset.to_owned(),
+        canonical_manifest_schema: canonical_schema.to_owned(),
+        apt_arches: parse_apt_arches(options)?,
+        signer_fingerprint: signer.to_owned(),
+        passphrase_secret: passphrase.to_owned(),
+        signing_key_secret: signing_key.to_owned(),
+        keyring_path: keyring.to_owned(),
+        apt_origin: origin.to_owned(),
+        apt_identity_dir: identity.to_owned(),
+        apt_feed_url: feed_url.to_owned(),
+        retention: parse_retention(options)?,
+        ..crate::s2::ReleaseSpec::default()
+    })
 }
 
 fn selection_path(options: &BTreeMap<String, String>) -> Result<&Path, GeneratorError> {

@@ -722,9 +722,13 @@ impl AptContract {
                 "apt canonical_manifest_schema must be {PRODUCT_MANIFEST_SCHEMA}"
             )));
         }
-        contract.discovery_script = spec.discovery_script.clone();
-        contract.canonical_manifest_asset = spec.canonical_manifest_asset.clone();
-        contract.canonical_manifest_schema = spec.canonical_manifest_schema.clone();
+        contract.discovery_script.clone_from(&spec.discovery_script);
+        contract
+            .canonical_manifest_asset
+            .clone_from(&spec.canonical_manifest_asset);
+        contract
+            .canonical_manifest_schema
+            .clone_from(&spec.canonical_manifest_schema);
         Ok(contract)
     }
 }
@@ -1283,6 +1287,10 @@ fn parse_product_preview_version(value: &str) -> Result<(String, String), Genera
     Ok((format!("{base}~preview.{sequence}+{sha}"), sha.to_owned()))
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "canonical product schema validation stays one auditable gate"
+)]
 fn validate_product_manifest_selection(
     manifest: &serde_json::Value,
     selection: &serde_json::Value,
@@ -1497,6 +1505,10 @@ fn validate_source_ref_resolution(
 /// Parse and validate one source-owned discovery result. The exact top-level
 /// shape is intentional: accepting a subset would let a later consumer omit
 /// the provenance fields that make an immutable selection auditable.
+#[allow(
+    clippy::too_many_lines,
+    reason = "selection parsing is one exact immutable contract gate"
+)]
 pub(crate) fn read_discovery_selection(path: &Path) -> Result<DiscoverySelection, GeneratorError> {
     let document = read_json(path)?;
     exact_object_keys(
@@ -1575,9 +1587,7 @@ pub(crate) fn read_discovery_selection(path: &Path) -> Result<DiscoverySelection
         }
         "preview" => {
             let (_, preview_sha) = parse_product_preview_version(&version)?;
-            if !tag
-                .strip_prefix("preview-")
-                .is_some_and(|commit| commit == source_commit)
+            if tag.strip_prefix("preview-").unwrap_or_default() != source_commit
                 || preview_sha != source_commit[..7]
                 || source_ref != PREVIEW_SOURCE_REF
             {
@@ -1586,7 +1596,9 @@ pub(crate) fn read_discovery_selection(path: &Path) -> Result<DiscoverySelection
                 ));
             }
         }
-        _ => unreachable!("channel checked above"),
+        _ => {
+            return Err(GeneratorError::usage("discovery channel is unsupported"));
+        }
     }
     validate_source_ref_resolution(&document, &channel, &tag, &source_commit)?;
     let manifest_asset = field(&document, "manifest_asset")?.to_owned();
