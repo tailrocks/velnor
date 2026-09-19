@@ -2940,6 +2940,12 @@ fn check_g0_derived_plan(
     plan: &DerivedWorkflowPlan,
     findings: &mut Vec<Finding>,
 ) {
+    let dependencies = workflow
+        .reusable_workflows
+        .iter()
+        .chain(workflow.actions.iter())
+        .chain(workflow.scanners.iter())
+        .collect::<Vec<_>>();
     let expected_workloads = manifest
         .expected_workload_ids
         .iter()
@@ -3021,7 +3027,29 @@ fn check_g0_derived_plan(
             )
         })
         .collect::<BTreeSet<_>>();
+    let mut child_edge_ids = BTreeSet::new();
     for edge in &plan.child_edges {
+        let edge_id = (
+            edge.root_workload_id.clone(),
+            edge.workload_id.clone(),
+            edge.repository.clone(),
+            edge.workflow_path.clone(),
+            edge.event.clone(),
+            edge.relation.clone(),
+            edge.source_sha.clone(),
+            edge.parent_repository.clone(),
+            edge.parent_workflow_path.clone(),
+            edge.parent_source_sha.clone(),
+        );
+        if !child_edge_ids.insert(edge_id) {
+            finding(
+                findings,
+                "g0-workflow-child",
+                repository,
+                "workflow.source/child_edges",
+                "source-derived child identities must be unique",
+            );
+        }
         let Some(expected) = manifest
             .expected_jobs
             .iter()
@@ -3039,6 +3067,14 @@ fn check_g0_derived_plan(
             );
             continue;
         };
+        let parent_source_matches = (edge.parent_repository == repository
+            && edge.parent_workflow_path == workflow.source.path
+            && edge.parent_source_sha == workflow.source.source_sha)
+            || dependencies.iter().any(|dependency| {
+                dependency.source.repository == edge.parent_repository
+                    && dependency.source.path == edge.parent_workflow_path
+                    && dependency.source.source_sha == edge.parent_source_sha
+            });
         let matches = if edge.workload_id == edge.root_workload_id {
             expected.child_workflow.as_ref().is_some_and(|child| {
                 child.repository == edge.repository
@@ -3046,7 +3082,7 @@ fn check_g0_derived_plan(
                     && child.event == edge.event
             })
         } else {
-            expected.child_workflow.is_some()
+            expected.child_workflow.is_some() && parent_source_matches
         };
         if !matches {
             finding(
@@ -4428,7 +4464,12 @@ fn g0_graph_edge_shape_is_bound(
                 && from.repository == to.repository
                 && from.workload_id == to.workload_id
         }
-        "workload-to-child" => from.kind == "workload" && to.kind == "child",
+        "workload-to-child" => {
+            from.kind == "workload"
+                && to.kind == "child"
+                && from.repository == to.repository
+                && from.workload_id == to.workload_id
+        }
         "workload-to-package" => {
             from.kind == "workload"
                 && to.kind == "package"
@@ -4767,7 +4808,8 @@ fn check_execution_observation(
         }
     }
     for child in &execution.child_runs {
-        if child.parent_run_id != execution.run_id
+        if child.parent_run_id == 0
+            || child.parent_run_id == child.run_id
             || child.run_id == 0
             || child.run_attempt == 0
             || child.status != "completed"
@@ -6071,6 +6113,8 @@ fn check_authoritative_children_from_source(
             })
         })
         .collect::<Vec<_>>();
+    let mut matched_edges = BTreeSet::new();
+    let mut observed_child_ids = BTreeSet::new();
     if expected.len() != execution.child_runs.len()
         || expected.len() != record.child_run_links.len()
     {
@@ -6083,16 +6127,26 @@ fn check_authoritative_children_from_source(
         );
     }
     for child in &execution.child_runs {
+        if !observed_child_ids.insert(child.run_id) {
+            finding(
+                findings,
+                "duplicate-child-run",
+                repo,
+                "execution.child_runs.run_id",
+                format!("duplicate child run {}", child.run_id),
+            );
+        }
         let matching_edges = expected
             .iter()
-            .filter(|edge| {
+            .enumerate()
+            .filter(|(_, edge)| {
                 edge.repository == child.repository
                     && edge.workflow_path == child.workflow_path
                     && edge.event == child.event
                     && edge.source_sha == child.source_sha
             })
             .collect::<Vec<_>>();
-        let parent_matches = matching_edges.iter().any(|edge| {
+        let parent_matches = matching_edges.iter().any(|(_, edge)| {
             if edge.parent_repository == repository.repository
                 && edge.parent_workflow_path == execution.workflow_path
                 && (edge.parent_source_sha == execution.workflow_revision
@@ -6109,8 +6163,30 @@ fn check_authoritative_children_from_source(
                 })
             }
         });
-        if matching_edges.len() != 1
+        let manifest_target_matches = matching_edges.first().is_some_and(|(_, edge)| {
+            if edge.workload_id != edge.root_workload_id {
+                return true;
+            }
+            manifest.expected_jobs.iter().any(|job| {
+                job.job_id == edge.root_workload_id
+                    && job.provider == record.provider
+                    && job.required
+                    && job.child_workflow.as_ref().is_some_and(|child| {
+                        child.repository == edge.repository
+                            && child.workflow_path == edge.workflow_path
+                            && child.event == edge.event
+                    })
+            })
+        });
+        let edge_is_unique = matching_edges.len() == 1
+            && parent_matches
+            && manifest_target_matches
+            && matching_edges
+                .first()
+                .is_some_and(|(index, _)| matched_edges.insert(*index));
+        if !edge_is_unique
             || !parent_matches
+            || !manifest_target_matches
             || child.provider != record.provider
             || child.parent_run_id == child.run_id
             || child.run_id == 0
@@ -6132,7 +6208,26 @@ fn check_authoritative_children_from_source(
             );
         }
     }
+    if matched_edges.len() != expected.len() {
+        finding(
+            findings,
+            "child-run-inventory",
+            repo,
+            "execution.child_runs",
+            "each source-derived child edge must map to exactly one distinct observed run",
+        );
+    }
+    let mut child_run_ids = BTreeSet::new();
     for link in &record.child_run_links {
+        if !child_run_ids.insert(link.run_id) {
+            finding(
+                findings,
+                "duplicate-child-run",
+                repo,
+                "child_run_links.run_id",
+                format!("duplicate child run {}", link.run_id),
+            );
+        }
         let Some(actual) = execution
             .child_runs
             .iter()
@@ -6172,6 +6267,20 @@ fn check_authoritative_children_from_source(
                 ),
             );
         }
+    }
+    let actual_child_ids = execution
+        .child_runs
+        .iter()
+        .map(|child| child.run_id)
+        .collect::<BTreeSet<_>>();
+    if child_run_ids != actual_child_ids {
+        finding(
+            findings,
+            "child-run-inventory",
+            repo,
+            "child_run_links.run_id",
+            "child links must form a complete bijection with authoritative child runs",
+        );
     }
 }
 
@@ -6951,13 +7060,15 @@ fn check_expected_job(
             "expected_jobs.child_workflow.repository",
             findings,
         );
-        if child.workflow_path.trim().is_empty() || child.event != "workflow_run" {
+        if child.workflow_path.trim().is_empty()
+            || !matches!(child.event.as_str(), "workflow_call" | "workflow_run")
+        {
             finding(
                 findings,
                 "child-workflow",
                 repository,
                 "expected_jobs.child_workflow",
-                "child workflow must identify a path and workflow_run event",
+                "child workflow must identify a path and workflow_call/workflow_run event",
             );
         }
     }
@@ -8482,6 +8593,25 @@ mod tests {
             findings.is_empty(),
             "valid nested graph rejected: {findings:?}"
         );
+        let mut observation_findings = Vec::new();
+        check_execution_observation(&repository, &child_execution, &mut observation_findings);
+        assert!(!observation_findings
+            .iter()
+            .any(|finding| finding.code == "child-run-conclusion"));
+
+        let mut duplicate_links = record.clone();
+        duplicate_links.child_run_links[1] = duplicate_links.child_run_links[0].clone();
+        findings.clear();
+        check_authoritative_children_from_source(
+            manifest_repo,
+            Some(&inventory),
+            &duplicate_links,
+            &child_execution,
+            &mut findings,
+        );
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "duplicate-child-run"));
 
         let mut wrong_parent = child_execution;
         wrong_parent.child_runs[1].parent_run_id = wrong_parent.run_id;
