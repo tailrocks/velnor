@@ -197,10 +197,13 @@ fn validate_workflow_file(file: Option<&str>) -> Result<String, GeneratorError> 
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
     };
+    let valid_extension = path.extension().is_some_and(|extension| {
+        extension.eq_ignore_ascii_case("yml") || extension.eq_ignore_ascii_case("yaml")
+    });
     if path.is_absolute()
         || file.contains(['\\', ':', '\n', '\r'])
         || file.split('/').any(|segment| !valid_segment(segment))
-        || !(file.ends_with(".yml") || file.ends_with(".yaml"))
+        || !valid_extension
     {
         return Err(GeneratorError::usage(
             "package-release file must be a safe relative .yml/.yaml workflow path",
@@ -1365,8 +1368,12 @@ verify_asset_bytes() {
     for name in release_asset_names(spec) {
         let _ = writeln!(script, "  printf '%s\\n' {}", shell_quote(&name));
     }
-    script.push_str(
-        r#"} | LC_ALL=C sort > "$expected_assets"
+    script.push_str(immutable_publish_script_body());
+    script
+}
+
+fn immutable_publish_script_body() -> &'static str {
+    r#"} | LC_ALL=C sort > "$expected_assets"
 
 tag_sha="$(remote_tag_sha "$tag")"
 if [ -n "$tag_sha" ] && [ "$tag_sha" != "$EXPECTED_SOURCE_COMMIT" ]; then
@@ -1456,9 +1463,7 @@ cmp -s "$expected_assets" "$existing_assets" || {
 final_tag_sha="$(remote_tag_sha "$tag")"
 [ "$final_tag_sha" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::immutable tag does not resolve to the verified source commit" >&2; exit 1; }
 printf 'immutable_tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
-"#,
-    );
-    script
+"#
 }
 
 /// Render the publication half separately from the build half.  The release
@@ -1788,6 +1793,8 @@ concurrency_group = "package-release-preview"
             Path::new(".github/workflows").join(&workflow_file),
             Path::new(".github/workflows/release.yml")
         );
+        assert!(validate_workflow_file(Some("release.YmL")).is_ok());
+        assert!(validate_workflow_file(Some("release.YaMl")).is_ok());
         assert!(validate_workflow_file(Some("../release.yml")).is_err());
         assert!(validate_workflow_file(Some("release.txt")).is_err());
     }
@@ -2067,6 +2074,12 @@ concurrency_group = "package-release-preview"
         assert!(workflow.contains("git status --porcelain --untracked-files=all"));
         assert!(workflow.contains("consumer updater produced untracked files; staging them"));
         assert!(workflow.contains("bash -c \"$UPDATER\""));
+    }
+
+    #[test]
+    fn rendered_workflow_consumer_update_is_fail_closed_and_generic() {
+        let spec = parse_spec(&Args(&args())).expect("valid fixture");
+        let workflow = render_workflow(&render_config(), &spec, "preview.yml");
         let workflow_lower = workflow.to_ascii_lowercase();
         assert!(!workflow_lower.contains("formula"));
         assert!(!workflow_lower.contains("homebrew"));
