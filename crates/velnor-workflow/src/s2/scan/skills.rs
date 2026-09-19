@@ -13,18 +13,19 @@ use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 
 use super::{unit, RepositoryShape, ScanContext};
-use crate::s2::{GeneratorError, UnitKind, SKILLS_BUN_VERSION};
+use crate::s2::{GeneratorError, UnitKind};
 
 const CATALOG: &str = "catalog.json";
 const DOCS_INDEX: &str = "docs/index.json";
 const DOCS_README: &str = "docs/README.md";
-const REQUIRED_PLUGIN_FILES: [&str; 5] = [
-    "plugin.json",
+const PROVIDER_PLUGIN_FILES: [&str; 3] = [
     ".codex-plugin/plugin.json",
     ".kimi-plugin/plugin.json",
     ".claude-plugin/plugin.json",
-    ".claude-plugin/marketplace.json",
 ];
+const MARKETPLACE_FILE: &str = ".claude-plugin/marketplace.json";
+const VELNOR_MISE_TOML: &str = include_str!("../../../../../mise.toml");
+const VELNOR_MISE_LOCK: &str = include_str!("../../../../../mise.lock");
 
 const HELPER_TEMPLATE_GLOB: &str = "*/templates/*";
 
@@ -43,8 +44,7 @@ enum FrontmatterMode {
 const SKILLS_CHECKS: [SkillsCheck; 2] = [SkillsCheck::GeneratedDocs, SkillsCheck::HelperSyntax];
 
 impl SkillsCheck {
-    fn command(self) -> String {
-        let bun = SKILLS_BUN_VERSION;
+    fn command(self, bun: &str) -> String {
         match self {
             Self::GeneratedDocs => format!(
                 "set -o pipefail && test \"$(bun --version)\" = \"{bun}\" && tmp=$(mktemp -d) && trap 'rm -rf \"$tmp\"' EXIT && repo=$(basename \"$PWD\") && mkdir \"$tmp/$repo\" && git archive --format=tar HEAD | tar -x -C \"$tmp/$repo\" && cp -R \"$tmp/$repo/docs\" \"$tmp/docs.expected\" && bun \"$tmp/$repo/scripts/generate-docs.ts\" && diff -ru \"$tmp/docs.expected\" \"$tmp/$repo/docs\""
@@ -56,12 +56,107 @@ impl SkillsCheck {
     }
 }
 
-fn verification_commands() -> Vec<String> {
+fn verification_commands(bun: &str) -> Vec<String> {
     SKILLS_CHECKS
         .iter()
         .copied()
-        .map(SkillsCheck::command)
+        .map(|check| check.command(bun))
         .collect()
+}
+
+fn central_bun_version() -> Result<String, GeneratorError> {
+    let mise = VELNOR_MISE_TOML.parse::<toml::Value>().map_err(|error| {
+        GeneratorError::usage(format!("invalid generator mise.toml Bun policy: {error}"))
+    })?;
+    let configured = mise
+        .get("tools")
+        .and_then(toml::Value::as_table)
+        .and_then(|tools| tools.get("aqua:oven-sh/bun"))
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| {
+            GeneratorError::usage(
+                "generator mise.toml must pin aqua:oven-sh/bun to an exact version",
+            )
+        })?;
+    let lock = VELNOR_MISE_LOCK.parse::<toml::Value>().map_err(|error| {
+        GeneratorError::usage(format!("invalid generator mise.lock Bun policy: {error}"))
+    })?;
+    let locked = lock
+        .get("tools")
+        .and_then(toml::Value::as_table)
+        .and_then(|tools| tools.get("aqua:oven-sh/bun"))
+        .and_then(toml::Value::as_array)
+        .and_then(|entries| entries.first())
+        .and_then(toml::Value::as_table)
+        .and_then(|entry| entry.get("version"))
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| {
+            GeneratorError::usage(
+                "generator mise.lock must contain the pinned aqua:oven-sh/bun version",
+            )
+        })?;
+    if configured != locked {
+        return Err(GeneratorError::usage(format!(
+            "generator mise Bun version {configured} does not match locked version {locked}"
+        )));
+    }
+    validate_provider_version(configured, "generator Bun toolchain")?;
+    Ok(configured.to_owned())
+}
+
+fn target_bun_version(
+    context: &ScanContext<'_>,
+    template_files: &BTreeSet<String>,
+) -> Result<String, GeneratorError> {
+    let mut versions = BTreeSet::new();
+    for file in context
+        .files
+        .iter()
+        .filter(|file| file.ends_with("package.json") && !template_files.contains(*file))
+    {
+        let path = context.root.join(file);
+        let value = parse_json(
+            &read_text(&path, "read package manager manifest")?,
+            &path,
+            file,
+        )?;
+        let Some(object) = value.as_object() else {
+            return Err(GeneratorError::usage(format!(
+                "{file} must contain an object to declare packageManager"
+            )));
+        };
+        let Some(package_manager) = object.get("packageManager") else {
+            continue;
+        };
+        let Some(spec) = package_manager.as_str() else {
+            return Err(GeneratorError::usage(format!(
+                "{file} packageManager must be a string"
+            )));
+        };
+        let Some((manager, version)) = spec.split_once('@') else {
+            if spec == "bun" {
+                return Err(GeneratorError::usage(format!(
+                    "{file} packageManager must pin Bun to an exact version"
+                )));
+            }
+            continue;
+        };
+        if manager != "bun" {
+            continue;
+        }
+        validate_provider_version(version, &format!("{file} packageManager"))?;
+        versions.insert(version.to_owned());
+    }
+    if versions.len() > 1 {
+        return Err(GeneratorError::usage(format!(
+            "Skills package manifests declare conflicting Bun versions: {}",
+            versions.into_iter().collect::<Vec<_>>().join(", ")
+        )));
+    }
+    versions
+        .into_iter()
+        .next()
+        .map_or_else(central_bun_version, Ok)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -90,11 +185,12 @@ pub(crate) fn detect(
     }
     let catalog = read_catalog(context)?;
     validate_plugin_manifests(context, &catalog.plugin_name)?;
-    let template_skills = validate_skills(context, &catalog.names)?;
+    validate_skills(context, &catalog.names)?;
     validate_docs(context, &catalog.names)?;
     validate_links(context)?;
-    let template_files = template_files(context, &template_skills);
+    let template_files = template_files(context, &catalog.names);
     validate_templates(context, &template_files)?;
+    let bun_version = target_bun_version(context, &template_files)?;
     if !context.file_set.contains("scripts/generate-docs.ts") {
         return Err(GeneratorError::usage(
             "skills plugin is missing scripts/generate-docs.ts",
@@ -119,15 +215,13 @@ pub(crate) fn detect(
         Vec::new(),
         None,
     );
-    skill_unit.tool_version = Some(SKILLS_BUN_VERSION.to_owned());
-    let commands = verification_commands();
+    skill_unit.tool_version = Some(bun_version.clone());
+    let commands = verification_commands(&bun_version);
     skill_unit.pr_commands.clone_from(&commands);
     skill_unit.full_commands.clone_from(&commands);
     shape.units.push(skill_unit);
     shape.detected.push("skills-plugin".to_owned());
-    shape
-        .detected
-        .push(format!("skills-bun:{SKILLS_BUN_VERSION}"));
+    shape.detected.push(format!("skills-bun:{bun_version}"));
     shape
         .detected
         .push(format!("skills-count:{}", catalog.names.len()));
@@ -135,9 +229,10 @@ pub(crate) fn detect(
 }
 
 fn has_plugin_marker(context: &ScanContext<'_>) -> bool {
-    REQUIRED_PLUGIN_FILES[1..]
+    PROVIDER_PLUGIN_FILES
         .iter()
         .any(|path| context.file_set.contains(*path))
+        || context.file_set.contains(MARKETPLACE_FILE)
         || (context.file_set.contains(CATALOG)
             && context
                 .files
@@ -385,22 +480,22 @@ fn validate_plugin_manifests(
     context: &ScanContext<'_>,
     expected_name: &str,
 ) -> Result<(), GeneratorError> {
-    for path in REQUIRED_PLUGIN_FILES {
-        require_file(context, path)?;
-    }
-    let codex = read_json_object(context, ".codex-plugin/plugin.json")?;
-    let kimi = read_json_object(context, ".kimi-plugin/plugin.json")?;
-    let claude = read_json_object(context, ".claude-plugin/plugin.json")?;
-    let marketplace = read_json_object(context, ".claude-plugin/marketplace.json")?;
     // Provider objects intentionally remain forward-compatible: their
     // provider-specific fields differ, so only shared compatibility fields
     // are validated here while recursive duplicate JSON keys are rejected by
     // the strict parser.
-    for (path, object) in [
-        (".codex-plugin/plugin.json", &codex),
-        (".kimi-plugin/plugin.json", &kimi),
-        (".claude-plugin/plugin.json", &claude),
-    ] {
+    let providers = PROVIDER_PLUGIN_FILES
+        .iter()
+        .filter(|path| context.file_set.contains(**path))
+        .map(|path| Ok((*path, read_json_object(context, path)?)))
+        .collect::<Result<Vec<_>, GeneratorError>>()?;
+    if providers.is_empty() && !context.file_set.contains(MARKETPLACE_FILE) {
+        return Err(GeneratorError::usage(
+            "skills plugin requires at least one provider or marketplace manifest",
+        ));
+    }
+    let mut shared_version = None;
+    for (path, object) in &providers {
         let name = string_field(object, "name", path)?;
         if name != expected_name {
             return Err(GeneratorError::usage(format!(
@@ -409,71 +504,53 @@ fn validate_plugin_manifests(
         }
         let version = string_field(object, "version", path)?;
         validate_provider_version(version, path)?;
-    }
-    for path in [".codex-plugin/plugin.json", ".kimi-plugin/plugin.json"] {
-        let object = if path.starts_with(".codex") {
-            &codex
-        } else {
-            &kimi
-        };
-        if string_field(object, "skills", path)? != "./skills/" {
+        if shared_version.is_none() {
+            shared_version = Some(version.to_owned());
+        } else if shared_version.as_deref() != Some(version) {
+            return Err(GeneratorError::usage(format!(
+                "{path} version does not match the other provider manifests"
+            )));
+        }
+        if matches!(
+            *path,
+            ".codex-plugin/plugin.json" | ".kimi-plugin/plugin.json"
+        ) && string_field(object, "skills", path)? != "./skills/"
+        {
             return Err(GeneratorError::usage(format!(
                 "{path} skills must be `./skills/`"
             )));
         }
     }
-    let codex_version = string_field(&codex, "version", ".codex-plugin/plugin.json")?;
-    for (path, object) in [
-        (".kimi-plugin/plugin.json", &kimi),
-        (".claude-plugin/plugin.json", &claude),
-    ] {
-        if string_field(object, "version", path)? != codex_version {
-            return Err(GeneratorError::usage(format!(
-                "{path} version does not match .codex-plugin/plugin.json"
-            )));
+    if context.file_set.contains(MARKETPLACE_FILE) {
+        let marketplace = read_json_object(context, MARKETPLACE_FILE)?;
+        let marketplace_plugins = marketplace
+            .get("plugins")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                GeneratorError::usage(
+                    ".claude-plugin/marketplace.json must contain a plugins array",
+                )
+            })?;
+        if marketplace_plugins.len() != 1 {
+            return Err(GeneratorError::usage(
+                ".claude-plugin/marketplace.json must contain exactly one plugin",
+            ));
         }
-    }
-    let marketplace_plugins = marketplace
-        .get("plugins")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            GeneratorError::usage(".claude-plugin/marketplace.json must contain a plugins array")
+        let marketplace_plugin = marketplace_plugins[0].as_object().ok_or_else(|| {
+            GeneratorError::usage(".claude-plugin/marketplace.json plugins entries must be objects")
         })?;
-    if marketplace_plugins.len() != 1 {
-        return Err(GeneratorError::usage(
-            ".claude-plugin/marketplace.json must contain exactly one plugin",
-        ));
-    }
-    let marketplace_plugin = marketplace_plugins[0].as_object().ok_or_else(|| {
-        GeneratorError::usage(".claude-plugin/marketplace.json plugins entries must be objects")
-    })?;
-    validate_provider_version(
-        string_field(
-            marketplace_plugin,
-            "version",
-            ".claude-plugin/marketplace.json",
-        )?,
-        ".claude-plugin/marketplace.json",
-    )?;
-    if string_field(
-        marketplace_plugin,
-        "name",
-        ".claude-plugin/marketplace.json",
-    )? != expected_name
-        || string_field(
-            marketplace_plugin,
-            "source",
-            ".claude-plugin/marketplace.json",
-        )? != "./"
-        || string_field(
-            marketplace_plugin,
-            "version",
-            ".claude-plugin/marketplace.json",
-        )? != codex_version
-    {
-        return Err(GeneratorError::usage(
-            ".claude-plugin/marketplace.json plugin name, source, and version do not match provider manifests",
-        ));
+        let marketplace_version = string_field(marketplace_plugin, "version", MARKETPLACE_FILE)?;
+        validate_provider_version(marketplace_version, MARKETPLACE_FILE)?;
+        if string_field(marketplace_plugin, "name", MARKETPLACE_FILE)? != expected_name
+            || string_field(marketplace_plugin, "source", MARKETPLACE_FILE)? != "./"
+            || shared_version
+                .as_deref()
+                .is_some_and(|version| version != marketplace_version)
+        {
+            return Err(GeneratorError::usage(
+                ".claude-plugin/marketplace.json plugin name, source, and version do not match provider manifests",
+            ));
+        }
     }
     Ok(())
 }
@@ -521,15 +598,11 @@ fn validate_provider_version(version: &str, path: &str) -> Result<(), GeneratorE
     Ok(())
 }
 
-fn validate_skills(
-    context: &ScanContext<'_>,
-    names: &[String],
-) -> Result<BTreeSet<String>, GeneratorError> {
+fn validate_skills(context: &ScanContext<'_>, names: &[String]) -> Result<(), GeneratorError> {
     let expected = names
         .iter()
         .map(|name| format!("skills/{name}/SKILL.md"))
         .collect::<BTreeSet<_>>();
-    let mut template_skills = BTreeSet::new();
     for path in &expected {
         require_file(context, path)?;
         let text = read_text(&context.root.join(path), "read skill definition")?;
@@ -563,9 +636,6 @@ fn validate_skills(
                 "{path} frontmatter disable-model-invocation must be true or false"
             )));
         }
-        if has_template_context(&text) {
-            template_skills.insert(expected_name.to_owned());
-        }
     }
     let extra = context
         .files
@@ -579,7 +649,7 @@ fn validate_skills(
             "skill definition `{path}` is not listed in catalog.json"
         )));
     }
-    Ok(template_skills)
+    Ok(())
 }
 
 fn validate_docs(context: &ScanContext<'_>, names: &[String]) -> Result<(), GeneratorError> {
@@ -794,15 +864,7 @@ fn is_markdown_placeholder(target: &str) -> bool {
     })
 }
 
-fn has_template_context(text: &str) -> bool {
-    text.lines().any(|line| {
-        line.contains("](templates/")
-            || line.contains("`templates/")
-            || line.contains("templates/`")
-    })
-}
-
-fn template_files(context: &ScanContext<'_>, names: &BTreeSet<String>) -> BTreeSet<String> {
+fn template_files(context: &ScanContext<'_>, names: &[String]) -> BTreeSet<String> {
     let mut files = names
         .iter()
         .flat_map(|name| {
@@ -864,11 +926,45 @@ fn is_helper_source(file: &str) -> bool {
 }
 
 fn helper_source_declares_templates(text: &str) -> bool {
-    text.contains("\"templates\"")
-        || text.contains("\"templates/")
-        || text.contains("'templates'")
-        || text.contains("'templates/")
-        || text.contains("/templates/")
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let quote = bytes[index];
+        if !matches!(quote, b'\'' | b'"' | b'`') {
+            index += 1;
+            continue;
+        }
+        index += 1;
+        let start = index;
+        let mut escaped = false;
+        while index < bytes.len() {
+            let byte = bytes[index];
+            if escaped {
+                escaped = false;
+                index += 1;
+                continue;
+            }
+            if byte == b'\\' {
+                escaped = true;
+                index += 1;
+                continue;
+            }
+            if byte == quote {
+                let literal = &text[start..index];
+                if literal
+                    .replace("\\/", "/")
+                    .split('/')
+                    .any(|component| component == "templates")
+                {
+                    return true;
+                }
+                index += 1;
+                break;
+            }
+            index += 1;
+        }
+    }
+    false
 }
 
 fn validate_templates(
@@ -1706,7 +1802,7 @@ See [policy](references/policy.md "title"), [templates](templates/), [diagram](d
         assert!(!hidden.contains("skills/example/helpers/package.json"));
         assert_eq!(shape.units.len(), 1);
         assert_eq!(shape.units[0].kind, UnitKind::Skills);
-        assert_eq!(shape.units[0].tool_version.as_deref(), Some("1.4.0"));
+        assert_eq!(shape.units[0].tool_version.as_deref(), Some("1.2.3"));
         assert!(shape.units[0]
             .pr_commands
             .iter()
@@ -1714,7 +1810,7 @@ See [policy](references/policy.md "title"), [templates](templates/), [diagram](d
         assert!(shape.units[0].pr_commands.iter().any(|command| {
             command.contains("find scripts")
                 && command.contains("bun build")
-                && command.contains("test \"$(bun --version)\" = \"1.4.0\"")
+                && command.contains("test \"$(bun --version)\" = \"1.2.3\"")
                 && command.contains("-not -path '*/templates/*'")
         }));
     }
@@ -1883,7 +1979,64 @@ See [policy](references/policy.md "title"), [templates](templates/), [diagram](d
         let mut shape = empty_shape();
         let error = detect(&context, &mut shape)
             .expect_err("catalog plus direct skill marker must not silently no-op");
-        assert!(error.to_string().contains(".codex-plugin/plugin.json"));
+        assert!(error
+            .to_string()
+            .contains("at least one provider or marketplace manifest"));
+    }
+
+    #[test]
+    fn provider_projection_validates_only_manifests_present() {
+        let fixture = Fixture::new();
+        let files = fixture
+            .files
+            .iter()
+            .filter(|file| {
+                !file.starts_with(".kimi-plugin/") && !file.starts_with(".claude-plugin/")
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+        let context = ScanContext {
+            root: &fixture.root,
+            files: &files,
+            file_set: &file_set,
+        };
+        let mut shape = empty_shape();
+        let hidden = detect(&context, &mut shape)
+            .unwrap_or_else(|error| panic!("Codex-only provider detects: {error}"));
+        assert!(hidden.contains("skills/example/templates/package.json"));
+        assert_eq!(shape.units.len(), 1);
+        assert!(shape.detected.contains(&"skills-bun:1.2.3".to_owned()));
+    }
+
+    #[test]
+    fn catalogued_template_directory_is_hidden_without_markdown_reference() {
+        let fixture = Fixture::new();
+        let skill = must(
+            fs::read_to_string(fixture.root.join("skills/example/SKILL.md")),
+            "read skill fixture",
+        );
+        fixture.write(
+            "skills/example/SKILL.md",
+            &skill.replace("[templates](templates/), ", ""),
+        );
+        let (hidden, shape) = fixture
+            .run_detect()
+            .unwrap_or_else(|error| panic!("unlinked template directory detects: {error}"));
+        assert!(hidden.contains("skills/example/templates/package.json"));
+        assert_eq!(shape.units.len(), 1);
+    }
+
+    #[test]
+    fn target_bun_version_conflicts_fail_closed() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "scripts/template-helper/package.json",
+            r#"{"name":"template-helper","packageManager":"bun@1.3.0","scripts":{"check":"bun test"}}"#,
+        );
+        let (error, shape) = fixture.run_detect_failure();
+        assert!(shape.units.is_empty());
+        assert!(error.to_string().contains("conflicting Bun versions"));
     }
 
     #[test]
