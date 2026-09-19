@@ -1305,12 +1305,43 @@ fn scan_target(
         .as_ref()
         .and_then(config::RepoGenerationConfig::default_branch)
         .unwrap_or(default_branch);
-    // Only independently recorded output ownership is removed from scan
-    // provenance. Configuration-declared paths are validated after scanning;
-    // a static output cannot hide its own workflow/action source.
-    let shape = scan::scan_shape(root, &scan_providers, scan_default_branch, exclude)?;
+    // The sidecar is an untrusted claim until its paths are checked against a
+    // render from the current scanned shape. Start with only fixed generator
+    // artifacts excluded, then converge once the renderer proves the sidecar's
+    // paths and recorded preimages.
+    let recorded = recorded_ownership_state(root)?;
+    let mut owned_paths = BTreeSet::new();
+    for _ in 0..2 {
+        let shape = scan::scan_shape_with_owned_paths(
+            root,
+            &scan_providers,
+            scan_default_branch,
+            exclude,
+            &owned_paths,
+        )?;
+        let scanned = resolve_scanned_target(root, generation.as_ref(), shape)?;
+        let Some(state) = recorded.as_ref() else {
+            return Ok(scanned);
+        };
+        let rendered = rendered_files_for_scanned(root, &scanned)?;
+        let verified = verified_recorded_output_paths(root, &state.outputs, &rendered)?;
+        if verified == owned_paths {
+            return Ok(scanned);
+        }
+        owned_paths = verified;
+    }
+    Err(GeneratorError::usage(
+        "generated ownership did not stabilize against the current renderer; rerun generation after reconciling the sidecar",
+    ))
+}
+
+fn resolve_scanned_target(
+    root: &Path,
+    generation: Option<&config::RepoGenerationConfig>,
+    shape: scan::RepositoryShape,
+) -> Result<ScannedTarget, GeneratorError> {
     let mut config = ProjectConfig::from(shape.clone());
-    if let Some(generation) = &generation {
+    if let Some(generation) = generation {
         apply_generation_config(&mut config, generation, root)?;
     }
     // Prerequisites compile into the selection graph and prepare commands, and
@@ -1346,7 +1377,7 @@ fn scan_target(
             }
         }
     }
-    let mut config = load_workflow_templates(root, config, generation.as_ref())?;
+    let mut config = load_workflow_templates(root, config, generation)?;
     // The root lock's tool keys pin every mise id the surface may install:
     // `mise --locked` requires install args to equal the lock keys, so both
     // validation and rendering resolve against these instead of mandating a
@@ -1359,7 +1390,7 @@ fn scan_target(
     // it can influence anything: a declared unit the scan did not find, or a
     // channel grant for an owner block the render does not declare, is a hard
     // error, never a silent no-op.
-    if let Some(generation) = &generation {
+    if let Some(generation) = generation {
         config.package_update_channels = generation.package_update_channels();
         let unit_ids = config
             .units
@@ -1378,13 +1409,33 @@ fn scan_target(
     // whether the rest of the contract is scanned or declared.
     validate_provider_selectors(&config)?;
     validate_unit_capabilities(&config)?;
-    let inputs = GenerationInputs::current(generation.as_ref(), &shape)?;
+    let inputs = GenerationInputs::current(generation, &shape)?;
     Ok(ScannedTarget {
         shape,
         config,
-        generation,
+        generation: generation.cloned(),
         inputs,
     })
+}
+
+fn rendered_files_for_scanned(
+    root: &Path,
+    scanned: &ScannedTarget,
+) -> Result<BTreeMap<PathBuf, String>, GeneratorError> {
+    let surface = primitives::generate(
+        root,
+        &scanned.shape,
+        &scanned.config,
+        scanned.generation.as_ref(),
+    )?;
+    let mut config = scanned.config.clone();
+    config.units.clone_from(&surface.units);
+    for file in &surface.added_files {
+        if !config.workflow_files.contains(file) {
+            config.workflow_files.push(file.clone());
+        }
+    }
+    generated_files_with_surface(&config, Some(&surface))
 }
 
 pub(crate) fn enable_mr_boxington_commands(config: &mut ProjectConfig) {
@@ -2885,13 +2936,40 @@ fn read_static_files(
     rows: &[config::StaticFileSection],
     root: &Path,
 ) -> Result<(), GeneratorError> {
+    config::validate_static_files(rows)?;
+    let canonical_root = fs::canonicalize(root).map_err(|error| {
+        GeneratorError::io("resolve repository root for static file", root, &error)
+    })?;
+    let canonical_github = canonical_root.join(".github");
     for row in rows {
         let (Some(file), Some(source)) = (row.file(), row.source()) else {
             continue;
         };
-        let path = root.join(source);
-        let content = fs::read_to_string(&path).map_err(|error| {
-            GeneratorError::io("read declared static file source", &path, &error)
+        let normalized = config::normalize_repository_relative_path(source).ok_or_else(|| {
+            GeneratorError::usage(format!(
+                "[[static_file]] source must be a repository-relative path, found `{source}`"
+            ))
+        })?;
+        let path = root.join(&normalized);
+        let canonical_source = fs::canonicalize(&path).map_err(|error| {
+            GeneratorError::io("resolve declared static file source", &path, &error)
+        })?;
+        if !canonical_source.starts_with(&canonical_root) {
+            return Err(GeneratorError::usage(format!(
+                "[[static_file]] source must resolve inside the repository, found `{source}`"
+            )));
+        }
+        if canonical_source == canonical_github || canonical_source.starts_with(&canonical_github) {
+            return Err(GeneratorError::usage(format!(
+                "[[static_file]] source must stay outside `.github/` so a static output cannot hide workflow or action inputs, found `{source}`"
+            )));
+        }
+        let content = fs::read_to_string(&canonical_source).map_err(|error| {
+            GeneratorError::io(
+                "read declared static file source",
+                &canonical_source,
+                &error,
+            )
         })?;
         config.static_files.push(StaticFile {
             path: file.to_owned(),
@@ -6883,6 +6961,48 @@ enum OwnershipStateFile {
     ForeignSchema { message: String },
 }
 
+fn recorded_ownership_state(root: &Path) -> Result<Option<OwnershipState>, GeneratorError> {
+    let state_path = PathBuf::from(OWNERSHIP_STATE);
+    let preimage = capture_file_preimage(&root.join(&state_path), &state_path)?;
+    match parse_ownership_state(root, &preimage)? {
+        OwnershipStateFile::Present(state) => Ok(Some(state)),
+        OwnershipStateFile::Absent | OwnershipStateFile::ForeignSchema { .. } => Ok(None),
+    }
+}
+
+/// Bind sidecar claims to the current renderer before they can affect scan
+/// provenance. The path must be one the current renderer owns, and an existing
+/// file must still be either the recorded preimage or the exact current render.
+/// This preserves ordinary generator upgrades while rejecting a sidecar that
+/// names an arbitrary user workflow/action with an attacker-chosen digest.
+fn verified_recorded_output_paths(
+    root: &Path,
+    ownership: &BTreeMap<PathBuf, u64>,
+    rendered: &BTreeMap<PathBuf, String>,
+) -> Result<BTreeSet<PathBuf>, GeneratorError> {
+    let mut verified = BTreeSet::new();
+    for (relative, expected) in ownership {
+        let Some(wanted) = rendered.get(relative) else {
+            return Err(GeneratorError::usage(format!(
+                "generated ownership state names a path outside the current renderer: {}",
+                relative.display()
+            )));
+        };
+        let path = root.join(relative);
+        if let Some(current) = capture_file_preimage(&path, relative)?.bytes() {
+            let current_digest = content_digest_bytes(current);
+            if current_digest != *expected && current != wanted.as_bytes() {
+                return Err(GeneratorError::usage(format!(
+                    "generated ownership state cannot prove current output bytes: {}",
+                    relative.display()
+                )));
+            }
+        }
+        verified.insert(relative.clone());
+    }
+    Ok(verified)
+}
+
 fn parse_ownership_state(
     root: &Path,
     preimage: &FilePreimage,
@@ -6924,28 +7044,6 @@ fn parse_ownership_state(
         inputs,
         outputs,
     }))
-}
-
-/// Return output paths whose ownership was recorded by this generator.
-///
-/// A file's content is not an authority claim: an unmanaged workflow can
-/// forge the generated header. The sidecar is parsed independently and its
-/// output list is the only source that lets a later scan omit an output. The
-/// host cache file is known from the contract even before the first sidecar
-/// exists.
-pub(crate) fn generator_owned_output_paths(
-    root: &Path,
-) -> Result<BTreeSet<PathBuf>, GeneratorError> {
-    let state_path = PathBuf::from(OWNERSHIP_STATE);
-    let mut paths = BTreeSet::from([
-        state_path.clone(),
-        PathBuf::from("config/fleet/velnor-host.env"),
-    ]);
-    let preimage = capture_file_preimage(&root.join(&state_path), &state_path)?;
-    if let OwnershipStateFile::Present(state) = parse_ownership_state(root, &preimage)? {
-        paths.extend(state.outputs.into_keys());
-    }
-    Ok(paths)
 }
 
 fn parse_inputs<'a>(
@@ -20311,6 +20409,94 @@ lockfile = true
     }
 
     #[test]
+    fn forged_sidecar_cannot_hide_workflow_or_action_inputs() {
+        for (suffix, relative, content, initialize_git) in [
+            (
+                "tracked-workflow",
+                ".github/workflows/user.yml",
+                "name: user\non:\n  workflow_dispatch:\n",
+                true,
+            ),
+            (
+                "untracked-action",
+                ".github/actions/user/action.yml",
+                "name: user\nruns:\n  using: composite\n  steps: []\n",
+                false,
+            ),
+        ] {
+            let root = configured_repository(&format!("forged-sidecar-{suffix}"), None);
+            generate_repository(&root, false);
+            let path = root.join(relative);
+            must(
+                fs::create_dir_all(must_some(path.parent(), "input parent")),
+                "create input parent",
+            );
+            must(fs::write(&path, content), "write unmanaged input");
+            if initialize_git {
+                let status = must(
+                    Command::new("git")
+                        .current_dir(&root)
+                        .args(["init", "-q"])
+                        .status(),
+                    "initialize input repository",
+                );
+                assert!(status.success(), "git init failed: {status}");
+                let status = must(
+                    Command::new("git")
+                        .current_dir(&root)
+                        .args(["add", "."])
+                        .status(),
+                    "stage tracked input",
+                );
+                assert!(status.success(), "git add failed: {status}");
+                let status = must(
+                    Command::new("git")
+                        .current_dir(&root)
+                        .args([
+                            "-c",
+                            "user.name=velnor-workflow",
+                            "-c",
+                            "user.email=test@example.com",
+                            "commit",
+                            "-qm",
+                            "fixture",
+                        ])
+                        .status(),
+                    "commit tracked input",
+                );
+                assert!(status.success(), "git commit failed: {status}");
+            }
+            let state_path = root.join(OWNERSHIP_STATE);
+            let mut state = must(fs::read_to_string(&state_path), "read ownership state");
+            if !state.ends_with('\n') {
+                state.push('\n');
+            }
+            state.push_str(&format!(
+                "{relative}\t{:016x}\n",
+                content_digest_bytes(content.as_bytes())
+            ));
+            must(fs::write(&state_path, state), "forge ownership state");
+            let error = must_some(
+                scan_target(
+                    &root,
+                    Some(std::collections::BTreeSet::from([
+                        crate::s2::provider::ProviderId::GithubHosted,
+                    ])),
+                    "main",
+                )
+                .err(),
+                "forged sidecar must fail closed",
+            )
+            .to_string();
+            assert!(
+                error.contains("outside the current renderer") && error.contains(relative),
+                "forged sidecar must name its untrusted path: {error}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
     fn declared_static_output_is_excluded_before_and_after_first_generation() {
         let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[static_files]]\nfile = \".github/workflows/owned-static.yml\"\nsource = \".github-gen/sources/owned-static.yml\"\n";
         let root = configured_repository("static-output-provenance", Some(config));
@@ -20352,11 +20538,59 @@ lockfile = true
 
     #[test]
     fn static_source_cannot_hide_workflow_inputs_or_self_reference() {
-        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[static_files]]\nfile = \".github/workflows/self.yml\"\nsource = \".github/workflows/self.yml\"\n";
-        let root = configured_repository("static-self-source", Some(config));
+        for (suffix, source) in [
+            ("exact", ".github/workflows/self.yml"),
+            ("dot", "./.github/workflows/self.yml"),
+            ("repeated-separator", ".//.github/workflows/self.yml"),
+        ] {
+            let config = format!(
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[static_files]]\nfile = \".github/workflows/self.yml\"\nsource = \"{source}\"\n"
+            );
+            let root =
+                configured_repository(&format!("static-self-source-{suffix}"), Some(&config));
+            must(
+                fs::create_dir_all(root.join(".github/workflows")),
+                "create workflow directory",
+            );
+            must(
+                fs::write(
+                    root.join(".github/workflows/self.yml"),
+                    "name: self-source\non:\n  workflow_dispatch:\n",
+                ),
+                "write self-source workflow",
+            );
+            let error = must_some(
+                scan_target(
+                    &root,
+                    Some(std::collections::BTreeSet::from([
+                        crate::s2::provider::ProviderId::GithubHosted,
+                    ])),
+                    "main",
+                )
+                .err(),
+                "static workflow source must be rejected",
+            )
+            .to_string();
+            assert!(
+                error.contains("source must stay outside `.github/"),
+                "static workflow source must fail closed: {error}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn static_source_symlink_cannot_reach_github_inputs() {
+        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[static_files]]\nfile = \".github/actions/self/action.yml\"\nsource = \".github-gen/source.yml\"\n";
+        let root = configured_repository("static-symlink-source", Some(config));
         must(
             fs::create_dir_all(root.join(".github/workflows")),
             "create workflow directory",
+        );
+        must(
+            fs::create_dir_all(root.join(".github-gen")),
+            "create config source directory",
         );
         must(
             fs::write(
@@ -20364,6 +20598,13 @@ lockfile = true
                 "name: self-source\non:\n  workflow_dispatch:\n",
             ),
             "write self-source workflow",
+        );
+        must(
+            std::os::unix::fs::symlink(
+                "../.github/workflows/self.yml",
+                root.join(".github-gen/source.yml"),
+            ),
+            "link source into .github",
         );
         let error = must_some(
             scan_target(
@@ -20374,12 +20615,12 @@ lockfile = true
                 "main",
             )
             .err(),
-            "static workflow source must be rejected",
+            "static source symlink must be rejected",
         )
         .to_string();
         assert!(
             error.contains("source must stay outside `.github/"),
-            "static workflow source must fail closed: {error}"
+            "static source symlink must fail closed: {error}"
         );
         let _ = fs::remove_dir_all(root);
     }
