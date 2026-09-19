@@ -22,6 +22,13 @@ const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const CONTROL_PLANE_BLOCKING_THREADS: usize = 16;
 
 fn main() -> Result<()> {
+    if matches!(
+        std::env::args().nth(1).as_deref(),
+        Some("--version") | Some("-V")
+    ) {
+        println!("{}", version_line());
+        return Ok(());
+    }
     let runtime = build_runtime()?;
     let result = runtime.block_on(velnor_runner::service::execute());
     // Tokio waits forever for a started `spawn_blocking` task when Runtime is
@@ -29,6 +36,17 @@ fn main() -> Result<()> {
     // systemd daemon (and package upgrade) for hours.
     runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
     result
+}
+
+fn version_line() -> String {
+    let identity = velnor_runner::embedded_build_identity();
+    if identity.source_sha == "development" {
+        return format!("{} development", identity.crate_version);
+    }
+    format!(
+        "{} {} {} {}",
+        identity.crate_version, identity.kind, identity.tag, identity.source_sha
+    )
 }
 
 fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
@@ -61,5 +79,12 @@ mod tests {
         let started = std::time::Instant::now();
         runtime.shutdown_timeout(Duration::from_millis(20));
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn version_line_is_source_identity_aware() {
+        let line = version_line();
+        assert!(line.starts_with(env!("CARGO_PKG_VERSION")));
+        assert!(!line.contains("unknown"));
     }
 }
