@@ -7,6 +7,7 @@ use super::file_walk::{
     files_named, join_repo_path, path_prefix, resolve_repo_path, roots_for_manifests,
 };
 use super::{unit, RepositoryShape, ScanContext};
+use crate::swift_capability::package_evidence;
 use crate::{
     identifier_suffix, parent_path, shell_change_dir, shell_quote, CachePurpose, CacheSpec, Unit,
     UnitKind,
@@ -188,18 +189,16 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
 /// bundle only resolves where the Apple SDK exists, so the unit is
 /// Apple-bound even without an Xcode project. A remote (URL) binary target
 /// without an `.xcframework` reference carries no such need.
-fn package_manifest_needs_xcframework(root: &Path, package_root: &str) -> bool {
-    let manifest = root.join(join_repo_path(package_root, "Package.swift"));
-    let contents = fs::read_to_string(manifest).unwrap_or_default();
-    contents.contains(".binaryTarget") && contents.contains(".xcframework")
-}
-
 pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
-    for package_root in roots_for_manifests(&files_named(context.files, "Package.swift")) {
+    let package_roots = roots_for_manifests(&files_named(context.files, "Package.swift"));
+    for package_root in &package_roots {
         shape.detected.push(format!("swift-package:{package_root}"));
-        let mut unit = swift_package_unit(&package_root);
-        if package_manifest_needs_xcframework(context.root, &package_root) {
+        let mut unit = swift_package_unit(package_root);
+        let evidence = package_evidence(context.root, package_root, context.files, &package_roots);
+        if evidence.xcframework {
             unit.platform = crate::platform::PlatformRequirement::apple_xcframework();
+        } else if evidence.apple {
+            unit.platform = crate::platform::PlatformRequirement::apple_swift_package();
         }
         shape.units.push(unit);
     }

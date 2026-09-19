@@ -73,6 +73,16 @@ impl PlatformRequirement {
         Self::default()
     }
 
+    /// A `SwiftPM` package whose manifest or source imports require an Apple SDK
+    /// but do not prove an Xcode scheme or `XCFramework` consumer.
+    pub(crate) fn apple_swift_package() -> Self {
+        Self {
+            os: Os::Macos,
+            arch: Arch::Any,
+            capabilities: BTreeSet::new(),
+        }
+    }
+
     /// An Xcode scheme build: macOS with the Xcode SDK capability.
     pub(crate) fn apple_xcode() -> Self {
         Self {
