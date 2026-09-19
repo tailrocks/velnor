@@ -14,6 +14,13 @@ velnor-tools evidence-check \
   --release-manifest application-manifest.json
 ```
 
+The command shape above is the collector integration contract. In the current
+checker revision `--live` intentionally fails closed: no authenticated
+collector/current-API closing reconciliation is wired yet, so caller-owned
+JSON and CAS files cannot authorize a gate. Offline invocation is
+validation-only and also cannot authorize a gate. This is an explicit blocker,
+not a successful G0/G7 result.
+
 The reviewed workload manifest is source authority for the fixed 32-repository
 scope and generated workload plan. The snapshot is an independently collected
 GitHub fact set. Evidence records only bind claims to identities found in that
@@ -25,7 +32,8 @@ nullable-row normalization, legacy fallbacks, and flat release/install aliases
 are not accepted. Parse failure is failure. No credentials, bearer tokens, or
 authentication headers may occur in any source/provenance field.
 
-`--evidence-root` is an explicit local immutable CAS root. The checker resolves
+`--evidence-root` is an explicit local immutable CAS root for validation or a
+future trusted collector handoff. The checker resolves
 only `sha256://<hex>` references beneath
 `<root>/sha256/<hex>`, reopens each regular file, and recomputes its measured
 bytes and SHA-256. It never treats a URI or caller digest as proof, follows
@@ -275,17 +283,18 @@ edges must also preserve the source repository and workload identity; a node
 from another repository is not a valid endpoint merely because its digest and
 ID are present.
 
-`--live` has one canonical input path: a producer-owned typed live capture in
-`evidence.g0_inventory`, plus the explicit `--evidence-root` CAS. The checker
-revalidates the capture identity, request/page chain, raw response bindings,
-source-derived workflow graph, current repository/PR/check inventory, and
-measured CAS bytes. It does not run or retain a second lightweight API
-collector, and it rejects a missing capture rather than treating the supplied
-snapshot or result records as live proof. The producer must obtain the
-capture through its read-only API client; offline fixtures prove only parser
-and rejection behavior and cannot declare G0 or G7 completion. Execution
-stages remain explicitly blocked until the producer supplies the separately
-derived run/job/check/child coverage contract.
+`--live` will have one canonical input path once collector integration lands:
+a producer-owned authenticated capture in `evidence.g0_inventory`, plus the
+explicit `--evidence-root` CAS. The checker must revalidate the capture
+identity, request/page chain, raw response bindings, source-derived workflow
+graph, current repository/PR/check inventory, and measured CAS bytes against
+the collector's authority binding. A typed capture, fresh timestamp, or
+self-consistent local CAS is not that binding. Until the authenticated
+read-only API collector and closing-head reconciliation are wired, `--live`
+rejects before reading caller files. Offline fixtures prove only parser and
+rejection behavior and cannot declare G0 or G7 completion. Execution stages
+remain explicitly blocked until the producer supplies the separately derived
+run/job/check/child coverage contract.
 
 The envelope also has optional `reviewer_attestation`; G7 requires
 `{reviewer, report_digest, manifest_id, snapshot_id, attested_at_utc, artifact}`

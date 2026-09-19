@@ -3,9 +3,11 @@
 //! The checker has three deliberately separate inputs: a reviewed workload
 //! manifest, an independently collected GitHub snapshot, and result records.
 //! Result records never define the scope, expected jobs, current revision, or
-//! required checks.  `--live` consumes a producer-owned typed live capture and
-//! reopens its immutable CAS objects before verification; G7 always requires
-//! that mode.  The checker does not contain a second, weaker API collector.
+//! required checks.  Offline input files are validation fixtures only.  The
+//! `--live` gate remains closed until a producer-owned authenticated collector
+//! (or independently verified attestation) is wired to the current API and
+//! closing-head reconciliation.  A caller-supplied JSON/CAS capture cannot
+//! acquire authority by passing this checker.
 
 use crate::g0_contract::*;
 use crate::g0_workflow::{derive_workflow_plan, DerivedWorkflowPlan};
@@ -30,7 +32,6 @@ const CANONICAL_RELEASE_SCHEMA_VERSION: u32 = 1;
 const REQUIRED_REPOSITORIES: usize = 32;
 const SHA_LENGTH: usize = 40;
 const DIGEST_LENGTH: usize = 64;
-const LIVE_FRESHNESS_SECONDS: i64 = 15 * 60;
 const REVIEWED_MANIFEST_ID: &str = "github-first-dual-lane-2026-09-19";
 const REVIEWED_SOURCE_REPOSITORY: &str = "tailrocks/velnor";
 const REVIEWED_SOURCE_REVISION: &str = "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9";
@@ -162,8 +163,8 @@ pub struct EvidenceCheckArgs {
     /// Reviewed external exact-scope workload manifest.
     #[arg(long)]
     pub manifest: PathBuf,
-    /// Independently captured snapshot. Live mode reconciles it to the typed
-    /// producer capture embedded in `--evidence`.
+    /// Snapshot input for offline validation. A future trusted live collector
+    /// will supply and reconcile its own current snapshot.
     #[arg(long)]
     pub snapshot: PathBuf,
     /// Evidence records for the snapshot.
@@ -172,14 +173,13 @@ pub struct EvidenceCheckArgs {
     /// Independent producer-owned canonical application manifest for G2+.
     #[arg(long)]
     pub release_manifest: Option<PathBuf>,
-    /// Require and validate a producer-owned current live capture. The
-    /// capture must include typed G0 inventory, request/page/raw provenance,
-    /// source-derived graph data, and an explicit CAS root. G7 always enables
-    /// this mode. The checker never falls back to a weaker API collector.
+    /// Request the trusted current live collector. Until that authenticated
+    /// collector is wired, this mode fails closed; caller files never become
+    /// live authority merely by passing this flag. G7 always enables it.
     #[arg(long)]
     pub live: bool,
-    /// Explicit local root of the immutable CAS evidence store. G0 storage
-    /// references are resolved only below this directory.
+    /// Explicit local root of an immutable CAS evidence store for offline
+    /// validation or a future trusted collector handoff.
     #[arg(long)]
     pub evidence_root: Option<PathBuf>,
     /// Emit a stable JSON report.
@@ -886,7 +886,7 @@ pub async fn evidence_check(args: EvidenceCheckArgs) -> Result<()> {
 }
 
 /// Offline validation is useful for deterministic fixture tests and G0
-/// preparation. It is explicitly marked offline and cannot pass G7.
+/// preparation. It is explicitly validation-only and cannot pass any gate.
 pub fn check_paths(input: &EvidenceCheckInput) -> Result<CheckReport> {
     let stage = Stage::parse(&input.stage)?;
     let manifest: ManifestDocument = read_json(&input.manifest, "manifest")?;
@@ -907,70 +907,31 @@ pub fn check_paths(input: &EvidenceCheckInput) -> Result<CheckReport> {
         input.evidence_root.as_deref(),
         &mut report.findings,
     );
+    finding(
+        &mut report.findings,
+        "offline-validation-only",
+        "",
+        "mode",
+        "offline evidence files are validation-only and cannot authorize a gate",
+    );
     sort_findings(&mut report.findings);
-    report.status = if report.findings.is_empty() {
-        "pass"
-    } else {
-        "fail"
-    };
+    report.status = "fail";
     Ok(report)
 }
 
-/// Live mode consumes a producer-owned typed capture.  The capture is carried
-/// in `EvidenceDocument.g0_inventory`; its request/page/raw identities and
-/// source-derived graph are checked independently of result records, and all
-/// referenced bytes are reopened from the explicit CAS root.  A missing or
-/// incomplete capture is a hard failure.  The former lightweight API collector
-/// is intentionally removed because it could not bind workflow source,
-/// checkout, check-suite, and child-run identities strongly enough.
+/// Live mode is intentionally closed until its authority boundary is wired.
+///
+/// A typed `EvidenceDocument.g0_inventory` plus a fresh timestamp and
+/// self-consistent local CAS proves only caller-controlled internal
+/// consistency.  It does not prove that GitHub produced the capture, that the
+/// collector authenticated to the requested account, or that the closing API
+/// state was reconciled.  Refusing the input here prevents `--live` from
+/// upgrading caller-authored offline evidence into gate evidence.
 pub fn check_paths_live(input: &EvidenceCheckInput) -> Result<CheckReport> {
-    let stage = Stage::parse(&input.stage)?;
-    if stage == Stage::G7 && !input.live {
-        bail!("G7 requires --live");
-    }
-    let manifest: ManifestDocument = read_json(&input.manifest, "manifest")?;
-    let supplied_snapshot: SnapshotDocument = read_json(&input.snapshot, "snapshot")?;
-    let evidence: EvidenceDocument = read_json(&input.evidence, "evidence")?;
-    let release = read_release_manifest(stage, input.release_manifest.as_deref())?;
-    let Some(inventory) = evidence.g0_inventory.as_ref() else {
-        bail!("--live requires evidence.g0_inventory from the producer-owned typed live capture");
-    };
-    if input.evidence_root.is_none() {
-        bail!("--live requires --evidence-root for producer CAS verification");
-    }
-    let mut report = check_documents(
-        stage,
-        &manifest,
-        &supplied_snapshot,
-        &evidence,
-        release.as_ref(),
-        "live",
-    );
-    // G0 is checked by check_documents itself. Execution/review stages still
-    // need the same independently captured inventory as their source of
-    // current branch/PR/workflow/ruleset facts.
-    if stage != Stage::G0 {
-        check_g0_inventory(
-            &manifest,
-            &supplied_snapshot,
-            Some(inventory),
-            &mut report.findings,
-        );
-    }
-    check_collector_freshness(inventory, &mut report.findings);
-    check_g0_external_storage(
-        stage,
-        Some(inventory),
-        input.evidence_root.as_deref(),
-        &mut report.findings,
-    );
-    sort_findings(&mut report.findings);
-    report.status = if report.findings.is_empty() {
-        "pass"
-    } else {
-        "fail"
-    };
-    Ok(report)
+    let _ = input;
+    bail!(
+        "--live is unavailable: trusted authenticated collector/current-API reconciliation is not wired; offline files cannot authorize a gate"
+    )
 }
 
 fn read_release_manifest(
@@ -7193,49 +7154,6 @@ fn check_eligibility(
     }
 }
 
-fn check_collector_freshness(inventory: &G0InventoryEvidence, findings: &mut Vec<Finding>) {
-    let collector = &inventory.collector_snapshot;
-    let Ok(observed) = OffsetDateTime::parse(&collector.observed_at_utc, &Rfc3339) else {
-        finding(
-            findings,
-            "collector-freshness",
-            "",
-            "evidence.g0_inventory.collector_snapshot.observed_at_utc",
-            "producer capture observation time is invalid",
-        );
-        return;
-    };
-    let Ok(completed) = OffsetDateTime::parse(&collector.completed_at_utc, &Rfc3339) else {
-        finding(
-            findings,
-            "collector-freshness",
-            "",
-            "evidence.g0_inventory.collector_snapshot.completed_at_utc",
-            "producer capture completion time is invalid",
-        );
-        return;
-    };
-    if completed < observed {
-        finding(
-            findings,
-            "collector-freshness",
-            "",
-            "evidence.g0_inventory.collector_snapshot.observed_at_utc/completed_at_utc",
-            "producer capture completion cannot precede observation",
-        );
-    }
-    let age = OffsetDateTime::now_utc() - completed;
-    if age.whole_seconds() < 0 || age.whole_seconds() > LIVE_FRESHNESS_SECONDS {
-        finding(
-            findings,
-            "collector-freshness",
-            "",
-            "evidence.g0_inventory.collector_snapshot.completed_at_utc",
-            "producer live capture is not fresh enough for reconciliation",
-        );
-    }
-}
-
 fn manifest_as_value(manifest: &CanonicalReleaseManifest) -> Value {
     serde_json::to_value(manifest).unwrap_or(Value::Null)
 }
@@ -8307,8 +8225,9 @@ mod tests {
             reviewer_attestation: None,
             g0_inventory: Some(inventory),
         };
-        let directory =
-            std::env::temp_dir().join(format!("velnor-g0-public-check-{}", std::process::id()));
+        let directory = std::fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!("velnor-g0-public-check-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("create fixture directory");
         let store_root = directory.join("store");
@@ -8359,11 +8278,11 @@ mod tests {
             evidence_root: Some(store_root.clone()),
         })
         .expect("public checker accepts serialized fixture");
-        assert!(
-            report.findings.is_empty(),
-            "unexpected CLI findings: {:?}",
-            report.findings
-        );
+        assert!(report
+            .findings
+            .iter()
+            .any(|finding| finding.code == "offline-validation-only"));
+        assert_eq!(report.status, "fail");
         assert_eq!(report.mode, "offline");
         let missing_store_report = check_paths(&EvidenceCheckInput {
             stage: "G0".to_owned(),
@@ -9538,10 +9457,12 @@ mod tests {
             reviewer_attestation: None,
             g0_inventory: None,
         };
-        let directory = std::env::temp_dir().join(format!(
-            "velnor-live-capture-required-{}",
-            std::process::id()
-        ));
+        let directory = std::fs::canonicalize(std::env::temp_dir())
+            .expect("canonical temp directory")
+            .join(format!(
+                "velnor-live-capture-required-{}",
+                std::process::id()
+            ));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("create fixture directory");
         let manifest_path = directory.join("manifest.json");
@@ -9573,7 +9494,45 @@ mod tests {
             evidence_root: None,
         })
         .expect_err("live mode must reject a result-only envelope");
-        assert!(error.to_string().contains("evidence.g0_inventory"));
+        assert!(error
+            .to_string()
+            .contains("trusted authenticated collector"));
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn public_live_checker_rejects_caller_authored_capture_before_reading_files() {
+        let error = check_paths_live(&EvidenceCheckInput {
+            stage: "G0".to_owned(),
+            manifest: PathBuf::from("caller-authored-manifest.json"),
+            snapshot: PathBuf::from("caller-authored-snapshot.json"),
+            evidence: PathBuf::from("caller-authored-evidence.json"),
+            release_manifest: None,
+            live: true,
+            evidence_root: Some(PathBuf::from("caller-authored-store")),
+        })
+        .expect_err("public live entrypoint must not upgrade local files");
+        assert!(error
+            .to_string()
+            .contains("trusted authenticated collector/current-API reconciliation"));
+    }
+
+    #[tokio::test]
+    async fn evidence_check_command_rejects_synthetic_live_capture() {
+        let error = evidence_check(EvidenceCheckArgs {
+            stage: "G0".to_owned(),
+            manifest: PathBuf::from("caller-authored-manifest.json"),
+            snapshot: PathBuf::from("caller-authored-snapshot.json"),
+            evidence: PathBuf::from("caller-authored-evidence.json"),
+            release_manifest: None,
+            live: true,
+            evidence_root: Some(PathBuf::from("caller-authored-store")),
+            json: true,
+        })
+        .await
+        .expect_err("the public command handler must fail closed for synthetic live input");
+        assert!(error
+            .to_string()
+            .contains("trusted authenticated collector/current-API reconciliation"));
     }
 }
