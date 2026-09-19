@@ -16,8 +16,9 @@ use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
 // can bind the compiled manifest to one release commit, bumping the schema to v7.
 // Approved remote action kinds introduced v8; the native GitHub App token adapter is v9;
 // Kache v0.14.2 admission is v10; mr-boxington-action v1.3.0 admission is v11;
-// explicit planner dispatch classes are v12; legacy provider removal is v13.
-pub const MANIFEST_VERSION: u32 = 13;
+// explicit planner dispatch classes are v12; legacy provider removal is v13;
+// mr-boxington-action v1.3.1 admission is v14.
+pub const MANIFEST_VERSION: u32 = 14;
 const MAX_MANIFEST_STEPS: usize = 4096;
 const MAX_MANIFEST_INPUTS: usize = 256;
 
@@ -451,8 +452,8 @@ pub static ACTIONS: &[ActionCapability] = &[
         repository: "jdx/mr-boxington-action",
         adapter: ActionAdapter::JavaScript,
         allowed_refs: &[allowed(
-            "7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777",
-            "v1.3.0",
+            "a20e1ffcd962370fb2b6045c13b7b349f7b03386",
+            "v1.3.1",
         )],
         allowed_subpaths: &[],
         inputs: MR_BOXINGTON_INPUTS,
@@ -1953,11 +1954,11 @@ mod tests {
     }
 
     #[test]
-    fn compiled_manifest_is_version_thirteen_and_structurally_immutable() {
+    fn compiled_manifest_is_version_fourteen_and_structurally_immutable() {
         // Removing a provider changes the exported capability surface and
         // requires a new version so stale consumers fail closed.
-        assert_eq!(MANIFEST_VERSION, 13);
-        assert_eq!(MANIFEST.version, 13);
+        assert_eq!(MANIFEST_VERSION, 14);
+        assert_eq!(MANIFEST.version, 14);
         assert_manifest_integrity().expect("compiled manifest must pass integrity");
     }
 
@@ -2806,7 +2807,11 @@ mod tests {
 
     #[test]
     fn mr_boxington_admits_github_server_and_local_backends() {
-        const SHA: &str = "7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777";
+        const SHA: &str = "a20e1ffcd962370fb2b6045c13b7b349f7b03386";
+        let capability = find("jdx/mr-boxington-action").expect("Mr. Boxington capability");
+        assert_eq!(capability.allowed_refs.len(), 1);
+        assert_eq!(capability.allowed_refs[0].value, SHA);
+        assert_eq!(capability.allowed_refs[0].release, "v1.3.1");
 
         // `local` is the generated Velnor-lane backend: the job image pins
         // mbx and the runner mounts its host-persistent store.
@@ -2860,7 +2865,7 @@ mod tests {
         validate_action_runtime(
             "cache",
             "jdx/mr-boxington-action",
-            "7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777",
+            "a20e1ffcd962370fb2b6045c13b7b349f7b03386",
             &ActionRuntime::JavaScript {
                 node: "node24".to_string(),
                 main: "dist/index.js".to_string(),
