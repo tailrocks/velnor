@@ -5,6 +5,10 @@
 //! that source digest/length separately from the safe bytes stored here.  The
 //! store never follows a caller path after construction, never replaces an
 //! existing object, and verifies bytes through the file descriptor it opened.
+//! The shared acquisition helper supplies the sole canonical `sha256://` URI;
+//! this boundary does not accept or emit URI aliases. The original digest and
+//! length remain producer-owned measurements and are not authenticated by
+//! this store without the producer's verified capture contract.
 
 use crate::github_acquisition::{
     content_addressed_storage_ref, sha256_digest, RawObject, RawObjectRef, RawObjectStore,
@@ -17,7 +21,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 #[cfg(unix)]
-use std::ffi::{CStr, CString, OsStr};
+use std::ffi::{CStr, CString, OsStr, OsString};
 #[cfg(unix)]
 use std::fs::File;
 #[cfg(unix)]
@@ -30,6 +34,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAX_RAW_OBJECT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_RAW_SIDECAR_BYTES: usize = MAX_RAW_OBJECT_BYTES * 2 + 4096;
 
 /// Immutable local CAS for redacted/safe response bytes and provenance
 /// sidecars.
@@ -68,6 +73,7 @@ impl RawObjectFileStore {
             let root_directory = open_secure_directory(&root)?;
             let objects = open_directory_at(&root_directory, "sha256", true)?;
             let refs = open_directory_at(&root_directory, "refs", true)?;
+            root_directory.sync_all()?;
             Ok(Self {
                 root,
                 objects,
@@ -100,7 +106,6 @@ impl RawObjectFileStore {
         let safe_length =
             u64::try_from(object.bytes.len()).map_err(|_| RawStorageError::Refused)?;
         let object_name = digest_name(&safe_digest)?;
-        publish_if_absent(&self.objects, &object_name, &object.bytes)?;
 
         let reference = RawObjectRef {
             raw_id: object.raw_id,
@@ -116,7 +121,25 @@ impl RawObjectFileStore {
             storage_ref: content_addressed_storage_ref(&safe_digest),
         };
         let sidecar_bytes = sidecar_bytes(&reference)?;
-        publish_if_absent(&self.refs, &sidecar_name, &sidecar_bytes)?;
+        if sidecar_bytes.len() > MAX_RAW_SIDECAR_BYTES {
+            return Err(RawStorageError::Refused);
+        }
+        // A valid raw ID can already be bound to a different response. Read
+        // that sidecar before publishing a new CAS object so a collision
+        // cannot create an unreferenced object as a side effect.
+        ensure_sidecar_slot(&self.refs, &sidecar_name, &sidecar_bytes)?;
+        publish_if_absent(
+            &self.objects,
+            &object_name,
+            &object.bytes,
+            MAX_RAW_OBJECT_BYTES,
+        )?;
+        publish_if_absent(
+            &self.refs,
+            &sidecar_name,
+            &sidecar_bytes,
+            MAX_RAW_SIDECAR_BYTES,
+        )?;
         Ok(reference)
     }
 
@@ -128,7 +151,7 @@ impl RawObjectFileStore {
             return Err(RawStorageError::Unbound);
         }
         let object_name = digest_name(&reference.sha256)?;
-        let safe_bytes = read_named(&self.objects, &object_name)?;
+        let safe_bytes = read_named(&self.objects, &object_name, MAX_RAW_OBJECT_BYTES)?;
         if safe_bytes.len() as u64 != reference.byte_length
             || sha256_digest(&safe_bytes) != reference.sha256
             || BASE64.encode(&safe_bytes) != reference.bytes_base64
@@ -137,7 +160,7 @@ impl RawObjectFileStore {
         }
 
         let sidecar_name = raw_id_name(&reference.raw_id)?;
-        let actual_sidecar = read_named(&self.refs, &sidecar_name)?;
+        let actual_sidecar = read_named(&self.refs, &sidecar_name, MAX_RAW_SIDECAR_BYTES)?;
         let expected_sidecar = sidecar_bytes(reference)?;
         if actual_sidecar != expected_sidecar {
             return Err(RawStorageError::Unbound);
@@ -286,11 +309,19 @@ fn open_start(path: &Path) -> io::Result<File> {
 
 #[cfg(unix)]
 fn open_secure_directory(path: &Path) -> io::Result<File> {
-    let mut current = open_start(path)?;
+    let mut components = Vec::<OsString>::new();
     for component in path.components() {
-        let component = match component {
-            Component::RootDir | Component::CurDir => continue,
-            Component::Normal(component) => component,
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(component) => {
+                CString::new(component.as_bytes()).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "raw store path component contains NUL",
+                    )
+                })?;
+                components.push(component.to_os_string());
+            }
             Component::ParentDir => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -303,7 +334,11 @@ fn open_secure_directory(path: &Path) -> io::Result<File> {
                     "raw store path prefix is unsupported",
                 ));
             }
-        };
+        }
+    }
+
+    let mut current = open_start(path)?;
+    for component in components {
         current = open_directory_at(&current, component, true)?;
     }
     Ok(current)
@@ -362,7 +397,7 @@ fn raw_id_name(raw_id: &str) -> Result<CString, RawStorageError> {
 }
 
 #[cfg(unix)]
-fn read_named(directory: &File, name: &CStr) -> Result<Vec<u8>, RawStorageError> {
+fn open_named(directory: &File, name: &CStr) -> Result<Option<File>, RawStorageError> {
     let fd = unsafe {
         libc::openat(
             directory.as_raw_fd(),
@@ -371,23 +406,57 @@ fn read_named(directory: &File, name: &CStr) -> Result<Vec<u8>, RawStorageError>
         )
     };
     if fd < 0 {
-        return Err(storage_io(io::Error::last_os_error()));
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ENOENT) {
+            return Ok(None);
+        }
+        return Err(storage_io(error));
     }
-    let mut file = unsafe { File::from_raw_fd(fd) };
-    read_verified_fd(&mut file)
+    Ok(Some(unsafe { File::from_raw_fd(fd) }))
 }
 
 #[cfg(unix)]
-fn read_verified_fd(file: &mut File) -> Result<Vec<u8>, RawStorageError> {
+fn read_named(directory: &File, name: &CStr, max_bytes: usize) -> Result<Vec<u8>, RawStorageError> {
+    let mut file = open_named(directory, name)?.ok_or(RawStorageError::Unavailable)?;
+    read_verified_fd(&mut file, max_bytes)
+}
+
+#[cfg(unix)]
+fn read_named_if_present(
+    directory: &File,
+    name: &CStr,
+    max_bytes: usize,
+) -> Result<Option<Vec<u8>>, RawStorageError> {
+    let Some(mut file) = open_named(directory, name)? else {
+        return Ok(None);
+    };
+    read_verified_fd(&mut file, max_bytes).map(Some)
+}
+
+#[cfg(unix)]
+fn ensure_sidecar_slot(
+    directory: &File,
+    name: &CStr,
+    expected: &[u8],
+) -> Result<(), RawStorageError> {
+    match read_named_if_present(directory, name, MAX_RAW_SIDECAR_BYTES)? {
+        None => Ok(()),
+        Some(actual) if actual == expected => Ok(()),
+        Some(_) => Err(RawStorageError::Refused),
+    }
+}
+
+#[cfg(unix)]
+fn read_verified_fd(file: &mut File, max_bytes: usize) -> Result<Vec<u8>, RawStorageError> {
     let before = stat_fd(file).map_err(storage_io)?;
     if !before.is_regular_single_link() {
         return Err(RawStorageError::Unbound);
     }
     let mut bytes = Vec::new();
-    file.take((MAX_RAW_OBJECT_BYTES as u64) + 1)
+    file.take((max_bytes as u64) + 1)
         .read_to_end(&mut bytes)
         .map_err(storage_io)?;
-    if bytes.len() > MAX_RAW_OBJECT_BYTES {
+    if bytes.len() > max_bytes {
         return Err(RawStorageError::Unbound);
     }
     let after = stat_fd(file).map_err(storage_io)?;
@@ -398,8 +467,13 @@ fn read_verified_fd(file: &mut File) -> Result<Vec<u8>, RawStorageError> {
 }
 
 #[cfg(unix)]
-fn publish_if_absent(directory: &File, name: &CStr, bytes: &[u8]) -> Result<(), RawStorageError> {
-    if bytes.len() > MAX_RAW_OBJECT_BYTES {
+fn publish_if_absent(
+    directory: &File,
+    name: &CStr,
+    bytes: &[u8],
+    max_bytes: usize,
+) -> Result<(), RawStorageError> {
+    if bytes.len() > max_bytes {
         return Err(RawStorageError::Refused);
     }
     let mut temporary = TemporaryFile::create(directory)?;
@@ -413,48 +487,87 @@ fn publish_if_absent(directory: &File, name: &CStr, bytes: &[u8]) -> Result<(), 
             .file
             .seek(SeekFrom::Start(0))
             .map_err(storage_io)?;
-        if read_verified_fd(&mut temporary.file)? != bytes {
+        if read_verified_fd(&mut temporary.file, max_bytes)? != bytes {
             return Err(RawStorageError::Refused);
         }
         if unsafe { libc::fchmod(temporary.file.as_raw_fd(), 0o400) } < 0 {
             return Err(storage_io(io::Error::last_os_error()));
         }
 
-        let linked = unsafe {
-            libc::linkat(
-                directory.as_raw_fd(),
-                temporary.name.as_ptr(),
-                directory.as_raw_fd(),
-                name.as_ptr(),
-                0,
-            )
-        };
-        if linked == 0 {
-            temporary.remove_name()?;
-            let final_identity = stat_at(directory, name)?;
-            let temporary_identity = stat_fd(&temporary.file).map_err(storage_io)?;
-            if !temporary_identity.is_regular_single_link()
-                || !temporary_identity.same_inode(final_identity)
-            {
-                return Err(RawStorageError::Refused);
+        match install_no_clobber(directory, &temporary.name, name) {
+            Ok(()) => {
+                // Atomic rename/link moved the temporary name to the final
+                // name. There is no cleanup pathname left to race.
+                temporary.name_removed = true;
+                sync_directory(directory)?;
+                let final_identity = stat_at(directory, name)?;
+                let temporary_identity = stat_fd(&temporary.file).map_err(storage_io)?;
+                if !temporary_identity.is_regular_single_link()
+                    || !temporary_identity.same_inode(final_identity)
+                {
+                    return Err(RawStorageError::Refused);
+                }
+                temporary
+                    .file
+                    .seek(SeekFrom::Start(0))
+                    .map_err(storage_io)?;
+                if read_verified_fd(&mut temporary.file, max_bytes)? != bytes {
+                    return Err(RawStorageError::Refused);
+                }
+                sync_directory(directory)?;
+                Ok(())
             }
-            temporary
-                .file
-                .seek(SeekFrom::Start(0))
-                .map_err(storage_io)?;
-            if read_verified_fd(&mut temporary.file)? != bytes {
-                return Err(RawStorageError::Refused);
+            Err(error) if error.raw_os_error() == Some(libc::EEXIST) => {
+                temporary.remove_name(1)?;
+                sync_directory(directory)?;
+                read_existing_published(directory, name, bytes, max_bytes)
             }
-            Ok(())
-        } else {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::EEXIST) {
-                return Err(storage_io(error));
-            }
-            temporary.remove_name()?;
-            read_existing_published(directory, name, bytes)
+            Err(error) => Err(storage_io(error)),
         }
     })()
+}
+
+#[cfg(unix)]
+fn install_no_clobber(directory: &File, temporary: &CStr, final_name: &CStr) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    let result = unsafe {
+        libc::renameatx_np(
+            directory.as_raw_fd(),
+            temporary.as_ptr(),
+            directory.as_raw_fd(),
+            final_name.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+
+    #[cfg(target_os = "linux")]
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            directory.as_raw_fd(),
+            temporary.as_ptr(),
+            directory.as_raw_fd(),
+            final_name.as_ptr(),
+            1_i32,
+        ) as libc::c_int
+    };
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let result = unsafe {
+        libc::linkat(
+            directory.as_raw_fd(),
+            temporary.as_ptr(),
+            directory.as_raw_fd(),
+            final_name.as_ptr(),
+            0,
+        )
+    };
+
+    if result < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(unix)]
@@ -462,19 +575,27 @@ fn read_existing_published(
     directory: &File,
     name: &CStr,
     expected: &[u8],
+    max_bytes: usize,
 ) -> Result<(), RawStorageError> {
     // A concurrent publisher briefly leaves two links to the winner's inode:
     // its private temporary name and the final content-addressed name.  Wait
     // for that bounded commit window, but never relax the single-link check.
-    for attempt in 0..64 {
-        match read_named(directory, name) {
+    for attempt in 0..1024 {
+        match read_named(directory, name, max_bytes) {
             Ok(existing) if existing == expected => return Ok(()),
             Ok(_) => return Err(RawStorageError::Refused),
-            Err(RawStorageError::Refused) if attempt < 63 => std::thread::yield_now(),
+            Err(RawStorageError::Refused | RawStorageError::Unbound) if attempt < 1023 => {
+                std::thread::yield_now()
+            }
             Err(error) => return Err(error),
         }
     }
     Err(RawStorageError::Refused)
+}
+
+#[cfg(unix)]
+fn sync_directory(directory: &File) -> Result<(), RawStorageError> {
+    directory.sync_all().map_err(storage_io)
 }
 
 #[cfg(unix)]
@@ -532,9 +653,17 @@ impl<'a> TemporaryFile<'a> {
         Err(RawStorageError::Unavailable)
     }
 
-    fn remove_name(&mut self) -> Result<(), RawStorageError> {
-        let actual = stat_at(self.directory, &self.name)?;
-        if !actual.same_inode(self.identity) {
+    fn remove_name(&mut self, expected_links: u64) -> Result<(), RawStorageError> {
+        let Some(named_file) = open_named(self.directory, &self.name)? else {
+            return Err(RawStorageError::Refused);
+        };
+        let named_identity = stat_fd(&named_file).map_err(storage_io)?;
+        let current_identity = stat_fd(&self.file).map_err(storage_io)?;
+        if !named_identity.same_inode(self.identity)
+            || !current_identity.same_inode(self.identity)
+            || named_identity.nlink != expected_links
+            || current_identity.nlink != expected_links
+        {
             return Err(RawStorageError::Refused);
         }
         let result = unsafe { libc::unlinkat(self.directory.as_raw_fd(), self.name.as_ptr(), 0) };
@@ -542,6 +671,7 @@ impl<'a> TemporaryFile<'a> {
             return Err(storage_io(io::Error::last_os_error()));
         }
         self.name_removed = true;
+        sync_directory(self.directory)?;
         Ok(())
     }
 }
@@ -552,13 +682,24 @@ impl Drop for TemporaryFile<'_> {
         if self.name_removed {
             return;
         }
-        let Ok(actual) = stat_at(self.directory, &self.name) else {
+        let Ok(Some(named_file)) = open_named(self.directory, &self.name) else {
             return;
         };
-        if !actual.same_inode(self.identity) {
+        let Ok(named_identity) = stat_fd(&named_file) else {
+            return;
+        };
+        let Ok(current_identity) = stat_fd(&self.file) else {
+            return;
+        };
+        if !named_identity.same_inode(self.identity)
+            || !current_identity.same_inode(self.identity)
+            || named_identity.nlink > 2
+            || current_identity.nlink > 2
+        {
             return;
         }
         let _ = unsafe { libc::unlinkat(self.directory.as_raw_fd(), self.name.as_ptr(), 0) };
+        let _ = self.directory.sync_all();
     }
 }
 

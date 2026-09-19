@@ -140,6 +140,16 @@ fn stores_safe_bytes_with_distinct_original_provenance() {
     assert_eq!(reference.original_byte_length, source.len() as u64);
     assert_eq!(reference.sha256, github_acquisition::sha256_digest(safe));
     assert_eq!(reference.byte_length, safe.len() as u64);
+    assert_eq!(
+        reference.storage_ref,
+        format!(
+            "sha256://{}",
+            reference
+                .sha256
+                .strip_prefix("sha256:")
+                .unwrap_or_else(|| panic!("safe digest has sha256 prefix"))
+        )
+    );
     assert_ne!(reference.original_sha256, reference.sha256);
     assert_ne!(reference.original_byte_length, reference.byte_length);
     must(store.verify(&reference), "verify capture");
@@ -159,6 +169,64 @@ fn rejects_path_like_raw_id_before_publishing_an_object() {
         .is_err());
     let entries = must(fs::read_dir(root.join("sha256")), "read object directory");
     assert_eq!(entries.count(), 0);
+    remove_fixture(&root);
+}
+
+#[test]
+fn valid_raw_id_collision_does_not_publish_an_orphan_object() {
+    let root = fixture("raw-id-collision");
+    let mut store = must(RawObjectFileStore::new(&root), "open collision store");
+    let first = must(
+        store.store(capture("same-raw-id", b"source-one", b"safe-one")),
+        "store first collision object",
+    );
+    assert_eq!(
+        must(
+            fs::read_dir(root.join("sha256")),
+            "read first object directory"
+        )
+        .count(),
+        1
+    );
+    assert!(store
+        .store(capture("same-raw-id", b"source-two", b"safe-two"))
+        .is_err());
+    assert_eq!(
+        must(
+            fs::read_dir(root.join("sha256")),
+            "read collision object directory"
+        )
+        .count(),
+        1
+    );
+    must(store.verify(&first), "verify original collision object");
+    remove_fixture(&root);
+}
+
+#[test]
+fn accepts_exact_max_payload_but_rejects_max_plus_one_without_publish() {
+    const MAX_OBJECT_BYTES: usize = 64 * 1024 * 1024;
+    let root = fixture("max-payload");
+    let mut store = must(RawObjectFileStore::new(&root), "open max-payload store");
+    let exact = vec![b'x'; MAX_OBJECT_BYTES];
+    let reference = must(
+        store.store(capture("max-payload", b"original", &exact)),
+        "store exact max payload",
+    );
+    assert_eq!(reference.byte_length, MAX_OBJECT_BYTES as u64);
+
+    let too_large = vec![b'y'; MAX_OBJECT_BYTES + 1];
+    assert!(store
+        .store(capture("max-plus-one", b"original", &too_large))
+        .is_err());
+    assert_eq!(
+        must(
+            fs::read_dir(root.join("sha256")),
+            "read max object directory"
+        )
+        .count(),
+        1
+    );
     remove_fixture(&root);
 }
 
@@ -196,6 +264,11 @@ fn refuses_root_ancestor_and_child_symlinks() {
     );
     assert!(RawObjectFileStore::new(&explicit_root).is_err());
     assert!(!child_target.join("refs").exists());
+
+    let parent_component_root = base.join("new-component").join("../target");
+    assert!(RawObjectFileStore::new(&parent_component_root).is_err());
+    assert!(!base.join("new-component").exists());
+    assert!(!base.join("target").exists());
     remove_fixture(&base);
 }
 
@@ -243,7 +316,7 @@ fn refuses_hardlinked_objects_and_sidecars() {
 #[test]
 fn concurrent_publish_is_no_clobber() {
     let root = fixture("concurrent");
-    let workers = 8;
+    let workers = 16;
     let barrier = Arc::new(Barrier::new(workers));
     let safe = br#"{"same":"payload"}"#;
     let mut joins = Vec::with_capacity(workers);
@@ -342,5 +415,81 @@ fn verification_survives_symlink_and_hardlink_replacement_race() {
         must(fs::read(&outside), "read attacker file"),
         b"attacker-bytes"
     );
+    remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn cleanup_leaves_replaced_temporary_name_instead_of_unlinking_attacker_path() {
+    use std::os::unix::fs::symlink;
+
+    let root = fixture("cleanup-race");
+    let safe = vec![b'z'; 1024 * 1024];
+    let mut store = must(RawObjectFileStore::new(&root), "open cleanup store");
+    must(
+        store.store(capture("cleanup-race", b"source", &safe)),
+        "seed cleanup object",
+    );
+    let object_directory = root.join("sha256");
+    let outside = root.join("outside-cleanup");
+    must(
+        fs::write(&outside, b"attacker-bytes"),
+        "write cleanup attacker file",
+    );
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let replaced = Arc::new(AtomicBool::new(false));
+    let attacker_stop = Arc::clone(&stop);
+    let attacker_replaced = Arc::clone(&replaced);
+    let attacker_directory = object_directory.clone();
+    let attacker_outside = outside.clone();
+    let attacker = thread::spawn(move || {
+        while !attacker_stop.load(Ordering::Relaxed) {
+            let Ok(entries) = fs::read_dir(&attacker_directory) else {
+                thread::yield_now();
+                continue;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if !name.to_string_lossy().starts_with(".velnor-raw-") {
+                    continue;
+                }
+                let path = entry.path();
+                if fs::remove_file(&path).is_ok() && symlink(&attacker_outside, &path).is_ok() {
+                    attacker_replaced.store(true, Ordering::Relaxed);
+                    return;
+                }
+            }
+            thread::yield_now();
+        }
+    });
+
+    for _ in 0..128 {
+        let _ = store.store(capture("cleanup-race", b"source", &safe));
+        if replaced.load(Ordering::Relaxed) {
+            break;
+        }
+        thread::yield_now();
+    }
+    stop.store(true, Ordering::Relaxed);
+    attacker
+        .join()
+        .unwrap_or_else(|_| panic!("cleanup attacker panicked"));
+    assert!(replaced.load(Ordering::Relaxed));
+    assert_eq!(
+        must(fs::read(&outside), "read cleanup attacker file"),
+        b"attacker-bytes"
+    );
+    let temporary_symlink = must(
+        fs::read_dir(&object_directory),
+        "read cleanup object directory",
+    )
+    .flatten()
+    .map(|entry| entry.path())
+    .find(|path| {
+        path.file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with(".velnor-raw-"))
+    });
+    assert!(temporary_symlink.is_some_and(|path| path.is_symlink()));
     remove_fixture(&root);
 }
