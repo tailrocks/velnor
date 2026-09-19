@@ -38,8 +38,9 @@ not reusable against the later live default revision.
 ## User native-version amendment
 
 The amended policy is explicit: every Velnor workload on a GitHub-hosted macOS
-runner uses the newest actual supported major available at dispatch—`macos-27`
-when available, otherwise `macos-26`. `macos-15`, older majors, and a lagging
+runner uses the newest actual supported major available at dispatch. `macos-27`
+and `macos-26` are current examples, not a ceiling; a future newest major such
+as `macos-28` supersedes them. `macos-15`, older majors, and a lagging
 `macos-latest` alias are never fallback choices. Evidence must bind the
 resolved label, host/image identity, Xcode/Swift, SDK, deployment target, and
 architecture. An incompatible native constraint fails explicitly; it is not
@@ -133,7 +134,7 @@ package delivery, fleet migration, Mac operation, or any gate exit.
 | PR954 current head | `f16592ea165ced141bf0bb1c43466a95d7df8b2e` | Observed; current run still pending/partial |
 | PR953 cache result | Run `35453601367` failed cache contract | Observed; cache diagnosis reopened |
 | G0-runtime | Read-only report persisted at external `G0/runtime/report.md`; actual Mac not operated before G3 | Completed investigation; G4/G5 pending |
-| Native macOS version policy | GitHub-hosted Velnor macOS workloads must use newest actual `macos-27`, otherwise `macos-26`; no `macos-15`, lagging alias, old fallback, skip, or silent reroute | Amendment recorded; official-label research/PR and exact runner/image/SDK evidence pending; immutable action/image pins remain required |
+| Native macOS version policy | GitHub-hosted Velnor macOS workloads must use the newest actual major; `macos-27`/`macos-26` are current examples and future majors supersede them; no `macos-15`, lagging alias, old fallback, skip, or silent reroute | Amendment recorded; official-label research/PR and exact runner/image/SDK evidence pending; immutable action/image pins remain required |
 | Runner protocol source | `actions/runner` revision `80bb1fb827fa44d489263061e71ef4adba7ad8cd` pinned for later work | Observed; no implementation here |
 | G2 native package compile | Three required ARM64 macOS binaries compile/smoke at `abe9ad82`; nothing installed or published | Preliminary only; G2 remains pending |
 | G2 product identity | Application/native asset/component identity contract is missing | Blocker for package acceptance; owned by G2-native-product |
@@ -189,7 +190,7 @@ unknown.
 | G2-native-product | Source implementation assigned to native-packages worker | `/root/g2_native_packages`, thread `01a0ba7a-328e-7282-943e-5b54c2ac209d`, worktree `dual-lane-native-product`; define application/runtime component identity and authoritative package manifest |
 | G2-preview-publication | Planned; blocked until G1 | `/root/g1_run_operations`, thread `01a0ba7a-9d5d-7291-a2f5-357ff78dba5e`, worktree `dual-lane-preview-publication`; reviewer `/root/g2_distribution_review` |
 | G2-distribution-review | Typed review pending; initial checker hostile G2 suite failed all nine mutations on old b3b6 | Thread `01a0ba81-1af6-7f11-9f24-3ff115b8f314`; no publication approval |
-| latest_macos_policy | Amendment assigned; exact official label research/PR pending | Isolated AGENTS-rule/research task; newest actual `macos-27`, otherwise `macos-26`; no `macos-15`/lagging alias/old fallback/skip; reviewer `/root/g2_homebrew_contract` |
+| latest_macos_policy | Amendment assigned; exact official label research/PR pending | Isolated AGENTS-rule/research task; newest actual major (current examples `macos-27`/`macos-26`, future majors supersede); no `macos-15`/lagging alias/old fallback/skip; reviewer `/root/g2_homebrew_contract` |
 | g3-skills-adapter | Read-only evidence written; central scanner fix required | Thread `01a0ba7b-0152-7a70-8d18-c2387f1c9469`; external report only, no rollout |
 | g3-native-routing | Read-only evidence written; generator policy amendment must use newest actual hosted macOS major and explicit incompatibility failure; rollout blocked until G2 | Thread `01a0ba7b-32f1-7af1-a25f-4cde73f1f075`; native routing report only; native/package contract review `/root/g2_homebrew_contract` |
 | g3-action-roles | Read-only evidence written; G3 contract incomplete | Thread `01a0ba7b-57a5-7623-bd92-d0666a02b96e`; reusable publisher/runtime gaps remain |

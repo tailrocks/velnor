@@ -63,8 +63,9 @@ required-check change.
 ### User native-version amendment
 
 For every Velnor workload that runs on GitHub-hosted macOS, select the newest
-actual supported macOS major available at dispatch time: `macos-27` when
-available, otherwise `macos-26` when available. Never select `macos-15` or any
+actual supported macOS major available at dispatch time. `macos-27` and
+`macos-26` are current examples, not a ceiling; a future newest major such as
+`macos-28` supersedes them when available. Never select `macos-15` or any
 other older major as a fallback, and do not treat a lagging `macos-latest`
 alias as proof of the newest actual major. Record the resolved runner label,
 host/image identity, Xcode/Swift and SDK versions, deployment target, and
@@ -98,6 +99,12 @@ Each checkpoint records branch, local/remote SHA, clean/dirty status, validation
 commands, pending/rejected/approved review state, and blockers. A commit or push
 never implies review approval, merge, publication, or gate success; merges and
 remote operational mutations remain separately authorized actions.
+
+Use small verified logical commits and push regularly at safe checkpoints.
+Reuse one branch per workstream. Create an isolated branch only for concrete
+conflicting ownership or independent review; do not create a branch per fix.
+An existing integration branch is valid when it combines already-approved
+sources under one recorded owner and review boundary.
 
 ## 2. Intended outcome and boundaries
 
@@ -409,10 +416,11 @@ Determine native capability from dependencies and code. Preserve Apple checks
 for Jackin, Tablerock, and the playground; verify macOS version, Xcode/Swift,
 SDK, deployment target, and architecture. A Linux Swift compiler or a macOS
 label alone is not evidence. For GitHub-hosted macOS Velnor jobs, the native
-version amendment above is mandatory: use the newest actual `macos-27` or
-`macos-26` major available, never `macos-15` or a lagging alias; incompatible
-constraints fail explicitly rather than skipping or falling back. Migrate in
-dependency-aware waves and record out-of-scope image/product dependencies.
+version amendment above is mandatory: use the newest actual major available
+(current examples are `macos-27`/`macos-26`; future majors supersede them),
+never `macos-15` or a lagging alias; incompatible constraints fail explicitly
+rather than skipping or falling back. Migrate in dependency-aware waves and
+record out-of-scope image/product dependencies.
 
 Every repository needs byte-stable regeneration, meaningful local/static checks,
 successful migration PR, deliberate full-workload hosted run, independent
@@ -436,11 +444,12 @@ VMs. Do not impose per-container CPU/RAM limits; enforce one host-wide
 containers, volumes, services, or projects.
 
 The hosted-runner native policy remains separate from this actual-host pilot:
-hosted macOS Velnor jobs must use the newest actual supported major
-(`macos-27`, otherwise `macos-26`), never `macos-15` or an older fallback. The
-pilot must record the actual host separately. An incompatible native
-constraint is a named failure with a reproduction and evidence; it is never a
-skip, downgrade, or silent provider fallback.
+hosted macOS Velnor jobs must use the newest actual supported major (current
+examples are `macos-27`/`macos-26`; a future newest major supersedes them),
+never `macos-15` or an older fallback. The pilot must record the actual host
+separately. An incompatible native constraint is a named failure with a
+reproduction and evidence; it is never a skip, downgrade, or silent provider
+fallback.
 
 Begin with existing `velnorctl host`; verify registration scope/labels/groups,
 shared capacity, trust policy, Docker resolution, and daemon defaults. Extend
@@ -674,9 +683,10 @@ The final report may say complete only if every applicable item passes:
 - Coverage: all required behavior has generated replacement; missing categories,
   native routing, feed automation, and action behavior are resolved.
 - Native version policy: every hosted macOS Velnor workload uses the newest
-  actual supported major (`macos-27`, otherwise `macos-26`), with explicit
-  failure for incompatible constraints and no older fallback/skip; immutable
-  action/image/assets pins remain revision-bound.
+  actual supported major (current examples are `macos-27`/`macos-26`; future
+  newest majors supersede them), with explicit failure for incompatible
+  constraints and no older fallback/skip; immutable action/image/assets pins
+  remain revision-bound.
 - Hosted CI: final migration PR and main jobs pass in every repository; no hidden
   Velnor prerequisite remains.
 - Velnor CI: eligible jobs pass in OrbStack Docker on same contract; native-only
