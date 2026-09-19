@@ -10026,7 +10026,7 @@ mod tests {
             .iter()
             .any(|command| command.contains("platform=iOS Simulator")));
         let workflow = WorkflowIr::from_config(&config).render(WorkflowKind::PullRequest);
-        assert!(workflow.contains("runs-on: macos-15"));
+        assert!(workflow.contains("runs-on: macos-26"));
         assert!(workflow.contains("CI_UNIT_ID: swift-xcodeproj-app"));
         let both_workflow = WorkflowIr::from_config(&ProjectConfig {
             runners: RunnerMode::Both,
@@ -10188,7 +10188,7 @@ mod tests {
             scan_repository(&root, RunnerMode::Github),
             "scan Swift repository",
         );
-        assert_eq!(config.macos_runner, "macos-15");
+        assert_eq!(config.macos_runner, "macos-26");
         let package = must_some(
             config
                 .units
@@ -10216,22 +10216,22 @@ mod tests {
         let default_surface =
             WorkflowIr::from_config(&config).render_nested_unit(&xcode, WorkflowKind::Main);
         assert!(
-            default_surface.contains("runs-on: macos-15"),
+            default_surface.contains("runs-on: macos-26"),
             "{default_surface}"
         );
-        config.macos_runner = "macos-26".to_owned();
+        config.macos_runner = "macos-26-intel".to_owned();
         let custom =
             WorkflowIr::from_config(&config).render_nested_unit(&xcode, WorkflowKind::Main);
-        assert!(custom.contains("runs-on: macos-26"), "{custom}");
-        assert!(!custom.contains("macos-15"), "{custom}");
+        assert!(custom.contains("runs-on: macos-26-intel"), "{custom}");
+        assert!(!custom.contains("runs-on: macos-26\n"), "{custom}");
         assert!(
             !config.toml().contains("macos_runner"),
             "pinned Planning runtimes reject unknown fields: {}",
             config.toml()
         );
-        assert!(report_unit_runners(&config, &xcode).contains("macos-26"));
+        assert!(report_unit_runners(&config, &xcode).contains("macos-26-intel"));
         let actionlint = render_actionlint_config(&config);
-        assert!(actionlint.contains("macos-26"), "{actionlint}");
+        assert!(actionlint.contains("macos-26-intel"), "{actionlint}");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -14993,7 +14993,7 @@ channel = "stable"
         });
         let actionlint = render_actionlint_config(&config);
         assert!(
-            actionlint.contains("    - macos-15\n"),
+            actionlint.contains("    - macos-26\n"),
             "an apple release target needs the macos label: {actionlint}"
         );
         if let Some(release) = config.release.as_mut() {
@@ -15001,7 +15001,7 @@ channel = "stable"
         }
         let linux_only = render_actionlint_config(&config);
         assert!(
-            !linux_only.contains("macos-15"),
+            !linux_only.contains("macos-26"),
             "linux-only releases must not allowlist the macos label: {linux_only}"
         );
     }

@@ -201,7 +201,7 @@ fn swift_tools_version(contents: &str) -> Option<AppleVersion> {
 }
 
 /// Combine the generated Xcode project and its declarative generator input.
-/// The latter is where XcodeGen pins facts such as xcodeVersion and universal
+/// The latter is where `XcodeGen` pins facts such as `xcodeVersion` and universal
 /// ARCHS; neither is guaranteed to survive into a generated project file.
 pub(crate) fn xcode_native_contract(
     project: &str,
@@ -246,7 +246,7 @@ fn first_setting_version(contents: &str, keys: &[&str]) -> Option<AppleVersion> 
 fn setting_version(contents: &str, key: &str) -> Option<AppleVersion> {
     let position = contents.find(key)? + key.len();
     let value = contents[position..]
-        .trim_start_matches(|character: char| matches!(character, ' ' | '\t' | ':' | '=' | '"'))
+        .trim_start_matches([' ', '\t', ':', '=', '"'])
         .split(|character: char| {
             character.is_whitespace() || matches!(character, '"' | '\'' | ',' | ';' | '#' | ')')
         })
@@ -479,7 +479,7 @@ fn swift_import_module(line: &str) -> Option<&str> {
     } else {
         first
     };
-    Some(module.split('.').next()?)
+    module.split('.').next()
 }
 
 fn strip_swift_comments_and_strings(contents: &str) -> String {
@@ -667,10 +667,14 @@ fn is_package_source(
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::expect_used,
+        reason = "native capability tests must fail loudly when their fixture loses evidence"
+    )]
+
     use super::{
         is_package_source, manifest_declares_apple_platform, manifest_uses_apple_linker,
-        manifest_uses_xcframework, project_native_contract, source_imports_apple_module,
-        xcode_native_contract,
+        manifest_uses_xcframework, source_imports_apple_module, xcode_native_contract,
     };
     use crate::native_contract::{AppleArch, AppleSdkFamily, AppleVersion};
     use std::collections::BTreeSet;
@@ -745,9 +749,9 @@ mod tests {
 
     #[test]
     fn native_contract_reads_tools_sdk_xcode_and_architecture_facts() {
-        let package = r#"// swift-tools-version: 6.2
+        let package = r"// swift-tools-version: 6.2
 let package = Package(platforms: [.macOS(.v26)])
-"#;
+";
         let package_contract = super::manifest_native_contract(package);
         assert_eq!(package_contract.sdk.family, AppleSdkFamily::Macos);
         assert_eq!(
@@ -759,10 +763,10 @@ let package = Package(platforms: [.macOS(.v26)])
             Some(AppleVersion::new(6, 2, 0))
         );
 
-        let project = r#"SDKROOT = macosx;
+        let project = r"SDKROOT = macosx;
 MACOSX_DEPLOYMENT_TARGET = 26.0;
 ARCHS = arm64 x86_64;
-"#;
+";
         let project_config = r#"xcodeVersion: "26.6"
 deploymentTarget:
   macOS: "26.0"
@@ -806,7 +810,8 @@ settings:
     #[test]
     fn conflicting_xcode_sources_are_not_silently_weakened() {
         let project = "SDKROOT = macosx; MACOSX_DEPLOYMENT_TARGET = 26.0;";
-        let config = "xcodeVersion: \"26.6\"\ndeploymentTarget:\n  iOS: \"26.0\"\n";
+        let config =
+            "SDKROOT = iphoneos; IPHONEOS_DEPLOYMENT_TARGET = 26.0;\nxcodeVersion: \"26.6\"\n";
         let contract = xcode_native_contract(project, Some(config)).expect("conflict evidence");
         assert!(!contract.conflicts.is_empty());
     }

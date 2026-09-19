@@ -9417,7 +9417,7 @@ mod tests {
         must(
             fs::write(
                 project.join("project.pbxproj"),
-                "SDKROOT = iphoneos;\nIPHONEOS_DEPLOYMENT_TARGET = 17.0;\n",
+                "SDKROOT = macosx;\nMACOSX_DEPLOYMENT_TARGET = 26.0;\n",
             ),
             "write project",
         );
@@ -9471,7 +9471,7 @@ mod tests {
         assert!(xcode
             .pr_commands
             .iter()
-            .any(|command| command.contains("platform=iOS Simulator")));
+            .all(|command| command.contains("xcodebuild") && !command.contains("iOS Simulator")));
         let ir = WorkflowIr::from_config(&config);
         let swift_kind = must_some(
             must(

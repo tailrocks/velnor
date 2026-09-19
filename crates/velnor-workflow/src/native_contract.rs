@@ -8,6 +8,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
+use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
@@ -29,7 +30,7 @@ impl AppleVersion {
         }
     }
 
-    /// Parse `26`, `26.5`, `26.5.1`, or the SwiftPM spelling `v26`.
+    /// Parse `26`, `26.5`, `26.5.1`, or the `SwiftPM` spelling `v26`.
     pub(crate) fn parse(value: &str) -> Option<Self> {
         let value = value.trim().strip_prefix('v').unwrap_or(value.trim());
         let mut parts = value.split('.');
@@ -137,7 +138,7 @@ impl AppleSdkFamily {
 }
 
 /// An Apple CPU architecture. Host execution and compiler output are tracked
-/// separately: an arm64 host can cross-build x86_64, but cannot execute it.
+/// separately: an arm64 host can cross-build `x86_64`, but cannot execute it.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum AppleArch {
@@ -188,9 +189,11 @@ impl AppleNativeContract {
             AppleVersionConstraint::default,
             AppleVersionConstraint::minimum,
         );
-        let macos = (family == AppleSdkFamily::Macos)
-            .then_some(version)
-            .unwrap_or_default();
+        let macos = if family == AppleSdkFamily::Macos {
+            version
+        } else {
+            AppleVersionConstraint::default()
+        };
         Self {
             macos,
             sdk: AppleSdkRequirement { family, version },
@@ -630,10 +633,10 @@ pub(crate) fn render_preflight_step(contract: &AppleNativeContract) -> String {
 }
 
 fn indent_script(script: &str) -> String {
-    script
-        .lines()
-        .map(|line| format!("          {line}\n"))
-        .collect()
+    script.lines().fold(String::new(), |mut output, line| {
+        let _ = writeln!(output, "          {line}");
+        output
+    })
 }
 
 fn preflight_script() -> String {
@@ -731,6 +734,11 @@ echo "Apple native host verified: macOS $actual_macos, Xcode $xcode_version, $AP
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::expect_used,
+        reason = "native capability tests must fail loudly when their fixture loses evidence"
+    )]
+
     use super::{
         hosted_apple_offer, offer_mismatches, render_preflight_step, AppleArch,
         AppleNativeContract, AppleSdkFamily, AppleVersion,
@@ -814,7 +822,7 @@ mod tests {
         ));
         let env_file = root.join("github-env");
         let path = format!("{}:/usr/bin:/bin", root.join("bin").display());
-        let mut command = || {
+        let command = || {
             let mut command = Command::new("bash");
             command
                 .arg("-c")
