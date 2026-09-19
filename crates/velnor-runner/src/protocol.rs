@@ -93,7 +93,7 @@ pub enum BrokerErrorCategory {
 /// on this type (rather than in a wrapper) so the error chain keeps its
 /// shape and downstream `GitHubApiError` downcasts (credential refresh,
 /// quota/rate-limit hints) keep working untouched.
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 #[error("{action} failed: status={status}, body={body}")]
 pub struct GitHubApiError {
     pub status: u16,
@@ -111,6 +111,20 @@ pub struct GitHubApiError {
     /// and every other `GitHubApiError` producer predates the taxonomy (see
     /// the remaining-untyped-sites list in `plans/2026-09-14-r0-798-corr.md`).
     pub(crate) category: Option<BrokerErrorCategory>,
+}
+
+impl fmt::Debug for GitHubApiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GitHubApiError")
+            .field("status", &self.status)
+            .field("action", &self.action)
+            .field("body", &"<redacted>")
+            .field("retry_after_seconds", &self.retry_after_seconds)
+            .field("rate_limit_reset_epoch", &self.rate_limit_reset_epoch)
+            .field("remaining", &self.remaining)
+            .field("category", &self.category)
+            .finish()
+    }
 }
 
 /// Boundary-produced category of a broker/completion failure, or `None`
@@ -600,13 +614,34 @@ pub fn github_api_quota_status(error: &anyhow::Error) -> Option<GitHubRateLimitS
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct GitHubScope {
     pub original_url: String,
     pub hosted: bool,
     pub api_base_url: Url,
     pub jit_config_url: Url,
     runner_scope_path: String,
+}
+
+impl fmt::Debug for GitHubScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GitHubScope")
+            .field(
+                "original_url",
+                &redacted_authenticated_url(&self.original_url),
+            )
+            .field("hosted", &self.hosted)
+            .field(
+                "api_base_url",
+                &redacted_authenticated_url(self.api_base_url.as_str()),
+            )
+            .field(
+                "jit_config_url",
+                &redacted_authenticated_url(self.jit_config_url.as_str()),
+            )
+            .field("runner_scope_path", &self.runner_scope_path)
+            .finish()
+    }
 }
 
 impl GitHubScope {
@@ -801,10 +836,19 @@ pub struct GitHubJitConfigRequest {
     pub work_folder: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct GitHubJitConfigResponse {
     pub runner: GitHubJitRunner,
     pub encoded_jit_config: String,
+}
+
+impl fmt::Debug for GitHubJitConfigResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GitHubJitConfigResponse")
+            .field("runner", &self.runner)
+            .field("encoded_jit_config", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -838,11 +882,21 @@ pub struct RunnerGroup {
     pub default: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DecodedJitConfig {
     pub settings: DecodedJitRunnerSettings,
     pub credentials: DecodedJitCredentials,
     pub private_key_pem: String,
+}
+
+impl fmt::Debug for DecodedJitConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DecodedJitConfig")
+            .field("settings", &self.settings)
+            .field("credentials", &"<redacted>")
+            .field("private_key_pem", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -914,7 +968,7 @@ fn deser_opt_i64_from_any<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i64>
     d.deserialize_any(Visitor)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 pub struct DecodedJitRunnerSettings {
     #[serde(
         default,
@@ -994,7 +1048,31 @@ pub struct DecodedJitRunnerSettings {
     pub disable_update: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+impl fmt::Debug for DecodedJitRunnerSettings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let server_url = self.server_url.as_deref().map(redacted_authenticated_url);
+        let server_url_v2 = self
+            .server_url_v2
+            .as_deref()
+            .map(redacted_authenticated_url);
+        let github_url = self.github_url.as_deref().map(redacted_authenticated_url);
+        f.debug_struct("DecodedJitRunnerSettings")
+            .field("agent_id", &self.agent_id)
+            .field("agent_name", &self.agent_name)
+            .field("pool_id", &self.pool_id)
+            .field("pool_name", &self.pool_name)
+            .field("server_url", &server_url)
+            .field("server_url_v2", &server_url_v2)
+            .field("github_url", &github_url)
+            .field("work_folder", &self.work_folder)
+            .field("use_v2_flow", &self.use_v2_flow)
+            .field("ephemeral", &self.ephemeral)
+            .field("disable_update", &self.disable_update)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Deserialize)]
 pub struct DecodedJitCredentials {
     #[serde(rename = "Scheme", alias = "scheme")]
     pub scheme: String,
@@ -1002,11 +1080,33 @@ pub struct DecodedJitCredentials {
     pub data: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone)]
+impl fmt::Debug for DecodedJitCredentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DecodedJitCredentials")
+            .field("scheme", &self.scheme)
+            .field("data", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct OAuthJwtCredentials {
     pub client_id: String,
     pub authorization_url: String,
     pub private_key_pem: String,
+}
+
+impl fmt::Debug for OAuthJwtCredentials {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthJwtCredentials")
+            .field("client_id", &self.client_id)
+            .field(
+                "authorization_url",
+                &redacted_authenticated_url(&self.authorization_url),
+            )
+            .field("private_key_pem", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1019,7 +1119,7 @@ struct OAuthJwtClaims {
     exp: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OAuthTokenResponse {
     #[serde(rename = "access_token")]
     pub access_token: Option<String>,
@@ -1033,10 +1133,34 @@ pub struct OAuthTokenResponse {
     pub error_description: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl fmt::Debug for OAuthTokenResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthTokenResponse")
+            .field(
+                "access_token",
+                &self.access_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("token_type", &self.token_type)
+            .field("expires_in", &self.expires_in)
+            .field("error", &self.error)
+            .field("error_description", &self.error_description)
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct OAuthAccessToken {
     pub token: String,
     pub expires_in: Option<std::time::Duration>,
+}
+
+impl fmt::Debug for OAuthAccessToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthAccessToken")
+            .field("token", &"<redacted>")
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
 }
 
 #[derive(Clone)]
@@ -1181,10 +1305,19 @@ fn build_client_assertion(credentials: &OAuthJwtCredentials) -> Result<String> {
     encode(&header, &claims, &key).context("sign OAuth client assertion")
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RunnerKeyPair {
     pub private_key_pem: String,
     pub public_key: TaskAgentPublicKey,
+}
+
+impl fmt::Debug for RunnerKeyPair {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RunnerKeyPair")
+            .field("private_key_pem", &"<redacted>")
+            .field("public_key", &self.public_key)
+            .finish()
+    }
 }
 
 impl RunnerKeyPair {
@@ -4031,7 +4164,7 @@ pub struct TaskAgentPool {
     pub is_internal: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TaskAgentSession {
     #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
@@ -4043,6 +4176,18 @@ pub struct TaskAgentSession {
     pub use_fips_encryption: bool,
     #[serde(rename = "encryptionKey", skip_serializing_if = "Option::is_none")]
     pub encryption_key: Option<TaskAgentSessionKey>,
+}
+
+impl fmt::Debug for TaskAgentSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TaskAgentSession")
+            .field("session_id", &self.session_id)
+            .field("owner_name", &self.owner_name)
+            .field("agent", &self.agent)
+            .field("use_fips_encryption", &self.use_fips_encryption)
+            .field("encryption_key", &self.encryption_key)
+            .finish()
+    }
 }
 
 impl TaskAgentSession {
@@ -4078,12 +4223,21 @@ pub struct TaskAgentReference {
     pub os_description: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TaskAgentSessionKey {
     #[serde(rename = "encrypted")]
     pub encrypted: bool,
     #[serde(rename = "value")]
     pub value: String,
+}
+
+impl fmt::Debug for TaskAgentSessionKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TaskAgentSessionKey")
+            .field("encrypted", &self.encrypted)
+            .field("value", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4213,19 +4367,37 @@ impl TaskAgentPublicKey {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AgentSession {
     pub session_id: String,
     pub encryption_key: Option<EncryptionKey>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl fmt::Debug for AgentSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AgentSession")
+            .field("session_id", &self.session_id)
+            .field("encryption_key", &self.encryption_key)
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct EncryptionKey {
     pub encrypted: bool,
     pub value_base64: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+impl fmt::Debug for EncryptionKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EncryptionKey")
+            .field("encrypted", &self.encrypted)
+            .field("value_base64", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskAgentMessage {
     #[serde(default, rename = "messageId")]
     pub message_id: i64,
@@ -4235,6 +4407,17 @@ pub struct TaskAgentMessage {
     pub body: String,
     #[serde(rename = "iv", skip_serializing_if = "Option::is_none")]
     pub iv_base64: Option<String>,
+}
+
+impl fmt::Debug for TaskAgentMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TaskAgentMessage")
+            .field("message_id", &self.message_id)
+            .field("message_type", &self.message_type)
+            .field("body", &"<redacted>")
+            .field("iv_base64", &self.iv_base64)
+            .finish()
+    }
 }
 
 pub const RUNNER_JOB_REQUEST: &str = "RunnerJobRequest";
@@ -4312,12 +4495,26 @@ pub struct RunServiceTelemetry {
     pub kind: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct RunServiceVariableValue {
     #[serde(rename = "value")]
     pub value: String,
     #[serde(rename = "isSecret")]
     pub is_secret: bool,
+}
+
+impl fmt::Debug for RunServiceVariableValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = if self.is_secret {
+            "<redacted>"
+        } else {
+            self.value.as_str()
+        };
+        f.debug_struct("RunServiceVariableValue")
+            .field("value", &value)
+            .field("is_secret", &self.is_secret)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -4489,12 +4686,28 @@ impl JobCompletedEvent {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct JobOutputValue {
     #[serde(default, rename = "value", skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
     #[serde(default, rename = "isSecret")]
     pub is_secret: bool,
+}
+
+impl fmt::Debug for JobOutputValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JobOutputValue")
+            .field(
+                "value",
+                &if self.is_secret {
+                    self.value.as_ref().map(|_| "<redacted>")
+                } else {
+                    self.value.as_deref()
+                },
+            )
+            .field("is_secret", &self.is_secret)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -11444,5 +11657,149 @@ mod tests {
         let error = error.downcast_ref::<GitHubApiError>().unwrap();
         assert!(error.body.len() <= 4099);
         assert!(error.body.ends_with('…'));
+    }
+
+    #[test]
+    fn protocol_debug_redacts_secrets_and_sanitizes_signed_urls() {
+        let scope = GitHubScope::parse(
+            "https://scope-user:scope-pass@github.com/org?token=scope-query-secret#scope-fragment-secret",
+        )
+        .unwrap();
+        let api_error = GitHubApiError {
+            status: 500,
+            action: "request".to_string(),
+            body: "api-body-secret".to_string(),
+            retry_after_seconds: None,
+            rate_limit_reset_epoch: None,
+            remaining: None,
+            category: None,
+        };
+        let jit_response = GitHubJitConfigResponse {
+            runner: GitHubJitRunner {
+                id: 1,
+                name: "runner".to_string(),
+                os: "linux".to_string(),
+                status: "offline".to_string(),
+                busy: false,
+                labels: Vec::new(),
+                runner_group_id: None,
+                ephemeral: None,
+            },
+            encoded_jit_config: "encoded-jit-secret".to_string(),
+        };
+        let settings = DecodedJitRunnerSettings {
+            agent_id: None,
+            agent_name: None,
+            pool_id: None,
+            pool_name: None,
+            server_url: Some("https://server.example/agent?token=settings-url-secret".to_string()),
+            server_url_v2: None,
+            github_url: None,
+            work_folder: None,
+            use_v2_flow: false,
+            ephemeral: false,
+            disable_update: false,
+        };
+        let credentials: DecodedJitCredentials = serde_json::from_value(json!({
+            "Scheme": "OAuth",
+            "Data": { "token": "decoded-credential-secret" }
+        }))
+        .unwrap();
+        let decoded = DecodedJitConfig {
+            settings,
+            credentials,
+            private_key_pem: "decoded-private-key-secret".to_string(),
+        };
+        let oauth_jwt = OAuthJwtCredentials {
+            client_id: "client-id".to_string(),
+            authorization_url: "https://oauth.example/token?sig=oauth-url-secret".to_string(),
+            private_key_pem: "oauth-private-key-secret".to_string(),
+        };
+        let oauth_response = OAuthTokenResponse {
+            access_token: Some("oauth-response-token-secret".to_string()),
+            token_type: Some("bearer".to_string()),
+            expires_in: Some(300),
+            error: None,
+            error_description: None,
+        };
+        let oauth_access = OAuthAccessToken {
+            token: "oauth-access-token-secret".to_string(),
+            expires_in: Some(Duration::from_secs(300)),
+        };
+        let runner_key_pair = RunnerKeyPair {
+            private_key_pem: "runner-private-key-secret".to_string(),
+            public_key: TaskAgentPublicKey {
+                exponent: "AQAB".to_string(),
+                modulus: "public-modulus".to_string(),
+            },
+        };
+        let mut task_session = TaskAgentSession::new("owner", 1, "agent");
+        task_session.encryption_key = Some(TaskAgentSessionKey {
+            encrypted: true,
+            value: "task-session-key-secret".to_string(),
+        });
+        let agent_session = AgentSession {
+            session_id: "session-id".to_string(),
+            encryption_key: Some(EncryptionKey {
+                encrypted: true,
+                value_base64: "agent-session-key-secret".to_string(),
+            }),
+        };
+        let message = TaskAgentMessage {
+            message_id: 1,
+            message_type: RUNNER_JOB_REQUEST.to_string(),
+            body: "task-message-body-secret".to_string(),
+            iv_base64: Some("message-iv".to_string()),
+        };
+        let secret_variable = RunServiceVariableValue {
+            value: "secret-variable-value".to_string(),
+            is_secret: true,
+        };
+        let public_variable = RunServiceVariableValue {
+            value: "public-variable-value".to_string(),
+            is_secret: false,
+        };
+        let secret_output = JobOutputValue {
+            value: Some("secret-output-value".to_string()),
+            is_secret: true,
+        };
+        let public_output = JobOutputValue {
+            value: Some("public-output-value".to_string()),
+            is_secret: false,
+        };
+
+        let debug = format!(
+            "{scope:?} {api_error:?} {jit_response:?} {decoded:?} {oauth_jwt:?} \
+             {oauth_response:?} {oauth_access:?} {runner_key_pair:?} {task_session:?} \
+             {agent_session:?} {message:?} {secret_variable:?} {public_variable:?} \
+             {secret_output:?} {public_output:?}"
+        );
+
+        for secret in [
+            "scope-user",
+            "scope-pass",
+            "scope-query-secret",
+            "scope-fragment-secret",
+            "api-body-secret",
+            "encoded-jit-secret",
+            "settings-url-secret",
+            "decoded-credential-secret",
+            "decoded-private-key-secret",
+            "oauth-url-secret",
+            "oauth-private-key-secret",
+            "oauth-response-token-secret",
+            "oauth-access-token-secret",
+            "runner-private-key-secret",
+            "task-session-key-secret",
+            "agent-session-key-secret",
+            "task-message-body-secret",
+            "secret-variable-value",
+            "secret-output-value",
+        ] {
+            assert!(!debug.contains(secret), "Debug leaked {secret}: {debug}");
+        }
+        assert!(debug.contains("public-variable-value"));
+        assert!(debug.contains("public-output-value"));
+        assert!(debug.contains("public-modulus"));
     }
 }
