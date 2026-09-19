@@ -230,7 +230,7 @@ fn project_native_contract(contents: &str) -> Option<AppleNativeContract> {
     Some(contract)
 }
 
-/// Return every PackageDescription Apple platform declaration together with
+/// Return every `PackageDescription` Apple platform declaration together with
 /// the destination families this generator can verify. Unsupported families
 /// stay as explicit evidence and become a generation error; they never fall
 /// through to the macOS SDK merely because the package is Apple-bound.
