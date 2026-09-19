@@ -61,10 +61,10 @@ pub(crate) const PRE_PARAMETERIZATION_KEYS: &[UnitLaneKeys] = &[
             CacheKey {
                 layer: "docker_seed",
                 paths: &[".velnor-docker-cache"],
-                primary: "velnor-docker-seed-v3-743cc362f16c-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-trusted-only-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'deny.toml') }}",
+                primary: "velnor-docker-seed-v3-7e67216c9e23-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-trusted-only-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock', 'deny.toml') }}",
                 restore_keys: &[
-                    "velnor-docker-seed-v3-743cc362f16c-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-trusted-only-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-",
-                    "velnor-docker-seed-v3-743cc362f16c-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-trusted-only-docker-",
+                    "velnor-docker-seed-v3-7e67216c9e23-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-trusted-only-docker-${{ hashFiles('Cargo.lock', 'Dockerfile', 'docker/build-mise.lock', 'docker/build-mise.toml', 'rust-toolchain.toml') }}-",
+                    "velnor-docker-seed-v3-7e67216c9e23-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-trusted-only-docker-",
                 ],
             },
         ],
