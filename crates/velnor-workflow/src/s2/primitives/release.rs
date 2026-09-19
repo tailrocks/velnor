@@ -2914,6 +2914,21 @@ fn render_versioned_tool_mise_setup(config: &ProjectConfig) -> String {
     if !config.providers.contains(&ProviderId::GithubHosted) {
         return String::new();
     }
+    render_mise_setup()
+}
+
+/// Pinned Mise provisioning for one typed release job. The job's selected
+/// runner owns this decision: GitHub-hosted Linux and macOS lanes need the
+/// setup action, while Velnor lanes use the preinstalled binary.
+fn render_mise_setup_for_runner(runner: &str) -> String {
+    if matches!(runner, "github" | "macos") {
+        render_mise_setup()
+    } else {
+        String::new()
+    }
+}
+
+fn render_mise_setup() -> String {
     format!(
         "      - name: Set up Mise\n        uses: {}\n        with:\n          install: false\n",
         ActionPin::Mise.reference()
@@ -3026,7 +3041,7 @@ fn render_tasks_release_job(config: &ProjectConfig, job: &ReleaseJobSpec) -> Str
         output,
         "    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n{}",
         ActionPin::Checkout.reference(),
-        render_versioned_tool_mise_setup(config),
+        render_mise_setup_for_runner(&job.runner),
     );
     output.push_str(&render_versioned_tool_task_steps(&job.tasks, None));
     if !job.attest_subjects.is_empty() {
@@ -5968,6 +5983,29 @@ mod tests {
         assert!(defaults.contains("id-token: write"), "{defaults}");
         assert!(defaults.contains("attestations: write"), "{defaults}");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn schema2_tasks_release_mise_setup_follows_job_runner() {
+        let mut config = config(&["release.yml"], None);
+        config.providers = [ProviderId::Velnor].into_iter().collect();
+
+        for (runner, needs_setup) in [("github", true), ("macos", true), ("velnor", false)] {
+            let job = ReleaseJobSpec {
+                id: "job".to_owned(),
+                name: "Job".to_owned(),
+                tasks: vec!["desktop-build".to_owned()],
+                runner: runner.to_owned(),
+                timeout_minutes: 10,
+                ..ReleaseJobSpec::default()
+            };
+            let rendered = render_tasks_release_job(&config, &job);
+            assert_eq!(
+                rendered.contains("Set up Mise"),
+                needs_setup,
+                "Mise setup for runner {runner}: {rendered}"
+            );
+        }
     }
 
     #[test]
