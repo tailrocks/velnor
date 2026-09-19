@@ -54,6 +54,33 @@ independently reviews the native/package contract. These ownership records do
 not approve a source change or alter G0→G1→G2→G3→G4/G5 sequencing. Exact label
 research and policy PR evidence remain external and pending.
 
+## Current candidate-bound checkpoint
+
+External candidate observations around `2026-09-19T22:47:37Z` do not advance
+G0 or any later gate:
+
+- PR957 source `9e06`, revision `53`, has source-only approval in
+  `G0/native-review/review-pr957-92387e88.md` with 1,888 source tests plus
+  fmt/clippy/check pass. Merge/live is not ready: D19 is unpublished, Policy
+  run `35473052923` failed candidate acquisition, and the separately typed
+  validator dependency remains unresolved.
+- PR960 is open at head
+  `2c810f1b46ce8eddb5906fd4bdcc8ae23e78ed40` on base
+  `b5a4b4afaa6ca807927cacc03659b570a895dd5c`; Policy was in progress at
+  capture and no review decision or merge exists. PR962 is open at head
+  `94b43578cad9720e569780d18dc966370ed47c11` on the same base; required and
+  Velnor-workflow hosted failures were observed. These are not approvals.
+- The signed replacement integration path starts from current main, carries
+  signed source units only, excludes redundant unsigned `857`, and forbids
+  force/override. DCO plus complete review/CI evidence remain required.
+- The selected product boundary is a separately typed validator-only
+  product/publisher owned by `/root/g0_inventory` and reviewed by
+  `/root/g0_reviewer`; no three-platform runtime reuse or platform-selection
+  workaround is allowed. Publication precedes separate PR957 pin adoption.
+- Secure CAS/sourcegraph and collector/checker binding remain unresolved. The
+  scan `38345852` reports five full-suite failures, but exact-parent baseline
+  attribution is pending; this status does not call them baseline failures.
+
 ## Completed
 
 - Read the full authoritative goal and applicable root rules.

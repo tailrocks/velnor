@@ -114,6 +114,26 @@ runner-label research/PR. `g3-native-routing` owns generator policy, and
 contract. These assignments do not authorize a gate exit or change the
 G0→G1→G2→G3→G4/G5 sequencing.
 
+## Current candidate-bound checkpoint
+
+These are external, revision-bound observations captured around
+`2026-09-19T22:47:37Z`; they do not advance a gate.
+
+| Candidate | Observed state | Boundary/blocker |
+| --- | --- | --- |
+| PR957, source `9e06`, revision `53` | Source-only approval in `G0/native-review/review-pr957-92387e88.md`; 1,888 source tests plus fmt/clippy/check pass | Merge/live not ready; D19 unpublished; Policy `35473052923` candidate acquisition failed; separate typed-validator dependency unresolved |
+| PR960, head `2c810f1b46ce8eddb5906fd4bdcc8ae23e78ed40`, base `b5a4b4afaa6ca807927cacc03659b570a895dd5c` | Open; Policy observed in progress; no review decision or merge | Candidate checks/review remain incomplete |
+| PR962, head `94b43578cad9720e569780d18dc966370ed47c11`, base `b5a4b4afaa6ca807927cacc03659b570a895dd5c` | Open; required and Velnor-workflow hosted failures observed | Not merge-ready; no gate evidence |
+| PR961 replacement path | New branch from current main, signed source units only; redundant unsigned `857` excluded | No force/override; DCO and complete review/CI proof required |
+
+The selected G2 design is a separately typed validator-only product/publisher,
+owned by `/root/g0_inventory` and reviewed by `/root/g0_reviewer`. It must not
+reuse a three-platform runtime or add a platform-selection workaround.
+Publication precedes the separate PR957 pin operation. Secure CAS/sourcegraph
+and collector/checker binding remain unresolved; no helper output closes G0.
+The scan `38345852` reports five full-suite failures, but exact-parent baseline
+attribution remains pending and must not be called a baseline failure.
+
 ## G0 acceptance-matrix handoff
 
 The exact user acceptance matrix is canonical in
@@ -247,6 +267,7 @@ reviewer. Unknown thread/worktree metadata stays `unknown` until observed.
 | `G2-native-packages` | Native package/Homebrew prerequisites | `/root/g2_native_packages` (Luna/max) | `G1`, `G0-distribution` | Thread `01a0ba7a-328e-7282-943e-5b54c2ac209d`; worktree `dual-lane-native-packages` | `[observed]` three ARM64 macOS binaries compile/smoke only; worker now also owns product/manifest contract; install/publication pending | `G0/native-packages/findings.md` | `/root/g0-reviewer` |
 | `G2-homebrew-contract` | Homebrew consumer/producer contract | `/root/g2_homebrew_contract` (Luna/max) | `G1`, `G0-distribution`, `G2-native-packages` | Thread `01a0ba80-8408-7380-8ac2-b743eb4494a5`; worktree `dual-lane-homebrew` | `[pending]` typed Homebrew contract and producer coordination | `G2/homebrew-contract/findings.md` | `/root/g2_distribution_review` |
 | `G2-native-product` | Product binary/component identity and authoritative package manifest | `/root/g2_native_packages` (Luna/max) | `G1`, `G0-distribution` | Thread `01a0ba7a-328e-7282-943e-5b54c2ac209d`; worktree `dual-lane-native-product` | `[pending]` application/runtime component inventory, identity, and package contract | `G2/native-product.json` | `/root/g2_distribution_review` |
+| `G2-typed-validator-product-publisher` | Separately typed validator-only product/publisher | `/root/g0_inventory` | `G0-inventory`, `G0-distribution`; publication before separate PR957 pin | External design context; no three-platform runtime reuse or platform-selection workaround | `[pending]` typed validator/product/publisher design and independent review | External `G2/native-product.json` and session graph | `/root/g0_reviewer` |
 | `G2-preview-publication` | Immutable preview publisher/version/monotonic channel | `/root/g1_run_operations` (Luna/max) | `G1`, `G2-native-product`, `G0-distribution` | Thread `01a0ba7a-9d5d-7291-a2f5-357ff78dba5e`; worktree `dual-lane-preview-publication` | `[blocked]` design/source work may prepare, but no real publication before G1 | `G2/preview-publication.json` | `/root/g2_distribution_review` |
 | `G2-distribution-review` | Independent APT/Homebrew product contract review | `/root/g2_distribution_review` (Luna/max) | `G2-native-product`, `G0-distribution` | Thread `01a0ba81-1af6-7f11-9f24-3ff115b8f314`; review worktree unknown | `[observed]` package identity/publication/install blockers recorded | `G0/distribution-review/report.md` | `/root/g0-reviewer` |
 | `g3-skills-adapter` | Eight skills repositories: `tailrocks/tailrocks-typescript-skills`, `tailrocks/tailrocks-skill-authoring-skills`, `tailrocks/tailrocks-rust-skills`, `tailrocks/tailrocks-roadmap-skills`, `tailrocks/tailrocks-pull-request-skills`, `tailrocks/tailrocks-open-source-skills`, `tailrocks/tailrocks-macos-skills`, `tailrocks/tailrocks-code-quality-skills` | `/root/g3_skills_adapter` (Luna/max) | `G0-inventory`; operationally G3 depends on G2 | Thread `01a0ba7b-0152-7a70-8d18-c2387f1c9469`; external read-only source inspection | `[observed]` catalog/frontmatter/template inventory; central scanner fix required | `G0/skills-adapter/report.md`; no G3 rollout | `/root/g3_distribution_consumers` |

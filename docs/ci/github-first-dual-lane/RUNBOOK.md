@@ -50,6 +50,35 @@ the artifact or that a gate passed.
   pagination, and coverage before invoking the checker. A manual or available
   artifact is not proof until the checker consumes and validates those bindings.
 
+## Current candidate-bound checkpoint
+
+The following read-only observations were captured around
+`2026-09-19T22:47:37Z`; they are external evidence references, not verified
+merge instructions or gate results:
+
+- PR957 source `9e06`, revision `53`, is approved only by
+  `G0/native-review/review-pr957-92387e88.md` (1,888 source tests plus
+  fmt/clippy/check). Merge/live is blocked by unpublished D19, failed Policy
+  candidate acquisition in run `35473052923`, and the separate typed
+  validator dependency.
+- PR960 is open at head
+  `2c810f1b46ce8eddb5906fd4bdcc8ae23e78ed40` against base
+  `b5a4b4afaa6ca807927cacc03659b570a895dd5c`; Policy was in progress at
+  capture. PR962 is open at head
+  `94b43578cad9720e569780d18dc966370ed47c11` against the same base, with
+  required/Velnor-workflow hosted failures observed. Do not merge either
+  without the complete paginated preflight below.
+- PR961's DCO remediation uses a replacement branch from current main with
+  signed source units only; exclude redundant unsigned `857`, and never
+  force-push or override required checks.
+- Product validation uses the separately typed validator-only
+  product/publisher design owned by `/root/g0_inventory` and reviewed by
+  `/root/g0_reviewer`; publication precedes separate PR957 pin adoption. Do
+  not reuse a three-platform runtime or add platform-selection workarounds.
+- Secure CAS/sourcegraph and collector/checker binding are unresolved. The
+  `38345852` scan's five full-suite failures lack exact-parent baseline
+  attribution; record them as attribution-pending, not baseline failures.
+
 ## Regular checkpoint and push procedure
 
 Take a coherent checkpoint at each safe handoff, review disposition, or
@@ -350,6 +379,13 @@ canonical manifest and external ledger at a fresh snapshot, then fail
 stale/missing/queued/canceled/timed-out/skipped/failed required work. Fixtures
 must cover stale SHA, skipped job, missing row, wrong provider, failed child,
 and mismatched artifact.
+
+Current checker work remains incomplete: the public CLI candidate rejects
+CAS/sourcegraph handling, the shared-file-descriptor helper is under repair,
+and the published 245-test candidate still has partial review with nested-child
+and collector gaps. Collector credential-provider/repository-mapping security
+work also requires independent review. These are unresolved evidence/implementation
+findings, not checker or gate passes.
 
 The exact user G0 acceptance matrix is in
 [`SPEC.md`](./SPEC.md#exact-g0-acceptance-matrix). Before invoking the

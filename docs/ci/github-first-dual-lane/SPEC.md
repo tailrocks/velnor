@@ -106,6 +106,35 @@ conflicting ownership or independent review; do not create a branch per fix.
 An existing integration branch is valid when it combines already-approved
 sources under one recorded owner and review boundary.
 
+### Current candidate-bound checkpoint
+
+The following are external, revision-bound observations captured around
+`2026-09-19T22:47:37Z`; they are not source-tree attestations or gate results.
+
+- PR957 source `9e06` (revision `53`) has bounded source approval in
+  `G0/native-review/review-pr957-92387e88.md`: 1,888 source tests plus fmt,
+  clippy, and check passed. Merge/live use is not ready: D19 is unpublished,
+  Policy run `35473052923` reported candidate-acquisition failure, and the
+  separately typed validator dependency remains unresolved.
+- PR960 is open at head
+  `2c810f1b46ce8eddb5906fd4bdcc8ae23e78ed40` on base
+  `b5a4b4afaa6ca807927cacc03659b570a895dd5c`; its Policy check was observed
+  in progress and it has no merge or review decision. PR962 is open at head
+  `94b43578cad9720e569780d18dc966370ed47c11` on that same base; its observed
+  `Control / Required`, `ci-required`, and Velnor-workflow hosted checks
+  include failures. Neither PR is merge approval or gate evidence.
+- The signed replacement integration path is a new branch from current main
+  with signed source units only; redundant unsigned `857` is excluded, and
+  force/override is forbidden. PR961 remains open until DCO and complete
+  review/CI evidence are re-established.
+- Secure CAS/sourcegraph handling and collector/checker binding remain
+  unresolved. The external checker candidates report CAS/sourcegraph CLI
+  rejection, nested-child/collector gaps, and credential-provider/mapping
+  security work; no helper output can close G0.
+- Scan candidate `38345852` has five reported full-suite failures, but baseline
+  attribution is pending exact-parent reproduction. Do not label them
+  baseline failures or treat the candidate as approved.
+
 ## 2. Intended outcome and boundaries
 
 Deliver a reproducible recovery and migration in this order:
@@ -341,6 +370,14 @@ checksums/signing, consumer update, and install commands. At minimum verify
 Linux amd64/arm64 Debian and native Homebrew on the actual Mac; validate or
 explicitly leave unresolved Intel/other advertised targets. Do not advertise a
 target solely because cross-compilation produced an archive.
+
+The selected product boundary is a separately typed validator-only
+product/publisher contract. Its design owner is `/root/g0_inventory` and its
+independent reviewer is `/root/g0_reviewer`. Do not reuse a three-platform
+runtime for validation, add a platform-selection workaround, or merge runtime
+identity into application discovery. Publication must complete before the
+separate PR957 pin operation; neither design assignment nor source-only PR957
+approval authorizes publication, pin adoption, or a gate.
 
 The installed product must contain or explicitly depend on the compatible
 `velnorctl`, `velnor-runner`, and `velnor-workflow` roles. Every component emits
@@ -598,6 +635,13 @@ checker commit was rejected by independent review: its unit-test hygiene and
 must bind canonical scope, live snapshots, required work, run/provider identity,
 phase coverage, package/install applicability, strict canonical fields, and
 external reviewer attestation before any checker result can support a gate.
+
+Secure CAS/sourcegraph handling and collector binding remain unresolved. The
+current external checker work reports public-CLI rejection of CAS/sourcegraph,
+incomplete nested-child/collector evidence, and a shared-file-descriptor helper
+under repair. Collector credential-provider and repository-mapping hardening
+must complete and receive independent review; available helper output cannot
+stand in for checker-consumed, source-bound evidence or close G0.
 
 ### Exact G0 acceptance matrix
 
