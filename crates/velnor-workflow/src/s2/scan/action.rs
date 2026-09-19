@@ -199,9 +199,6 @@ fn discover_action_sources(files: &[String]) -> Vec<ActionSource> {
                     kind: ActionSourceKind::Metadata,
                 });
             }
-            if !is_bare_dockerfile_action_candidate(&root, files) {
-                return None;
-            }
             dockerfiles.get(&root).map(|path| ActionSource {
                 root,
                 path: path.clone(),
@@ -209,42 +206,6 @@ fn discover_action_sources(files: &[String]) -> Vec<ActionSource> {
             })
         })
         .collect()
-}
-
-/// A repository-level Dockerfile is also the normal project container input.
-/// Runner fallback applies when that tree is consumed as an action, but a
-/// project scanner has no caller context with which to distinguish the two.
-/// Keep the fallback for Dockerfile-only action trees while avoiding a second
-/// GitHub Action unit for a manifest-backed project (the Docker detector owns
-/// that project already).
-fn is_bare_dockerfile_action_candidate(root: &str, files: &[String]) -> bool {
-    files
-        .iter()
-        .filter(|file| parent_path(file) == root)
-        .all(|file| {
-            let name = file.rsplit('/').next().unwrap_or(file);
-            !is_project_manifest_name(name)
-        })
-}
-
-fn is_project_manifest_name(name: &str) -> bool {
-    matches!(
-        name,
-        "Cargo.toml"
-            | "Package.swift"
-            | "Gemfile"
-            | "Makefile"
-            | "go.mod"
-            | "mix.exs"
-            | "package.json"
-            | "composer.json"
-            | "pom.xml"
-            | "pyproject.toml"
-            | "setup.py"
-            | "build.gradle"
-            | "build.gradle.kts"
-    ) || name.ends_with(".csproj")
-        || name.ends_with(".sln")
 }
 
 fn inspect_action_source(
@@ -681,7 +642,7 @@ mod tests {
     )]
 
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use super::{shell_references, shell_tokens};
     use crate::s2::provider::ProviderId;
@@ -708,6 +669,16 @@ mod tests {
             "create action fixture",
         );
         root
+    }
+
+    fn pin_fixture_rust_toolchain(root: &Path) {
+        must(
+            fs::write(
+                root.join("rust-toolchain.toml"),
+                "[toolchain]\nchannel = \"1.98.1\"\n",
+            ),
+            "pin Rust toolchain for project-manifest fixture",
+        );
     }
 
     fn providers() -> std::collections::BTreeSet<ProviderId> {
@@ -939,6 +910,127 @@ mod tests {
             .unwrap_or_else(|| panic!("shadowed action.yaml must not be canonical"));
         assert!(
             error.to_string().contains("canonical action entrypoint"),
+            "{error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dockerfile_fallback_matches_runner_for_manifest_backed_local_actions() {
+        let root = fixture("manifest-backed-docker-actions");
+        pin_fixture_rust_toolchain(&root);
+        let manifest_fixtures = [
+            (
+                "cargo",
+                "Cargo.toml",
+                "[package]\nname = \"cargo_docker_action\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            (
+                "node",
+                "package.json",
+                "{\"name\":\"node-docker-action\",\"version\":\"1.0.0\",\"scripts\":{}}\n",
+            ),
+            ("make", "Makefile", "all:\n\t@true\n"),
+        ];
+        let mut steps = String::new();
+        for (name, _, _) in &manifest_fixtures {
+            steps.push_str("    - uses: ./actions/");
+            steps.push_str(name);
+            steps.push('\n');
+        }
+        must(
+            fs::write(
+                root.join("action.yml"),
+                format!("runs:\n  using: composite\n  steps:\n{steps}"),
+            ),
+            "write parent action metadata",
+        );
+
+        for (name, manifest, contents) in manifest_fixtures {
+            let action_root = root.join("actions").join(name);
+            must(
+                fs::create_dir_all(&action_root),
+                "create manifest-backed local action",
+            );
+            must(
+                fs::write(action_root.join(manifest), contents),
+                "write local action project manifest",
+            );
+            must(
+                fs::write(action_root.join("Dockerfile"), "FROM scratch\n"),
+                "write local action Dockerfile",
+            );
+        }
+
+        let shape = must(
+            super::super::scan_shape(&root, &providers(), "main", &[]),
+            "scan manifest-backed Dockerfile actions",
+        );
+        let parent_action = shape
+            .units
+            .iter()
+            .find(|unit| unit.root == "." && unit.kind == crate::s2::UnitKind::GithubAction)
+            .unwrap_or_else(|| panic!("parent composite action missing"));
+        for (name, _, _) in manifest_fixtures {
+            let dockerfile = format!("actions/{name}/Dockerfile");
+            let local_action = shape
+                .units
+                .iter()
+                .find(|unit| {
+                    unit.root == format!("actions/{name}")
+                        && unit.kind == crate::s2::UnitKind::GithubAction
+                })
+                .unwrap_or_else(|| panic!("manifest-backed Dockerfile action missing: {name}"));
+            assert!(local_action.capabilities.docker);
+            assert!(local_action.pr_commands.iter().any(|command| command
+                == &format!("velnor-workflow verify-action --path '{dockerfile}'")));
+            assert!(parent_action
+                .pr_commands
+                .iter()
+                .any(|command| command == &format!("test -f '{dockerfile}'")));
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn nested_invalid_metadata_still_fails_with_dockerfile_and_project_manifest() {
+        let root = fixture("nested-invalid-metadata");
+        pin_fixture_rust_toolchain(&root);
+        let nested = root.join("nested");
+        must(fs::create_dir_all(&nested), "create nested action");
+        must(
+            fs::write(
+                root.join("action.yml"),
+                "runs:\n  using: composite\n  steps:\n    - uses: ./nested\n",
+            ),
+            "write parent action metadata",
+        );
+        must(
+            fs::write(
+                nested.join("action.yml"),
+                "runs:\n  using: unsupported\n  main: missing\n",
+            ),
+            "write invalid nested action metadata",
+        );
+        must(
+            fs::write(
+                nested.join("Cargo.toml"),
+                "[package]\nname = \"nested_action\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            "write nested project manifest",
+        );
+        must(
+            fs::write(nested.join("Dockerfile"), "FROM scratch\n"),
+            "write nested Dockerfile",
+        );
+
+        let error = super::super::scan_shape(&root, &providers(), "main", &[])
+            .err()
+            .unwrap_or_else(|| panic!("invalid nested action metadata must fail the scan"));
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported GitHub Action runtime `unsupported`"),
             "{error}"
         );
         let _ = fs::remove_dir_all(root);
