@@ -41,7 +41,7 @@ pub(crate) fn scan_shape(
     default_branch: &str,
     exclude: &[String],
 ) -> Result<RepositoryShape, GeneratorError> {
-    let files = file_walk::repository_files(root, exclude)?;
+    let mut files = file_walk::repository_files(root, exclude)?;
     let file_set: BTreeSet<String> = files.iter().cloned().collect();
     let context = ScanContext {
         root,
@@ -68,13 +68,16 @@ pub(crate) fn scan_shape(
     signals::detect(&context, &mut shape);
     gradle::detect(&context, &mut shape)?;
     node::detect(&context, &mut shape)?;
-    action::detect(&context, &mut shape)?;
+    let action_reference_files = action::detect(&context, &mut shape, exclude)?;
     swift::detect(&context, &mut shape);
     opentofu::detect(&context, &mut shape);
     docker::detect(&context, &mut shape);
     homebrew::detect(&context, &mut shape);
     docs::detect(&context, &mut shape);
     shape.finalize();
+    files.extend(action_reference_files);
+    files.sort();
+    files.dedup();
     shape.files = files;
     Ok(shape)
 }

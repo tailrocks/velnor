@@ -6,7 +6,7 @@
 //! Repository-owned consumer fixtures are attached later through the generic
 //! `github-action-fixtures` unit contract.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 
 use serde::Deserialize;
@@ -14,6 +14,9 @@ use serde::Deserialize;
 use super::file_walk::is_test_support_path;
 use super::{unit, RepositoryShape, ScanContext};
 use crate::s2::{is_full_revision, parent_path, shell_quote, UnitKind};
+
+const GITHUB_ACTION_PATH_MARKER: &str = "__VELNOR_GITHUB_ACTION_PATH__";
+const GITHUB_WORKSPACE_MARKER: &str = "__VELNOR_GITHUB_WORKSPACE__";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ActionSourceKind {
@@ -26,6 +29,29 @@ struct ActionSource {
     root: String,
     path: String,
     kind: ActionSourceKind,
+}
+
+#[derive(Default)]
+struct ActionReferences {
+    files: BTreeSet<String>,
+    actions: BTreeSet<String>,
+}
+
+struct InspectedAction {
+    source: ActionSource,
+    metadata: Option<ActionMetadata>,
+    references: Vec<String>,
+}
+
+struct ActionAnalysis {
+    actions: Vec<InspectedAction>,
+    supplemental_files: Vec<String>,
+}
+
+struct MetadataActionSources {
+    preferred_metadata: BTreeMap<String, String>,
+    alternate_metadata: BTreeMap<String, String>,
+    sources: BTreeMap<String, ActionSource>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,19 +111,23 @@ struct ActionStep {
     env: serde_yaml::Value,
 }
 
-/// Detect every tracked action metadata file outside test support trees.
+/// Detect tracked action metadata and local Dockerfile actions selected by a
+/// workflow or another local action.
 pub(crate) fn detect(
     context: &ScanContext<'_>,
     shape: &mut RepositoryShape,
-) -> Result<(), crate::s2::GeneratorError> {
-    for source in discover_action_sources(context.files) {
-        let (metadata, references) = inspect_action_source(&source, context.root, context.files)?;
+    exclude: &[String],
+) -> Result<Vec<String>, crate::s2::GeneratorError> {
+    let analysis = analyze_actions(context.root, context.files, exclude)?;
+    for action_details in analysis.actions {
+        let source = action_details.source;
         let mut commands = vec![format!(
             "velnor-workflow verify-action --path {}",
             shell_quote(&source.path)
         )];
         commands.extend(
-            references
+            action_details
+                .references
                 .iter()
                 .map(|path| format!("test -f {}", shell_quote(path))),
         );
@@ -113,15 +143,15 @@ pub(crate) fn detect(
             None,
         );
         if source.kind == ActionSourceKind::Dockerfile
-            || metadata
-                .as_ref()
+            || action_details
+                .metadata
                 .is_some_and(|metadata| metadata.runs.using.eq_ignore_ascii_case("docker"))
         {
             action.capabilities.docker = true;
         }
         shape.units.push(action);
     }
-    Ok(())
+    Ok(analysis.supplemental_files)
 }
 
 /// Re-validate one action metadata file at execution time. Generation proves
@@ -131,37 +161,136 @@ pub(crate) fn verify_action(
     root: &Path,
     source_path: &str,
 ) -> Result<(), crate::s2::GeneratorError> {
-    let source = Path::new(source_path);
-    if source.is_absolute()
-        || source
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
+    if !is_safe_repository_file_path(source_path) {
         return Err(crate::s2::GeneratorError::usage(format!(
             "GitHub Action source path `{source_path}` must be repository-relative"
         )));
     }
     let files = super::file_walk::repository_files(root, &[])?;
-    let Some(canonical) = discover_action_sources(&files)
-        .into_iter()
-        .find(|candidate| candidate.path == source_path)
-    else {
+    let analysis = analyze_actions(root, &files, &[])?;
+    if !analysis
+        .actions
+        .iter()
+        .any(|candidate| candidate.source.path == source_path)
+    {
         return Err(crate::s2::GeneratorError::usage(format!(
             "GitHub Action source `{source_path}` is not the canonical action entrypoint"
         )));
-    };
-    inspect_action_source(&canonical, root, &files).map(|_| ())
+    }
+    Ok(())
 }
 
-/// Discover the entrypoint that actions/runner would prepare for every action
-/// directory.  `action.yml` wins over `action.yaml`; a bare Dockerfile is the
-/// fallback only when neither metadata file exists.  Keeping this decision in
-/// one function prevents generation and runtime verification from auditing
-/// different files.
-fn discover_action_sources(files: &[String]) -> Vec<ActionSource> {
+/// Analyze actions selected by repository metadata or an actual local `uses`
+/// reference. Metadata actions retain repository-wide discovery; Dockerfile
+/// fallback is added only for referenced action directories.
+fn analyze_actions(
+    root: &Path,
+    files: &[String],
+    exclude: &[String],
+) -> Result<ActionAnalysis, crate::s2::GeneratorError> {
+    let workflows = super::file_walk::workflow_reference_files(root, exclude)?;
+    let workflow_roots = workflow_action_roots(root, &workflows)?;
+    let mut action_files = files.iter().cloned().collect::<BTreeSet<_>>();
+    let mut supplemental_files = BTreeSet::new();
+    let MetadataActionSources {
+        preferred_metadata,
+        alternate_metadata,
+        mut sources,
+    } = metadata_action_sources(&action_files)?;
+
+    let mut queue = VecDeque::new();
+    for action_root in workflow_roots {
+        queue.push_back(action_root);
+    }
+    for action_root in sources.keys() {
+        queue.push_back(action_root.clone());
+    }
+
+    let mut processed = BTreeSet::new();
+    let mut inspected = BTreeMap::<String, InspectedAction>::new();
+    while let Some(action_root) = queue.pop_front() {
+        if !processed.insert(action_root.clone()) {
+            continue;
+        }
+        ensure_selected_action_files(
+            root,
+            &action_root,
+            &mut action_files,
+            &mut supplemental_files,
+            exclude,
+        )?;
+        let source = action_source_in_root(
+            &action_root,
+            &action_files,
+            &preferred_metadata,
+            &alternate_metadata,
+            true,
+        )
+        .ok_or_else(|| {
+            crate::s2::GeneratorError::usage(format!(
+                "local GitHub Action `{action_root}` has no action metadata or Dockerfile"
+            ))
+        })?;
+        sources.insert(action_root.clone(), source.clone());
+
+        let (metadata, action_references) = match source.kind {
+            ActionSourceKind::Dockerfile => (None, ActionReferences::default()),
+            ActionSourceKind::Metadata => {
+                let metadata = parse_metadata(root, &source.path)?;
+                let references = local_references(&metadata.runs, &source.root, &action_files)?;
+                (Some(metadata), references)
+            }
+        };
+        let mut watched = action_references.files;
+        for referenced_root in action_references.actions {
+            ensure_selected_action_files(
+                root,
+                &referenced_root,
+                &mut action_files,
+                &mut supplemental_files,
+                exclude,
+            )?;
+            let referenced_source = action_source_in_root(
+                &referenced_root,
+                &action_files,
+                &preferred_metadata,
+                &alternate_metadata,
+                true,
+            )
+            .ok_or_else(|| {
+                crate::s2::GeneratorError::usage(format!(
+                    "GitHub composite local action has no action metadata or Dockerfile under `{referenced_root}`"
+                ))
+            })?;
+            watched.insert(referenced_source.path.clone());
+            if !sources.contains_key(&referenced_root) {
+                sources.insert(referenced_root.clone(), referenced_source);
+                queue.push_back(referenced_root);
+            } else if !processed.contains(&referenced_root) {
+                queue.push_back(referenced_root);
+            }
+        }
+        inspected.insert(
+            action_root,
+            InspectedAction {
+                source,
+                metadata,
+                references: watched.into_iter().collect(),
+            },
+        );
+    }
+
+    Ok(ActionAnalysis {
+        actions: inspected.into_values().collect(),
+        supplemental_files: supplemental_files.into_iter().collect(),
+    })
+}
+
+fn metadata_action_sources(
+    files: &BTreeSet<String>,
+) -> Result<MetadataActionSources, crate::s2::GeneratorError> {
     let mut preferred_metadata = BTreeMap::new();
     let mut alternate_metadata = BTreeMap::new();
-    let mut dockerfiles = BTreeMap::new();
     for file in files.iter().filter(|file| !is_test_support_path(file)) {
         let root = parent_path(file);
         match file.rsplit('/').next() {
@@ -171,56 +300,168 @@ fn discover_action_sources(files: &[String]) -> Vec<ActionSource> {
             Some("action.yaml") => {
                 alternate_metadata.insert(root, file.clone());
             }
-            Some("Dockerfile") => {
-                dockerfiles.insert(root, file.clone());
-            }
-            Some("dockerfile") => {
-                dockerfiles.entry(root).or_insert_with(|| file.clone());
-            }
             _ => {}
         }
     }
-    let roots = preferred_metadata
+    let mut sources = BTreeMap::<String, ActionSource>::new();
+    let metadata_roots = preferred_metadata
         .keys()
         .chain(alternate_metadata.keys())
-        .chain(dockerfiles.keys())
         .cloned()
         .collect::<BTreeSet<_>>();
-    roots
-        .into_iter()
-        .filter_map(|root| {
-            if let Some(path) = preferred_metadata
-                .get(&root)
-                .or_else(|| alternate_metadata.get(&root))
-            {
-                return Some(ActionSource {
-                    root,
-                    path: path.clone(),
-                    kind: ActionSourceKind::Metadata,
-                });
-            }
-            dockerfiles.get(&root).map(|path| ActionSource {
-                root,
-                path: path.clone(),
-                kind: ActionSourceKind::Dockerfile,
-            })
-        })
-        .collect()
+    for action_root in metadata_roots {
+        let source = action_source_in_root(
+            &action_root,
+            files,
+            &preferred_metadata,
+            &alternate_metadata,
+            false,
+        )
+        .ok_or_else(|| {
+            crate::s2::GeneratorError::usage(format!(
+                "GitHub Action metadata root `{action_root}` has no canonical action entrypoint"
+            ))
+        })?;
+        sources.insert(action_root, source);
+    }
+    Ok(MetadataActionSources {
+        preferred_metadata,
+        alternate_metadata,
+        sources,
+    })
 }
 
-fn inspect_action_source(
-    source: &ActionSource,
-    root: &Path,
-    files: &[String],
-) -> Result<(Option<ActionMetadata>, Vec<String>), crate::s2::GeneratorError> {
-    match source.kind {
-        ActionSourceKind::Dockerfile => Ok((None, Vec::new())),
-        ActionSourceKind::Metadata => {
-            let metadata = parse_metadata(root, &source.path)?;
-            let references = local_references(&metadata.runs, &source.root, files)?;
-            Ok((Some(metadata), references))
+fn action_source_in_root(
+    action_root: &str,
+    files: &BTreeSet<String>,
+    preferred_metadata: &BTreeMap<String, String>,
+    alternate_metadata: &BTreeMap<String, String>,
+    allow_dockerfile: bool,
+) -> Option<ActionSource> {
+    if let Some(path) = preferred_metadata
+        .get(action_root)
+        .or_else(|| alternate_metadata.get(action_root))
+    {
+        return Some(ActionSource {
+            root: action_root.to_owned(),
+            path: path.clone(),
+            kind: ActionSourceKind::Metadata,
+        });
+    }
+    if files.contains(&super::file_walk::join_repo_path(action_root, "action.yml")) {
+        return Some(ActionSource {
+            root: action_root.to_owned(),
+            path: super::file_walk::join_repo_path(action_root, "action.yml"),
+            kind: ActionSourceKind::Metadata,
+        });
+    }
+    if files.contains(&super::file_walk::join_repo_path(
+        action_root,
+        "action.yaml",
+    )) {
+        return Some(ActionSource {
+            root: action_root.to_owned(),
+            path: super::file_walk::join_repo_path(action_root, "action.yaml"),
+            kind: ActionSourceKind::Metadata,
+        });
+    }
+    if !allow_dockerfile {
+        return None;
+    }
+    for name in ["Dockerfile", "dockerfile"] {
+        let path = super::file_walk::join_repo_path(action_root, name);
+        if files.contains(&path) {
+            return Some(ActionSource {
+                root: action_root.to_owned(),
+                path,
+                kind: ActionSourceKind::Dockerfile,
+            });
         }
     }
+    None
+}
+
+fn ensure_selected_action_files(
+    root: &Path,
+    action_root: &str,
+    files: &mut BTreeSet<String>,
+    supplemental_files: &mut BTreeSet<String>,
+    exclude: &[String],
+) -> Result<(), crate::s2::GeneratorError> {
+    let excludes = super::file_walk::exclude_set(exclude)?;
+    for name in ["action.yml", "action.yaml", "Dockerfile", "dockerfile"] {
+        let relative_path = super::file_walk::join_repo_path(action_root, name);
+        let path = root.join(&relative_path);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(crate::s2::GeneratorError::usage(format!(
+                    "local GitHub Action `{action_root}` has a symlink entrypoint `{name}`"
+                )));
+            }
+            Ok(metadata) if metadata.is_file() => {
+                if excludes.is_match(&relative_path) {
+                    return Err(crate::s2::GeneratorError::usage(format!(
+                        "canonical GitHub Action entrypoint `{relative_path}` is excluded from the scan"
+                    )));
+                }
+                break;
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(crate::s2::GeneratorError::io(
+                    "inspect GitHub Action entrypoint",
+                    &path,
+                    &error,
+                ));
+            }
+        }
+    }
+    let selected = super::file_walk::selected_action_files(root, action_root, exclude)?;
+    for file in selected {
+        if !files.contains(&file) {
+            supplemental_files.insert(file.clone());
+            files.insert(file);
+        }
+    }
+    Ok(())
+}
+
+fn workflow_action_roots(
+    root: &Path,
+    workflow_files: &[String],
+) -> Result<BTreeSet<String>, crate::s2::GeneratorError> {
+    let mut roots = BTreeSet::new();
+    for workflow_file in workflow_files {
+        let path = root.join(workflow_file);
+        let contents = std::fs::read_to_string(&path).map_err(|error| {
+            crate::s2::GeneratorError::io("read workflow reference context", &path, &error)
+        })?;
+        let workflow: serde_yaml::Value = serde_yaml::from_str(&contents).map_err(|error| {
+            crate::s2::GeneratorError::usage(format!(
+                "parse workflow reference context {}: {error}",
+                path.display()
+            ))
+        })?;
+        let Some(jobs) = workflow.get("jobs").and_then(serde_yaml::Value::as_mapping) else {
+            continue;
+        };
+        for (_, job) in jobs {
+            let Some(steps) = job.get("steps").and_then(serde_yaml::Value::as_sequence) else {
+                // `jobs.<id>.uses` names a reusable workflow, not an action.
+                continue;
+            };
+            for step in steps {
+                let Some(uses) = step.get("uses").and_then(serde_yaml::Value::as_str) else {
+                    continue;
+                };
+                if looks_like_local_action_reference(uses) {
+                    roots.insert(normalize_local_action_directory(uses)?);
+                }
+            }
+        }
+    }
+    Ok(roots)
 }
 
 fn parse_metadata(
@@ -257,69 +498,22 @@ fn validate_mapping(
 fn local_references(
     runs: &ActionRuns,
     action_root: &str,
-    files: &[String],
-) -> Result<Vec<String>, crate::s2::GeneratorError> {
+    files: &BTreeSet<String>,
+) -> Result<ActionReferences, crate::s2::GeneratorError> {
     let using = runs.using.trim().to_ascii_lowercase();
-    let mut references = BTreeSet::new();
+    let mut references = ActionReferences::default();
     match using.as_str() {
-        "composite" => {
-            if runs.steps.is_empty() {
-                return Err(crate::s2::GeneratorError::usage(
-                    "GitHub composite action metadata must declare at least one runs.steps entry",
-                ));
-            }
-            for step in &runs.steps {
-                validate_composite_step(step)?;
-                if step.run.is_none() && step.uses.is_none() {
-                    return Err(crate::s2::GeneratorError::usage(
-                        "GitHub composite action step must declare run or uses",
-                    ));
-                }
-                if step.run.is_some() && step.uses.is_some() {
-                    return Err(crate::s2::GeneratorError::usage(
-                        "GitHub composite action step must not declare both run and uses",
-                    ));
-                }
-                if let Some(run) = &step.run {
-                    if step.shell.as_deref().is_none_or(str::is_empty) {
-                        return Err(crate::s2::GeneratorError::usage(
-                            "GitHub composite action run step must declare shell",
-                        ));
-                    }
-                    let run = resolve_action_path_expression(run);
-                    for reference in shell_references(&run) {
-                        add_local_reference(&mut references, &reference, action_root, files)?;
-                    }
-                }
-                if let Some(uses) = &step.uses
-                    && uses.trim().is_empty()
-                {
-                    return Err(crate::s2::GeneratorError::usage(
-                        "GitHub composite action uses value must not be empty",
-                    ));
-                }
-                if let Some(uses) = &step.uses {
-                    let uses = uses.trim();
-                    if uses.starts_with('.') {
-                        add_local_action_reference(&mut references, uses, action_root, files)?;
-                    } else if !is_full_sha_action_reference(uses) {
-                        return Err(crate::s2::GeneratorError::usage(format!(
-                            "GitHub composite external action `{uses}` must use a full 40-character SHA pin"
-                        )));
-                    }
-                }
-            }
-        }
+        "composite" => return composite_action_references(runs, action_root, files),
         "node12" | "node16" | "node20" | "node24" => {
             let main = runs.main.as_deref().ok_or_else(|| {
                 crate::s2::GeneratorError::usage(format!(
                     "GitHub JavaScript action ({using}) metadata must declare runs.main"
                 ))
             })?;
-            add_local_reference(&mut references, main, action_root, files)?;
+            add_local_reference(&mut references.files, main, action_root, files)?;
             for reference in [&runs.pre, &runs.post] {
                 if let Some(reference) = reference.as_deref() {
-                    add_local_reference(&mut references, reference, action_root, files)?;
+                    add_local_reference(&mut references.files, reference, action_root, files)?;
                 }
             }
         }
@@ -335,7 +529,7 @@ fn local_references(
                 ));
             }
             if is_dockerfile_reference(image) {
-                add_local_reference(&mut references, image, action_root, files)?;
+                add_local_reference(&mut references.files, image, action_root, files)?;
             }
             // Docker action entrypoints are resolved inside the image. They
             // are not host files and must not be mistaken for local scripts.
@@ -346,7 +540,147 @@ fn local_references(
             )));
         }
     }
-    Ok(references.into_iter().collect())
+    Ok(references)
+}
+
+fn composite_action_references(
+    runs: &ActionRuns,
+    action_root: &str,
+    files: &BTreeSet<String>,
+) -> Result<ActionReferences, crate::s2::GeneratorError> {
+    let mut references = ActionReferences::default();
+    if runs.steps.is_empty() {
+        return Err(crate::s2::GeneratorError::usage(
+            "GitHub composite action metadata must declare at least one runs.steps entry",
+        ));
+    }
+    for step in &runs.steps {
+        validate_composite_step(step)?;
+        if step.run.is_none() && step.uses.is_none() {
+            return Err(crate::s2::GeneratorError::usage(
+                "GitHub composite action step must declare run or uses",
+            ));
+        }
+        if step.run.is_some() && step.uses.is_some() {
+            return Err(crate::s2::GeneratorError::usage(
+                "GitHub composite action step must not declare both run and uses",
+            ));
+        }
+        if let Some(run) = &step.run {
+            if step.shell.as_deref().is_none_or(str::is_empty) {
+                return Err(crate::s2::GeneratorError::usage(
+                    "GitHub composite action run step must declare shell",
+                ));
+            }
+            let run = resolve_action_path_expression(run);
+            let shell_references = shell_references(&run);
+            if !shell_references.is_empty() {
+                let working_directory =
+                    composite_working_directory(step.working_directory.as_deref(), action_root)?;
+                for reference in shell_references {
+                    add_composite_run_reference(
+                        &mut references.files,
+                        &reference,
+                        action_root,
+                        &working_directory,
+                        files,
+                    )?;
+                }
+            }
+        }
+        if let Some(uses) = &step.uses
+            && uses.trim().is_empty()
+        {
+            return Err(crate::s2::GeneratorError::usage(
+                "GitHub composite action uses value must not be empty",
+            ));
+        }
+        if let Some(uses) = &step.uses {
+            let uses = uses.trim();
+            if looks_like_local_action_reference(uses) {
+                references
+                    .actions
+                    .insert(normalize_local_action_directory(uses)?);
+            } else if !is_full_sha_action_reference(uses) {
+                // Runner accepts tags here; Velnor applies the repository-wide
+                // full-SHA action pin policy.
+                return Err(crate::s2::GeneratorError::usage(format!(
+                    "GitHub composite external action `{uses}` must use a full 40-character SHA pin"
+                )));
+            }
+        }
+    }
+    Ok(references)
+}
+
+fn looks_like_local_action_reference(value: &str) -> bool {
+    value.starts_with('.')
+        || value.starts_with('/')
+        || value.starts_with('\\')
+        || value.starts_with("$/")
+        || value.starts_with('$')
+        || value.as_bytes().get(1) == Some(&b':')
+            && value
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphabetic)
+}
+
+fn normalize_local_action_directory(reference: &str) -> Result<String, crate::s2::GeneratorError> {
+    let reference = reference.trim();
+    let normalized_reference = reference.to_owned();
+    let (path, allows_workspace_root) = if let Some(path) = normalized_reference.strip_prefix("./")
+    {
+        (path, true)
+    } else if let Some(path) = reference.strip_prefix("$/") {
+        if path.contains('@') {
+            return Err(crate::s2::GeneratorError::usage(format!(
+                "GitHub self-repository action `{reference}` must be a nonempty workspace-relative path without an `@ref` suffix"
+            )));
+        }
+        (path, false)
+    } else {
+        return Err(crate::s2::GeneratorError::usage(format!(
+            "GitHub composite local action `{reference}` must be a workspace-relative path"
+        )));
+    };
+    if path.is_empty() {
+        if allows_workspace_root {
+            return Ok(".".to_owned());
+        }
+        return Err(crate::s2::GeneratorError::usage(format!(
+            "GitHub composite local action `{reference}` must name a workspace-relative path"
+        )));
+    }
+    if path.contains('\\')
+        || path.contains('$')
+        || normalized_reference.contains("{{")
+        || normalized_reference.contains("}}")
+        || path.starts_with('/')
+        || path.split('/').next().is_some_and(is_windows_drive_prefix)
+        || reference.chars().any(char::is_control)
+    {
+        return Err(crate::s2::GeneratorError::usage(format!(
+            "GitHub composite local action `{reference}` must be a static workspace-relative path"
+        )));
+    }
+    let mut components = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                return Err(crate::s2::GeneratorError::usage(format!(
+                    "GitHub composite local action `{reference}` escapes the workspace"
+                )));
+            }
+            value => components.push(value),
+        }
+    }
+    if components.is_empty() {
+        Ok(".".to_owned())
+    } else {
+        Ok(components.join("/"))
+    }
 }
 
 fn is_full_sha_action_reference(value: &str) -> bool {
@@ -361,7 +695,10 @@ fn is_full_sha_action_reference(value: &str) -> bool {
 /// a host-side build source.
 fn is_dockerfile_reference(value: &str) -> bool {
     let value = value.trim();
-    if value.starts_with("docker://") {
+    if value
+        .get(.."docker://".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("docker://"))
+    {
         return false;
     }
     let basename = value.rsplit('/').next().unwrap_or(value);
@@ -371,10 +708,8 @@ fn is_dockerfile_reference(value: &str) -> bool {
         || basename.ends_with("dockerfile")
 }
 
-/// Resolve the one host-local expression actions/runner makes available to a
-/// composite action.  Other expressions stay opaque and are rejected if they
-/// would be used as a local entrypoint, so dynamic paths cannot become an
-/// accidental host-file dependency.
+/// Preserve Runner's action-path context while making its expression a single
+/// shell token. Other expressions stay opaque and fail when used as file paths.
 fn resolve_action_path_expression(value: &str) -> String {
     let mut resolved = String::with_capacity(value.len());
     let mut cursor = 0;
@@ -389,7 +724,9 @@ fn resolve_action_path_expression(value: &str) -> String {
         let end = expression_start + relative_end + 2;
         let expression = value[expression_start..end - 2].trim();
         if expression.eq_ignore_ascii_case("github.action_path") {
-            resolved.push('.');
+            resolved.push_str(GITHUB_ACTION_PATH_MARKER);
+        } else if expression.eq_ignore_ascii_case("github.workspace") {
+            resolved.push_str(GITHUB_WORKSPACE_MARKER);
         } else {
             resolved.push_str(&value[start..end]);
         }
@@ -397,6 +734,110 @@ fn resolve_action_path_expression(value: &str) -> String {
     }
     resolved.push_str(&value[cursor..]);
     resolved
+}
+
+fn composite_working_directory(
+    working_directory: Option<&str>,
+    action_root: &str,
+) -> Result<String, crate::s2::GeneratorError> {
+    let Some(working_directory) = working_directory else {
+        return Ok(".".to_owned());
+    };
+    let working_directory = resolve_action_path_expression(working_directory);
+    if let Some(suffix) = working_directory.strip_prefix(GITHUB_ACTION_PATH_MARKER) {
+        if working_directory.matches(GITHUB_ACTION_PATH_MARKER).count() != 1
+            || working_directory.contains(GITHUB_WORKSPACE_MARKER)
+        {
+            return Err(crate::s2::GeneratorError::usage(
+                "GitHub Action `working-directory` must be a static workspace-relative path",
+            ));
+        }
+        return append_static_directory(action_root, suffix);
+    }
+    if let Some(suffix) = working_directory.strip_prefix(GITHUB_WORKSPACE_MARKER) {
+        if working_directory.matches(GITHUB_WORKSPACE_MARKER).count() != 1
+            || working_directory.contains(GITHUB_ACTION_PATH_MARKER)
+        {
+            return Err(crate::s2::GeneratorError::usage(
+                "GitHub Action `working-directory` must be a static workspace-relative path",
+            ));
+        }
+        return append_static_directory(".", suffix);
+    }
+    if working_directory.contains(GITHUB_ACTION_PATH_MARKER)
+        || working_directory.contains(GITHUB_WORKSPACE_MARKER)
+    {
+        return Err(crate::s2::GeneratorError::usage(
+            "GitHub Action `working-directory` must be a static workspace-relative path",
+        ));
+    }
+    let reference = if working_directory.starts_with("./") || working_directory.starts_with(".\\") {
+        working_directory
+    } else {
+        format!("./{working_directory}")
+    };
+    normalize_local_action_directory(&reference)
+}
+
+fn add_composite_run_reference(
+    references: &mut BTreeSet<String>,
+    reference: &str,
+    action_root: &str,
+    working_directory: &str,
+    files: &BTreeSet<String>,
+) -> Result<(), crate::s2::GeneratorError> {
+    let (base, path) = if let Some(suffix) = reference.strip_prefix(GITHUB_ACTION_PATH_MARKER) {
+        if reference.matches(GITHUB_ACTION_PATH_MARKER).count() != 1
+            || reference.contains(GITHUB_WORKSPACE_MARKER)
+        {
+            return Err(crate::s2::GeneratorError::usage(format!(
+                "GitHub Action local entrypoint `{reference}` must be a static relative path"
+            )));
+        }
+        (action_root, expression_relative_path(suffix, reference)?)
+    } else if let Some(suffix) = reference.strip_prefix(GITHUB_WORKSPACE_MARKER) {
+        if reference.matches(GITHUB_WORKSPACE_MARKER).count() != 1
+            || reference.contains(GITHUB_ACTION_PATH_MARKER)
+        {
+            return Err(crate::s2::GeneratorError::usage(format!(
+                "GitHub Action local entrypoint `{reference}` must be a static relative path"
+            )));
+        }
+        (".", expression_relative_path(suffix, reference)?)
+    } else if reference.contains(GITHUB_ACTION_PATH_MARKER)
+        || reference.contains(GITHUB_WORKSPACE_MARKER)
+    {
+        return Err(crate::s2::GeneratorError::usage(format!(
+            "GitHub Action local entrypoint `{reference}` must be a static relative path"
+        )));
+    } else {
+        (working_directory, reference.to_owned())
+    };
+    add_local_reference(references, &path, base, files)
+}
+
+fn expression_relative_path(
+    suffix: &str,
+    reference: &str,
+) -> Result<String, crate::s2::GeneratorError> {
+    let Some(suffix) = suffix.strip_prefix('/') else {
+        return Err(crate::s2::GeneratorError::usage(format!(
+            "GitHub Action local entrypoint `{reference}` must be a static relative path"
+        )));
+    };
+    Ok(format!("./{suffix}"))
+}
+
+fn append_static_directory(base: &str, suffix: &str) -> Result<String, crate::s2::GeneratorError> {
+    if suffix.is_empty() {
+        return Ok(base.to_owned());
+    }
+    let Some(suffix) = suffix.strip_prefix('/') else {
+        return Err(crate::s2::GeneratorError::usage(
+            "GitHub Action `working-directory` must be a static workspace-relative path",
+        ));
+    };
+    normalize_local_action_directory(&format!("./{base}/{suffix}"))
 }
 
 fn validate_composite_step(step: &ActionStep) -> Result<(), crate::s2::GeneratorError> {
@@ -433,7 +874,7 @@ fn add_local_reference(
     references: &mut BTreeSet<String>,
     reference: &str,
     action_root: &str,
-    files: &[String],
+    files: &BTreeSet<String>,
 ) -> Result<(), crate::s2::GeneratorError> {
     let reference = reference.trim().trim_matches(['"', '\'']);
     if reference.is_empty()
@@ -446,26 +887,18 @@ fn add_local_reference(
             "GitHub Action local entrypoint `{reference}` must be a static relative path"
         )));
     }
-    let path = Path::new(reference);
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
+    if !is_safe_relative_reference(reference) {
         return Err(crate::s2::GeneratorError::usage(format!(
             "GitHub Action local entrypoint `{reference}` escapes its action directory"
         )));
     }
-    let normalized = path
-        .components()
-        .filter_map(|component| match component {
-            std::path::Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
-            _ => None,
-        })
+    let normalized = reference
+        .split('/')
+        .filter(|component| !component.is_empty() && *component != ".")
         .collect::<Vec<_>>()
         .join("/");
     let repository_path = super::file_walk::join_repo_path(action_root, &normalized);
-    if !files.iter().any(|file| file == &repository_path) {
+    if !files.contains(&repository_path) {
         return Err(crate::s2::GeneratorError::usage(format!(
             "GitHub Action entrypoint `{reference}` resolves to missing file `{repository_path}`"
         )));
@@ -474,47 +907,32 @@ fn add_local_reference(
     Ok(())
 }
 
-fn add_local_action_reference(
-    references: &mut BTreeSet<String>,
-    reference: &str,
-    action_root: &str,
-    files: &[String],
-) -> Result<(), crate::s2::GeneratorError> {
-    let reference = reference.trim();
-    if reference.contains('$') || reference.contains("${{") {
-        return Err(crate::s2::GeneratorError::usage(format!(
-            "GitHub composite local action `{reference}` must be a static relative path"
-        )));
-    }
-    let path = Path::new(reference.trim_start_matches("./"));
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
-        return Err(crate::s2::GeneratorError::usage(format!(
-            "GitHub composite local action `{reference}` escapes its action directory"
-        )));
-    }
-    let normalized = path
-        .components()
-        .filter_map(|component| match component {
-            std::path::Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("/");
-    let directory = super::file_walk::join_repo_path(action_root, &normalized);
-    if let Some(source) = discover_action_sources(files)
-        .into_iter()
-        .find(|source| source.root == directory)
-    {
-        references.insert(source.path);
-        return Ok(());
-    }
-    Err(crate::s2::GeneratorError::usage(format!(
-        "GitHub composite local action `{reference}` has no action metadata or Dockerfile under `{directory}`"
-    )))
+fn is_safe_relative_reference(reference: &str) -> bool {
+    !reference.is_empty()
+        && !reference.starts_with('/')
+        && !reference.starts_with('\\')
+        && !reference.contains('\\')
+        && !reference.chars().any(char::is_control)
+        && !reference.contains('$')
+        && !reference.contains("{{")
+        && !reference.contains("}}")
+        && !reference.split('/').any(|component| component == "..")
+        && !reference
+            .split('/')
+            .next()
+            .is_some_and(is_windows_drive_prefix)
+}
+
+fn is_safe_repository_file_path(path: &str) -> bool {
+    is_safe_relative_reference(path) && !path.split('/').any(str::is_empty)
+}
+
+fn is_windows_drive_prefix(value: &str) -> bool {
+    value.as_bytes().get(1) == Some(&b':')
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphabetic)
 }
 
 fn shell_references(command: &str) -> Vec<String> {
@@ -643,6 +1061,7 @@ mod tests {
 
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
 
     use super::{shell_references, shell_tokens};
     use crate::s2::provider::ProviderId;
@@ -679,6 +1098,34 @@ mod tests {
             ),
             "pin Rust toolchain for project-manifest fixture",
         );
+    }
+
+    fn write_workflow(root: &Path, relative_path: &str, contents: &str) {
+        let path = root.join(relative_path);
+        if let Some(parent) = path.parent() {
+            must(fs::create_dir_all(parent), "create workflow directory");
+        }
+        must(
+            fs::write(path, contents),
+            "write workflow reference context",
+        );
+    }
+
+    #[expect(
+        clippy::panic,
+        reason = "git fixture setup failures must name their root cause"
+    )]
+    fn git(root: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "velnor-workflow")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "velnor-workflow")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .status()
+            .unwrap_or_else(|error| panic!("run git: {error}"));
+        assert!(status.success(), "git {args:?} failed");
     }
 
     fn providers() -> std::collections::BTreeSet<ProviderId> {
@@ -857,6 +1304,11 @@ mod tests {
             fs::write(root.join("actions/bare/dockerfile"), "FROM scratch\n"),
             "write lowercase Dockerfile fallback",
         );
+        write_workflow(
+            &root,
+            ".github/workflows/ci.yml",
+            "name: ci\njobs:\n  build:\n    steps:\n      - uses: ./actions/bare\n",
+        );
         must(
             fs::create_dir_all(root.join("actions/shadowed")),
             "create Docker metadata action",
@@ -905,6 +1357,13 @@ mod tests {
             .iter()
             .any(|command| command
                 == "velnor-workflow verify-action --path 'actions/bare/dockerfile'"));
+        assert!(
+            !shape
+                .files()
+                .iter()
+                .any(|file| file == ".github/workflows/ci.yml"),
+            "workflow reference context leaked into product inputs"
+        );
         let error = super::verify_action(&root, "action.yaml")
             .err()
             .unwrap_or_else(|| panic!("shadowed action.yaml must not be canonical"));
@@ -912,6 +1371,686 @@ mod tests {
             error.to_string().contains("canonical action entrypoint"),
             "{error}"
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unreferenced_docker_contexts_and_reusable_workflows_are_not_actions() {
+        let root = fixture("unreferenced-docker-contexts");
+        pin_fixture_rust_toolchain(&root);
+        must(
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"image_project\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            "write root project manifest",
+        );
+        must(
+            fs::write(root.join("Dockerfile"), "FROM scratch\n"),
+            "write root image Dockerfile",
+        );
+        must(
+            fs::create_dir_all(root.join("containers/image")),
+            "create ordinary nested Docker context",
+        );
+        must(
+            fs::write(root.join("containers/image/Dockerfile"), "FROM scratch\n"),
+            "write nested image Dockerfile",
+        );
+        must(
+            fs::create_dir_all(root.join("generated-action")),
+            "create generated action target",
+        );
+        must(
+            fs::write(root.join("generated-action/Dockerfile"), "FROM scratch\n"),
+            "write generated action target Dockerfile",
+        );
+        write_workflow(
+            &root,
+            ".github/workflows/caller.yml",
+            "name: caller\njobs:\n  reusable:\n    uses: ./.github/workflows/reusable.yml\n",
+        );
+        write_workflow(
+            &root,
+            ".github/workflows/reusable.yml",
+            "name: reusable\non:\n  workflow_call:\n",
+        );
+        write_workflow(
+            &root,
+            ".github/workflows/generated.yml",
+            "# Generated by velnor-workflow.\njobs:\n  build:\n    steps:\n      - uses: ./generated-action\n",
+        );
+
+        let shape = must(
+            super::super::scan_shape(&root, &providers(), "main", &[]),
+            "scan unreferenced Docker contexts",
+        );
+        for action_root in [".", "containers/image", "generated-action"] {
+            assert!(
+                !shape.units.iter().any(|unit| {
+                    unit.root == action_root && unit.kind == crate::s2::UnitKind::GithubAction
+                }),
+                "unreferenced Docker context became an action: {action_root}"
+            );
+        }
+        for docker_root in [".", "containers/image", "generated-action"] {
+            assert!(
+                shape.units.iter().any(|unit| {
+                    unit.root == docker_root && unit.kind == crate::s2::UnitKind::Docker
+                }),
+                "Docker build context missing: {docker_root}"
+            );
+        }
+        for workflow in [
+            ".github/workflows/caller.yml",
+            ".github/workflows/reusable.yml",
+            ".github/workflows/generated.yml",
+        ] {
+            assert!(
+                !shape.files().iter().any(|file| file == workflow),
+                "workflow reference context leaked into product inputs: {workflow}"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn workflow_step_uses_selects_manifest_backed_dockerfile_action() {
+        let root = fixture("workflow-dockerfile-action");
+        pin_fixture_rust_toolchain(&root);
+        must(
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"image_project\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            "write root project manifest",
+        );
+        must(
+            fs::write(root.join("Dockerfile"), "FROM scratch\n"),
+            "write root image Dockerfile",
+        );
+        must(
+            fs::create_dir_all(root.join("actions/docker")),
+            "create referenced Dockerfile action",
+        );
+        must(
+            fs::write(
+                root.join("actions/docker/Cargo.toml"),
+                "[package]\nname = \"docker_action\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            "write action project manifest",
+        );
+        must(
+            fs::write(root.join("actions/docker/Dockerfile"), "FROM scratch\n"),
+            "write action Dockerfile",
+        );
+        must(
+            fs::create_dir_all(root.join("containers/build")),
+            "create unrelated Docker context",
+        );
+        must(
+            fs::write(root.join("containers/build/Dockerfile"), "FROM scratch\n"),
+            "write unrelated Dockerfile",
+        );
+        write_workflow(
+            &root,
+            ".github/workflows/ci.yml",
+            "name: ci\njobs:\n  build:\n    steps:\n      - uses: actions/checkout@v4\n      - uses: ./actions/docker\n",
+        );
+
+        let shape = must(
+            super::super::scan_shape(&root, &providers(), "main", &[]),
+            "scan workflow-selected Dockerfile action",
+        );
+        let action = shape
+            .units
+            .iter()
+            .find(|unit| {
+                unit.root == "actions/docker" && unit.kind == crate::s2::UnitKind::GithubAction
+            })
+            .unwrap_or_else(|| panic!("workflow-selected Dockerfile action missing"));
+        assert!(action.capabilities.docker);
+        assert!(action
+            .pr_commands
+            .iter()
+            .any(|command| command
+                == "velnor-workflow verify-action --path 'actions/docker/Dockerfile'"));
+        assert!(
+            !shape
+                .units
+                .iter()
+                .any(|unit| { unit.root == "." && unit.kind == crate::s2::UnitKind::GithubAction }),
+            "root Docker build context became an action"
+        );
+        assert!(super::verify_action(&root, "actions/docker/Dockerfile").is_ok());
+        assert!(
+            !shape
+                .files()
+                .iter()
+                .any(|file| file == ".github/workflows/ci.yml"),
+            "workflow file entered product inputs"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn nested_composite_local_action_resolves_from_workspace_root() {
+        let root = fixture("workspace-root-resolution");
+        pin_fixture_rust_toolchain(&root);
+        must(
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"image_project\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            "write root project manifest",
+        );
+        must(
+            fs::write(root.join("Dockerfile"), "FROM scratch\n"),
+            "write root image Dockerfile",
+        );
+        must(
+            fs::create_dir_all(root.join("actions/parent")),
+            "create nested parent action",
+        );
+        must(
+            fs::write(
+                root.join("actions/parent/action.yml"),
+                "runs:\n  using: composite\n  steps:\n    - uses: ./actions/child\n    - uses: $/actions/child\n",
+            ),
+            "write nested parent metadata",
+        );
+        must(
+            fs::create_dir_all(root.join("actions/child")),
+            "create workspace-root child action",
+        );
+        must(
+            fs::write(
+                root.join("actions/child/Cargo.toml"),
+                "[package]\nname = \"child_action\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            "write child project manifest",
+        );
+        must(
+            fs::write(root.join("actions/child/Dockerfile"), "FROM scratch\n"),
+            "write child Dockerfile",
+        );
+
+        let shape = must(
+            super::super::scan_shape(&root, &providers(), "main", &[]),
+            "scan workspace-root child action",
+        );
+        let parent = shape
+            .units
+            .iter()
+            .find(|unit| {
+                unit.root == "actions/parent" && unit.kind == crate::s2::UnitKind::GithubAction
+            })
+            .unwrap_or_else(|| panic!("nested parent action missing"));
+        assert!(parent
+            .pr_commands
+            .iter()
+            .any(|command| command == "test -f 'actions/child/Dockerfile'"));
+        assert!(shape.units.iter().any(|unit| {
+            unit.root == "actions/child" && unit.kind == crate::s2::UnitKind::GithubAction
+        }));
+        assert!(
+            !shape
+                .units
+                .iter()
+                .any(|unit| { unit.root == "." && unit.kind == crate::s2::UnitKind::GithubAction }),
+            "root Docker build context became an action"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn workflow_selected_github_action_uses_workspace_relative_children() {
+        let root = fixture("github-action-workspace-resolution");
+        pin_fixture_rust_toolchain(&root);
+        must(
+            fs::create_dir_all(root.join(".github/actions/foo")),
+            "create workflow-selected GitHub action",
+        );
+        must(
+            fs::write(
+                root.join(".github/actions/foo/action.yml"),
+                "runs:\n  using: composite\n  steps:\n    - uses: ./bar\n",
+            ),
+            "write GitHub action metadata",
+        );
+        must(
+            fs::create_dir_all(root.join(".github/actions/foo/dist")),
+            "create checked-in action dist directory",
+        );
+        must(
+            fs::write(
+                root.join(".github/actions/foo/dist/index.js"),
+                "entrypoint\n",
+            ),
+            "write checked-in action dist file",
+        );
+        must(
+            fs::create_dir_all(root.join(".github/actions/foo/node_modules/package")),
+            "create ignored action dependency directory",
+        );
+        must(
+            fs::write(
+                root.join(".github/actions/foo/node_modules/package/generated.js"),
+                "generated\n",
+            ),
+            "write ignored action dependency file",
+        );
+        must(
+            fs::create_dir_all(root.join("bar")),
+            "create workspace-root child action",
+        );
+        must(
+            fs::write(
+                root.join("bar/Cargo.toml"),
+                "[package]\nname = \"bar\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            "write child project manifest",
+        );
+        must(
+            fs::write(root.join("bar/Dockerfile"), "FROM scratch\n"),
+            "write child Dockerfile",
+        );
+        write_workflow(
+            &root,
+            ".github/workflows/ci.yml",
+            "name: ci\njobs:\n  build:\n    steps:\n      - uses: ./.github/actions/foo\n      - uses: $/.github/actions/foo\n",
+        );
+
+        let shape = must(
+            super::super::scan_shape(&root, &providers(), "main", &[]),
+            "scan explicitly selected .github action",
+        );
+        let parent = shape
+            .units
+            .iter()
+            .find(|unit| {
+                unit.root == ".github/actions/foo" && unit.kind == crate::s2::UnitKind::GithubAction
+            })
+            .unwrap_or_else(|| panic!("workflow-selected .github action missing"));
+        assert!(parent.pr_commands.iter().any(|command| {
+            command == "velnor-workflow verify-action --path '.github/actions/foo/action.yml'"
+        }));
+        assert!(parent
+            .pr_commands
+            .iter()
+            .any(|command| command == "test -f 'bar/Dockerfile'"));
+        assert!(shape
+            .units
+            .iter()
+            .any(|unit| { unit.root == "bar" && unit.kind == crate::s2::UnitKind::GithubAction }));
+        assert!(shape
+            .files()
+            .iter()
+            .any(|file| { file == ".github/actions/foo/action.yml" }));
+        assert!(shape
+            .files()
+            .iter()
+            .any(|file| file == ".github/actions/foo/dist/index.js"));
+        assert!(!shape
+            .files()
+            .iter()
+            .any(|file| file.starts_with(".github/actions/foo/node_modules/")));
+        assert!(!shape
+            .files()
+            .iter()
+            .any(|file| file == ".github/workflows/ci.yml"));
+        assert!(super::verify_action(&root, ".github/actions/foo/action.yml").is_ok());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the Git-backed shape fixture keeps reference discovery and product filtering auditable together"
+    )]
+    fn tracked_workflow_selects_github_action_tree_end_to_end() {
+        let root = fixture("tracked-github-action-selection");
+        git(&root, &["init", "-q"]);
+        git(&root, &["commit", "--allow-empty", "-qm", "seed"]);
+        pin_fixture_rust_toolchain(&root);
+        must(
+            fs::create_dir_all(root.join(".github/workflows")),
+            "create tracked workflow directory",
+        );
+        must(
+            fs::create_dir_all(root.join(".github/actions/foo/dist")),
+            "create tracked action directory",
+        );
+        must(
+            fs::create_dir_all(root.join(".github/actions/foo/build/output")),
+            "create tracked generated action build directory",
+        );
+        must(
+            fs::create_dir_all(root.join(".github/actions/foo/node_modules/pkg")),
+            "create tracked generated action dependency",
+        );
+        must(
+            fs::create_dir_all(root.join("actions/child")),
+            "create workspace-root Dockerfile action",
+        );
+        must(
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"docker_project\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            "write root Rust manifest",
+        );
+        must(
+            fs::write(root.join("Dockerfile"), "FROM scratch\n"),
+            "write ordinary root Docker build context",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/ci.yml"),
+                "name: ci\njobs:\n  build:\n    steps:\n      - uses: ./.github/actions/foo\n",
+            ),
+            "write tracked action workflow reference",
+        );
+        must(
+            fs::write(
+                root.join(".github/actions/foo/action.yml"),
+                "runs:\n  using: composite\n  steps:\n    - uses: ./actions/child\n",
+            ),
+            "write tracked composite action",
+        );
+        must(
+            fs::write(
+                root.join(".github/actions/foo/dist/index.js"),
+                "checked-in action distribution\n",
+            ),
+            "write tracked action distribution",
+        );
+        must(
+            fs::write(
+                root.join(".github/actions/foo/build/output/cache"),
+                "generated action build output\n",
+            ),
+            "write tracked action build output",
+        );
+        must(
+            fs::write(
+                root.join(".github/actions/foo/node_modules/pkg/index.js"),
+                "generated dependency\n",
+            ),
+            "write tracked generated dependency",
+        );
+        must(
+            fs::write(
+                root.join("actions/child/Cargo.toml"),
+                "[package]\nname = \"child_action\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+            ),
+            "write child Rust manifest",
+        );
+        must(
+            fs::write(root.join("actions/child/Dockerfile"), "FROM scratch\n"),
+            "write child Dockerfile",
+        );
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-qm", "tracked local action"]);
+
+        must(
+            fs::write(
+                root.join(".github/actions/foo/untracked.txt"),
+                "untracked action decoy\n",
+            ),
+            "write untracked selected-action decoy",
+        );
+        let shape = must(
+            super::super::scan_shape(&root, &providers(), "main", &[]),
+            "scan Git-backed workflow-selected action",
+        );
+        let parent = shape
+            .units
+            .iter()
+            .find(|unit| unit.root == ".github/actions/foo")
+            .unwrap_or_else(|| panic!("Git-backed .github action was not selected"));
+        assert!(parent
+            .pr_commands
+            .iter()
+            .any(|command| command == "test -f 'actions/child/Dockerfile'"));
+        assert!(shape.units.iter().any(|unit| {
+            unit.root == "actions/child" && unit.kind == crate::s2::UnitKind::GithubAction
+        }));
+        assert!(!shape
+            .units
+            .iter()
+            .any(|unit| { unit.root == "." && unit.kind == crate::s2::UnitKind::GithubAction }));
+        for included in [
+            ".github/actions/foo/action.yml",
+            ".github/actions/foo/dist/index.js",
+        ] {
+            assert!(
+                shape.files().iter().any(|file| file == included),
+                "missing {included}"
+            );
+        }
+        for ignored in [
+            ".github/actions/foo/node_modules/pkg/index.js",
+            ".github/actions/foo/build/output/cache",
+            ".github/actions/foo/untracked.txt",
+            ".github/workflows/ci.yml",
+        ] {
+            assert!(
+                !shape.files().iter().any(|file| file == ignored),
+                "included {ignored}"
+            );
+        }
+        assert!(super::verify_action(&root, ".github/actions/foo/action.yml").is_ok());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn workflow_selecting_repository_root_uses_runner_dockerfile_case_precedence() {
+        let root = fixture("root-dockerfile-precedence");
+        must(
+            fs::write(root.join("Dockerfile"), "FROM scratch\n"),
+            "write preferred Dockerfile",
+        );
+        must(
+            fs::write(root.join("dockerfile"), "FROM busybox\n"),
+            "write lowercase Dockerfile",
+        );
+        write_workflow(
+            &root,
+            ".github/workflows/ci.yml",
+            "name: ci\njobs:\n  build:\n    steps:\n      - uses: ./\n",
+        );
+
+        let shape = must(
+            super::super::scan_shape(&root, &providers(), "main", &[]),
+            "scan workflow-selected repository root",
+        );
+        let root_action = shape
+            .units
+            .iter()
+            .find(|unit| unit.root == "." && unit.kind == crate::s2::UnitKind::GithubAction)
+            .unwrap_or_else(|| panic!("workflow-selected root action missing"));
+        assert!(root_action.capabilities.docker);
+        assert!(root_action
+            .pr_commands
+            .iter()
+            .any(|command| command == "velnor-workflow verify-action --path 'Dockerfile'"));
+        assert!(!root_action
+            .pr_commands
+            .iter()
+            .any(|command| command.contains("dockerfile'")));
+        assert!(super::verify_action(&root, "Dockerfile").is_ok());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn invalid_and_missing_local_action_paths_fail_closed() {
+        for (name, reference) in [
+            ("traversal", "./../outside"),
+            ("absolute", "/outside"),
+            ("double-slash", ".//outside"),
+            ("dollar-double-slash", "$//outside"),
+            ("empty-self-repository", "$/"),
+            ("self-repository-ref", "$/outside@v1"),
+            ("windows-relative", ".\\actions\\child"),
+            ("windows-traversal", ".\\..\\outside"),
+            ("drive-forward", "C:/outside"),
+            ("drive-backslash", "C:\\outside"),
+            ("unc", "\\\\server\\share"),
+        ] {
+            let root = fixture(name);
+            must(
+                fs::write(
+                    root.join("action.yml"),
+                    format!("runs:\n  using: composite\n  steps:\n    - uses: '{reference}'\n"),
+                ),
+                "write unsafe local action metadata",
+            );
+            let error = super::super::scan_shape(&root, &providers(), "main", &[])
+                .err()
+                .unwrap_or_else(|| panic!("unsafe local action path must fail: {reference}"));
+            assert!(
+                error.to_string().contains("workspace-relative")
+                    || error.to_string().contains("escapes the workspace")
+                    || error.to_string().contains("static workspace-relative"),
+                "{reference}: {error}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+
+        let root = fixture("missing-local-action");
+        must(
+            fs::write(
+                root.join("action.yml"),
+                "runs:\n  using: composite\n  steps:\n    - uses: ./missing\n",
+            ),
+            "write missing local action metadata",
+        );
+        let error = super::super::scan_shape(&root, &providers(), "main", &[])
+            .err()
+            .unwrap_or_else(|| panic!("missing local action must fail scan"));
+        assert!(error
+            .to_string()
+            .contains("no action metadata or Dockerfile"));
+        let _ = fs::remove_dir_all(root);
+
+        let workflow = fixture("workflow-drive-path");
+        write_workflow(
+            &workflow,
+            ".github/workflows/ci.yml",
+            "name: ci\njobs:\n  build:\n    steps:\n      - uses: C:/outside\n",
+        );
+        let error = super::super::scan_shape(&workflow, &providers(), "main", &[])
+            .err()
+            .unwrap_or_else(|| panic!("absolute workflow action path must fail scan"));
+        assert!(error.to_string().contains("workspace-relative"), "{error}");
+        let _ = fs::remove_dir_all(workflow);
+
+        let workflow_missing = fixture("workflow-missing-local-action");
+        write_workflow(
+            &workflow_missing,
+            ".github/workflows/ci.yml",
+            "name: ci\njobs:\n  build:\n    steps:\n      - uses: ./missing\n",
+        );
+        let error = super::super::scan_shape(&workflow_missing, &providers(), "main", &[])
+            .err()
+            .unwrap_or_else(|| panic!("missing workflow action must fail scan"));
+        assert!(error
+            .to_string()
+            .contains("no action metadata or Dockerfile"));
+        let _ = fs::remove_dir_all(workflow_missing);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_local_action_paths_are_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let root = fixture("symlinked-local-action");
+        must(
+            fs::create_dir_all(root.join("actions/real")),
+            "create real local action",
+        );
+        must(
+            fs::write(root.join("actions/real/Dockerfile"), "FROM scratch\n"),
+            "write real local action Dockerfile",
+        );
+        must(
+            fs::create_dir_all(root.join("actions")),
+            "create local actions directory",
+        );
+        must(
+            symlink("real", root.join("actions/linked")),
+            "create symlinked local action",
+        );
+        must(
+            fs::write(
+                root.join("action.yml"),
+                "runs:\n  using: composite\n  steps:\n    - uses: ./actions/linked\n",
+            ),
+            "write parent local action metadata",
+        );
+
+        let error = super::super::scan_shape(&root, &providers(), "main", &[])
+            .err()
+            .unwrap_or_else(|| panic!("symlinked local action target must fail scan"));
+        assert!(error.to_string().contains("symlink"), "{error}");
+        let _ = fs::remove_dir_all(root);
+
+        let root = fixture("symlinked-root-entrypoint");
+        must(
+            fs::write(
+                root.join("action.yaml"),
+                "runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo selected\n",
+            ),
+            "write lowercase action metadata",
+        );
+        must(
+            fs::write(root.join("Dockerfile"), "FROM scratch\n"),
+            "write Dockerfile fallback",
+        );
+        must(
+            symlink("action.yaml", root.join("action.yml")),
+            "create preferred metadata symlink",
+        );
+        write_workflow(
+            &root,
+            ".github/workflows/ci.yml",
+            "name: ci\njobs:\n  build:\n    steps:\n      - uses: ./\n",
+        );
+        let error = super::super::scan_shape(&root, &providers(), "main", &[])
+            .err()
+            .unwrap_or_else(|| panic!("symlinked preferred metadata must fail"));
+        assert!(error
+            .to_string()
+            .contains("symlink entrypoint `action.yml`"));
+        let _ = fs::remove_dir_all(root);
+
+        let root = fixture("unused-dockerfile-symlink");
+        must(
+            fs::write(
+                root.join("action.yml"),
+                "runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo selected\n",
+            ),
+            "write preferred valid action metadata",
+        );
+        must(
+            symlink("missing-target", root.join("Dockerfile")),
+            "create unused Dockerfile symlink",
+        );
+        write_workflow(
+            &root,
+            ".github/workflows/ci.yml",
+            "name: ci\njobs:\n  build:\n    steps:\n      - uses: ./\n",
+        );
+        let shape = must(
+            super::super::scan_shape(&root, &providers(), "main", &[]),
+            "select valid metadata without inspecting unused Dockerfile fallback",
+        );
+        assert!(shape
+            .units
+            .iter()
+            .any(|unit| { unit.root == "." && unit.kind == crate::s2::UnitKind::GithubAction }));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1108,6 +2247,207 @@ mod tests {
             "{error}"
         );
         let _ = fs::remove_dir_all(mutable);
+    }
+
+    #[test]
+    fn mixed_case_docker_uri_is_not_treated_as_a_local_dockerfile() {
+        let root = fixture("mixed-case-docker-uri");
+        must(
+            fs::create_dir_all(root.join("actions/remote")),
+            "create remote Docker action directory",
+        );
+        must(
+            fs::write(
+                root.join("actions/remote/action.yml"),
+                "runs:\n  using: docker\n  image: DoCkEr://ghcr.io/example/Dockerfile\n",
+            ),
+            "write mixed-case Docker URI metadata",
+        );
+        let shape = must(
+            super::super::scan_shape(&root, &providers(), "main", &[]),
+            "scan mixed-case Docker URI",
+        );
+        let action = shape
+            .units
+            .iter()
+            .find(|unit| unit.root == "actions/remote")
+            .unwrap_or_else(|| panic!("remote Docker action missing"));
+        assert_eq!(action.pr_commands.len(), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn external_composite_action_tags_follow_velnor_pin_policy() {
+        for (name, reference) in [
+            ("git-tag", "actions/checkout@v4"),
+            ("container-tag", "docker://alpine:3.8"),
+        ] {
+            let root = fixture(name);
+            must(
+                fs::write(
+                    root.join("action.yml"),
+                    format!("runs:\n  using: composite\n  steps:\n    - uses: '{reference}'\n"),
+                ),
+                "write external action pin fixture",
+            );
+            let error = super::super::scan_shape(&root, &providers(), "main", &[])
+                .err()
+                .unwrap_or_else(|| panic!("mutable external action must fail policy: {reference}"));
+            assert!(
+                error.to_string().contains("full 40-character SHA pin"),
+                "{reference}: {error}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn composite_run_paths_use_runner_working_directories() {
+        let root = fixture("composite-run-working-directories");
+        let action_root = root.join(".github/actions/foo");
+        for directory in [
+            root.join("scripts"),
+            root.join("packages/app/scripts"),
+            action_root.join("scripts"),
+            action_root.join("subdir"),
+        ] {
+            must(
+                fs::create_dir_all(directory),
+                "create composite script directory",
+            );
+        }
+        write_workflow(
+            &root,
+            ".github/workflows/ci.yml",
+            "name: ci\njobs:\n  build:\n    steps:\n      - uses: ./.github/actions/foo\n",
+        );
+        must(
+            fs::write(
+                action_root.join("action.yml"),
+                "runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: ./scripts/workspace.sh\n    - shell: bash\n      working-directory: '${{ github.workspace }}'\n      run: ./scripts/workspace-expression.sh\n    - shell: bash\n      working-directory: packages/app\n      run: ./scripts/package.sh\n    - shell: bash\n      run: ${{ github.action_path }}/scripts/action-path.sh\n    - shell: bash\n      working-directory: '${{ github.action_path }}/subdir'\n      run: ./working-directory.sh\n",
+            ),
+            "write composite run path metadata",
+        );
+        for file in [
+            root.join("scripts/workspace.sh"),
+            root.join("scripts/workspace-expression.sh"),
+            root.join("packages/app/scripts/package.sh"),
+            action_root.join("scripts/action-path.sh"),
+            action_root.join("subdir/working-directory.sh"),
+        ] {
+            must(fs::write(file, "exit 0\n"), "write composite run script");
+        }
+
+        let shape = must(
+            super::super::scan_shape(&root, &providers(), "main", &[]),
+            "scan composite run paths",
+        );
+        let action = shape
+            .units
+            .iter()
+            .find(|unit| unit.root == ".github/actions/foo")
+            .unwrap_or_else(|| panic!("workflow-selected composite action missing"));
+        for path in [
+            "scripts/workspace.sh",
+            "scripts/workspace-expression.sh",
+            "packages/app/scripts/package.sh",
+            ".github/actions/foo/scripts/action-path.sh",
+            ".github/actions/foo/subdir/working-directory.sh",
+        ] {
+            assert!(
+                action
+                    .pr_commands
+                    .iter()
+                    .any(|command| command == &format!("test -f '{path}'")),
+                "composite script path was resolved against the wrong directory: {path}"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scan_excludes_apply_to_workflow_context_and_selected_action_inputs() {
+        let workflow_excluded = fixture("workflow-reference-excluded");
+        must(
+            fs::create_dir_all(workflow_excluded.join(".github/actions/docker")),
+            "create workflow-selected Docker action",
+        );
+        write_workflow(
+            &workflow_excluded,
+            ".github/workflows/ci.yml",
+            "name: ci\njobs:\n  build:\n    steps:\n      - uses: ./.github/actions/docker\n",
+        );
+        must(
+            fs::write(
+                workflow_excluded.join(".github/actions/docker/Dockerfile"),
+                "FROM scratch\n",
+            ),
+            "write Dockerfile-only selected action",
+        );
+        let excluded_workflow = vec![".github/workflows/ci.yml".to_owned()];
+        let shape = must(
+            super::super::scan_shape(&workflow_excluded, &providers(), "main", &excluded_workflow),
+            "scan while excluding workflow reference context",
+        );
+        assert!(!shape
+            .units
+            .iter()
+            .any(|unit| unit.kind == crate::s2::UnitKind::GithubAction));
+        assert!(!shape
+            .files()
+            .iter()
+            .any(|file| file.starts_with(".github/")));
+        let _ = fs::remove_dir_all(workflow_excluded);
+
+        let action_excluded = fixture("selected-action-input-excluded");
+        must(
+            fs::create_dir_all(action_excluded.join(".github/actions/foo")),
+            "create selected action directory",
+        );
+        write_workflow(
+            &action_excluded,
+            ".github/workflows/ci.yml",
+            "name: ci\njobs:\n  build:\n    steps:\n      - uses: ./.github/actions/foo\n",
+        );
+        must(
+            fs::write(
+                action_excluded.join(".github/actions/foo/action.yml"),
+                "runs:\n  using: docker\n  image: ubuntu\n",
+            ),
+            "write selected action metadata",
+        );
+        must(
+            fs::write(
+                action_excluded.join(".github/actions/foo/notes.txt"),
+                "excluded supplemental input\n",
+            ),
+            "write excluded supplemental action input",
+        );
+        let excluded_note = vec![".github/actions/foo/notes.txt".to_owned()];
+        let shape = must(
+            super::super::scan_shape(&action_excluded, &providers(), "main", &excluded_note),
+            "scan selected action with an excluded supplemental input",
+        );
+        assert!(shape
+            .files()
+            .iter()
+            .any(|file| file == ".github/actions/foo/action.yml"));
+        assert!(!shape
+            .files()
+            .iter()
+            .any(|file| file == ".github/actions/foo/notes.txt"));
+        let excluded_metadata = vec![".github/actions/foo/action.yml".to_owned()];
+        let error =
+            super::super::scan_shape(&action_excluded, &providers(), "main", &excluded_metadata)
+                .err()
+                .unwrap_or_else(|| {
+                    panic!("excluding a selected canonical action entrypoint must fail")
+                });
+        assert!(
+            error.to_string().contains("is excluded from the scan"),
+            "{error}"
+        );
+        let _ = fs::remove_dir_all(action_excluded);
     }
 
     #[test]
