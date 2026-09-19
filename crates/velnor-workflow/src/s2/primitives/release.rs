@@ -128,10 +128,18 @@ impl Primitive for Release {
             "build_tasks",
             "consumer_repository",
             "context",
+            "canonical_manifest_asset",
+            "canonical_manifest_schema",
+            "discovery_script",
             "dockerfile",
             "image",
             "image_package",
             "kind",
+            "apt_arches",
+            "apt_feed_url",
+            "apt_identity_dir",
+            "apt_origin",
+            "keyring_path",
             "manifest_schema",
             "modes",
             "name",
@@ -140,6 +148,7 @@ impl Primitive for Release {
             "platforms",
             "producer_conclusion",
             "producer_workflow",
+            "passphrase_secret",
             "publish_group",
             "pull_request_paths",
             "push_paths",
@@ -147,8 +156,11 @@ impl Primitive for Release {
             "registry_password_secret",
             "registry_username_secret",
             "source_repository",
+            "signer_fingerprint",
+            "signing_key_secret",
             "tag_pattern",
             "targets",
+            "retention",
             "version_gate_tasks",
             "version_manifest",
             "version_prefix",
@@ -317,6 +329,33 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
         artifact_path: args.string("artifact_path")?.unwrap_or_default(),
         description: String::new(),
         manifest_schema: args.string("manifest_schema")?.unwrap_or_default(),
+        discovery_script: args.string("discovery_script")?.unwrap_or_default(),
+        canonical_manifest_asset: args
+            .string("canonical_manifest_asset")?
+            .unwrap_or_default(),
+        canonical_manifest_schema: args
+            .string("canonical_manifest_schema")?
+            .unwrap_or_default(),
+        apt_arches: args.strings("apt_arches")?.unwrap_or_default(),
+        signer_fingerprint: args
+            .string("signer_fingerprint")?
+            .unwrap_or_default(),
+        passphrase_secret: args.string("passphrase_secret")?.unwrap_or_default(),
+        signing_key_secret: args
+            .string("signing_key_secret")?
+            .unwrap_or_default(),
+        keyring_path: args.string("keyring_path")?.unwrap_or_default(),
+        apt_origin: args.string("apt_origin")?.unwrap_or_default(),
+        apt_identity_dir: args.string("apt_identity_dir")?.unwrap_or_default(),
+        apt_feed_url: args.string("apt_feed_url")?.unwrap_or_default(),
+        retention: match args.integer("retention")? {
+            None => 0,
+            Some(value) => u32::try_from(value).map_err(|_| {
+                GeneratorError::usage(format!(
+                    "`{family}` `retention` must be a non-negative count, found `{value}`"
+                ))
+            })?,
+        },
         dockerfile: args.string("dockerfile")?.unwrap_or_default(),
         context: args.string("context")?.unwrap_or_default(),
         platforms: args.strings("platforms")?.unwrap_or_default(),
@@ -365,6 +404,18 @@ fn declared_preview_spec(args: &Args<'_>) -> Result<ReleaseSpec, GeneratorError>
         artifact_path: String::new(),
         description: String::new(),
         manifest_schema: String::new(),
+        discovery_script: String::new(),
+        canonical_manifest_asset: String::new(),
+        canonical_manifest_schema: String::new(),
+        apt_arches: Vec::new(),
+        signer_fingerprint: String::new(),
+        passphrase_secret: String::new(),
+        signing_key_secret: String::new(),
+        keyring_path: String::new(),
+        apt_origin: String::new(),
+        apt_identity_dir: String::new(),
+        apt_feed_url: String::new(),
+        retention: 0,
         dockerfile: String::new(),
         context: String::new(),
         platforms: Vec::new(),

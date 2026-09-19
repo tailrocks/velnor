@@ -524,6 +524,13 @@ pub(crate) struct AptContract {
     pub(crate) consumer_repo: String,
     /// The consumer release-manifest schema URN the config declares.
     pub(crate) manifest_schema: String,
+    /// Repository-relative immutable release selector. Empty is retained for
+    /// schema-1 callers; schema-2 contracts must declare it explicitly.
+    pub(crate) discovery_script: String,
+    /// Canonical application manifest asset selected by the discovery script.
+    pub(crate) canonical_manifest_asset: String,
+    /// Exact schema URN of the canonical application manifest.
+    pub(crate) canonical_manifest_schema: String,
     /// The pinned publisher signing-key fingerprint.
     pub(crate) signer: String,
     /// The environment secret holding the signing passphrase (name only).
@@ -619,6 +626,9 @@ impl AptContract {
             binary: spec.binary.clone(),
             consumer_repo: spec.consumer_repository.clone(),
             manifest_schema: spec.manifest_schema.clone(),
+            discovery_script: String::new(),
+            canonical_manifest_asset: String::new(),
+            canonical_manifest_schema: String::new(),
             signer: normalize_fingerprint(&spec.signer_fingerprint),
             passphrase_secret: spec.passphrase_secret.clone(),
             signing_key_secret: spec.signing_key_secret.clone(),
@@ -631,6 +641,93 @@ impl AptContract {
             retention,
         })
     }
+
+    /// Resolve the schema-2 APT contract through the same validator used by
+    /// schema 1, then require the immutable application-selection seam that
+    /// schema 2 owns. The adapter carries no behavior of its own: all package,
+    /// signer, URL, architecture, and retention validation remains centralized
+    /// in `resolve`.
+    pub(crate) fn resolve_s2(
+        spec: &crate::s2::ReleaseSpec,
+    ) -> Result<Self, GeneratorError> {
+        let legacy = crate::ReleaseSpec {
+            kind: spec.kind.clone(),
+            package: spec.package.clone(),
+            packages: spec.packages.clone(),
+            binary: spec.binary.clone(),
+            targets: spec.targets.clone(),
+            image: spec.image.clone(),
+            image_package: spec.image_package.clone(),
+            source_repository: spec.source_repository.clone(),
+            consumer_repository: spec.consumer_repository.clone(),
+            artifact_path: spec.artifact_path.clone(),
+            description: spec.description.clone(),
+            manifest_schema: spec.manifest_schema.clone(),
+            apt_arches: spec.apt_arches.clone(),
+            signer_fingerprint: spec.signer_fingerprint.clone(),
+            passphrase_secret: spec.passphrase_secret.clone(),
+            signing_key_secret: spec.signing_key_secret.clone(),
+            keyring_path: spec.keyring_path.clone(),
+            apt_origin: spec.apt_origin.clone(),
+            apt_identity_dir: spec.apt_identity_dir.clone(),
+            apt_feed_url: spec.apt_feed_url.clone(),
+            retention: spec.retention,
+            dockerfile: spec.dockerfile.clone(),
+            context: spec.context.clone(),
+            platforms: spec.platforms.clone(),
+            producer_workflow: spec.producer_workflow.clone(),
+            producer_conclusion: spec.producer_conclusion.clone(),
+            modes: spec.modes.clone(),
+            archive_members: spec.archive_members.clone(),
+            archive_checksum: spec.archive_checksum.clone(),
+            archive_retention_days: spec.archive_retention_days,
+            credentials: Vec::new(),
+            tag_pattern: spec.tag_pattern.clone(),
+            registry: spec.registry.clone(),
+            registry_username_secret: spec.registry_username_secret.clone(),
+            registry_password_secret: spec.registry_password_secret.clone(),
+            jobs: Vec::new(),
+        };
+        let mut contract = Self::resolve(&legacy)?;
+        if !valid_discovery_script(&spec.discovery_script) {
+            return Err(GeneratorError::usage(
+                "apt discovery_script must be a safe repository-relative path",
+            ));
+        }
+        if !valid_manifest_asset(&spec.canonical_manifest_asset) {
+            return Err(GeneratorError::usage(
+                "apt canonical_manifest_asset must be a safe asset file name",
+            ));
+        }
+        if spec.canonical_manifest_schema.is_empty()
+            || spec.canonical_manifest_schema.contains(char::is_whitespace)
+        {
+            return Err(GeneratorError::usage(
+                "apt canonical_manifest_schema must be a non-empty schema URN without whitespace",
+            ));
+        }
+        contract.discovery_script = spec.discovery_script.clone();
+        contract.canonical_manifest_asset = spec.canonical_manifest_asset.clone();
+        contract.canonical_manifest_schema = spec.canonical_manifest_schema.clone();
+        Ok(contract)
+    }
+}
+
+fn valid_discovery_script(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('/')
+        && !value.contains('\\')
+        && !value.split('/').any(|segment| segment.is_empty() || segment == "." || segment == "..")
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'/' | b'-')
+        })
+}
+
+fn valid_manifest_asset(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'~' | b'-')
+        })
 }
 
 /// The validated keyring path: explicit, or `<package>.gpg` by default.

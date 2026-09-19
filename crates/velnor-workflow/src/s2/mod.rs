@@ -899,6 +899,30 @@ pub(crate) struct ReleaseSpec {
     /// `release-manifest.json`. A consumer-contract value the repository
     /// declares; the generic renderer never invents one.
     pub(crate) manifest_schema: String,
+    /// Repository-relative immutable release selector invoked after checkout.
+    pub(crate) discovery_script: String,
+    /// Canonical application manifest asset selected by the discovery script.
+    pub(crate) canonical_manifest_asset: String,
+    /// Exact schema URN of the canonical application manifest.
+    pub(crate) canonical_manifest_schema: String,
+    /// Debian target architectures required by the feed.
+    pub(crate) apt_arches: Vec<String>,
+    /// Full uppercase signing-key fingerprint pinned by the consumer.
+    pub(crate) signer_fingerprint: String,
+    /// Secret name carrying the signing passphrase.
+    pub(crate) passphrase_secret: String,
+    /// Secret name carrying the private signing key.
+    pub(crate) signing_key_secret: String,
+    /// Repository-relative public keyring used for live signer verification.
+    pub(crate) keyring_path: String,
+    /// APT Origin/Label value.
+    pub(crate) apt_origin: String,
+    /// Packaged identity directory used by the APT verifier.
+    pub(crate) apt_identity_dir: String,
+    /// HTTPS feed URL used for rollback and deploy guard checks.
+    pub(crate) apt_feed_url: String,
+    /// Number of prior versions retained alongside the candidate.
+    pub(crate) retention: u32,
     /// The consumer-owned Dockerfile the `docker` publisher builds, relative
     /// to the repository root. Empty selects the `Dockerfile` convention.
     /// Generation-time only: pinned runtimes never consume it.
@@ -2229,6 +2253,18 @@ fn apply_release(config: &mut ProjectConfig, release: &config::ReleaseSection) {
         || release.artifact_path().is_some()
         || release.description().is_some()
         || release.manifest_schema().is_some()
+        || release.discovery_script().is_some()
+        || release.canonical_manifest_asset().is_some()
+        || release.canonical_manifest_schema().is_some()
+        || !release.apt_arches().is_empty()
+        || release.signer_fingerprint().is_some()
+        || release.passphrase_secret().is_some()
+        || release.signing_key_secret().is_some()
+        || release.keyring_path().is_some()
+        || release.apt_origin().is_some()
+        || release.apt_identity_dir().is_some()
+        || release.apt_feed_url().is_some()
+        || release.retention().is_some()
         || release.dockerfile().is_some()
         || release.context().is_some()
         || !release.platforms().is_empty()
@@ -2282,6 +2318,42 @@ fn apply_release(config: &mut ProjectConfig, release: &config::ReleaseSection) {
     }
     if let Some(schema) = release.manifest_schema() {
         schema.clone_into(&mut spec.manifest_schema);
+    }
+    if let Some(script) = release.discovery_script() {
+        script.clone_into(&mut spec.discovery_script);
+    }
+    if let Some(asset) = release.canonical_manifest_asset() {
+        asset.clone_into(&mut spec.canonical_manifest_asset);
+    }
+    if let Some(schema) = release.canonical_manifest_schema() {
+        schema.clone_into(&mut spec.canonical_manifest_schema);
+    }
+    if !release.apt_arches().is_empty() {
+        spec.apt_arches = release.apt_arches().to_vec();
+    }
+    if let Some(signer) = release.signer_fingerprint() {
+        signer.clone_into(&mut spec.signer_fingerprint);
+    }
+    if let Some(secret) = release.passphrase_secret() {
+        secret.clone_into(&mut spec.passphrase_secret);
+    }
+    if let Some(secret) = release.signing_key_secret() {
+        secret.clone_into(&mut spec.signing_key_secret);
+    }
+    if let Some(keyring) = release.keyring_path() {
+        keyring.clone_into(&mut spec.keyring_path);
+    }
+    if let Some(origin) = release.apt_origin() {
+        origin.clone_into(&mut spec.apt_origin);
+    }
+    if let Some(identity) = release.apt_identity_dir() {
+        identity.clone_into(&mut spec.apt_identity_dir);
+    }
+    if let Some(feed) = release.apt_feed_url() {
+        feed.clone_into(&mut spec.apt_feed_url);
+    }
+    if let Some(retention) = release.retention() {
+        spec.retention = u32::try_from(retention.clamp(0, 90)).unwrap_or(0);
     }
     if let Some(dockerfile) = release.dockerfile() {
         dockerfile.clone_into(&mut spec.dockerfile);
