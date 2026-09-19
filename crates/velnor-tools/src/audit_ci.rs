@@ -1282,7 +1282,15 @@ fn verify_checkout_identity(
             );
         }
     }
-    if !git(&["status", "--porcelain=v1", "--untracked-files=all"])?.is_empty() {
+    if !git(&[
+        "-c",
+        "core.fsmonitor=false",
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+    ])?
+    .is_empty()
+    {
         bail!("estate checkout {repository} is dirty");
     }
     Ok(())
@@ -4067,6 +4075,60 @@ mod tests {
                 .to_string_lossy()
                 .into_owned()
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn checkout_cleanliness_check_does_not_run_repository_fsmonitor() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = TestRepo::new();
+        let checkout = root.path.join("checkout");
+        let head = initialize_git_repository(&checkout, "trusted tree\n");
+        let fsmonitor = root.path.join("fsmonitor");
+        let marker = root.path.join("fsmonitor.ran");
+        let fsmonitor_command = format!("'{}'", fsmonitor.to_string_lossy().replace('\'', "'\\''"));
+        fs::write(
+            &fsmonitor,
+            "#!/bin/sh\n: > \"${0}.ran\"\nprintf 'token\\n\\0'\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fsmonitor).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&fsmonitor, permissions).unwrap();
+
+        let config = run_git(
+            &checkout,
+            &[
+                "config",
+                "--local",
+                "core.fsmonitor",
+                fsmonitor_command.as_str(),
+            ],
+        );
+        assert!(
+            config.status.success(),
+            "{}",
+            String::from_utf8_lossy(&config.stderr)
+        );
+
+        let control = run_git(
+            &checkout,
+            &["status", "--porcelain=v1", "--untracked-files=all"],
+        );
+        assert!(
+            marker.exists(),
+            "repository-local core.fsmonitor did not run in the control status: {}",
+            String::from_utf8_lossy(&control.stderr)
+        );
+        fs::remove_file(&marker).unwrap();
+
+        let result = verify_checkout_identity(&checkout, "fixture/repo", "main", &head, true);
+        assert!(
+            !marker.exists(),
+            "repository-local core.fsmonitor ran during the cleanliness check"
+        );
+        result.unwrap();
     }
 
     #[test]
