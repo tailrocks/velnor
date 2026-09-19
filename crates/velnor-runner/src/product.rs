@@ -94,6 +94,12 @@ pub enum ApplicationManifestError {
     ArtifactDigest,
     #[error("application manifest artifact size does not match its bytes")]
     ArtifactSize,
+    #[error("application manifest artifact inventory is not exact")]
+    ArtifactInventory,
+    #[error("application manifest binary architecture does not match its target")]
+    Architecture,
+    #[error("application manifest is missing a target archive")]
+    ArchiveMissing,
     #[error("application manifest is not canonical JSON")]
     NonCanonical,
     #[error("application manifest digest does not match its bytes")]
@@ -210,7 +216,7 @@ impl ApplicationManifest {
             }
             if !safe_basename(&artifact.name)
                 || artifact.target.is_empty()
-                || !safe_slug(&artifact.kind)
+                || !supported_artifact_kind(&artifact.kind)
                 || !supported_target(&artifact.target)
                 || !lower_hex(&artifact.sha256, 64)
                 || artifact.size == 0
@@ -226,6 +232,7 @@ impl ApplicationManifest {
         }
 
         let mut component_names = BTreeSet::new();
+        let mut component_targets = BTreeSet::new();
         for component in &self.components {
             if !safe_slug(&component.name)
                 || !safe_slug(&component.crate_name)
@@ -243,6 +250,7 @@ impl ApplicationManifest {
                 if !supported_target(target) || !targets.insert(target) {
                     return Err(ApplicationManifestError::Target);
                 }
+                component_targets.insert(target.as_str());
                 let found = self.artifacts.iter().any(|artifact| {
                     artifact.kind == "binary"
                         && (artifact.name == component.binary
@@ -256,6 +264,28 @@ impl ApplicationManifest {
         }
         if self.components.is_empty() {
             return Err(ApplicationManifestError::Field("components"));
+        }
+        for target in &component_targets {
+            let archive_kind = if target.ends_with("-apple-darwin") {
+                "homebrew-archive"
+            } else {
+                "archive"
+            };
+            let archive_count = self
+                .artifacts
+                .iter()
+                .filter(|artifact| artifact.target == *target && artifact.kind == archive_kind)
+                .count();
+            if archive_count != 1 {
+                return Err(ApplicationManifestError::ArchiveMissing);
+            }
+        }
+        if self
+            .artifacts
+            .iter()
+            .any(|artifact| !component_targets.contains(artifact.target.as_str()))
+        {
+            return Err(ApplicationManifestError::Target);
         }
         Ok(())
     }
@@ -282,6 +312,34 @@ impl ApplicationManifest {
     /// it never starts a daemon, installs a package, or runs a product binary.
     pub fn verify_artifacts(&self, root: &Path) -> Result<(), ApplicationManifestError> {
         self.verify()?;
+        let expected_names: BTreeSet<&str> = self
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.name.as_str())
+            .collect();
+        let mut actual_names = BTreeSet::new();
+        for entry in fs::read_dir(root).map_err(|_| ApplicationManifestError::ArtifactMissing)? {
+            let entry = entry.map_err(|_| ApplicationManifestError::ArtifactMissing)?;
+            let metadata = fs::symlink_metadata(entry.path())
+                .map_err(|_| ApplicationManifestError::ArtifactMissing)?;
+            if !metadata.file_type().is_file() {
+                return Err(ApplicationManifestError::ArtifactInventory);
+            }
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| ApplicationManifestError::ArtifactInventory)?;
+            if !actual_names.insert(name) {
+                return Err(ApplicationManifestError::ArtifactInventory);
+            }
+        }
+        if actual_names.len() != expected_names.len()
+            || actual_names
+                .iter()
+                .any(|name| !expected_names.contains(name.as_str()))
+        {
+            return Err(ApplicationManifestError::ArtifactInventory);
+        }
         for artifact in &self.artifacts {
             let path = root.join(&artifact.name);
             let metadata = fs::symlink_metadata(&path)
@@ -297,8 +355,44 @@ impl ApplicationManifest {
             if digest != artifact.sha256 {
                 return Err(ApplicationManifestError::ArtifactDigest);
             }
+            if artifact.kind == "binary" {
+                verify_binary_architecture(&path, &artifact.target)?;
+            }
         }
         Ok(())
+    }
+}
+
+/// Verify the executable format and architecture encoded by a native target.
+/// This is deliberately byte-level and offline: it never executes the file.
+pub fn verify_binary_architecture(
+    path: &Path,
+    target: &str,
+) -> std::result::Result<(), ApplicationManifestError> {
+    let bytes = fs::read(path).map_err(|_| ApplicationManifestError::ArtifactMissing)?;
+    let matches = match target {
+        "x86_64-unknown-linux-gnu" => {
+            bytes.starts_with(&[0x7f, b'E', b'L', b'F', 2, 1])
+                && bytes.get(18..20) == Some(&[0x3e, 0x00])
+        }
+        "aarch64-unknown-linux-gnu" => {
+            bytes.starts_with(&[0x7f, b'E', b'L', b'F', 2, 1])
+                && bytes.get(18..20) == Some(&[0xb7, 0x00])
+        }
+        "aarch64-apple-darwin" => {
+            bytes.starts_with(&[0xcf, 0xfa, 0xed, 0xfe])
+                && bytes.get(4..8) == Some(&[0x0c, 0x00, 0x00, 0x01])
+        }
+        "x86_64-apple-darwin" => {
+            bytes.starts_with(&[0xcf, 0xfa, 0xed, 0xfe])
+                && bytes.get(4..8) == Some(&[0x07, 0x00, 0x00, 0x01])
+        }
+        _ => false,
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(ApplicationManifestError::Architecture)
     }
 }
 
@@ -330,6 +424,13 @@ fn supported_target(target: &str) -> bool {
     )
 }
 
+fn supported_artifact_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "binary" | "archive" | "homebrew-archive" | "apt-package"
+    )
+}
+
 fn safe_slug(value: &str) -> bool {
     !value.is_empty()
         && value.bytes().all(|byte| {
@@ -356,10 +457,13 @@ fn safe_version(value: &str) -> bool {
 
 fn stable_version(value: &str) -> bool {
     let parts: Vec<&str> = value.split('.').collect();
-    parts.len() == 3
-        && parts
-            .iter()
-            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+    parts.len() == 3 && parts.iter().all(|part| numeric_version_part(part))
+}
+
+fn numeric_version_part(part: &str) -> bool {
+    !part.is_empty()
+        && part.bytes().all(|byte| byte.is_ascii_digit())
+        && (part == "0" || !part.starts_with('0'))
 }
 
 fn preview_version(value: &str, source_commit: &str) -> bool {
@@ -371,7 +475,7 @@ fn preview_version(value: &str, source_commit: &str) -> bool {
     };
     stable_version(base)
         && !run.is_empty()
-        && run.bytes().all(|byte| byte.is_ascii_digit())
+        && numeric_version_part(run)
         && sha7 == &source_commit[..7]
         && lower_hex(sha7, 7)
 }
@@ -451,10 +555,7 @@ mod tests {
         value.components[0].targets.reverse();
         let bytes = value.to_canonical_json();
         assert!(!bytes.contains("manifest_sha256"));
-        assert_eq!(
-            ApplicationManifest::verify_bytes(bytes.as_bytes(), Some(&value.digest())).is_ok(),
-            true
-        );
+        assert!(ApplicationManifest::verify_bytes(bytes.as_bytes(), Some(&value.digest())).is_ok());
     }
 
     #[test]
@@ -482,23 +583,23 @@ mod tests {
     #[test]
     fn artifact_digest_and_size_are_verified_without_execution() {
         let value = manifest();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
         let root = std::env::temp_dir().join(format!(
             "velnor-product-manifest-{}-{}",
             std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
+            nanos
         ));
-        fs::create_dir_all(&root).expect("create test directory");
-        fs::write(root.join("runner"), b"runner").expect("write test artifact");
+        assert!(fs::create_dir_all(&root).is_ok());
+        assert!(fs::write(root.join("runner"), b"runner").is_ok());
         assert!(value.verify_artifacts(&root).is_ok());
-        fs::write(root.join("runner"), b"changed").expect("rewrite test artifact");
+        assert!(fs::write(root.join("runner"), b"changed").is_ok());
         assert_eq!(
             value.verify_artifacts(&root),
             Err(ApplicationManifestError::ArtifactSize)
         );
-        fs::remove_dir_all(root).expect("remove test directory");
+        assert!(fs::remove_dir_all(root).is_ok());
     }
 
     #[test]

@@ -482,13 +482,17 @@ fn render_workflow(
             binary="$(jq -er '.binary' <<<"$row")"
             identity_count="$(jq -s --arg component "$component" '[.[] | select(.name == $component) | {crate,version,binary}] | unique | length' component-rows.jsonl)"
             [ "$identity_count" -eq 1 ] || { echo "::error::component identity differs across targets: $component" >&2; exit 1; }
-            binary_count="$(jq -s --arg target "$target" --arg binary "$binary" '[.[] | select(.kind == "binary" and .target == $target and (.name == $binary or .name == ($binary + "-" + $target)))] | length' artifacts.json)
+            binary_count="$(jq -s --arg target "$target" --arg binary "$binary" '[.[] | select(.kind == "binary" and .target == $target and (.name == $binary or .name == ($binary + "-" + $target)))] | length' artifacts.json)"
             [ "$binary_count" -eq 1 ] || { echo "::error::component binary artifact is missing: $component/$target" >&2; exit 1; }
           done < component-rows.jsonl
 "#;
     output = output.replace(
         "      - name: Verify extracted native package contents",
         &format!("{verification}      - name: Verify extracted native package contents"),
+    );
+    output = output.replace(
+        "jq -r --arg target \"$target\" '.[] | select(.target == $target) | .binary' component-rows.jsonl",
+        "jq -sr --arg target \"$target\" '.[] | select(.target == $target) | .binary' component-rows.jsonl",
     );
     output = output.replace("application-manifest.json", PRODUCT_MANIFEST_FILE);
     // Keep the generator-owned source URL and schema visible for policy
@@ -570,9 +574,11 @@ mod tests {
                 feature: None,
                 identity: "version".to_owned(),
             }],
-        )
-        .expect_err("incomplete product target set must fail");
-        assert!(error.to_string().contains("x86_64-unknown-linux-gnu"));
+        );
+        assert!(matches!(
+            error,
+            Err(error) if error.to_string().contains("x86_64-unknown-linux-gnu")
+        ));
     }
 
     #[test]
@@ -584,8 +590,9 @@ mod tests {
                 "runner".to_owned(),
                 "release-build".to_owned(),
             ],
-        )])))
-        .expect("typed component");
+        )])));
+        assert!(parsed.is_ok());
+        let parsed = parsed.unwrap_or_default();
         assert_eq!(parsed[0].feature.as_deref(), Some("release-build"));
         assert!(parse_components(Some(BTreeMap::from([(
             "runner".to_owned(),
@@ -601,7 +608,7 @@ mod tests {
             vec![
                 "runner".to_owned(),
                 "runner".to_owned(),
-                "".to_owned(),
+                String::new(),
                 "unknown".to_owned(),
             ],
         )])))
