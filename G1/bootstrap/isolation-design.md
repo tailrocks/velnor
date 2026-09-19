@@ -119,7 +119,7 @@ named static-single-uploader-v1; there is no attestation fallback in this
 implementation. The gate remains BLOCKED until this mechanism and its hostile
 producer proof are implemented:
 
-* Each transport workflow has exactly one fixed upload step and exactly one eligible job: candidate_upload in candidate_producer, handoff_upload in policy_acquire, and result_upload in candidate_execute. The static contract forbids every other upload-artifact invocation, dynamic artifact name, matrix duplicate, reusable-workflow uploader, or post-job uploader.
+* Each transport artifact namespace has exactly one fixed upload step and exactly one eligible job: candidate_upload for the static candidate namespace, handoff_upload for the handoff namespace, and result_upload for the result namespace. The existing fixed plan/runtime uploaders in ci-pr.yml are allowed only for their distinct static artifact names and cannot publish the candidate namespace. The static contract rejects any second path capable of publishing the candidate namespace, including computed or dynamic names, aliases, matrix duplicates, reusable-workflow uploaders, or post-job uploaders.
 * The base verifier fetches the exact workflow blob from the target head object and checks it against a base-owned normalized contract digest: exact workflow path, exact job ID/name, exact upload step ID/action commit, exact permissions, exact static artifact name, no extra jobs that can upload, and no candidate-controlled upload action. A missing or changed contract is red. For base-owned policy workflows, the same contract is checked against the base pinned blob.
 * Only after that contract check does the verifier derive artifact uploader_job_id/name from the unique uploader. It records artifact_binding_method=static-single-uploader-v1 and still rechecks the selected job REST id/run id/run attempt. The artifact service digest and raw ZIP digest remain mandatory. The derivation is a proof from the trusted workflow contract plus singularity, not an invented API field.
 * If the workflow cannot be independently normalized and contract-hashed, or if the artifact service later provides an uploader job/attempt field, the transport fails closed. It must not infer ownership from timing, names, candidate JSON, or job/artifact numeric proximity.
@@ -129,9 +129,12 @@ This is a concrete blocker from G1/bootstrap-artifact-feasibility-2026-09-20.md 
 ### Producer-hostile build proof
 
 The actual generated ci-pr.yml candidate_producer job must run a hostile build
-fixture from crates/velnor-workflow/tests/fixtures/bootstrap-hostile-producer/.
-The fixture is compiled/executed by the same PR-head build command that creates
-the candidate binary; it is not a unit-test string or a synthetic manifest.
+fixture from the base-pinned trusted test harness at
+crates/velnor-workflow/tests/fixtures/bootstrap-hostile-producer/. The fixture
+and assertion harness are checked out from the trusted base revision, not from
+the PR head and not from a PR-modifiable canary. The harness invokes the same
+PR-head build command that creates the candidate binary; it is not a unit-test
+string or a synthetic manifest.
 It attempts to read ACTIONS_RUNTIME_TOKEN, ACTIONS_RUNTIME_URL,
 ACTIONS_ID_TOKEN_REQUEST_TOKEN, GITHUB_TOKEN, GITHUB_OUTPUT, GITHUB_ENV,
 GITHUB_PATH, GITHUB_STATE, and the runner command files; it attempts to call
@@ -140,7 +143,8 @@ impersonate the fixed candidate_upload step by changing output names and
 action-runtime variables. The expected result is that all runtime-token and
 command-file values are absent/unreachable, the artifact service is
 unreachable from the build boundary, only the fixed trusted upload action can
-publish, and exactly one static artifact exists.
+publish the candidate namespace, and exactly one candidate artifact exists
+(distinct fixed plan/runtime artifacts are not counted as candidate artifacts).
 
 The candidate build must run under an explicit unprivileged env-i/container
 boundary with no ACTIONS_RUNTIME_TOKEN or uploader-service socket. The fixed
@@ -295,7 +299,9 @@ After the source implementation is separately approved, regeneration must prove 
 * candidate_execute is a fresh hosted job with {} permissions, fixed action/image references, no writable authoritative checkout, no socket, no command-file mount, and the complete sandbox flags;
 * policy is the only status writer and repeats API/source verification;
 * all action refs are immutable SHAs with trusted action archive digests;
-* all producer/handoff/result artifacts use static names, mandatory service/raw digests, and the unique-uploader binding; and
+* all producer/handoff/result artifact namespaces use static names, mandatory
+  service/raw digests, and one unique uploader; distinct fixed plan/runtime
+  namespaces remain separately contracted; and
 * absent image, quota, timeout, action, API, artifact, source, or uploader proof is a hard failure.
 
 Generated output must be produced by the generator. Do not hand-edit .github/workflows/ci-policy.yml, ci-pr.yml, or ci-unit-rust.yml.
