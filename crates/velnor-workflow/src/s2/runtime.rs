@@ -3995,6 +3995,7 @@ fn apt_publish(arguments: &[OsString]) -> Result<(), GeneratorError> {
         backend: crate::apt::DebBackend::Auto,
         path_overlay: None,
         selection: Some(&selection),
+        selection_path: Some(selection_path),
     };
     apt_result(crate::apt::publish_suite(&inputs))?;
     println!("{} suite staged", inputs.suite.as_str());

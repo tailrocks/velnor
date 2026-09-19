@@ -1149,11 +1149,34 @@ fn read_regular_file(path: &Path) -> Result<Vec<u8>, GeneratorError> {
 fn expected_sentinel(incoming: &Path) -> Result<Vec<u8>, GeneratorError> {
     let selection = incoming.join(DISCOVERY_SELECTION_FILE);
     match std::fs::symlink_metadata(&selection) {
-        Ok(_) => Ok(format!(
-            "selection:{}\n",
-            sha256_hex(&read_regular_file(&selection)?)
-        )
-        .into_bytes()),
+        Ok(_) => {
+            let selection_bytes = read_regular_file(&selection)?;
+            let document =
+                serde_json::from_slice::<serde_json::Value>(&selection_bytes).map_err(|error| {
+                    GeneratorError::usage(format!(
+                        "{} is not valid JSON: {error}",
+                        selection.display()
+                    ))
+                })?;
+            let parsed = parse_discovery_selection(&document)?;
+            let mut proof = format!("selection:{}\n", sha256_hex(&selection_bytes));
+            for asset in parsed.release_assets {
+                let path = incoming.join(&asset.name);
+                let bytes = read_regular_file(&path)?;
+                if bytes.len() as u64 != asset.size {
+                    return Err(GeneratorError::usage(format!(
+                        "incoming asset {} size differs from discovery",
+                        asset.name
+                    )));
+                }
+                proof.push_str("asset:");
+                proof.push_str(&asset.name);
+                proof.push(':');
+                proof.push_str(&sha256_hex(&bytes));
+                proof.push('\n');
+            }
+            Ok(proof.into_bytes())
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(b"verified\n".to_vec()),
         Err(error) => Err(GeneratorError::io(
             "stat discovery selection",
@@ -3632,6 +3655,10 @@ pub(crate) struct PublishInputs<'a> {
     pub(crate) path_overlay: Option<&'a Path>,
     /// The immutable application selection which produced these inputs.
     pub(crate) selection: Option<&'a DiscoverySelection>,
+    /// The source selection path. Schema-2 publication re-reads and compares
+    /// it immediately before staging so a changed handoff cannot cross the
+    /// verify-to-publish boundary.
+    pub(crate) selection_path: Option<&'a Path>,
 }
 
 /// Publish a suite into the staging tree: deterministic pool, per-arch
@@ -3655,6 +3682,19 @@ pub(crate) fn publish_suite(inputs: &PublishInputs<'_>) -> Result<(), GeneratorE
             "publish: refusing — verify has not armed the reprepro sentinel: {error}"
         ))
     })?;
+    if let (Some(selection_path), Some(selection)) = (inputs.selection_path, inputs.selection) {
+        let current = read_discovery_selection(selection_path)?;
+        if &current != selection {
+            return Err(GeneratorError::usage(
+                "publish: discovery selection changed after verification",
+            ));
+        }
+        verify_discovery_incoming(selection_path, inputs.incoming)?;
+    } else if inputs.selection_path.is_some() || inputs.selection.is_some() {
+        return Err(GeneratorError::usage(
+            "publish: selection and selection path must be supplied together",
+        ));
+    }
     for tool in ["apt-ftparchive", "gpg"] {
         if !tool_present(tool, inputs.path_overlay) {
             return Err(GeneratorError::usage(format!(
@@ -3752,6 +3792,40 @@ fn pool_root(staging: &Path, suite: Suite, contract: &AptContract) -> PathBuf {
 
 /// Stage one deb into the pool under its canonical name. A colliding name
 /// with different bytes fails; identical bytes are idempotent.
+fn selection_artifact_digest(
+    selection: &DiscoverySelection,
+    name: &str,
+) -> Result<String, GeneratorError> {
+    let artifacts = selection
+        .manifest
+        .get("artifacts")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| GeneratorError::usage("publish: product artifact inventory is missing"))?;
+    let mut digest = None;
+    for artifact in artifacts {
+        if field(artifact, "name")? != name {
+            continue;
+        }
+        if digest.is_some() {
+            return Err(GeneratorError::usage(format!(
+                "publish: product artifact {name} is duplicated"
+            )));
+        }
+        let value = field(artifact, "sha256")?;
+        if !valid_digest(value) {
+            return Err(GeneratorError::usage(format!(
+                "publish: product artifact {name} has an invalid digest"
+            )));
+        }
+        digest = Some(value.to_owned());
+    }
+    digest.ok_or_else(|| {
+        GeneratorError::usage(format!(
+            "publish: candidate package {name} is absent from immutable discovery"
+        ))
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn stage_package(
     deb: &Path,
@@ -3759,6 +3833,7 @@ fn stage_package(
     contract: &AptContract,
     backend: DebBackend,
     path_overlay: Option<&Path>,
+    expected_sha256: Option<&str>,
 ) -> Result<(String, String), GeneratorError> {
     if deb_control_field(deb, "Package", backend, path_overlay)? != contract.package {
         return Err(GeneratorError::usage(
@@ -3782,6 +3857,13 @@ fn stage_package(
         .unwrap_or(destination)
         .join(canonical_pool_name(&contract.package, &version, &arch));
     let deb_bytes = read_regular_file(deb)?;
+    if let Some(expected_sha256) = expected_sha256
+        && sha256_hex(&deb_bytes) != expected_sha256
+    {
+        return Err(GeneratorError::usage(
+            "publish: staged package differs from immutable discovery",
+        ));
+    }
     if std::fs::symlink_metadata(&expected).is_ok() {
         if sha256_hex(&deb_bytes) != sha256_file(&expected)? {
             return Err(GeneratorError::usage(
@@ -3826,7 +3908,14 @@ fn stage_dir_debs(
             }
             continue;
         }
-        stage_package(&deb, &pool.join(&name), contract, backend, path_overlay)?;
+        stage_package(
+            &deb,
+            &pool.join(&name),
+            contract,
+            backend,
+            path_overlay,
+            None,
+        )?;
     }
     Ok(())
 }
@@ -4327,12 +4416,17 @@ fn publish_stable(
         let name = format!("{}-{}-{arch}.deb", contract.package, tag.version);
         let deb = inputs.incoming.join(&name);
         if deb.is_file() {
+            let expected_sha256 = inputs
+                .selection
+                .map(|selection| selection_artifact_digest(selection, &name))
+                .transpose()?;
             stage_package(
                 &deb,
                 &pool.join(&name),
                 contract,
                 inputs.backend,
                 inputs.path_overlay,
+                expected_sha256.as_deref(),
             )?;
         }
     }
@@ -4503,6 +4597,11 @@ fn stage_preview_candidates(
             contract,
             inputs.backend,
             inputs.path_overlay,
+            inputs
+                .selection
+                .map(|selection| selection_artifact_digest(selection, &name))
+                .transpose()?
+                .as_deref(),
         )?;
     }
     Ok(())
@@ -8207,6 +8306,7 @@ mod tests {
             backend: DebBackend::Auto,
             path_overlay,
             selection: None,
+            selection_path: None,
         }
     }
 
