@@ -767,6 +767,52 @@ mod tests {
     }
 
     #[test]
+    fn startup_from_local_roots_retains_live_peer_permit() {
+        let path = temp_ledger_path("peer-root-isolation");
+        configure(&path, 2);
+        assert!(pid_alive(std::process::id()));
+        let peer_holder = native_permit_holder("peer-daemon");
+        {
+            let mut ledger = PermitLedger::open(&path).unwrap();
+            let generation = ledger.generation().unwrap();
+            assert_eq!(
+                ledger
+                    .acquire(
+                        &peer_holder,
+                        PermitLane::Native,
+                        PermitState::Running,
+                        generation,
+                        Some(std::process::id()),
+                    )
+                    .unwrap(),
+                AcquireOutcome::Acquired
+            );
+        }
+
+        // A second daemon starts with roots that cannot attest the peer's
+        // slot. Its host-wide reconcile may mark the row uncertain, but
+        // local absence cannot prove peer teardown or release its permit.
+        {
+            let mut ledger = PermitLedger::open(&path).unwrap();
+            ledger.begin_epoch().unwrap();
+        }
+        let (report, swept) =
+            crate::scaleset::allocator::startup_reconcile(&path, &[], &[], &pid_alive).unwrap();
+        assert!(report.confirmed.is_empty());
+        assert!(report.adopted.is_empty());
+        assert_eq!(report.marked_uncertain, vec![peer_holder.clone()]);
+        assert!(swept.is_empty());
+
+        let ledger = PermitLedger::open(&path).unwrap();
+        assert_eq!(ledger.occupied().unwrap(), 1);
+        assert_eq!(
+            ledger.holder_state(&peer_holder).unwrap(),
+            Some(PermitState::Uncertain)
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
     fn adopt_max_jobs_sets_once_then_keeps_without_explicit_override() {
         // First start on a fresh ledger: configure.
         assert_eq!(adopt_max_jobs(None, Some(32), 4), AdoptMaxJobs::Set(32));
