@@ -8401,6 +8401,17 @@ mod tests {
         }
     }
 
+    fn existing_test_baseline(root: &Path) -> Option<TrustedBaseline> {
+        let revision = Command::new("git")
+            .current_dir(root)
+            .args(["rev-parse", "--verify", "HEAD"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())?;
+        TrustedBaseline::from_git(root, &revision).ok()
+    }
+
     fn committed_test_baseline(root: &Path) -> TrustedBaseline {
         for args in [
             &["init", "-q"][..],
@@ -19419,6 +19430,7 @@ lockfile = true
             write_generated(&root, &files, false, false, false),
             "write generated layout",
         );
+        let baseline = committed_test_baseline(&root);
         let state_path = root.join(OWNERSHIP_STATE);
         let state = must(fs::read_to_string(&state_path), "read ownership state");
         let mut lines = state.lines().map(str::to_owned).collect::<Vec<_>>();
@@ -19437,7 +19449,17 @@ lockfile = true
         );
 
         let error = must_some(
-            write_generated(&root, &files, false, true, false).err(),
+            write_generated_with_baseline(
+                &root,
+                &files,
+                &GenerationInputs::parts(0, 0),
+                false,
+                true,
+                false,
+                false,
+                Some(&baseline),
+            )
+            .err(),
             "check must report ownership drift",
         )
         .to_string();
@@ -19459,13 +19481,24 @@ lockfile = true
             write_generated(&root, &previous, false, false, false),
             "write previous generated layout",
         );
+        let baseline = committed_test_baseline(&root);
         must(
             fs::remove_file(root.join(&stale)),
             "remove stale file outside generator",
         );
 
         let error = must_some(
-            write_generated(&root, &current, false, true, false).err(),
+            write_generated_with_baseline(
+                &root,
+                &current,
+                &GenerationInputs::parts(0, 0),
+                false,
+                true,
+                false,
+                false,
+                Some(&baseline),
+            )
+            .err(),
             "check must detect stale ownership metadata",
         )
         .to_string();
@@ -19486,13 +19519,23 @@ lockfile = true
             write_generated(&root, &previous, false, false, false),
             "write previous generated layout",
         );
+        let baseline = committed_test_baseline(&root);
         must(
             fs::remove_file(root.join(&stale)),
             "remove stale file outside generator",
         );
 
         let outcome = must(
-            write_generated(&root, &current, false, false, false),
+            write_generated_with_baseline(
+                &root,
+                &current,
+                &GenerationInputs::parts(0, 0),
+                false,
+                false,
+                false,
+                false,
+                Some(&baseline),
+            ),
             "refresh stale ownership metadata",
         );
         assert!(matches!(
@@ -19538,16 +19581,17 @@ lockfile = true
             write_generated(&root, &previous, false, false, false),
             "write previous generated layout",
         );
-        must(
-            write_generated(&root, &current, false, false, false),
-            "refresh beside sidecar-only legacy guide",
+        let error = must_some(
+            write_generated(&root, &current, false, false, false).err(),
+            "refuse sidecar-only projection refresh without a baseline",
         );
+        assert!(error.to_string().contains("immutable baseline"));
         assert!(root.join(".github/UNIFIED-ACTIONS.md").exists());
         let state = must(
             fs::read_to_string(root.join(OWNERSHIP_STATE)),
-            "read refreshed ownership state",
+            "read preserved ownership state",
         );
-        assert!(!state.contains("UNIFIED-ACTIONS.md"));
+        assert!(state.contains("UNIFIED-ACTIONS.md"));
         let _ = fs::remove_dir_all(root);
     }
     #[test]
@@ -19581,10 +19625,11 @@ lockfile = true
             fs::write(root.join(&guide), "# local guide\n"),
             "modify legacy guide",
         );
-        must(
-            write_generated(&root, &current, false, false, false),
-            "preserve modified sidecar-only guide",
+        let error = must_some(
+            write_generated(&root, &current, false, false, false).err(),
+            "refuse modified sidecar-only projection refresh without a baseline",
         );
+        assert!(error.to_string().contains("immutable baseline"));
         assert_eq!(
             must(
                 fs::read_to_string(root.join(&guide)),
@@ -19671,10 +19716,11 @@ lockfile = true
             ),
             "restore legacy guide ownership state",
         );
-        must(
-            write_generated(&root, &current, false, false, false),
-            "preserve symlinked sidecar-only guide",
+        let error = must_some(
+            write_generated(&root, &current, false, false, false).err(),
+            "refuse symlinked sidecar-only projection refresh without a baseline",
         );
+        assert!(error.to_string().contains("immutable baseline"));
         assert!(fs::symlink_metadata(root.join(&guide)).is_ok());
         assert!(must(fs::read_dir(&outside), "read outside directory")
             .next()
@@ -20814,7 +20860,7 @@ lockfile = true
         format!(
              "schema = 2\n\n[generator]\nrepository = \"tailrocks/fixture\"\n\n\
              [policy]\nci_required = true\ndco_required = false\nruleset_external_status_checks = [\"DCO\"]\n\n\
-             [[declare]]\nprimitive = \"rust-crate\"\nunits = [\"{unit}\"]\nfile = \"rust-crate.yml\"\n"
+             [[declare]]\nprimitive = \"rust-crate-pipeline\"\nunits = [\"{unit}\"]\n"
         )
     }
 
@@ -20926,8 +20972,18 @@ lockfile = true
             "scan repository for generation",
         );
         let files = must(generated_files(&scanned.config), "generate");
+        let baseline = existing_test_baseline(root);
         must(
-            write_generated_with_options(root, &files, &scanned.inputs, false, false, force, false),
+            write_generated_with_baseline(
+                root,
+                &files,
+                &scanned.inputs,
+                false,
+                false,
+                force,
+                false,
+                baseline.as_ref(),
+            ),
             "generate repository",
         )
     }
@@ -20941,7 +20997,17 @@ lockfile = true
             "main",
         )?;
         let files = must(generated_files(&scanned.config), "generate");
-        write_generated_with_options(root, &files, &scanned.inputs, false, true, false, false)
+        let baseline = existing_test_baseline(root);
+        write_generated_with_baseline(
+            root,
+            &files,
+            &scanned.inputs,
+            false,
+            true,
+            false,
+            false,
+            baseline.as_ref(),
+        )
     }
 
     fn recorded_state(root: &Path) -> OwnershipState {
@@ -21018,8 +21084,13 @@ lockfile = true
         let root = configured_repository("scan-input-drift", None);
         generate_repository(&root, false);
         must(
-            fs::write(root.join("scratch.txt"), "untracked by the renderer\n"),
-            "add scratch file",
+            fs::write(root.join("scratch.txt"), "scan input v1\n"),
+            "add scan input",
+        );
+        let _baseline = committed_test_baseline(&root);
+        must(
+            fs::write(root.join("scratch.txt"), "scan input v2\n"),
+            "change scan input",
         );
 
         let error =
@@ -21048,6 +21119,7 @@ lockfile = true
             crate::s2::provider::ProviderId::GithubHosted,
         ]));
         generate_repository(&root, false);
+        let _baseline = committed_test_baseline(&root);
         let initial = must(
             scan_target(&root, provider.clone(), "main"),
             "scan initial repository",
@@ -21085,6 +21157,16 @@ lockfile = true
             ),
             "write forged generated-header workflow",
         );
+        for args in [
+            &["add", ".github/workflows/forged.yml"][..],
+            &["commit", "-qm", "forge generated marker"][..],
+        ] {
+            let status = must(
+                Command::new("git").current_dir(&root).args(args).status(),
+                "commit forged workflow fixture",
+            );
+            assert!(status.success(), "git fixture command failed: {args:?}");
+        }
         let with_forged = must(
             scan_target(&root, provider.clone(), "main"),
             "scan forged generated-header workflow",
@@ -21101,12 +21183,32 @@ lockfile = true
             "forged workflow must be named: {forged_error}"
         );
         must(fs::remove_file(&forged), "remove forged workflow");
+        for args in [
+            &["add", "-u", ".github/workflows/forged.yml"][..],
+            &["commit", "-qm", "remove forged workflow"][..],
+        ] {
+            let status = must(
+                Command::new("git").current_dir(&root).args(args).status(),
+                "commit forged workflow cleanup",
+            );
+            assert!(status.success(), "git fixture command failed: {args:?}");
+        }
 
         let handwritten = root.join(".github/workflows/handwritten.yml");
         must(
             fs::write(&handwritten, "name: handwritten\n"),
             "write handwritten workflow",
         );
+        for args in [
+            &["add", ".github/workflows/handwritten.yml"][..],
+            &["commit", "-qm", "add handwritten workflow"][..],
+        ] {
+            let status = must(
+                Command::new("git").current_dir(&root).args(args).status(),
+                "commit handwritten workflow fixture",
+            );
+            assert!(status.success(), "git fixture command failed: {args:?}");
+        }
         let with_handwritten = must(
             scan_target(&root, provider, "main"),
             "scan with handwritten workflow",
@@ -21123,6 +21225,16 @@ lockfile = true
             "unmanaged workflow must be named: {handwritten_error}"
         );
         must(fs::remove_file(handwritten), "remove handwritten workflow");
+        for args in [
+            &["add", "-u", ".github/workflows/handwritten.yml"][..],
+            &["commit", "-qm", "remove handwritten workflow"][..],
+        ] {
+            let status = must(
+                Command::new("git").current_dir(&root).args(args).status(),
+                "commit handwritten workflow cleanup",
+            );
+            assert!(status.success(), "git fixture command failed: {args:?}");
+        }
         assert!(
             matches!(check_repository(&root), Ok(WriteOutcome::Unchanged)),
             "removing unmanaged workflows must restore the recorded scan"
@@ -21365,6 +21477,7 @@ lockfile = true
         let before = configured_repository_config("rust-fixture");
         let root = configured_repository("config-input-drift", Some(&before));
         generate_repository(&root, false);
+        let _baseline = committed_test_baseline(&root);
         let recorded = recorded_state(&root).inputs.config;
 
         let after = before.replace("dco_required = false", "dco_required = true");
@@ -21401,6 +21514,7 @@ lockfile = true
     fn state_schema_one_is_rejected_with_the_schema_move() {
         let root = configured_repository("schema-one-state", None);
         generate_repository(&root, false);
+        let _baseline = committed_test_baseline(&root);
         let before = generated_tree(&root);
         let state_path = root.join(OWNERSHIP_STATE);
         let state = must(fs::read_to_string(&state_path), "read ownership state");
