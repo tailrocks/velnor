@@ -14769,7 +14769,7 @@ lockfile = true
         }
         let linux_only = render_actionlint_config(&config);
         assert!(
-            !linux_only.contains("macos-26"),
+            !linux_only.contains("macos-15") && !linux_only.contains("macos-26"),
             "linux-only releases must not allowlist the macos label: {linux_only}"
         );
     }
