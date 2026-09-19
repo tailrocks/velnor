@@ -193,6 +193,7 @@ pub struct LiveRepository {
     pub rulesets: Vec<LiveRuleset>,
     pub workflows: Vec<LiveWorkflow>,
     pub open_prs: Vec<LivePullRequest>,
+    pub main_executions: Vec<LiveExecution>,
     pub main_checks: Vec<LiveCheck>,
     pub raw_object_refs: Vec<String>,
 }
@@ -312,7 +313,7 @@ where
     let mut opening_prs = Vec::new();
     for repository in &manifest.repositories {
         opening_prs.extend(
-            collect_pr_identities(transport, store, &auth, repository, &mut ledger)
+            collect_pr_identities(transport, store, &auth, repository, "opening", &mut ledger)
                 .await
                 .with_context(|| format!("opening PR census for {}", repository.repository))?,
         );
@@ -330,7 +331,7 @@ where
     let mut closing_prs = Vec::new();
     for repository in &manifest.repositories {
         closing_prs.extend(
-            collect_pr_identities(transport, store, &auth, repository, &mut ledger)
+            collect_pr_identities(transport, store, &auth, repository, "closing", &mut ledger)
                 .await
                 .with_context(|| format!("closing PR census for {}", repository.repository))?,
         );
@@ -419,6 +420,7 @@ async fn collect_pr_identities<T, S>(
     store: &mut S,
     auth: &AuthIdentity,
     repository: &ManifestRepository,
+    phase: &str,
     ledger: &mut Ledger,
 ) -> Result<Vec<LivePullRequestIdentity>>
 where
@@ -431,7 +433,7 @@ where
         auth,
         ledger,
         github_open_pull_requests_request(
-            collection_id(&repository.repository, "open-prs"),
+            collection_id(&repository.repository, &format!("{phase}-open-prs")),
             &repository.repository,
         ),
     )
@@ -445,7 +447,7 @@ where
             auth,
             ledger,
             github_single_object_request(
-                collection_id(&repository.repository, &format!("pr-{number}")),
+                collection_id(&repository.repository, &format!("{phase}-pr-{number}")),
                 format!("/repos/{}/pulls/{number}", repository.repository),
                 "pull_request",
             ),
@@ -515,7 +517,8 @@ where
         ledger,
     )
     .await?;
-    let identities = collect_pr_identities(transport, store, auth, manifest, ledger).await?;
+    let identities =
+        collect_pr_identities(transport, store, auth, manifest, "inventory", ledger).await?;
     let mut open_prs = Vec::with_capacity(identities.len());
     for identity in identities {
         let (executions, checks) = collect_pr_execution_facts(
@@ -532,12 +535,24 @@ where
             raw_object_refs: raw_ids,
         });
     }
+    let main_executions = collect_executions_for_source(
+        transport,
+        store,
+        auth,
+        manifest,
+        &workflows,
+        &default_branch_sha,
+        "main",
+        ledger,
+    )
+    .await?;
     let main_checks = collect_check_facts(
         transport,
         store,
         auth,
         manifest,
         &default_branch_sha,
+        "main",
         ledger,
     )
     .await?;
@@ -549,6 +564,7 @@ where
         rulesets,
         workflows,
         open_prs,
+        main_executions,
         main_checks,
         raw_object_refs: ledger.raw_ids_since(raw_start),
     })
@@ -713,6 +729,7 @@ where
                 manifest,
                 workflows,
                 &source_sha,
+                &format!("pr-{}", identity.number),
                 ledger,
             )
             .await?,
@@ -722,10 +739,23 @@ where
         .tested_merge_sha
         .as_deref()
         .ok_or_else(|| anyhow!("PR #{} lacks tested merge SHA", identity.number))?;
-    let checks = collect_check_facts(transport, store, auth, manifest, source_sha, ledger).await?;
+    let checks = collect_check_facts(
+        transport,
+        store,
+        auth,
+        manifest,
+        source_sha,
+        &format!("pr-{}", identity.number),
+        ledger,
+    )
+    .await?;
     Ok((executions, checks))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the collector keeps transport, storage, auth, manifest, workflow, source, and ledger boundaries explicit"
+)]
 async fn collect_executions_for_source<T, S>(
     transport: &T,
     store: &mut S,
@@ -733,6 +763,7 @@ async fn collect_executions_for_source<T, S>(
     manifest: &ManifestRepository,
     workflows: &[LiveWorkflow],
     source_sha: &str,
+    collection_prefix: &str,
     ledger: &mut Ledger,
 ) -> Result<Vec<LiveExecution>>
 where
@@ -745,7 +776,10 @@ where
         auth,
         ledger,
         github_workflow_runs_request(
-            collection_id(&manifest.repository, &format!("runs-{source_sha}")),
+            collection_id(
+                &manifest.repository,
+                &format!("{collection_prefix}-runs-{source_sha}"),
+            ),
             &manifest.repository,
         )
         .with_query("head_sha", source_sha),
@@ -799,7 +833,13 @@ where
             .await?;
             let live_jobs = jobs
                 .iter()
-                .map(|job| parse_job(job, &required_string(&run, &["event"])?))
+                .map(|job| {
+                    parse_job(
+                        job,
+                        &required_string(&run, &["event"])?,
+                        jobs_raw_ids.clone(),
+                    )
+                })
                 .collect::<Result<Vec<_>>>()?;
             let (artifacts, artifacts_raw_ids) = collect_items(
                 transport,
@@ -818,7 +858,7 @@ where
             .await?;
             let live_artifacts = artifacts
                 .iter()
-                .map(parse_artifact)
+                .map(|artifact| parse_artifact(artifact, artifacts_raw_ids.clone()))
                 .collect::<Result<Vec<_>>>()?;
             let mut raw_ids = run_list_raw_ids.clone();
             raw_ids.extend(attempt_raw_ids.clone());
@@ -857,6 +897,7 @@ async fn collect_check_facts<T, S>(
     auth: &AuthIdentity,
     manifest: &ManifestRepository,
     source_sha: &str,
+    collection_prefix: &str,
     ledger: &mut Ledger,
 ) -> Result<Vec<LiveCheck>>
 where
@@ -869,7 +910,10 @@ where
         auth,
         ledger,
         github_check_suites_request(
-            collection_id(&manifest.repository, &format!("check-suites-{source_sha}")),
+            collection_id(
+                &manifest.repository,
+                &format!("{collection_prefix}-check-suites-{source_sha}"),
+            ),
             &manifest.repository,
             source_sha,
         ),
@@ -884,7 +928,10 @@ where
             auth,
             ledger,
             github_check_suite_runs_request(
-                collection_id(&manifest.repository, &format!("suite-{suite_id}-runs")),
+                collection_id(
+                    &manifest.repository,
+                    &format!("{collection_prefix}-suite-{suite_id}-runs"),
+                ),
                 &manifest.repository,
                 suite_id,
             ),
@@ -1026,7 +1073,7 @@ fn parse_ruleset_checks(
     Ok(checks)
 }
 
-fn parse_job(value: &Value, event: &str) -> Result<LiveJob> {
+fn parse_job(value: &Value, event: &str, raw_object_refs: Vec<String>) -> Result<LiveJob> {
     Ok(LiveJob {
         job_id: required_u64(value, &["id"])?,
         name: required_string(value, &["name"])?,
@@ -1036,17 +1083,17 @@ fn parse_job(value: &Value, event: &str) -> Result<LiveJob> {
         source_sha: optional_string(value, &["head_sha"]),
         actual_checkout_sha: optional_string(value, &["head_sha"]),
         source_url: required_string(value, &["html_url"])?,
-        raw_object_refs: Vec::new(),
+        raw_object_refs,
     })
 }
 
-fn parse_artifact(value: &Value) -> Result<LiveArtifact> {
+fn parse_artifact(value: &Value, raw_object_refs: Vec<String>) -> Result<LiveArtifact> {
     Ok(LiveArtifact {
         artifact_id: required_u64(value, &["id"])?,
         name: required_string(value, &["name"])?,
         expired: value.get("expired").and_then(Value::as_bool),
         source_url: required_string(value, &["archive_download_url"])?,
-        raw_object_refs: Vec::new(),
+        raw_object_refs,
     })
 }
 

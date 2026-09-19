@@ -15,7 +15,9 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+#[cfg(test)]
+use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -35,6 +37,17 @@ pub mod live_transport;
 /// final `g0_contract` adapter seam.
 #[path = "github_live_collector.rs"]
 pub mod live_collector;
+
+/// Adapter from the live observation ledger to the strict checker-owned G0
+/// types.  It never fills missing provider identities with synthetic IDs.
+#[path = "g0_live_mapping.rs"]
+pub mod g0_mapping;
+
+/// Explicit CLI boundary for a read-only live capture.  It writes only to a
+/// caller-selected local evidence directory and never dispatches or mutates
+/// GitHub.
+#[path = "github_live_cli.rs"]
+pub mod live_cli;
 
 /// API family used by a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2153,7 +2166,7 @@ fn make_record(
                         &request.endpoint_or_operation,
                         &canonical_query,
                     )),
-                    None,
+                    Some(sha256_digest(b"")),
                     None,
                 )
             }

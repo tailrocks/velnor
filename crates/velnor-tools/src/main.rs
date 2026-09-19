@@ -79,6 +79,8 @@ enum CommandKind {
     /// Validate an external manifest, authoritative snapshot, and evidence envelope.
     #[command(name = "evidence-check")]
     EvidenceCheck(evidence_check::EvidenceCheckArgs),
+    /// Capture complete read-only GitHub facts into a local evidence directory.
+    G0LiveCollect(github_acquisition::live_cli::G0LiveCollectArgs),
     /// Diff the GitHub-hosted and Velnor lanes of one run via the GitHub API (equal-or-better gate).
     LaneCompare(lane_compare::LaneCompareArgs),
     /// Maintainer-only org-JIT fleet policy operations (Plan 039).
@@ -547,6 +549,7 @@ async fn main() -> Result<()> {
         CommandKind::AuditCi(args) => audit_ci::audit_ci(args),
         CommandKind::Compare(args) => lane_compare::lane_compare(&root, args),
         CommandKind::EvidenceCheck(args) => evidence_check::evidence_check(args).await,
+        CommandKind::G0LiveCollect(args) => github_acquisition::live_cli::run(args).await,
         CommandKind::LaneCompare(args) => lane_compare::lane_compare(&root, args),
         CommandKind::FleetPolicy(args) => fleet_policy::fleet_policy(args.command).await,
     }

@@ -16,11 +16,16 @@ use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT}
 use reqwest::redirect::Policy;
 use serde_json::json;
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+#[cfg(test)]
+use std::fs::File;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -80,7 +85,10 @@ impl GithubHttpTransport {
         max_body_bytes: usize,
     ) -> Result<Self> {
         let token = token.into();
-        if token.trim().is_empty() || token.as_bytes().contains(&0) {
+        if token.trim().is_empty()
+            || token.as_bytes().contains(&0)
+            || !token.bytes().all(|byte| byte.is_ascii_graphic())
+        {
             bail!("live GitHub transport requires a non-empty token");
         }
         if max_body_bytes == 0 {
@@ -105,7 +113,10 @@ impl GithubHttpTransport {
         max_body_bytes: usize,
     ) -> Result<Self> {
         let token = token.into();
-        if token.trim().is_empty() || token.as_bytes().contains(&0) {
+        if token.trim().is_empty()
+            || token.as_bytes().contains(&0)
+            || !token.bytes().all(|byte| byte.is_ascii_graphic())
+        {
             bail!("live GitHub transport requires a non-empty token");
         }
         if max_body_bytes == 0 {
@@ -142,14 +153,11 @@ impl GithubHttpTransport {
         }
     }
 
-    fn request_headers(&self) -> HeaderMap {
+    fn request_headers(&self) -> Result<HeaderMap, TransportFailure> {
         let mut headers = HeaderMap::new();
-        // HeaderValue construction can only fail for a token containing
-        // invalid header bytes; the constructor rejects NUL and reqwest will
-        // reject all other invalid values at send time without exposing them.
-        if let Ok(value) = HeaderValue::from_str(&format!("Bearer {}", self.token)) {
-            headers.insert(AUTHORIZATION, value);
-        }
+        let value = HeaderValue::from_str(&format!("Bearer {}", self.token))
+            .map_err(|_| TransportFailure::Other)?;
+        headers.insert(AUTHORIZATION, value);
         headers.insert(
             ACCEPT,
             HeaderValue::from_static("application/vnd.github+json"),
@@ -159,7 +167,7 @@ impl GithubHttpTransport {
             "x-github-api-version",
             HeaderValue::from_static(GITHUB_API_VERSION),
         );
-        headers
+        Ok(headers)
     }
 }
 
@@ -174,7 +182,7 @@ impl AcquisitionTransport for GithubHttpTransport {
                 HttpMethod::Get => self.client.get(url.clone()),
                 HttpMethod::Post => self.client.post(url.clone()),
             };
-            builder = builder.headers(self.request_headers());
+            builder = builder.headers(self.request_headers()?);
             if let Some(body) = request.body {
                 if body.len() > self.max_body_bytes {
                     return Err(TransportFailure::Other);
@@ -466,6 +474,12 @@ mod tests {
         let debug = format!("{transport:?}");
         assert!(!debug.contains(token));
         assert!(!debug.contains("github_pat_"));
+    }
+
+    #[test]
+    fn transport_rejects_tokens_that_cannot_be_sent_as_headers() {
+        assert!(GithubHttpTransport::new("github_pat_valid\nforged").is_err());
+        assert!(GithubHttpTransport::new("github_pat_valid\u{7f}").is_err());
     }
 
     #[test]
