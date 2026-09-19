@@ -54,6 +54,30 @@ pub(crate) fn is_release_side(primitive: &str) -> bool {
 /// The release-record schema the stable publisher assembles. The record tool
 /// and the package consumer refuse any other tag.
 const RELEASE_RECORD_SCHEMA: &str = "velnor.release-record/v1";
+const ARM64_LINUX_TARGET: &str = "aarch64-unknown-linux-gnu";
+const ARM64_HOSTED_RUNS_ON: &str = "ubuntu-24.04-arm";
+
+/// Pin the C compiler and Rust linker to the native arm64 toolchain before a
+/// target build. `cc`-based dependencies such as aws-lc/openssl otherwise
+/// infer the cross-prefix `aarch64-linux-gnu-gcc`, which is absent on the
+/// native GitHub arm64 image. The probe fails before a long Cargo build and
+/// makes the exact compiler/linker contract visible in the job log.
+fn native_arm64_toolchain_steps(target_expr: &str) -> String {
+    let condition = format!("${{{{ {target_expr} == '{ARM64_LINUX_TARGET}' }}}}");
+    format!(
+        "      - name: Verify native arm64 C and OpenSSL toolchain\n        if: {condition}\n        shell: bash\n        run: |\n          set -euo pipefail\n          test \"$(uname -m)\" = aarch64 || {{ echo \"::error::aarch64 target requires an arm64 runner\" >&2; exit 1; }}\n          cc=\"$(command -v cc)\"\n          cxx=\"$(command -v c++)\"\n          ar=\"$(command -v ar)\"\n          machine=\"$(\"$cc\" -dumpmachine)\"\n          case \"$machine\" in\n            aarch64-*|arm64-*) ;;\n            *) echo \"::error::native arm64 compiler reports unsupported target $machine\" >&2; exit 1 ;;\n          esac\n          \"$cc\" -x c -o \"$RUNNER_TEMP/velnor-arm64-c-probe\" - <<'EOF'\n          int main(void) {{ return 0; }}\n          EOF\n          \"$RUNNER_TEMP/velnor-arm64-c-probe\"\n          \"$cxx\" --version >/dev/null\n          \"$ar\" --version >/dev/null\n          printf 'CC_aarch64_unknown_linux_gnu=%s\\n' \"$cc\" >> \"$GITHUB_ENV\"\n          printf 'CXX_aarch64_unknown_linux_gnu=%s\\n' \"$cxx\" >> \"$GITHUB_ENV\"\n          printf 'AR_aarch64_unknown_linux_gnu=%s\\n' \"$ar\" >> \"$GITHUB_ENV\"\n          printf 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=%s\\n' \"$cc\" >> \"$GITHUB_ENV\"\n          printf 'CROSS_COMPILE=\\n' >> \"$GITHUB_ENV\"\n          if command -v openssl >/dev/null 2>&1; then\n            openssl version\n          else\n            echo 'host openssl CLI absent; vendored OpenSSL/aws-lc will use the verified native compiler'\n          fi\n          echo \"native arm64 compiler=$cc linker=$cc; vendored OpenSSL/aws-lc target builds use these settings\"\n",
+    )
+}
+
+fn add_native_arm64_toolchain_steps(steps: &str) -> String {
+    steps.replace(
+        "      - name: Set up sccache\n",
+        &format!(
+            "{}      - name: Set up sccache\n",
+            native_arm64_toolchain_steps("matrix.target")
+        ),
+    )
+}
 
 /// The source URL stamped into OCI labels and the release record: the
 /// release contract's own source repository on github.com.
@@ -1073,18 +1097,10 @@ fn deb_arch_matrix(config: &ProjectConfig, targets: &[String], guest: bool) -> O
             "amd64" => "\n            guest_arch: x86_64",
             _ => "\n            guest_arch: aarch64",
         });
-        // Build the aarch64 Debian lane on GitHub's native arm64 runner. The
-        // release binary links OpenSSL and other C dependencies, so a Rust
-        // target alone is not a complete cross toolchain on an x86 runner.
-        let runner = if target == "aarch64-unknown-linux-gnu" {
-            "ubuntu-24.04-arm".to_owned()
-        } else {
-            release_runner(config, target)
-        };
         let _ = writeln!(
             matrix,
             "          - arch: {arch}\n            target: {target}\n            runner: {}{}",
-            runner,
+            release_runner(config, target),
             guest_arch.unwrap_or_default(),
         );
     }
@@ -1241,14 +1257,14 @@ fn guest_arch_matrix(config: &ProjectConfig) -> String {
     let mut matrix = String::new();
     for (arch, target) in [
         ("x86_64", "x86_64-unknown-linux-gnu"),
-        ("aarch64", "aarch64-unknown-linux-gnu"),
+        ("aarch64", ARM64_LINUX_TARGET),
     ] {
         // aarch64 guest-agent + aws-lc/openssl need native headers. Crossing
         // on ubuntu-24.04 with only gcc-aarch64-linux-gnu fails closed
         // (bits/libc-header-start.h / sys/types.h). The image lane already
         // names GitHub's hosted arm64 label for the same reason.
         let runner = match arch {
-            "aarch64" => "ubuntu-24.04-arm".to_owned(),
+            "aarch64" => ARM64_HOSTED_RUNS_ON.to_owned(),
             _ => hosted_selector_runs_on(config),
         };
         let _ = writeln!(
@@ -1301,17 +1317,13 @@ fn render_guest_payload_job(
           sudo apt-get install -y --no-install-recommends \
             build-essential flex bison bc libssl-dev libelf-dev xz-utils e2fsprogs \
             mmdebstrap debootstrap arch-test
-          if [ "${{ matrix.arch }}" = "aarch64" ]; then
-            # Cross GCC without the aarch64 sysroot cannot compile aws-lc or
-            # vendored openssl (sys/types.h / bits/libc-header-start.h).
-            sudo apt-get install -y --no-install-recommends \
-              gcc-aarch64-linux-gnu libc6-dev-arm64-cross linux-libc-dev-arm64-cross
-          else
+          if [ "${{ matrix.arch }}" = "x86_64" ]; then
             sudo apt-get install -y --no-install-recommends qemu-user-static binfmt-support
             sudo update-binfmts --enable qemu-aarch64 || true
           fi
 "#,
     );
+    setup.push_str(&native_arm64_toolchain_steps("matrix.target"));
     // The agent ships inside the deb, so it carries release identity exactly
     // when the lane packages identity debs; otherwise the plain build stays.
     let identity = native_debian_release(config, release);
@@ -1400,10 +1412,9 @@ fn render_debian_job(config: &ProjectConfig, release: &ReleaseSpec, guest: bool)
     }
     let header = if guest {
         format!(
-            "  debian:\n    name: Package Debian artifacts\n    needs: [{needs}]\n    runs-on: {runner}\n    timeout-minutes: 45\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{}    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n",
+            "  debian:\n    name: Package Debian artifacts\n    needs: [{needs}]\n    runs-on: ${{{{ matrix.runner }}}}\n    timeout-minutes: 45\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{}    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    steps:\n",
             guest_arch_matrix(config),
             needs = needs,
-            runner = hosted_selector_runs_on(config),
         )
     } else {
         format!(
@@ -1725,6 +1736,7 @@ fn render_identity_debian_job(
     let mut steps = format!(
         "      - name: Checkout\n        uses: {checkout}\n        with:\n{checkout_ref}          persist-credentials: false\n{setup}      - name: Add Rust target\n        run: rustup target add \"$TARGET\"\n      - name: Set up sccache\n        uses: {sccache}\n        with:\n          version: v0.16.0\n      - name: Install cargo-deb\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: |\n          set -euo pipefail\n          cargo install cargo-deb --version 3.7.0 --locked\n          cargo-deb --version\n      - name: Download release metadata\n        uses: {download}\n        with:\n          name: {metadata_artifact}\n          path: metadata\n",
     );
+    steps = add_native_arm64_toolchain_steps(&steps);
     if preview {
         let _ = writeln!(
             steps,
@@ -1838,7 +1850,7 @@ fn image_platform_matrix(config: &ProjectConfig, targets: &[String]) -> Option<S
             "amd64" => hosted_selector_runs_on(config),
             // GitHub's hosted arm64 label; the release contract names it and
             // no second hosted label exists to configure.
-            _ => "ubuntu-24.04-arm".to_owned(),
+            _ => ARM64_HOSTED_RUNS_ON.to_owned(),
         };
         let _ = writeln!(
             matrix,
@@ -2406,6 +2418,8 @@ fn inject_native_preview_bindings(
 fn release_runner(config: &ProjectConfig, target: &str) -> String {
     if target.ends_with("-apple-darwin") {
         yaml_scalar(MACOS_HOSTED_RUNS_ON)
+    } else if target == ARM64_LINUX_TARGET && release_provider(config) == ProviderId::GithubHosted {
+        ARM64_HOSTED_RUNS_ON.to_owned()
     } else {
         hosted_selector_runs_on(config)
     }
@@ -2978,6 +2992,11 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
         ),
     )
     .replace("run: cargo build ", "run: mbx build ");
+    let arm_toolchain = native_arm64_toolchain_steps("matrix.target");
+    output = output.replace(
+        "      - name: Build preview binary\n",
+        &format!("{arm_toolchain}      - name: Build preview binary\n"),
+    );
     if has_producer_binding(release) {
         // Bind both the first-create fallback and the replacement edit to the
         // exact source admitted by publish-gate. Without this pair, a
@@ -4013,6 +4032,11 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         publish_checkout = ActionPin::Checkout.reference(),
         tag_check = TAG_IMMUTABILITY_STEP,
     );
+    let arm_toolchain = native_arm64_toolchain_steps("matrix.target");
+    output = output.replace(
+        "      - name: Build release binary\n",
+        &format!("{arm_toolchain}      - name: Build release binary\n"),
+    );
     if let Some((prefix, build)) = output.split_once("\n  build:") {
         let build = build.replace(
             "      - name: Set up sccache\n",
@@ -4341,7 +4365,7 @@ fn docker_platform_matrix(config: &ProjectConfig, release: &ReleaseSpec) -> Stri
             "amd64" => hosted_selector_runs_on(config),
             // GitHub's hosted arm64 label; the release contract names it and
             // no second hosted label exists to configure.
-            _ => "ubuntu-24.04-arm".to_owned(),
+            _ => ARM64_HOSTED_RUNS_ON.to_owned(),
         };
         let _ = writeln!(
             matrix,
@@ -5886,11 +5910,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "5d7699eb1fe59c1ff441adbd6ce225a847bf0c2ea20a3bc7cbc31c190bbcb62d",
+                "8d7225f37ba806409985b98d3d04b4cee5b32e01aa9288d26b7577c2850329b6",
             ),
             (
                 "preview.yml",
-                "7bfe242a1a5d8169a9dfdc1b8577de95ad6f29aae2f0f4271ac17162fffd45d0",
+                "b6b1d73bb3be07ef5fb5b3402a2ec97b40f49e36e73eb247b1ebd81ba255f0d4",
             ),
             (
                 "maintenance.yml",
@@ -6007,11 +6031,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "dda4fe0ecf3711890a1daa84b48b2f9517e57b07dad6c06783cb34bfcaa08559",
+                "068d8de3218713b1a25922806f2873079a44f1b076bf6029502bce804108d203",
             ),
             (
                 "preview.yml",
-                "4922e8b7aded3ec357e776fec51fad0ef4d408db8117801c87ec7dfeefb36368",
+                "fcf17f3142303268786874bc9f2b7b43caaa0c00d0b081c425e96c5867f61f59",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -6116,8 +6140,9 @@ mod tests {
                 "apple builders use the fixed GitHub-owned macos image: {workflow}"
             );
             assert!(
-                !workflow.contains("ubuntu-24.04-arm"),
-                "no hardcoded arm label may survive: {workflow}"
+                workflow.contains("runner: ubuntu-24.04-arm")
+                    && workflow.contains("runs-on: ${{ matrix.runner }}"),
+                "aarch64 builders must use the native hosted arm64 matrix row: {workflow}"
             );
         }
     }
@@ -6150,12 +6175,9 @@ mod tests {
                 "release-side artifact matrices must not carry a dynamic Velnor runner: {workflow}"
             );
             assert!(
-                !workflow.contains("runs-on: ${{ matrix.runner }}"),
-                "hosted-only release-side matrices must use a literal runner: {workflow}"
-            );
-            assert!(
-                workflow.contains("runs-on: ubuntu-24.04"),
-                "hosted release-side runner must remain configured: {workflow}"
+                workflow.contains("runs-on: ${{ matrix.runner }}")
+                    && workflow.contains("runner: ubuntu-24.04-arm"),
+                "hosted-only release-side matrices must use their approved per-target runners: {workflow}"
             );
         }
         for provider in ["github-hosted", "github-self-hosted", "velnor"] {
@@ -8022,6 +8044,19 @@ mod tests {
             "{build}"
         );
         assert!(build.contains("needs a Debian architecture"), "{build}");
+        assert!(
+            build.contains("runs-on: ${{ matrix.runner }}")
+                && build.contains(
+                    "- target: aarch64-unknown-linux-gnu\n            provider: github-hosted\n            runner: ubuntu-24.04-arm"
+                ),
+            "stable aarch64 producer must use the native hosted runner: {build}"
+        );
+        assert!(
+            build.contains("Verify native arm64 C and OpenSSL toolchain")
+                && build.contains("CC_aarch64_unknown_linux_gnu")
+                && build.contains("CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER"),
+            "stable aarch64 producer must preflight and pin its native C/linker toolchain: {build}"
+        );
         // The stable deb packages the build job's exact bytes: no second
         // build that merely should agree.
         let debian = yaml_job(&workflow, "debian");
@@ -8063,6 +8098,12 @@ mod tests {
         assert!(
             preview_debian.contains("Build release runner binary"),
             "{preview_debian}"
+        );
+        assert!(
+            preview_debian.contains("Verify native arm64 C and OpenSSL toolchain")
+                && preview_debian.contains("CC_aarch64_unknown_linux_gnu")
+                && preview_debian.contains("CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER"),
+            "preview aarch64 producer must preflight and pin its native C/linker toolchain: {preview_debian}"
         );
         assert!(
             !preview.contains("Reuse the build job's release binary"),
@@ -8377,8 +8418,15 @@ mod tests {
                 "aarch64 guest payload must build on hosted arm64: {preview}"
             );
             assert!(
-                preview.contains("libc6-dev-arm64-cross"),
-                "aarch64 guest payload must install the cross sysroot: {preview}"
+                preview.contains("Verify native arm64 C and OpenSSL toolchain")
+                    && preview.contains("CC_aarch64_unknown_linux_gnu")
+                    && preview.contains("CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER"),
+                "aarch64 guest payload must preflight and pin its native C/linker toolchain: {preview}"
+            );
+            assert!(
+                !preview.contains("libc6-dev-arm64-cross")
+                    && !preview.contains("gcc-aarch64-linux-gnu"),
+                "native arm64 guest payload must not advertise a cross sysroot: {preview}"
             );
             assert!(
                 !preview.contains("ln -sf /usr/local/bin/mold"),
