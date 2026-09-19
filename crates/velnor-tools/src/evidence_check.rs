@@ -25,6 +25,19 @@ const REQUIRED_REPOSITORIES: usize = 32;
 const SHA_LENGTH: usize = 40;
 const DIGEST_LENGTH: usize = 64;
 const LIVE_FRESHNESS_SECONDS: i64 = 15 * 60;
+const REVIEWED_MANIFEST_ID: &str = "github-first-dual-lane-2026-09-19";
+const REVIEWED_SOURCE_REPOSITORY: &str = "tailrocks/velnor";
+const REVIEWED_SOURCE_REVISION: &str = "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9";
+// This is the digest of the reviewed `docs/ci/github-first-dual-lane/fleet.json`
+// authority at the accepted preparation revision.  A future reviewed plan
+// must update this checker constant in the same reviewed change; a caller may
+// not select a new plan by changing JSON input alone.
+const REVIEWED_SOURCE_DIGEST: &str =
+    "sha256:b39b3bcb5d149db66a03483bd7a19482af2657df6f962872030d820a39f13514";
+const EXPECTED_ORCHESTRATOR_MODEL: &str = "gpt-6-astra";
+const EXPECTED_ORCHESTRATOR_EFFORT: &str = "low";
+const EXPECTED_AGENT_MODEL: &str = "gpt-5.6-luna";
+const EXPECTED_AGENT_EFFORT: &str = "max";
 
 /// The fixed scope belongs to this task-specific checker.  It is not part of
 /// the generic workflow generator and cannot be replaced with an arbitrary
@@ -334,6 +347,24 @@ pub(crate) struct SnapshotSource {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct G0InventoryEvidence {
+    pub source_url: String,
+    pub repository_count: u32,
+    pub open_pr_count: u32,
+    pub workflow_repository_count: u32,
+    pub ruleset_repository_count: u32,
+    pub workload_matrix_digest: String,
+    pub dependency_graph_digest: String,
+    pub access_scopes: Vec<String>,
+    pub access_gaps: Vec<String>,
+    pub orchestrator_model: String,
+    pub orchestrator_effort: String,
+    pub agent_model: String,
+    pub agent_effort: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SnapshotRepository {
     pub repository: String,
     pub repository_id: u64,
@@ -368,9 +399,14 @@ pub(crate) struct WorkflowObservation {
 pub(crate) struct SnapshotPullRequest {
     pub number: u64,
     pub state: String,
+    pub draft: bool,
+    pub author: String,
+    pub author_association: String,
+    pub head_repository: String,
     pub head_sha: String,
     pub base_sha: String,
     pub merge_sha: Option<String>,
+    pub merge_group_sha: Option<String>,
     pub source_url: String,
     pub executions: Vec<ExecutionObservation>,
 }
@@ -459,6 +495,7 @@ pub(crate) struct EvidenceDocument {
     pub stage: String,
     pub records: Vec<EvidenceRecord>,
     pub reviewer_attestation: Option<ReviewerAttestation>,
+    pub g0_inventory: Option<G0InventoryEvidence>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -916,6 +953,9 @@ fn check_documents(
     check_headers(stage, manifest, snapshot, evidence, &mut findings);
     check_manifest(manifest, &mut findings);
     check_snapshot(manifest, snapshot, &mut findings);
+    if stage == Stage::G0 {
+        check_g0_inventory(snapshot, evidence.g0_inventory.as_ref(), &mut findings);
+    }
 
     let manifest_by_repo = index_manifest(manifest, &mut findings);
     let snapshot_by_repo = index_snapshot(snapshot, &mut findings);
@@ -1062,6 +1102,15 @@ fn check_headers(
             "manifest_id is required",
         );
     }
+    if manifest.manifest_id != REVIEWED_MANIFEST_ID {
+        finding(
+            findings,
+            "untrusted-manifest",
+            "",
+            "manifest.manifest_id",
+            format!("manifest must bind reviewed authority {REVIEWED_MANIFEST_ID}"),
+        );
+    }
     if snapshot.snapshot_id.trim().is_empty() {
         finding(
             findings,
@@ -1149,6 +1198,33 @@ fn check_headers(
 }
 
 fn check_manifest(manifest: &ManifestDocument, findings: &mut Vec<Finding>) {
+    if manifest.source.repository != REVIEWED_SOURCE_REPOSITORY {
+        finding(
+            findings,
+            "untrusted-manifest",
+            "",
+            "manifest.source.repository",
+            format!("expected reviewed source {REVIEWED_SOURCE_REPOSITORY}"),
+        );
+    }
+    if manifest.source.revision != REVIEWED_SOURCE_REVISION {
+        finding(
+            findings,
+            "untrusted-manifest",
+            "",
+            "manifest.source.revision",
+            "manifest source revision is not the accepted reviewed revision",
+        );
+    }
+    if !digest_equal(&manifest.source.digest, REVIEWED_SOURCE_DIGEST) {
+        finding(
+            findings,
+            "untrusted-manifest",
+            "",
+            "manifest.source.digest",
+            "manifest source digest is not the accepted reviewed authority digest",
+        );
+    }
     validate_repository_name(
         &manifest.source.repository,
         "manifest.source.repository",
@@ -1176,10 +1252,7 @@ fn check_manifest(manifest: &ManifestDocument, findings: &mut Vec<Finding>) {
         );
     }
 
-    let expected = CANONICAL_REPOSITORIES
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>();
+    let expected = canonical_scope();
     let actual = manifest
         .repositories
         .iter()
@@ -1490,6 +1563,151 @@ fn check_snapshot(
             check_execution_observation(&repo.repository, execution, findings);
         }
     }
+    let expected = canonical_scope();
+    let actual = snapshot
+        .repositories
+        .iter()
+        .map(|repo| repo.repository.as_str())
+        .collect::<BTreeSet<_>>();
+    if snapshot.repositories.len() != REQUIRED_REPOSITORIES {
+        finding(
+            findings,
+            "snapshot-count",
+            "",
+            "snapshot.repositories",
+            format!("expected exactly {REQUIRED_REPOSITORIES} unique rows"),
+        );
+    }
+    if actual != expected {
+        finding(
+            findings,
+            "snapshot-scope",
+            "",
+            "snapshot.repositories",
+            "snapshot must equal the fixed canonical 32-repository set exactly",
+        );
+    }
+}
+
+fn canonical_scope() -> BTreeSet<&'static str> {
+    CANONICAL_REPOSITORIES.iter().copied().collect()
+}
+
+fn check_g0_inventory(
+    snapshot: &SnapshotDocument,
+    inventory: Option<&G0InventoryEvidence>,
+    findings: &mut Vec<Finding>,
+) {
+    let Some(inventory) = inventory else {
+        finding(
+            findings,
+            "missing-g0-inventory",
+            "",
+            "evidence.g0_inventory",
+            "G0 requires typed branch/PR/check/workflow/dependency/access/model inventory",
+        );
+        return;
+    };
+    if !nonempty_url(&inventory.source_url) {
+        finding(
+            findings,
+            "g0-inventory-source",
+            "",
+            "evidence.g0_inventory.source_url",
+            "G0 inventory needs an immutable HTTPS source identity",
+        );
+    }
+    let open_pr_count = snapshot
+        .repositories
+        .iter()
+        .map(|repo| repo.open_prs.len() as u32)
+        .sum::<u32>();
+    let workflow_repository_count = snapshot
+        .repositories
+        .iter()
+        .filter(|repo| !repo.workflows.is_empty())
+        .count() as u32;
+    for (field, expected, actual) in [
+        (
+            "repository_count",
+            REQUIRED_REPOSITORIES as u32,
+            inventory.repository_count,
+        ),
+        ("open_pr_count", open_pr_count, inventory.open_pr_count),
+        (
+            "workflow_repository_count",
+            workflow_repository_count,
+            inventory.workflow_repository_count,
+        ),
+        (
+            "ruleset_repository_count",
+            snapshot.repositories.len() as u32,
+            inventory.ruleset_repository_count,
+        ),
+    ] {
+        if expected != actual {
+            finding(
+                findings,
+                "g0-inventory-mismatch",
+                "",
+                format!("evidence.g0_inventory.{field}"),
+                format!("declared {actual}, independently observed {expected}"),
+            );
+        }
+    }
+    validate_digest(
+        "",
+        "evidence.g0_inventory.workload_matrix_digest",
+        &inventory.workload_matrix_digest,
+        findings,
+    );
+    validate_digest(
+        "",
+        "evidence.g0_inventory.dependency_graph_digest",
+        &inventory.dependency_graph_digest,
+        findings,
+    );
+    if inventory.access_scopes.is_empty() {
+        finding(
+            findings,
+            "g0-inventory-access",
+            "",
+            "evidence.g0_inventory.access_scopes",
+            "G0 inventory must record observed non-secret access scopes",
+        );
+    }
+    for (field, actual, expected) in [
+        (
+            "orchestrator_model",
+            inventory.orchestrator_model.as_str(),
+            EXPECTED_ORCHESTRATOR_MODEL,
+        ),
+        (
+            "orchestrator_effort",
+            inventory.orchestrator_effort.as_str(),
+            EXPECTED_ORCHESTRATOR_EFFORT,
+        ),
+        (
+            "agent_model",
+            inventory.agent_model.as_str(),
+            EXPECTED_AGENT_MODEL,
+        ),
+        (
+            "agent_effort",
+            inventory.agent_effort.as_str(),
+            EXPECTED_AGENT_EFFORT,
+        ),
+    ] {
+        if actual != expected {
+            finding(
+                findings,
+                "g0-inventory-model",
+                "",
+                format!("evidence.g0_inventory.{field}"),
+                format!("expected recorded runtime metadata {expected}"),
+            );
+        }
+    }
 }
 
 fn check_pull_requests(repo: &SnapshotRepository, findings: &mut Vec<Finding>) {
@@ -1785,7 +2003,7 @@ fn check_record_coverage(
                 key.repository == *name
                     && key.provider == provider
                     && key.pr_number.is_none()
-                    && (key.event == "push" || key.event == "workflow_dispatch")
+                    && key.event == "push"
             });
             if !has_main {
                 finding(
@@ -2021,6 +2239,10 @@ fn check_record(
         &record.workload_platform_architecture,
         findings,
     );
+    if stage == Stage::G0 {
+        check_g0_record(record, findings);
+        return;
+    }
     if record.provider_eligibility != manifest.provider_eligibility {
         finding(
             findings,
@@ -2105,6 +2327,36 @@ fn check_record(
             repo,
             "blocker/next_action",
             "a passing record cannot carry an unresolved blocker or next action",
+        );
+    }
+}
+
+fn check_g0_record(record: &EvidenceRecord, findings: &mut Vec<Finding>) {
+    if record.provider != "inventory" || record.event != "inventory" {
+        finding(
+            findings,
+            "g0-record-role",
+            &record.repository,
+            "provider/event",
+            "G0 rows are inventory observations, never execution/provider claims",
+        );
+    }
+    if record.run_id != 0 || record.run_attempt != 0 {
+        finding(
+            findings,
+            "g0-record-run",
+            &record.repository,
+            "run_id/run_attempt",
+            "G0 inventory rows cannot claim an execution",
+        );
+    }
+    if record.gate_status != "inventory" {
+        finding(
+            findings,
+            "g0-record-status",
+            &record.repository,
+            "gate_status",
+            "G0 uses independently checked inventory status, not pass/self-attestation",
         );
     }
 }
@@ -2267,13 +2519,13 @@ fn check_source_semantics(
 ) {
     let repo = &record.repository;
     if record.pr_number.is_none() {
-        if execution.event != "push" && execution.event != "workflow_dispatch" {
+        if execution.event != "push" {
             finding(
                 findings,
                 "event-source",
                 repo,
                 "event",
-                "main evidence must use push or explicit diagnostic dispatch",
+                "resulting-main evidence must use push; workflow_dispatch is diagnostic only",
             );
         }
         if execution.trigger_source_sha != snapshot.default_branch_sha
@@ -3840,7 +4092,7 @@ fn finding(
     findings: &mut Vec<Finding>,
     code: &str,
     repository: &str,
-    field: &str,
+    field: impl Into<String>,
     message: impl Into<String>,
 ) {
     findings.push(Finding::new(
