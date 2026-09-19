@@ -389,6 +389,16 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
             )?;
             Ok(true)
         }
+        "verify-action" => {
+            let options = parse_options(&arguments[1..], &["path"])?;
+            let root = env::current_dir()
+                .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
+            let metadata = options.get("path").ok_or_else(|| {
+                GeneratorError::usage("verify-action needs --path PATH".to_owned())
+            })?;
+            super::scan::action::verify_action(&root, metadata)?;
+            Ok(true)
+        }
         "test-crates" => {
             let options = parse_options(&arguments[1..], &["config"])?;
             let root = env::current_dir()
