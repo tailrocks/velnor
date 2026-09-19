@@ -121,6 +121,16 @@ pub const VELNOR_WORKFLOW_PINNED_BINARY_ENV: &str = "VELNOR_WORKFLOW_PINNED_BINA
 /// `--candidate-manifest` overrides this fallback; empty or missing disables
 /// the env-slot candidate.
 pub const VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV: &str = "VELNOR_WORKFLOW_CANDIDATE_MANIFEST";
+/// Static artifact namespaces in the trusted candidate transport graph.
+/// Candidate JSON never selects one of these names.
+pub(crate) const CANDIDATE_ARTIFACT_NAME: &str = "velnor-workflow-candidate-linux-x64";
+pub(crate) const CANDIDATE_HANDOFF_ARTIFACT_NAME: &str = "velnor-workflow-candidate-handoff";
+pub(crate) const CANDIDATE_RESULT_ARTIFACT_NAME: &str = "velnor-workflow-candidate-result";
+/// The execute image is intentionally empty until the base-owned final image
+/// is published and its manifest/config digest is reviewed. The generated
+/// wrapper fails closed rather than falling back to the hosted runner.
+const CANDIDATE_SANDBOX_IMAGE_REPOSITORY: &str = "ghcr.io/tailrocks/velnor-bootstrap-sandbox";
+const CANDIDATE_SANDBOX_IMAGE_DIGEST: &str = "";
 // The D19 generator pin is not a source literal: a constant naming the commit
 // that carries it can never equal that commit, so a tree rendered by the
 // pinned generator could never be byte-identical to the tree that declares the
@@ -4567,112 +4577,484 @@ fn audited_pin_script() -> &'static str {
 "#
 }
 
-/// Owner policy step acquiring the PR run's candidate generator product.
-/// When the audited pin shares the base validator's closure AND the tree
-/// matches the pin's render the step exits immediately (the Stage-0
-/// validator renders). A same-closure tree that differs from the pin's
-/// render falls through to the candidate path: that is a generator change
-/// in flight, and exiting early would strand the validator with no
-/// candidate binding (manifest cleared, pin leg red). Otherwise the step
-/// waits for the same-repository PR run at the audited head to publish the
-/// candidate artifact the Rust unit job packaged, verifies its manifest
-/// bindings and digest, requires the manifest closure to equal the audited
-/// head's candidate closure in full (not just the artifact-name prefix),
-/// and exports the binary as the pinned binary plus its manifest for the
-/// validator's manifest binding. The poll name and the manifest gate both
-/// key off the head closure — the same identity the publisher names the
-/// artifact by and the validator's `wanted` binding checks — so the three
-/// legs rendezvous on one digest. The `--closure` probe runs with
-/// `GH_TOKEN` and `GITHUB_TOKEN` emptied: the probe needs no auth, so the
-/// exec point holds no token even though the API steps above it use the job
-/// token. Fork generator changes fail closed: only same-repository runs
-/// are even considered. The same-repository select compares the embedded
-/// `.head_repository.id` object: the runs-list endpoint exposes no
-/// `.head_repository_id` scalar, and selecting on it matches nothing.
-/// The artifact check pipes the listing through real jq for the same
-/// class of reason: gh api has no `-e` flag, so gh-side evaluation can
-/// never report the match.
+/// Owner policy step acquiring the PR producer artifact.
+///
+/// The acquire role is base-owned and data-only: it selects one exact
+/// successful producer run through the Actions API, verifies the static
+/// uploader contract, downloads by numeric artifact id, records the service
+/// digest and separately measures the raw ZIP transport hash, safely extracts
+/// the two expected files, and uploads a static handoff artifact. It never
+/// executes candidate bytes.
+/// Candidate JSON is descriptive only; all identity fields in handoff.json
+/// come from the trusted API responses and the base workflow contract.
 fn policy_candidate_step(revision: &str) -> String {
     format!(
         r#"      - name: Acquire candidate generator product
         working-directory: policy-checkout
         env:
           GH_TOKEN: ${{{{ github.token }}}}
-          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}
-          HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}
-          BASE_PIN: {revision}
+          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.sha }}}}
+          HEAD_SHA: ${{{{ github.event.pull_request.head.sha }}}}
+          HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name }}}}
+          HEAD_REPOSITORY_ID: ${{{{ github.event.pull_request.head.repo.id }}}}
+          TARGET_REPOSITORY_ID: ${{{{ github.repository_id }}}}
+          BASE_REVISION: {revision}
         run: |
           set -euo pipefail
-{pin_script}          base_closure="$(velnor-workflow closure --rev="$BASE_PIN")"
-          pin_closure="$(velnor-workflow closure --rev="$pin")"
-          if [[ "$pin_closure" == "$base_closure" ]]; then
-            # Same closure means the running base validator IS the pin's
-            # renderer, so --check decides tree==pin-render with no extra
-            # provisioning. A match exits early; a differ falls through to
-            # the candidate path (a generator change in flight) instead of
-            # stranding the validator with a cleared manifest and a red pin
-            # leg. The check output stays visible: on a fall-through it is
-            # the diagnosis, on a match it is one line.
-            if velnor-workflow --plain --check; then
-              echo "pin $pin shares the base closure and renders the tree; the Stage-0 validator renders"
-              echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=" >> "$GITHUB_ENV"
-              exit 0
-            fi
-            echo "pin $pin shares the base closure but the tree differs from its render; falling through to the candidate path"
-          fi
-          [[ "$HEAD_REPOSITORY" == "$GITHUB_REPOSITORY" ]] || {{ echo "::error::generator changes from forks cannot be verified here; open the generator change from a branch of $GITHUB_REPOSITORY" >&2; exit 1; }}
+          test "$HEAD_REPOSITORY" = "$GITHUB_REPOSITORY" || {{ echo "::error::fork producer artifacts are not eligible" >&2; exit 1; }}
+          test "$HEAD_REPOSITORY_ID" = "$TARGET_REPOSITORY_ID" || {{ echo "::error::head repository id is not the target repository id" >&2; exit 1; }}
+          test -n "$HEAD_SHA"
+          test -n "$BASE_SHA"
+          head_tree_sha="$(git rev-parse "$HEAD_SHA^{{tree}}")"
+          base_tree_sha="$(git rev-parse "$BASE_SHA^{{tree}}")"
+
+          contract="$RUNNER_TEMP/ci-pr-contract.yml"
+          git show "$BASE_SHA:.github/workflows/ci-pr.yml" > "$contract"
+          candidate_block="$(awk '/^  candidate_producer:/{{seen=1}} seen && /^  [A-Za-z0-9_-]+:/ && $0 !~ /^  candidate_producer:/{{exit}} seen{{print}}' "$contract")"
+          test "$candidate_block" != ""
+          grep -Fqx "  candidate_producer:" <<<"$candidate_block"
+          grep -Fqx "    name: candidate_producer" <<<"$candidate_block"
+          grep -Fqx "    permissions: {{}}" <<<"$candidate_block"
+          grep -Fq "github.event.pull_request.head.repo.id == github.repository_id" <<<"$candidate_block"
+          grep -Fq "github.event.pull_request.base.repo.id == github.repository_id" <<<"$candidate_block"
+          grep -Fq 'test -z "${{GITHUB_TOKEN:-}}"' <<<"$candidate_block"
+          grep -Fq 'test -z "${{ACTIONS_RUNTIME_TOKEN:-}}"' <<<"$candidate_block"
+          grep -Fq 'test -z "${{ACTIONS_RUNTIME_URL:-}}"' <<<"$candidate_block"
+          grep -Fq 'env -i' <<<"$candidate_block"
+          test "$(grep -Fxc "          name: {artifact}" <<<"$candidate_block")" = 1
+          test "$(grep -Fxc "        id: candidate_upload" <<<"$candidate_block")" = 1
+          test "$(grep -Fxc "        uses: {upload}" <<<"$candidate_block")" = 1
+          test "$(grep -Fxc "          path: ${{{{ runner.temp }}}}/velnor-workflow-candidate" <<<"$candidate_block")" = 1
+          test "$(grep -Fxc "          name: {artifact}" "$contract")" = 1
+          contract_sha256="$(sha256sum "$contract" | awk '{{print $1}}')"
+
+          workflow="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml")"
+          workflow_id="$(jq -er 'select(.path == ".github/workflows/ci-pr.yml") | .id | numbers' <<<"$workflow")"
+          test "$workflow_id" -gt 0
+          runs="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_id/runs?event=pull_request&head_sha=$HEAD_SHA&per_page=100" \
+            | jq -c --arg path ".github/workflows/ci-pr.yml" --argjson workflow_id "$workflow_id" \
+                --arg head "$HEAD_SHA" --arg repo "$GITHUB_REPOSITORY" \
+                --argjson target_id "$TARGET_REPOSITORY_ID" --argjson head_id "$HEAD_REPOSITORY_ID" \
+                '[.[][] | select(.path == $path and (.workflow_id | tonumber) == $workflow_id and .event == "pull_request" and .head_sha == $head and .status == "completed" and .conclusion == "success" and (.repository.id | tonumber) == $target_id and (.head_repository.id | tonumber) == $head_id and .repository.full_name == $repo and .head_repository.full_name == $repo and (.run_attempt | tonumber) >= 1)]')"
+          test "$(jq -r 'length' <<<"$runs")" = 1
+          run="$(jq -c '.[0]' <<<"$runs")"
+          run_id="$(jq -er '.id | numbers' <<<"$run")"
+          run_attempt="$(jq -er '.run_attempt | numbers' <<<"$run")"
+
+          jobs="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100" \
+            | jq -c --argjson run_id "$run_id" --arg head "$HEAD_SHA" \
+                '[.[][] | select(.name == "candidate_producer" and (.run_id | tonumber) == $run_id and .head_sha == $head and .status == "completed" and .conclusion == "success")]')"
+          test "$(jq -r 'length' <<<"$jobs")" = 1
+          job="$(jq -c '.[0]' <<<"$jobs")"
+          job_id="$(jq -er '.id | numbers' <<<"$job")"
+          job_name="$(jq -er '.name | strings' <<<"$job")"
+
+          artifacts="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" \
+            | jq -c --arg name "{artifact}" --argjson run_id "$run_id" \
+                '[.[][] | select(.name == $name and .expired == false and (.workflow_run.id | tonumber) == $run_id and (.size_in_bytes | numbers) <= 268435456)]')"
+          test "$(jq -r 'length' <<<"$artifacts")" = 1
+          artifact="$(jq -c '.[0]' <<<"$artifacts")"
+          artifact_id="$(jq -er '.id | numbers' <<<"$artifact")"
+          artifact_name="$(jq -er '.name | strings' <<<"$artifact")"
+          artifact_size="$(jq -er '.size_in_bytes | numbers' <<<"$artifact")"
+          artifact_digest="$(jq -er '.digest | strings | select(test("^sha256:[0-9a-f]{{64}}$"))' <<<"$artifact")"
+          expires_at="$(jq -er '.expires_at | strings' <<<"$artifact")"
+
+          archive="$RUNNER_TEMP/candidate.zip"
+          available_kib="$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 {{print $4}}')"
+          test "$available_kib" -ge 1048576
+          curl --fail --location --silent --show-error \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" \
+            --output "$archive"
+          raw_zip_sha256="$(sha256sum "$archive" | awk '{{print $1}}')"
+          service_digest="$(printf '%s' "$artifact_digest" | sed 's/^sha256://')"
+          test "$raw_zip_sha256" != ''
+          test "$service_digest" != ''
+          candidate="$RUNNER_TEMP/candidate"
+          rm -rf "$candidate"
+          mkdir -p "$candidate"
+          python3 - "$archive" "$candidate" <<'PY'
+          import sys
+          import zipfile
+          from pathlib import Path
+
+          archive = Path(sys.argv[1])
+          destination = Path(sys.argv[2])
+          seen = set()
+          with zipfile.ZipFile(archive) as payload:
+              for info in payload.infolist():
+                  name = info.filename
+                  parts = name.split("/")
+                  if name.startswith("/") or "\\" in name or any(part in ("", ".", "..") for part in parts):
+                      raise SystemExit("unsafe archive member")
+                  mode = (info.external_attr >> 16) & 0o170000
+                  if mode not in (0, 0o100000) and not info.is_dir():
+                      raise SystemExit("archive member is not a regular file")
+                  if name in seen:
+                      raise SystemExit("duplicate archive member")
+                  seen.add(name)
+              if sorted(seen) != ["candidate-manifest.json", "velnor-workflow"]:
+                  raise SystemExit("candidate artifact surface is not exact")
+              for info in payload.infolist():
+                  payload.extract(info, destination)
+          PY
+          manifest="$candidate/candidate-manifest.json"
+          binary="$candidate/velnor-workflow"
+          jq -e --arg repo "$GITHUB_REPOSITORY" --arg head "$HEAD_SHA" --arg name "$artifact_name" \
+            '.role == "producer" and .workflow_path == ".github/workflows/ci-pr.yml" and .job_name == "candidate_producer" and .event == "pull_request" and .repository == $repo and .head_sha == $head and .artifact_name == $name and (.binary_sha256 | strings | test("^[0-9a-f]{{64}}$"))' "$manifest" >/dev/null
+          binary_sha256="$(sha256sum "$binary" | awk '{{print $1}}')"
+          test "$binary_sha256" = "$(jq -er '.binary_sha256' "$manifest")"
+          chmod 0555 "$binary"
+
+          handoff="$RUNNER_TEMP/candidate-handoff"
+          rm -rf "$handoff"
+          mkdir -p "$handoff"
+          install -m 0555 "$binary" "$handoff/velnor-workflow"
+          install -m 0444 "$manifest" "$handoff/candidate-manifest.json"
+          git archive --format=tar "$HEAD_SHA" > "$handoff/source.tar"
+          source_archive_sha256="$(sha256sum "$handoff/source.tar" | awk '{{print $1}}')"
+          source_size="$(stat -c '%s' "$handoff/source.tar")"
+          test "$source_size" -le 536870912
+          closure_input="$RUNNER_TEMP/candidate-closure"
+          git ls-tree -r "$HEAD_SHA" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo \
+            | LC_ALL=C sort > "$closure_input"
+          printf 'closure-version:1\\nfeatures:tui\\nprofile:debug\\n' >> "$closure_input"
+          candidate_closure="$(sha256sum "$closure_input" | awk '{{print $1}}')"
+          test "$candidate_closure" != ''
+          jq -n \
+            --arg role handoff \
+            --arg workflow_path ".github/workflows/ci-pr.yml" \
+            --argjson workflow_id "$workflow_id" \
+            --argjson run_id "$run_id" \
+            --argjson run_attempt "$run_attempt" \
+            --argjson job_id "$job_id" \
+            --arg job_name "$job_name" \
+            --arg event pull_request \
+            --arg target_repository "$GITHUB_REPOSITORY" \
+            --argjson target_repository_id "$TARGET_REPOSITORY_ID" \
+            --arg head_repository "$HEAD_REPOSITORY" \
+            --argjson head_repository_id "$HEAD_REPOSITORY_ID" \
+            --arg head_sha "$HEAD_SHA" \
+            --arg base_sha "$BASE_SHA" \
+            --arg base_revision "$BASE_REVISION" \
+            --arg head_tree_sha "$head_tree_sha" \
+            --arg base_tree_sha "$base_tree_sha" \
+            --arg artifact_name "$artifact_name" \
+            --argjson artifact_id "$artifact_id" \
+            --argjson artifact_size "$artifact_size" \
+            --arg artifact_service_digest "$artifact_digest" \
+            --arg artifact_raw_zip_sha256 "$raw_zip_sha256" \
+            --arg artifact_expires_at "$expires_at" \
+            --arg source_archive_sha256 "$source_archive_sha256" \
+            --arg candidate_closure "$candidate_closure" \
+            --arg contract_sha256 "$contract_sha256" \
+            '{{role: $role, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, job_id: $job_id, job_name: $job_name, event: $event, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_expires_at: $artifact_expires_at, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, contract_sha256: $contract_sha256}}' > "$handoff/handoff.json"
+      - name: Upload candidate handoff
+        id: handoff_upload
+        uses: {upload}
+        with:
+          name: {handoff}
+          path: ${{{{ runner.temp }}}}/candidate-handoff
+          if-no-files-found: error
+          retention-days: 1
+"#,
+        artifact = crate::s2::CANDIDATE_ARTIFACT_NAME,
+        handoff = crate::s2::CANDIDATE_HANDOFF_ARTIFACT_NAME,
+        upload = ActionPin::UploadArtifact.reference(),
+    )
+}
+
+/// The three hosted roles that make the PR candidate transport acyclic:
+/// acquire is base-owned and API-only, execute is a fresh unprivileged
+/// sandbox, and policy is the fresh verifier. Candidate bytes cross jobs only
+/// through the numeric artifact IDs emitted by the trusted uploader; neither
+/// a candidate manifest nor a mutable artifact name selects a producer.
+fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str) -> String {
+    let acquire = policy_candidate_step(revision);
+    format!(
+        r#"  policy_acquire:
+    name: policy_acquire
+    if: ${{{{ github.event_name == 'pull_request_target' }}}}
+    runs-on: {runner}
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      handoff_id: ${{{{ steps.handoff_upload.outputs.artifact-id }}}}
+      handoff_digest: ${{{{ steps.handoff_upload.outputs.artifact-digest }}}}
+    steps:
+      - name: Checkout base history
+        uses: {checkout}
+        with:
+          path: policy-checkout
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Materialize audited head as data
+        working-directory: policy-checkout
+        env:
+          HEAD_SHA: ${{{{ github.event.pull_request.head.sha }}}}
+          HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name }}}}
+        run: |
+          set -euo pipefail
+          test -n "$HEAD_SHA"
+          test "$HEAD_REPOSITORY" = "$GITHUB_REPOSITORY"
           if ! git cat-file -e "$HEAD_SHA^{{commit}}" 2>/dev/null; then
             git fetch --no-tags "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$HEAD_SHA"
           fi
-          head_candidate="$(velnor-workflow closure --rev="$HEAD_SHA" --candidate)"
-          name="velnor-workflow-candidate-${{head_candidate:0:16}}-${{RUNNER_OS}}-${{RUNNER_ARCH}}"
-          deadline=$((SECONDS + 900))
-          run_id=""
-          while (( SECONDS < deadline )); do
-            runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml/runs?head_sha=$HEAD_SHA&event=pull_request&per_page=5" --jq '[.workflow_runs[] | select(.head_repository.id == .repository.id)]')"
-            waiting=false
-            seen=false
-            while read -r candidate_run; do
-              test "$candidate_run" != '' || continue
-              seen=true
-              status="$(jq -r .status <<<"$candidate_run")"
-              id="$(jq -r .id <<<"$candidate_run")"
-              # $name in the filter is a jq variable, not a shell expansion.
-              # shellcheck disable=SC2016
-              if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts?per_page=100" | jq -e --arg name "$name" '[.artifacts[] | select(.name == $name and .expired == false)] | length > 0' >/dev/null; then
-                run_id="$id"
-                break 2
-              fi
-              [[ "$status" == "completed" ]] || waiting=true
-            done <<<"$(jq -c '.[]' <<<"$runs")"
-            # No runs yet means the API has not indexed the sibling run, not
-            # that it will never come: keep polling until the deadline.
-            [[ "$seen" == "true" ]] || waiting=true
-            [[ "$waiting" == "true" ]] || {{ echo "::error::no same-repository PR run published candidate $name" >&2; exit 1; }}
-            sleep 15
+          git checkout --quiet --detach "$HEAD_SHA"
+{acquire}
+  candidate_execute:
+    name: candidate_execute
+    needs: [policy_acquire]
+    if: ${{{{ needs.policy_acquire.result == 'success' }}}}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions: {{}}
+    outputs:
+      result_id: ${{{{ steps.result_upload.outputs.artifact-id }}}}
+      result_digest: ${{{{ steps.result_upload.outputs.artifact-digest }}}}
+    steps:
+      - name: Download trusted candidate handoff
+        uses: {download}
+        with:
+          artifact-ids: ${{{{ needs.policy_acquire.outputs.handoff_id }}}}
+          path: ${{{{ runner.temp }}}}/candidate-handoff
+      - name: Execute candidate in pinned sandbox
+        id: candidate_execute
+        env:
+          HANDOFF: ${{{{ runner.temp }}}}/candidate-handoff/{handoff}
+          SANDBOX_IMAGE_REPOSITORY: {image_repository}
+          SANDBOX_IMAGE_DIGEST: {image_digest}
+          DEFAULT_BRANCH: {default_branch}
+        run: |
+          set -euo pipefail
+          test "${{RUNNER_OS:-}}" = Linux
+          test "${{RUNNER_ARCH:-}}" = X64
+          test "$(uname -m)" = x86_64
+          command -v docker >/dev/null
+          command -v timeout >/dev/null
+          command -v sha256sum >/dev/null
+          command -v jq >/dev/null
+          docker info >/dev/null
+          test "$(docker info --format '{{{{.OSType}}}}')" = linux
+          test -f "$HANDOFF/handoff.json"
+          test -f "$HANDOFF/candidate-manifest.json"
+          test -f "$HANDOFF/velnor-workflow"
+          test -f "$HANDOFF/source.tar"
+          test "$(find -P "$HANDOFF" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 4
+          jq -e '
+            .role == "handoff" and
+            (.workflow_path == ".github/workflows/ci-pr.yml") and
+            (.workflow_id | numbers) and (.run_id | numbers) and
+            (.run_attempt | numbers and . >= 1) and
+            (.job_id | numbers) and (.job_name == "candidate_producer") and
+            (.event == "pull_request") and
+            (.target_repository | strings) and (.target_repository_id | numbers) and
+            (.head_repository | strings) and (.head_repository_id | numbers) and
+            (.target_repository_id == .head_repository_id) and
+            (.head_sha | strings | test("^[0-9a-f]{{40}}$")) and
+            (.base_sha | strings | test("^[0-9a-f]{{40}}$")) and
+            (.base_revision | strings | test("^[0-9a-f]{{40}}$")) and
+            (.head_tree_sha | strings | test("^[0-9a-f]{{40}}$")) and
+            (.base_tree_sha | strings | test("^[0-9a-f]{{40}}$")) and
+            (.artifact_name == "{artifact}") and (.artifact_id | numbers) and (.artifact_size | numbers | . <= 268435456) and
+            (.artifact_service_digest | strings | test("^sha256:[0-9a-f]{{64}}$")) and
+            (.artifact_raw_zip_sha256 | strings | test("^[0-9a-f]{{64}}$")) and
+            (.artifact_expires_at | strings) and
+            (.source_archive_sha256 | strings | test("^[0-9a-f]{{64}}$")) and
+            (.candidate_closure | strings | test("^[0-9a-f]{{64}}$")) and
+            (.contract_sha256 | strings | test("^[0-9a-f]{{64}}$"))
+          ' "$HANDOFF/handoff.json" >/dev/null
+          jq -e --arg repo "$GITHUB_REPOSITORY" --arg head "$(jq -er .head_sha "$HANDOFF/handoff.json")" \
+            --arg name "$(jq -er .artifact_name "$HANDOFF/handoff.json")" \
+            '.role == "producer" and .workflow_path == ".github/workflows/ci-pr.yml" and .job_name == "candidate_producer" and .event == "pull_request" and .repository == $repo and .head_sha == $head and .artifact_name == $name and (.binary_sha256 | strings | test("^[0-9a-f]{{64}}$"))' \
+            "$HANDOFF/candidate-manifest.json" >/dev/null
+          binary_sha256="$(sha256sum "$HANDOFF/velnor-workflow" | awk '{{print $1}}')"
+          test "$binary_sha256" = "$(jq -er .binary_sha256 "$HANDOFF/candidate-manifest.json")"
+          source_archive_sha256="$(sha256sum "$HANDOFF/source.tar" | awk '{{print $1}}')"
+          test "$source_archive_sha256" = "$(jq -er .source_archive_sha256 "$HANDOFF/handoff.json")"
+          test -n "$SANDBOX_IMAGE_DIGEST"
+          case "$SANDBOX_IMAGE_DIGEST" in sha256:[0-9a-f]{{64}}) ;; *) exit 1 ;; esac
+          image="$SANDBOX_IMAGE_REPOSITORY@$SANDBOX_IMAGE_DIGEST"
+          docker buildx imagetools inspect --raw "$image" > "$RUNNER_TEMP/sandbox-index.json"
+          jq -e '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64") | select((.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest")] | length == 1' "$RUNNER_TEMP/sandbox-index.json" >/dev/null
+          platform_digest="$(jq -er '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64") | select((.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest") | .digest] | if length == 1 then .[0] else error("platform digest is not unique") end' "$RUNNER_TEMP/sandbox-index.json")"
+          case "$platform_digest" in sha256:[0-9a-f]{{64}}) ;; *) exit 1 ;; esac
+          platform_image="$SANDBOX_IMAGE_REPOSITORY@$platform_digest"
+          docker buildx imagetools inspect --raw "$platform_image" > "$RUNNER_TEMP/sandbox-platform.json"
+          config_digest="$(jq -er '.config.digest | strings | select(test("^sha256:[0-9a-f]{{64}}$"))' "$RUNNER_TEMP/sandbox-platform.json")"
+          docker buildx imagetools inspect "$platform_image" --format '{{{{json .Image}}}}' > "$RUNNER_TEMP/sandbox-config.json"
+          jq -e '(.architecture == "amd64" and .os == "linux") and ((.config.Env // []) | sort == ["PATH=/usr/bin:/bin"]) and ((.config.User // "") == "") and ((.config.Entrypoint // []) == []) and ((.config.Cmd // []) == []) and ((.config.WorkingDir // "/") == "/") and (.config.Volumes == null) and (.config.ExposedPorts == null) and (.config.Healthcheck == null) and (.config.Labels["org.velnor.sandbox"] // "") == "true"' "$RUNNER_TEMP/sandbox-config.json" >/dev/null
+          docker pull --quiet --platform linux/amd64 "$platform_image"
+          docker image inspect "$platform_image" --format '{{{{json .}}}}' > "$RUNNER_TEMP/sandbox-local.json"
+          jq -e --arg id "$config_digest" --arg ref "$platform_image" '.[0].Id == $id and (.[0].RepoDigests | index($ref) != null) and .[0].Os == "linux" and .[0].Architecture == "amd64" and ((.[0].Config.Env // []) | sort == ["PATH=/usr/bin:/bin"]) and ((.[0].Config.Entrypoint // []) == []) and ((.[0].Config.Cmd // []) == []) and ((.[0].Config.User // "") == "") and (.[0].Config.Volumes == null) and (.[0].Config.ExposedPorts == null) and (.[0].Config.Healthcheck == null)' "$RUNNER_TEMP/sandbox-local.json" >/dev/null
+          stage="$(mktemp -d "$RUNNER_TEMP/velnor-sandbox.XXXXXX")"
+          trap 'rm -rf "$stage"' EXIT
+          input="$stage/input"
+          candidate="$stage/candidate"
+          output="$stage/output"
+          mkdir -m 0755 "$input" "$candidate"
+          mkdir -m 0700 "$output"
+          python3 - "$HANDOFF/source.tar" "$input" <<'PY'
+          import sys, tarfile
+          from pathlib import Path
+          archive, destination = Path(sys.argv[1]), Path(sys.argv[2])
+          with tarfile.open(archive, "r:") as payload:
+              members = payload.getmembers()
+              names = set()
+              total_bytes = 0
+              if len(members) > 200000:
+                  raise SystemExit("source archive has too many members")
+              for member in members:
+                  parts = member.name.split("/")
+                  if member.name.startswith("/") or "\\" in member.name or any(part in ("", ".", "..") for part in parts):
+                      raise SystemExit("unsafe source archive member")
+                  if member.name in names or member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
+                      raise SystemExit("unsafe or duplicate source archive member")
+                  names.add(member.name)
+                  total_bytes += member.size
+                  if total_bytes > 536870912:
+                      raise SystemExit("source archive is too large")
+              payload.extractall(destination)
+          PY
+          chmod -R a-w "$input"
+          install -m 0555 "$HANDOFF/velnor-workflow" "$candidate/velnor-workflow"
+          uid="$(id -u)"; gid="$(id -g)"; test "$uid" -ne 0
+          test "$gid" -ge 0
+          head_sha="$(jq -er .head_sha "$HANDOFF/handoff.json")"
+          head_tree_sha="$(jq -er .head_tree_sha "$HANDOFF/handoff.json")"
+          head_repository="$(jq -er .head_repository "$HANDOFF/handoff.json")"
+          source_closure="$(jq -er .candidate_closure "$HANDOFF/handoff.json")"
+          for value in "$head_sha" "$head_tree_sha" "$head_repository" "$source_closure"; do
+            case "$value" in *$'\\n'*|*$'\\r'*|*' '*|*'"'*) exit 1 ;; esac
           done
-          [[ -n "$run_id" ]] || {{ echo "::error::no candidate product $name was published within 15 minutes" >&2; exit 1; }}
-          candidate="$RUNNER_TEMP/velnor-workflow-candidate"
-          rm -rf "$candidate"
-          mkdir -p "$candidate"
-          gh run download "$run_id" --name "$name" --dir "$candidate" --repo "$GITHUB_REPOSITORY"
-          jq -e --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repo "$GITHUB_REPOSITORY" --arg run "$run_id" '.profile == "debug" and .platform == $platform and .repository == $repo and .run_id == $run and (.revision | test("^[0-9a-f]{{40}}$")) and (.closure | test("^[0-9a-f]{{64}}$")) and (.binary_sha256 | test("^[0-9a-f]{{64}}$"))' "$candidate/candidate-manifest.json" >/dev/null
-          if command -v sha256sum >/dev/null 2>&1; then
-            actual="$(sha256sum "$candidate/velnor-workflow" | awk '{{print $1}}')"
-          else
-            actual="$(shasum -a 256 "$candidate/velnor-workflow" | awk '{{print $1}}')"
+          cid="$(docker create --name "velnor-sandbox-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --platform linux/amd64 --pull=never --network=none --read-only --pid=private --cap-drop=ALL --security-opt no-new-privileges=true --pids-limit=128 --memory=512m --memory-swap=512m --cpus=1 --ulimit fsize=67108864:67108864 --ulimit nofile=1024:1024 --ulimit core=0 --shm-size=16m --stop-timeout=5 --log-driver=none --user "$uid:$gid" --workdir /input --hostname=velnor-sandbox --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m,nr_inodes=4096,mode=700,uid=$uid,gid=$gid --tmpfs /output:rw,noexec,nosuid,nodev,size=64m,nr_inodes=4096,mode=700,uid=$uid,gid=$gid --mount "type=bind,src=$input,dst=/input,readonly,bind-propagation=rprivate" --mount "type=bind,src=$candidate,dst=/candidate,readonly,bind-propagation=rprivate" --env "SOURCE_HEAD_SHA=$head_sha" --env "SOURCE_TREE_SHA=$head_tree_sha" --env "SOURCE_REPOSITORY=$head_repository" --env "SOURCE_CLOSURE=$source_closure" --env HOSTNAME=velnor-sandbox --env HOME=/tmp/home --env PATH=/usr/bin:/bin --entrypoint /candidate/velnor-workflow "$platform_image" /input --output /output --plain --force --default-branch "$DEFAULT_BRANCH")"
+          cleanup() {{
+            status=$?
+            if [[ -n "${{cid:-}}" ]]; then docker rm -f "$cid" >/dev/null 2>&1 || status=1; fi
+            rm -rf "$stage" || status=1
+            trap - EXIT
+            exit "$status"
+          }}
+          trap cleanup EXIT
+          docker inspect "$cid" > "$stage/container.json"
+          jq -e --arg user "$uid:$gid" --arg input "$input" --arg candidate "$candidate" --arg uid "$uid" --arg gid "$gid" '
+            .[0].HostConfig.NetworkMode == "none" and
+            .[0].HostConfig.ReadonlyRootfs == true and
+            .[0].HostConfig.Privileged == false and
+            ((.[0].HostConfig.CapDrop // []) | index("ALL") != null) and
+            ((.[0].HostConfig.CapAdd // []) | length == 0) and
+            ((.[0].HostConfig.PidMode // "") == "private") and
+            ((.[0].HostConfig.IpcMode // "") == "private") and
+            ((.[0].HostConfig.UTSMode // "") != "host") and
+            ((.[0].HostConfig.UsernsMode // "") != "host") and
+            ((.[0].HostConfig.SecurityOpt // []) | index("no-new-privileges=true") != null) and
+            ((.[0].HostConfig.SecurityOpt // []) | all(. != "seccomp=unconfined")) and
+            .[0].HostConfig.PidsLimit == 128 and
+            .[0].HostConfig.Memory == 536870912 and
+            .[0].HostConfig.MemorySwap == 536870912 and
+            .[0].HostConfig.NanoCpus == 1000000000 and
+            .[0].HostConfig.LogConfig.Type == "none" and
+            .[0].Config.User == $user and
+            .[0].Config.WorkingDir == "/input" and
+            .[0].Config.Hostname == "velnor-sandbox" and
+            .[0].Config.Entrypoint == ["/candidate/velnor-workflow"] and
+            ((.[0].Config.Env | map(split("=")[0]) | sort) == ["HOME","HOSTNAME","PATH","SOURCE_CLOSURE","SOURCE_HEAD_SHA","SOURCE_REPOSITORY","SOURCE_TREE_SHA"]) and
+            ((.[0].HostConfig.Binds // []) | length == 0) and
+            ((.[0].HostConfig.Devices // []) | length == 0) and
+            ((.[0].HostConfig.DeviceRequests // []) | length == 0) and
+            ([.[0].Mounts[] | select(.Type == "bind" and .Destination == "/input" and .Source == $input and .RW == false and .Propagation == "rprivate")] | length == 1) and
+            ([.[0].Mounts[] | select(.Type == "bind" and .Destination == "/candidate" and .Source == $candidate and .RW == false and .Propagation == "rprivate")] | length == 1) and
+            ([.[0].Mounts[] | select(.Type == "bind" and (.Destination == "/input" or .Destination == "/candidate"))] | length == 2) and
+            ([.[0].Mounts[] | select(.Type == "bind" and (.Destination != "/input" and .Destination != "/candidate" and .Destination != "/etc/hosts" and .Destination != "/etc/hostname" and .Destination != "/etc/resolv.conf"))] | length == 0) and
+            ([.[0].Mounts[] | select(.Type == "tmpfs" and (.Destination == "/tmp" or .Destination == "/output"))] | length == 2) and
+            (.[0].HostConfig.Tmpfs["/tmp"] | split(",") | sort) == (["rw","noexec","nosuid","nodev","size=64m","nr_inodes=4096","mode=700",("uid=" + $uid),("gid=" + $gid)] | sort) and
+            (.[0].HostConfig.Tmpfs["/output"] | split(",") | sort) == (["rw","noexec","nosuid","nodev","size=64m","nr_inodes=4096","mode=700",("uid=" + $uid),("gid=" + $gid)] | sort)
+          ' "$stage/container.json" >/dev/null
+          jq -e '
+            ([.[0].HostConfig.Ulimits[]? | select(.Name == "fsize" and .Soft == 67108864 and .Hard == 67108864)] | length) == 1 and
+            ([.[0].HostConfig.Ulimits[]? | select(.Name == "nofile" and .Soft == 1024 and .Hard == 1024)] | length) == 1 and
+            ([.[0].HostConfig.Ulimits[]? | select(.Name == "core" and .Soft == 0 and .Hard == 0)] | length) == 1
+          ' "$stage/container.json" >/dev/null
+          docker start "$cid" >/dev/null
+          if ! timeout --foreground --kill-after=10s 900s docker wait "$cid" > "$stage/exit"; then
+            docker kill "$cid" >/dev/null 2>&1 || true
+            echo "candidate execution timed out" >&2
+            exit 1
           fi
-          expected="$(jq -er .binary_sha256 "$candidate/candidate-manifest.json")"
-          [[ "$actual" == "$expected" ]] || {{ echo "::error::candidate digest mismatch" >&2; exit 1; }}
-          chmod 0755 "$candidate/velnor-workflow"
-          manifest_closure="$(jq -er .closure "$candidate/candidate-manifest.json")"
-          [[ "$manifest_closure" == "$head_candidate" ]] || {{ echo "::error::candidate manifest closure $manifest_closure is not the head's candidate $head_candidate" >&2; exit 1; }}
-          reported="$(GH_TOKEN="" GITHUB_TOKEN="" "$candidate/velnor-workflow" --closure)"
-          [[ "$reported" == "$manifest_closure" ]] || {{ echo "::error::candidate reports closure $reported, manifest claims $manifest_closure" >&2; exit 1; }}
-          echo "{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$candidate/velnor-workflow" >> "$GITHUB_ENV"
-          echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=$candidate/candidate-manifest.json" >> "$GITHUB_ENV"
+          docker inspect "$cid" > "$stage/after.json"
+          jq -e '.[0].State.Status == "exited" and .[0].State.ExitCode == 0 and .[0].State.OOMKilled == false and .[0].State.Error == ""' "$stage/after.json" >/dev/null
+          docker cp "$cid:/output/." "$output/"
+          test -z "$(find -P "$output" -type l -print -quit)"
+          test -z "$(find -P "$output" ! -type f ! -type d -print -quit)"
+          test "$(find -P "$output" -type f | wc -l | tr -d ' ')" -le 4096
+          test "$(du -sx --bytes --apparent-size "$output" | awk '{{print $1}}')" -le 67108864
+          test -f "$output/.github/workflows/ci-pr.yml" || test -f "$output/ci-pr.yml"
+          result="$RUNNER_TEMP/candidate-result"
+          rm -rf "$result"; mkdir -m 0700 "$result"
+          cp -a "$output/." "$result/render"
+          render_sha256="$(find "$result/render" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{{print $1}}')"
+          handoff_json="$HANDOFF/handoff.json"
+          jq -n \
+            --arg role result \
+            --arg render_sha256 "$render_sha256" \
+            --arg handoff_id "${{{{ needs.policy_acquire.outputs.handoff_id }}}}" \
+            --arg handoff_digest "${{{{ needs.policy_acquire.outputs.handoff_digest }}}}" \
+            --arg workflow_path "$(jq -er .workflow_path "$handoff_json")" \
+            --argjson workflow_id "$(jq -er .workflow_id "$handoff_json")" \
+            --argjson run_id "$(jq -er .run_id "$handoff_json")" \
+            --argjson run_attempt "$(jq -er .run_attempt "$handoff_json")" \
+            --argjson job_id "$(jq -er .job_id "$handoff_json")" \
+            --arg job_name "$(jq -er .job_name "$handoff_json")" \
+            --arg event "$(jq -er .event "$handoff_json")" \
+            --arg target_repository "$(jq -er .target_repository "$handoff_json")" \
+            --argjson target_repository_id "$(jq -er .target_repository_id "$handoff_json")" \
+            --arg head_repository "$(jq -er .head_repository "$handoff_json")" \
+            --argjson head_repository_id "$(jq -er .head_repository_id "$handoff_json")" \
+            --arg head_sha "$(jq -er .head_sha "$handoff_json")" \
+            --arg base_sha "$(jq -er .base_sha "$handoff_json")" \
+            --arg base_revision "$(jq -er .base_revision "$handoff_json")" \
+            --arg head_tree_sha "$(jq -er .head_tree_sha "$handoff_json")" \
+            --arg base_tree_sha "$(jq -er .base_tree_sha "$handoff_json")" \
+            --arg source_archive_sha256 "$(jq -er .source_archive_sha256 "$handoff_json")" \
+            --arg candidate_closure "$(jq -er .candidate_closure "$handoff_json")" \
+            --arg artifact_name "$(jq -er .artifact_name "$handoff_json")" \
+            --argjson artifact_id "$(jq -er .artifact_id "$handoff_json")" \
+            --argjson artifact_size "$(jq -er .artifact_size "$handoff_json")" \
+            --arg artifact_service_digest "$(jq -er .artifact_service_digest "$handoff_json")" \
+            --arg artifact_raw_zip_sha256 "$(jq -er .artifact_raw_zip_sha256 "$handoff_json")" \
+            --arg artifact_expires_at "$(jq -er .artifact_expires_at "$handoff_json")" \
+            --arg execution_run_id "$GITHUB_RUN_ID" \
+            --arg execution_run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg execution_job "$GITHUB_JOB" \
+            --arg sandbox_index_digest "$SANDBOX_IMAGE_DIGEST" \
+            --arg sandbox_platform_digest "$platform_digest" \
+            --arg sandbox_config_digest "$config_digest" \
+            '{{role: $role, render_sha256: $render_sha256, handoff_id: $handoff_id, handoff_digest: $handoff_digest, workflow_path: $workflow_path, workflow_id: $workflow_id, run_id: $run_id, run_attempt: $run_attempt, job_id: $job_id, job_name: $job_name, event: $event, target_repository: $target_repository, target_repository_id: $target_repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, head_sha: $head_sha, base_sha: $base_sha, base_revision: $base_revision, head_tree_sha: $head_tree_sha, base_tree_sha: $base_tree_sha, source_archive_sha256: $source_archive_sha256, candidate_closure: $candidate_closure, artifact_name: $artifact_name, artifact_id: $artifact_id, artifact_size: $artifact_size, artifact_service_digest: $artifact_service_digest, artifact_raw_zip_sha256: $artifact_raw_zip_sha256, artifact_expires_at: $artifact_expires_at, execution_run_id: $execution_run_id, execution_run_attempt: $execution_run_attempt, execution_job: $execution_job, sandbox_index_digest: $sandbox_index_digest, sandbox_platform_digest: $sandbox_platform_digest, sandbox_config_digest: $sandbox_config_digest}}' > "$result/result.json"
+      - name: Upload candidate verification result
+        id: result_upload
+        uses: {upload}
+        with:
+          name: {result}
+          path: ${{{{ runner.temp }}}}/candidate-result
+          if-no-files-found: error
+          retention-days: 1
 "#,
-        pin_script = audited_pin_script(),
+        acquire = acquire,
+        artifact = CANDIDATE_ARTIFACT_NAME,
+        checkout = ActionPin::Checkout.reference(),
+        default_branch = default_branch,
+        download = ActionPin::DownloadArtifact.reference(),
+        handoff = CANDIDATE_HANDOFF_ARTIFACT_NAME,
+        image_digest = CANDIDATE_SANDBOX_IMAGE_DIGEST,
+        image_repository = CANDIDATE_SANDBOX_IMAGE_REPOSITORY,
+        result = CANDIDATE_RESULT_ARTIFACT_NAME,
+        runner = runner,
+        upload = ActionPin::UploadArtifact.reference(),
     )
 }
 
@@ -4705,6 +5087,205 @@ fn policy_renderer_steps(repository: &str, revision: &str) -> String {
 "#,
         pin_script = audited_pin_script(),
         setup_uses = workflow_setup_action_uses(repository, revision),
+    )
+}
+
+/// Fresh verifier-side provenance gate for the candidate result and its
+/// handoff. The execute job has no token, so it cannot prove that the artifact
+/// service metadata still names the bytes it consumed. This job re-reads the
+/// numeric artifact records and ZIP transports, then rechecks the producer
+/// run/job/repository/tree contract from a clean checkout before the policy
+/// command sees the render.
+fn policy_candidate_result_verification_step() -> String {
+    format!(
+        r#"      - name: Verify candidate transport provenance
+        id: candidate_provenance
+        if: github.event_name == 'pull_request_target'
+        working-directory: policy-checkout
+        env:
+          GH_TOKEN: ${{{{ github.token }}}}
+          RESULT_ID: ${{{{ needs.candidate_execute.outputs.result_id }}}}
+          RESULT_DIGEST: ${{{{ needs.candidate_execute.outputs.result_digest }}}}
+          HEAD_SHA: ${{{{ github.event.pull_request.head.sha }}}}
+          BASE_SHA: ${{{{ github.event.pull_request.base.sha }}}}
+          HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name }}}}
+          HEAD_REPOSITORY_ID: ${{{{ github.event.pull_request.head.repo.id }}}}
+          TARGET_REPOSITORY_ID: ${{{{ github.repository_id }}}}
+        run: |
+          set -euo pipefail
+          case "$RESULT_ID" in ''|*[!0-9]*) exit 1 ;; esac
+          case "$RESULT_DIGEST" in sha256:[0-9a-f]{{64}}) ;; *) exit 1 ;; esac
+          test "$HEAD_REPOSITORY" = "$GITHUB_REPOSITORY"
+          test "$HEAD_REPOSITORY_ID" = "$TARGET_REPOSITORY_ID"
+          result_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$RESULT_ID")"
+          jq -e --argjson id "$RESULT_ID" --arg digest "$RESULT_DIGEST" --arg name "{result}" --argjson run_id "$GITHUB_RUN_ID" '
+            .id == $id and .name == $name and .expired == false and .digest == $digest and
+            ((.workflow_run.id | tonumber) == $run_id)
+          ' <<<"$result_api" >/dev/null
+          result_archive="$RUNNER_TEMP/candidate-result.zip"
+          curl --fail --location --silent --show-error \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$RESULT_ID/zip" \
+            --output "$result_archive"
+          result_raw_zip_sha256="$(sha256sum "$result_archive" | awk '{{print $1}}')"
+          case "$result_raw_zip_sha256" in [0-9a-f]{{64}}) ;; *) exit 1 ;; esac
+          result_json="$RUNNER_TEMP/candidate-result/result.json"
+          test -f "$result_json"
+          jq -e --argjson result_id "$RESULT_ID" --arg result_digest "$RESULT_DIGEST" \
+            --arg head "$HEAD_SHA" --arg base "$BASE_SHA" --arg repo "$GITHUB_REPOSITORY" \
+            --arg head_repo "$HEAD_REPOSITORY" --argjson head_repo_id "$HEAD_REPOSITORY_ID" \
+            --argjson target_repo_id "$TARGET_REPOSITORY_ID" --arg execution_run "$GITHUB_RUN_ID" \
+            --arg execution_attempt "$GITHUB_RUN_ATTEMPT" '
+            .role == "result" and (.render_sha256 | strings | test("^[0-9a-f]{{64}}$")) and
+            (.handoff_id | strings | test("^[0-9]+$")) and (.handoff_digest | strings | test("^sha256:[0-9a-f]{{64}}$")) and
+            (.workflow_path == ".github/workflows/ci-pr.yml") and (.workflow_id | numbers) and
+            (.run_id | numbers) and (.run_attempt | numbers and . >= 1) and (.job_id | numbers) and
+            (.job_name == "candidate_producer") and (.event == "pull_request") and
+            (.target_repository == $repo) and (.target_repository_id == $target_repo_id) and
+            (.head_repository == $head_repo) and (.head_repository_id == $head_repo_id) and
+            (.head_sha == $head) and (.base_sha == $base) and
+            (.base_revision | strings | test("^[0-9a-f]{{40}}$")) and
+            (.head_tree_sha | strings | test("^[0-9a-f]{{40}}$")) and (.base_tree_sha | strings | test("^[0-9a-f]{{40}}$")) and
+            (.source_archive_sha256 | strings | test("^[0-9a-f]{{64}}$")) and
+            (.candidate_closure | strings | test("^[0-9a-f]{{64}}$")) and
+            (.artifact_name == "{artifact}") and (.artifact_id | numbers) and (.artifact_size | numbers | . <= 268435456) and
+            (.artifact_service_digest | strings | test("^sha256:[0-9a-f]{{64}}$")) and
+            (.artifact_raw_zip_sha256 | strings | test("^[0-9a-f]{{64}}$")) and (.artifact_expires_at | strings) and
+            (.execution_run_id == $execution_run) and (.execution_run_attempt == $execution_attempt) and (.execution_job == "candidate_execute") and
+            (.sandbox_index_digest | strings | test("^sha256:[0-9a-f]{{64}}$")) and
+            (.sandbox_platform_digest | strings | test("^sha256:[0-9a-f]{{64}}$")) and
+            (.sandbox_config_digest | strings | test("^sha256:[0-9a-f]{{64}}$"))
+          ' "$result_json" >/dev/null
+          handoff_id="$(jq -er '.handoff_id | tonumber' "$result_json")"
+          handoff_digest="$(jq -er '.handoff_digest | strings | select(test("^sha256:[0-9a-f]{{64}}$"))' "$result_json")"
+          handoff_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$handoff_id")"
+          jq -e --argjson id "$handoff_id" --arg digest "$handoff_digest" --arg name "{handoff}" --argjson run_id "$GITHUB_RUN_ID" '
+            .id == $id and .name == $name and .expired == false and .digest == $digest and
+            ((.workflow_run.id | tonumber) == $run_id)
+          ' <<<"$handoff_api" >/dev/null
+          handoff_archive="$RUNNER_TEMP/candidate-handoff.zip"
+          curl --fail --location --silent --show-error \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$handoff_id/zip" \
+            --output "$handoff_archive"
+          handoff_raw_zip_sha256="$(sha256sum "$handoff_archive" | awk '{{print $1}}')"
+          case "$handoff_raw_zip_sha256" in [0-9a-f]{{64}}) ;; *) exit 1 ;; esac
+          handoff_dir="$RUNNER_TEMP/candidate-handoff-verified"
+          rm -rf "$handoff_dir"; mkdir -m 0700 "$handoff_dir"
+          python3 - "$handoff_archive" "$handoff_dir" <<'PY'
+          import sys, zipfile
+          from pathlib import Path
+          archive, destination = Path(sys.argv[1]), Path(sys.argv[2])
+          with zipfile.ZipFile(archive) as payload:
+              names = set()
+              for info in payload.infolist():
+                  parts = info.filename.split("/")
+                  mode = (info.external_attr >> 16) & 0o170000
+                  if info.filename.startswith("/") or "\\" in info.filename or any(part in ("", ".", "..") for part in parts):
+                      raise SystemExit("unsafe handoff member")
+                  if info.filename in names or (mode not in (0, 0o100000) and not info.is_dir()):
+                      raise SystemExit("duplicate or non-regular handoff member")
+                  names.add(info.filename)
+              if sorted(names) != ["candidate-manifest.json", "handoff.json", "source.tar", "velnor-workflow"]:
+                  raise SystemExit("handoff artifact surface is not exact")
+              for info in payload.infolist():
+                  payload.extract(info, destination)
+          PY
+          handoff_json="$handoff_dir/handoff.json"
+          jq -e --slurpfile result "$result_json" --argjson handoff_id "$handoff_id" --arg head "$HEAD_SHA" --arg base "$BASE_SHA" \
+            --arg repo "$GITHUB_REPOSITORY" --arg head_repo "$HEAD_REPOSITORY" --argjson head_repo_id "$HEAD_REPOSITORY_ID" --argjson target_repo_id "$TARGET_REPOSITORY_ID" '
+            . as $h | $result[0] as $r |
+            $h.role == "handoff" and $r.handoff_id == ($handoff_id|tostring) and
+            $h.workflow_path == $r.workflow_path and $h.workflow_id == $r.workflow_id and $h.run_id == $r.run_id and $h.run_attempt == $r.run_attempt and
+            $h.job_id == $r.job_id and $h.job_name == $r.job_name and $h.event == $r.event and
+            $h.target_repository == $repo and $h.target_repository_id == $target_repo_id and
+            $h.head_repository == $head_repo and $h.head_repository_id == $head_repo_id and
+            $h.head_sha == $head and $h.base_sha == $base and $h.base_revision == $r.base_revision and
+            $h.head_tree_sha == $r.head_tree_sha and $h.base_tree_sha == $r.base_tree_sha and
+            $h.source_archive_sha256 == $r.source_archive_sha256 and $h.candidate_closure == $r.candidate_closure and
+            $h.artifact_name == $r.artifact_name and $h.artifact_id == $r.artifact_id and $h.artifact_size == $r.artifact_size and
+            $h.artifact_service_digest == $r.artifact_service_digest and $h.artifact_raw_zip_sha256 == $r.artifact_raw_zip_sha256 and
+            ($h.contract_sha256 | strings | test("^[0-9a-f]{{64}}$"))
+          ' "$handoff_json" >/dev/null
+          test "$(sha256sum "$handoff_dir/source.tar" | awk '{{print $1}}')" = "$(jq -er .source_archive_sha256 "$handoff_json")"
+          producer_id="$(jq -er '.artifact_id | tonumber' "$handoff_json")"
+          producer_digest="$(jq -er '.artifact_service_digest | strings | select(test("^sha256:[0-9a-f]{{64}}$"))' "$handoff_json")"
+          producer_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$producer_id")"
+          jq -e --argjson id "$producer_id" --arg digest "$producer_digest" --arg name "{artifact}" --argjson run_id "$(jq -er .run_id "$handoff_json")" '
+            .id == $id and .name == $name and .expired == false and .digest == $digest and
+            ((.workflow_run.id | tonumber) == $run_id)
+          ' <<<"$producer_api" >/dev/null
+          producer_archive="$RUNNER_TEMP/candidate-producer-verified.zip"
+          curl --fail --location --silent --show-error \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$producer_id/zip" \
+            --output "$producer_archive"
+          test "$(sha256sum "$producer_archive" | awk '{{print $1}}')" = "$(jq -er .artifact_raw_zip_sha256 "$handoff_json")"
+          producer_dir="$RUNNER_TEMP/candidate-producer-verified"
+          rm -rf "$producer_dir"; mkdir -m 0700 "$producer_dir"
+          python3 - "$producer_archive" "$producer_dir" <<'PY'
+          import sys, zipfile
+          from pathlib import Path
+          archive, destination = Path(sys.argv[1]), Path(sys.argv[2])
+          with zipfile.ZipFile(archive) as payload:
+              names = set()
+              for info in payload.infolist():
+                  parts = info.filename.split("/")
+                  mode = (info.external_attr >> 16) & 0o170000
+                  if info.filename.startswith("/") or "\\" in info.filename or any(part in ("", ".", "..") for part in parts):
+                      raise SystemExit("unsafe producer member")
+                  if info.filename in names or (mode not in (0, 0o100000) and not info.is_dir()):
+                      raise SystemExit("duplicate or non-regular producer member")
+                  names.add(info.filename)
+              if sorted(names) != ["candidate-manifest.json", "velnor-workflow"]:
+                  raise SystemExit("producer artifact surface is not exact")
+              for info in payload.infolist():
+                  payload.extract(info, destination)
+          PY
+          producer_manifest="$producer_dir/candidate-manifest.json"
+          producer_binary="$producer_dir/velnor-workflow"
+          test "$(sha256sum "$producer_binary" | awk '{{print $1}}')" = "$(jq -er .binary_sha256 "$producer_manifest")"
+          workflow_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml")"
+          jq -e --argjson id "$(jq -er .workflow_id "$handoff_json")" '.path == ".github/workflows/ci-pr.yml" and .id == $id' <<<"$workflow_api" >/dev/null
+          run_id="$(jq -er .run_id "$handoff_json")"
+          workflow_id="$(jq -er .workflow_id "$handoff_json")"
+          run_attempt="$(jq -er .run_attempt "$handoff_json")"
+          run_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")"
+          jq -e --argjson id "$run_id" --argjson workflow_id "$workflow_id" --argjson target_repo_id "$TARGET_REPOSITORY_ID" --argjson run_attempt "$run_attempt" --arg head "$HEAD_SHA" --arg repo "$GITHUB_REPOSITORY" '
+            .id == $id and .workflow_id == $workflow_id and .path == ".github/workflows/ci-pr.yml" and .event == "pull_request" and
+            .status == "completed" and .conclusion == "success" and .head_sha == $head and
+            ((.repository.id | tonumber) == $target_repo_id) and .repository.full_name == $repo and
+            .run_attempt == $run_attempt
+          ' <<<"$run_api" >/dev/null
+          job_id="$(jq -er .job_id "$handoff_json")"
+          job_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job_id")"
+          jq -e --argjson id "$job_id" --argjson run_id "$run_id" --arg head "$HEAD_SHA" '
+            .id == $id and .run_id == $run_id and .name == "candidate_producer" and .head_sha == $head and
+            .status == "completed" and .conclusion == "success"
+          ' <<<"$job_api" >/dev/null
+          head_tree_sha="$(git rev-parse "$HEAD_SHA^{{tree}}")"
+          base_tree_sha="$(git rev-parse "$BASE_SHA^{{tree}}")"
+          test "$head_tree_sha" = "$(jq -er .head_tree_sha "$handoff_json")"
+          test "$base_tree_sha" = "$(jq -er .base_tree_sha "$handoff_json")"
+          test "$(git show "$BASE_SHA:.github/workflows/ci-pr.yml" | sha256sum | awk '{{print $1}}')" = "$(jq -er .contract_sha256 "$handoff_json")"
+          closure_file="$RUNNER_TEMP/verifier-closure"
+          git ls-tree -r "$HEAD_SHA" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo | LC_ALL=C sort > "$closure_file"
+          printf 'closure-version:1\\nfeatures:tui\\nprofile:debug\\n' >> "$closure_file"
+          test "$(sha256sum "$closure_file" | awk '{{print $1}}')" = "$(jq -er .candidate_closure "$handoff_json")"
+          render_sha256="$(find "$RUNNER_TEMP/candidate-result/render" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{{print $1}}')"
+          test "$render_sha256" = "$(jq -er .render_sha256 "$result_json")"
+          echo "result_raw_zip_sha256=$result_raw_zip_sha256" >> "$GITHUB_OUTPUT"
+          echo "handoff_raw_zip_sha256=$handoff_raw_zip_sha256" >> "$GITHUB_OUTPUT"
+"#,
+        artifact = crate::s2::CANDIDATE_ARTIFACT_NAME,
+        handoff = crate::s2::CANDIDATE_HANDOFF_ARTIFACT_NAME,
+        result = crate::s2::CANDIDATE_RESULT_ARTIFACT_NAME,
     )
 }
 
@@ -4787,20 +5368,88 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
     } else {
         String::new()
     };
-    let renderer = if hosted {
-        if owner && acquire_pull_request_candidate {
-            policy_candidate_step(revision)
-        } else {
-            policy_renderer_steps(repository, revision)
-        }
+    let candidate_graph = hosted && owner && acquire_pull_request_candidate;
+    let policy_permissions = if candidate_graph {
+        "      actions: read\n      contents: read\n"
+    } else {
+        "      contents: read\n"
+    };
+    let candidate_roles = if candidate_graph {
+        policy_candidate_role_jobs(&runner, revision, default_branch)
     } else {
         String::new()
     };
-    format!(
-        "  policy:\n    name: {name}\n{trusted_gate}    runs-on: {runner}\n    timeout-minutes: 20\n    # Trust invariant: this job runs the base branch's Stage-0 validator\n    # product against the audited tree under pull_request_target. It holds\n    # `contents: read` only, references no secrets, persists no credentials,\n    # and never compiles. When the audited tree differs from the declared\n    # pin's render, it additionally EXECUTES the PR run's prebuilt\n    # candidate generator — PR-built code, same-repository runs only, bound\n    # to the audited tree by manifest closure plus binary digest before\n    # execution — with no secret references, no persisted credentials, the\n    # read-only github.token confined to the Acquire/Ruleset API steps,\n    # and both candidate exec points tokenless.\n    permissions:\n      contents: read\n    steps:\n      - name: Checkout repository history\n        uses: {}\n        with:\n          path: policy-checkout\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Check out audited head\n        working-directory: policy-checkout\n        env:\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}\n        run: |\n          set -euo pipefail\n          if ! git cat-file -e \"$HEAD_SHA^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\" \"$HEAD_SHA\"\n          fi\n          git checkout --quiet --detach \"$HEAD_SHA\"\n{setup_checkout}{validator}{renderer}{ruleset_step}      - name: Enforce workflow policy\n        env:\n          WORKFLOW_ROOT: ${{{{ github.workspace }}}}/policy-checkout\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.sha }}}}\n          {VELNOR_POLICY_REVISION_ENV}: {revision}\n        run: |\n          set -euo pipefail\n          velnor-workflow policy \\\n            --workflow-root \"$WORKFLOW_ROOT\" \\\n            --head-sha \"$HEAD_SHA\" \\\n            --base-sha \"$BASE_SHA\" \\\n            --candidate-manifest \"${{VELNOR_WORKFLOW_CANDIDATE_MANIFEST:-}}\" \\\n{policy_arguments}\n{actionlint_setup}      - name: Lint caller workflows\n        working-directory: policy-checkout\n        env:\n          MISE_NO_CONFIG: \"1\"\n        run: mise exec actionlint@{ACTIONLINT_VERSION} -- actionlint\n",
+    let renderer = if hosted && !candidate_graph {
+        policy_renderer_steps(repository, revision)
+    } else {
+        String::new()
+    };
+    let candidate_result_download = if candidate_graph {
+        format!(
+            "      - name: Download candidate verification result\n        if: github.event_name == 'pull_request_target'\n        uses: {}\n        with:\n          artifact-ids: ${{{{ needs.candidate_execute.outputs.result_id }}}}\n          path: ${{{{ runner.temp }}}}/candidate-result\n",
+            ActionPin::DownloadArtifact.reference()
+        )
+    } else {
+        String::new()
+    };
+    let candidate_result_verification = if candidate_graph {
+        policy_candidate_result_verification_step()
+    } else {
+        String::new()
+    };
+    let candidate_render_argument = if candidate_graph {
+        "          candidate_args=()\n          if [[ \"$GITHUB_EVENT_NAME\" == pull_request_target ]]; then\n            candidate_args+=(--candidate-render \"$RUNNER_TEMP/candidate-result/render\")\n          fi\n"
+    } else {
+        ""
+    };
+    let candidate_render_invocation = if candidate_graph {
+        "            \"${candidate_args[@]}\" \\\n"
+    } else {
+        "            --candidate-manifest \"${VELNOR_WORKFLOW_CANDIDATE_MANIFEST:-}\" \\\n"
+    };
+    let mut policy = format!
+        (
+        "  policy:\n    name: {name}\n{trusted_gate}    runs-on: {runner}\n    timeout-minutes: 20\n    # Trust invariant: this job is the fresh verifier. It executes only the\n    # base-pinned validator and compares the isolated candidate's rendered\n    # bytes against a clean checkout; candidate code never runs in this job.\n    permissions:\n      contents: read\n    steps:\n      - name: Checkout repository history\n        uses: {}\n        with:\n          path: policy-checkout\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Check out audited head\n        working-directory: policy-checkout\n        env:\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}\n        run: |\n          set -euo pipefail\n          if ! git cat-file -e \"$HEAD_SHA^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\" \"$HEAD_SHA\"\n          fi\n          git checkout --quiet --detach \"$HEAD_SHA\"\n{setup_checkout}{validator}{renderer}{ruleset_step}      - name: Enforce workflow policy\n        env:\n          WORKFLOW_ROOT: ${{{{ github.workspace }}}}/policy-checkout\n          HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}\n          BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.sha }}}}\n          {VELNOR_POLICY_REVISION_ENV}: {revision}\n        run: |\n          set -euo pipefail\n          velnor-workflow policy \\\n            --workflow-root \"$WORKFLOW_ROOT\" \\\n            --head-sha \"$HEAD_SHA\" \\\n            --base-sha \"$BASE_SHA\" \\\n            --candidate-manifest \"${{VELNOR_WORKFLOW_CANDIDATE_MANIFEST:-}}\" \\\n{policy_arguments}\n{actionlint_setup}      - name: Lint caller workflows\n        working-directory: policy-checkout\n        env:\n          MISE_NO_CONFIG: \"1\"\n        run: mise exec actionlint@{ACTIONLINT_VERSION} -- actionlint\n",
         ActionPin::Checkout.reference(),
         actionlint_setup = actionlint_setup_step(cache_backend),
-    )
+    );
+    policy = policy.replacen(
+        "    permissions:\n",
+        "    # Candidate execution runs with no secret references or persisted credentials.\n    permissions:\n",
+        1,
+    );
+    if candidate_graph {
+        policy = policy.replacen(
+            "    permissions:\n      contents: read\n",
+            &format!("    permissions:\n{policy_permissions}"),
+            1,
+        );
+        policy = policy.replacen(
+            "  policy:\n    name:",
+            "  policy:\n    needs: [candidate_execute]\n    if: ${{ always() && (github.event_name != 'pull_request_target' || needs.candidate_execute.result == 'success') }}\n    name:",
+            1,
+        );
+        policy = policy.replacen(
+            "          set -euo pipefail\n          velnor-workflow policy \\\n",
+            &format!(
+                "          set -euo pipefail\n{candidate_render_argument}          velnor-workflow policy \\\n"
+            ),
+            1,
+        );
+        policy = policy.replacen(
+            "            --candidate-manifest \"${VELNOR_WORKFLOW_CANDIDATE_MANIFEST:-}\" \\\n",
+            &candidate_render_invocation,
+            1,
+        );
+        policy = policy.replacen(
+            "      - name: Resolve required status checks\n",
+            &format!(
+                "{candidate_result_download}{candidate_result_verification}      - name: Resolve required status checks\n"
+            ),
+            1,
+        );
+    }
+    format!("{candidate_roles}{policy}")
 }
 
 /// The step that provisions the pinned actionlint for the policy job. The
@@ -15523,7 +16172,10 @@ lockfile = true
                 );
             }
         }
-        assert_eq!(checkouts, 2, "history plus base setup action: {owner}");
+        assert_eq!(
+            checkouts, 3,
+            "acquire history, policy history, and base setup action: {owner}"
+        );
         assert!(
             owner.contains(&format!("uses: {VELNOR_WORKFLOW_POLICY_SETUP_ACTION}\n")),
             "the setup step resolves out of the sibling checkout: {owner}"
@@ -15754,227 +16406,6 @@ lockfile = true
                     path.display()
                 );
             }
-        }
-    }
-
-    /// The acquire step, the unit-job publisher, and the validator's
-    /// `wanted` binding rendezvous on one digest: the audited head's
-    /// candidate closure. Polling by the pin's candidate closure while the
-    /// other two legs bind the head's is jointly satisfiable only when
-    /// pin..head is closure-clean, so no render-changing generator PR can
-    /// land green. The step therefore derives the poll name and the
-    /// manifest gate from `closure --rev $HEAD_SHA --candidate`, and no
-    /// `pin_candidate` derivation survives anywhere in the job.
-    #[test]
-    fn policy_candidate_step_binds_manifest_to_head_and_exports_it() {
-        let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
-        assert!(
-            owner.contains(
-                "head_candidate=\"$(velnor-workflow closure --rev=\"$HEAD_SHA\" --candidate)\""
-            ),
-            "the acquire step derives the candidate from the audited head: {owner}"
-        );
-        assert!(
-            owner.contains("name=\"velnor-workflow-candidate-${head_candidate:0:16}-${RUNNER_OS}-${RUNNER_ARCH}\""),
-            "the polled artifact name keys off the head candidate, as published: {owner}"
-        );
-        assert!(
-            !owner.contains("pin_candidate"),
-            "no pin-anchored candidate derivation survives the rendezvous: {owner}"
-        );
-        assert!(
-            owner.contains("\"$manifest_closure\" == \"$head_candidate\""),
-            "the acquire step requires the manifest closure to equal the head's candidate in full: {owner}"
-        );
-        assert!(
-            owner.contains(
-                "candidate manifest closure $manifest_closure is not the head's candidate $head_candidate"
-            ),
-            "a closure mismatch fails closed with both digests: {owner}"
-        );
-        assert!(
-            owner.contains(
-                "echo \"VELNOR_WORKFLOW_CANDIDATE_MANIFEST=$candidate/candidate-manifest.json\" >> \"$GITHUB_ENV\""
-            ),
-            "the acquire step exports the manifest for the validator's binding: {owner}"
-        );
-        assert!(
-            owner.contains("echo \"VELNOR_WORKFLOW_CANDIDATE_MANIFEST=\" >> \"$GITHUB_ENV\""),
-            "the early exit clears the manifest so no stale binding survives: {owner}"
-        );
-        assert!(
-            owner.contains(&format!(
-                "--candidate-manifest \"${{{VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV}:-}}\""
-            )),
-            "the Enforce step passes the manifest through the unset-safe fallback: {owner}"
-        );
-        assert!(
-            owner.contains("::error::candidate digest mismatch"),
-            "a binary whose digest disagrees with the manifest fails closed: {owner}"
-        );
-        assert!(
-            owner.contains("\"$reported\" == \"$manifest_closure\""),
-            "the self-report gate requires the binary to report the manifest closure: {owner}"
-        );
-        for clause in [
-            ".platform == $platform",
-            ".repository == $repo",
-            ".run_id == $run",
-        ] {
-            assert!(
-                owner.contains(clause),
-                "the manifest accept filter binds {clause}: {owner}"
-            );
-        }
-        assert!(
-            owner.contains("generator changes from forks cannot be verified here"),
-            "the fork gate still fails closed before any candidate fetch: {owner}"
-        );
-    }
-
-    /// The same-closure early exit fires only when the tree matches the
-    /// pin's render: same closure makes the running base validator the
-    /// pin's own renderer, so `--plain --check` decides tree==pin-render
-    /// with no extra provisioning. A same-closure tree that differs is a
-    /// generator change in flight and must fall through to the candidate
-    /// path — exiting early would clear the manifest and strand the
-    /// validator with a red pin leg and no candidate binding.
-    #[test]
-    fn policy_acquire_same_closure_exit_requires_pin_render_match() {
-        let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
-        assert!(
-            owner.contains("if velnor-workflow --plain --check; then"),
-            "the same-closure branch proves tree==pin-render before exiting: {owner}"
-        );
-        assert!(
-            owner.contains(
-                "echo \"pin $pin shares the base closure and renders the tree; the Stage-0 validator renders\""
-            ),
-            "the early exit names both conditions it proved: {owner}"
-        );
-        assert!(
-            !owner.contains(
-                "echo \"pin $pin shares the base closure; the Stage-0 validator renders\""
-            ),
-            "no unconditional same-closure exit survives: {owner}"
-        );
-        assert!(
-            owner.contains("falling through to the candidate path"),
-            "a same-closure render differ falls through instead of exiting: {owner}"
-        );
-        let check = must_some(
-            owner.find("if velnor-workflow --plain --check; then"),
-            "the render gate is present",
-        );
-        let fork = must_some(
-            owner.find("generator changes from forks cannot be verified here"),
-            "the fork gate is present",
-        );
-        let head = must_some(
-            owner.find("head_candidate=\"$(velnor-workflow closure"),
-            "the head derivation is present",
-        );
-        assert!(
-            check < fork && fork < head,
-            "the render gate precedes the fork gate precedes the head derivation: {owner}"
-        );
-    }
-
-    /// The acquire step finds the sibling PR run through the runs-list API,
-    /// whose items carry `.head_repository` as an object — there is no
-    /// `.head_repository_id` scalar, so selecting on it matches nothing and
-    /// the candidate path fails systematically. An empty list means the API
-    /// has not indexed the sibling run yet, so the loop keeps polling until
-    /// the deadline instead of failing fast. The artifact check pipes
-    /// through real `jq`: `gh api` has no `-e` flag, so `gh api --jq -e`
-    /// exits 1 with "unknown shorthand flag" and the artifact is never
-    /// detected.
-    #[test]
-    fn policy_acquire_step_selects_same_repository_runs_by_object_id() {
-        let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
-        assert!(
-            owner.contains("select(.head_repository.id == .repository.id)"),
-            "the same-repository select compares the embedded objects: {owner}"
-        );
-        assert!(
-            !owner.contains(".head_repository_id"),
-            "the list endpoint has no head_repository_id scalar: {owner}"
-        );
-        assert!(
-            owner.contains("[[ \"$seen\" == \"true\" ]] || waiting=true"),
-            "an unindexed sibling run keeps polling until the deadline: {owner}"
-        );
-        assert!(
-            owner.contains(
-                "| jq -e --arg name \"$name\" '[.artifacts[] | select(.name == $name and .expired == false)] | length > 0'"
-            ),
-            "the artifact check evaluates through real jq: {owner}"
-        );
-        assert!(
-            !owner.contains("--jq --arg name"),
-            "no gh api call smuggles jq flags gh does not accept: {owner}"
-        );
-    }
-
-    /// The acquire step's `--closure` probe executes the candidate binary in a
-    /// step whose env carries the read-scoped job token for the artifact API
-    /// calls above it. The probe needs no auth, so the invocation prefixes
-    /// both token variables with empty values: the exec point holds no
-    /// token. The values are quoted (`VAR=""`) so shellcheck's SC1007 does
-    /// not flag the prefix assignments as suspicious spacing.
-    #[test]
-    fn policy_candidate_closure_probe_holds_no_token() {
-        let owner = hosted_policy_job_for_repository("abc123", workflow_setup_action_repository());
-        assert!(
-            owner.contains(
-                "reported=\"$(GH_TOKEN=\"\" GITHUB_TOKEN=\"\" \"$candidate/velnor-workflow\" --closure)\""
-            ),
-            "the candidate probe strips both tokens from its own invocation: {owner}"
-        );
-    }
-
-    #[test]
-    fn policy_trust_comment_states_candidate_execution() {
-        for job in [
-            hosted_policy_job("abc123"),
-            velnor_policy_job("abc123", "[self-hosted, velnor]"),
-        ] {
-            assert!(
-                job.contains("additionally EXECUTES the PR run's prebuilt"),
-                "the comment states that PR-built code executes: {job}"
-            );
-            assert!(
-                job.contains("same-repository runs only, bound"),
-                "the comment states the same-repo confinement: {job}"
-            );
-            assert!(
-                job.contains("by manifest closure plus binary digest before"),
-                "the comment states the pre-execution binding: {job}"
-            );
-            assert!(
-                job.contains("and never compiles"),
-                "the compile claim stays: {job}"
-            );
-            assert!(
-                job.contains("with no secret references, no persisted credentials, the"),
-                "the comment states the credential absence precisely: {job}"
-            );
-            assert!(
-                job.contains("read-only github.token confined to the Acquire/Ruleset API steps,"),
-                "the comment confines the job token to the API steps: {job}"
-            );
-            assert!(
-                job.contains("and both candidate exec points tokenless."),
-                "the comment states both exec points hold no token: {job}"
-            );
-            assert!(
-                !job.contains("never by building pull-request code here"),
-                "the misleading implication that no PR code runs is gone: {job}"
-            );
-            assert!(
-                !job.contains("secretless, credentialless confinement"),
-                "the false secretless claim is gone: {job}"
-            );
         }
     }
 

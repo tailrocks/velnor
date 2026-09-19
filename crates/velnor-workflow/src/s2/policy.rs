@@ -1960,6 +1960,14 @@ fn audit_entrypoint_privileges(
             .push(finding("must not reference `secrets.`"));
     }
     match mapping_value(workflow, "jobs").and_then(Value::as_mapping) {
+        Some(jobs)
+            if jobs.len() == 3
+                && ["policy_acquire", "candidate_execute", "policy"]
+                    .iter()
+                    .all(|name| mapping_value(jobs, name).is_some()) =>
+        {
+            audit_candidate_entrypoint_jobs(jobs, &finding, velnor_policy, audit);
+        }
         Some(jobs) if jobs.len() == 1 => {
             let Some((job_id, job)) = jobs.iter().next() else {
                 return;
@@ -2041,6 +2049,124 @@ fn audit_entrypoint_privileges(
     }
 }
 
+/// The owner entrypoint's candidate transport has three jobs instead of one:
+/// the base-owned API acquire role, the tokenless isolated execute role, and
+/// the base-pinned verifier. Keep this audit independent of candidate JSON or
+/// of the renderer's source strings: the job IDs, permissions, needs, and
+/// checkout boundaries are the trust contract.
+fn audit_candidate_entrypoint_jobs(
+    jobs: &Mapping,
+    finding: &impl Fn(&str) -> String,
+    velnor_policy: &VelnorPolicyContract,
+    audit: &mut EntrypointAudit,
+) {
+    let expected_permissions = [
+        (
+            "policy_acquire",
+            is_actions_contents_read as fn(Option<&Value>) -> bool,
+        ),
+        (
+            "candidate_execute",
+            is_empty_permissions as fn(Option<&Value>) -> bool,
+        ),
+        (
+            "policy",
+            is_actions_contents_read as fn(Option<&Value>) -> bool,
+        ),
+    ];
+    for (job_id, permissions_ok) in expected_permissions {
+        let Some(job) = mapping_value(jobs, job_id).and_then(Value::as_mapping) else {
+            audit
+                .privileges
+                .push(finding(&format!("job {job_id} must be a YAML mapping")));
+            continue;
+        };
+        if !permissions_ok(mapping_value(job, "permissions")) {
+            audit.privileges.push(finding(&format!(
+                "job {job_id} has permissions outside its reviewed transport contract"
+            )));
+        }
+        if mapping_value(job, "environment").is_some() {
+            audit.privileges.push(finding(&format!(
+                "job {job_id} must not bind a deployment environment"
+            )));
+        }
+        if job_id == "candidate_execute" {
+            if !has_need(job, "policy_acquire") {
+                audit
+                    .privileges
+                    .push(finding("candidate_execute must need policy_acquire"));
+            }
+            if job_contains_checkout(job) {
+                audit.privileges.push(finding(
+                    "candidate_execute must not check out candidate-controlled source",
+                ));
+            }
+        }
+        if job_id == "policy" && !has_need(job, "candidate_execute") {
+            audit
+                .privileges
+                .push(finding("policy verifier must need candidate_execute"));
+        }
+        audit_entrypoint_job_runner(job_id, job, finding, velnor_policy, audit);
+    }
+}
+
+fn has_need(job: &Mapping, expected: &str) -> bool {
+    mapping_value(job, "needs")
+        .and_then(Value::as_sequence)
+        .is_some_and(|needs| needs.iter().any(|need| need.as_str() == Some(expected)))
+}
+
+fn job_contains_checkout(job: &Mapping) -> bool {
+    mapping_value(job, "steps")
+        .and_then(Value::as_sequence)
+        .is_some_and(|steps| {
+            steps.iter().any(|step| {
+                step.as_mapping()
+                    .and_then(|step| mapping_value(step, "uses"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|uses| uses.starts_with("actions/checkout@"))
+            })
+        })
+}
+
+fn audit_entrypoint_job_runner(
+    job_id: &str,
+    job: &Mapping,
+    finding: &impl Fn(&str) -> String,
+    velnor_policy: &VelnorPolicyContract,
+    audit: &mut EntrypointAudit,
+) {
+    match mapping_value(job, "runs-on") {
+        Some(runs_on) => {
+            let mut resolving = BTreeSet::new();
+            let analysis = analyze_runner(runs_on, None, &mut resolving, velnor_policy);
+            if analysis.dynamic || analysis.invalid {
+                audit.privileges.push(finding(&format!(
+                    "job {job_id} runs-on must be static labels"
+                )));
+            } else if analysis.local_provider {
+                let gated = mapping_value(job, "if")
+                    .and_then(Value::as_str)
+                    .is_some_and(|condition| has_safe_runner_gate(condition, job, velnor_policy));
+                if !gated {
+                    audit.privileges.push(finding(&format!(
+                        "job {job_id} runs on a local provider without a trusted-event gate"
+                    )));
+                }
+            } else if analysis.foreign {
+                audit.privileges.push(finding(&format!(
+                    "job {job_id} runs-on does not match any declared provider selector"
+                )));
+            }
+        }
+        None => audit
+            .privileges
+            .push(finding(&format!("job {job_id} declares no runs-on"))),
+    }
+}
+
 fn is_contents_read_only(permissions: Option<&Value>) -> bool {
     permissions
         .and_then(Value::as_mapping)
@@ -2048,6 +2174,22 @@ fn is_contents_read_only(permissions: Option<&Value>) -> bool {
             permissions.len() == 1
                 && mapping_value(permissions, "contents").and_then(Value::as_str) == Some("read")
         })
+}
+
+fn is_actions_contents_read(permissions: Option<&Value>) -> bool {
+    permissions
+        .and_then(Value::as_mapping)
+        .is_some_and(|permissions| {
+            permissions.len() == 2
+                && mapping_value(permissions, "contents").and_then(Value::as_str) == Some("read")
+                && mapping_value(permissions, "actions").and_then(Value::as_str) == Some("read")
+        })
+}
+
+fn is_empty_permissions(permissions: Option<&Value>) -> bool {
+    permissions
+        .and_then(Value::as_mapping)
+        .is_some_and(Mapping::is_empty)
 }
 
 // ---------------------------------------------------------------------------

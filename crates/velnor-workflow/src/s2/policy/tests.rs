@@ -586,12 +586,13 @@ fn generated_entrypoint_satisfies_the_privilege_and_trigger_invariants() {
     let _ = fs::remove_dir_all(root);
 }
 
-/// The owner policy job acquires products (no `--rev <sha>` install) and its
-/// candidate step passes shell variables to `closure --rev=`: those variable
-/// references are not pin literals, so the pin rule still passes on the
-/// exported revision and still names it on drift.
+/// The owner policy entrypoint is a typed four-role transport: the producer
+/// lives in `ci-pr.yml`, acquire selects its exact API identity, execute runs
+/// only inside the reviewed sandbox, and policy verifies the render. No
+/// candidate bytes execute in the trusted verifier and no mutable artifact
+/// name is used as a download selector.
 #[test]
-fn owner_entrypoint_pin_ignores_variable_references() {
+fn owner_entrypoint_renders_the_isolated_candidate_transport() {
     let job = crate::s2::policy_job(&PolicyJobSpec {
         name: "Policy",
         revision: PIN_A,
@@ -603,18 +604,95 @@ fn owner_entrypoint_pin_ignores_variable_references() {
         declared_ruleset_contexts: "ci-required,Policy",
         acquire_pull_request_candidate: true,
     });
-    assert!(job.contains("--rev=\"$pin\""), "{job}");
+    assert!(job.contains("policy_acquire:\n"), "{job}");
+    assert!(job.contains("candidate_execute:\n"), "{job}");
+    assert!(job.contains("  policy:\n"), "{job}");
+    assert!(job.contains("needs: [candidate_execute]"), "{job}");
     assert!(
-        !job.contains("--rev "),
-        "rendered templates never use the space form a pre-product base validator scans for: {job}"
+        job.contains("needs.policy_acquire.outputs.handoff_id"),
+        "{job}"
     );
     assert!(
-        job.contains(&format!(
-            "--candidate-manifest \"${{{VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV}:-}}\""
-        )),
-        "the Enforce step binds the candidate manifest through the unset-safe fallback: {job}"
+        job.contains("artifact-ids: ${{ needs.candidate_execute.outputs.result_id }}"),
+        "{job}"
     );
-    let root = entrypoint_tree("entrypoint-owner-pin", &job);
+    assert!(
+        job.contains("name: velnor-workflow-candidate-linux-x64"),
+        "{job}"
+    );
+    assert!(
+        job.contains("name: velnor-workflow-candidate-handoff"),
+        "{job}"
+    );
+    assert!(
+        job.contains("name: velnor-workflow-candidate-result"),
+        "{job}"
+    );
+    assert!(
+        job.contains("actions/runs/$run_id/jobs?per_page=100"),
+        "{job}"
+    );
+    assert!(
+        job.contains("actions/runs/$run_id/artifacts?per_page=100"),
+        "{job}"
+    );
+    assert!(job.contains("actions/artifacts/$artifact_id/zip"), "{job}");
+    assert!(job.contains("artifact_raw_zip_sha256"), "{job}");
+    assert!(job.contains("candidate_closure"), "{job}");
+    assert!(
+        job.contains("Verify candidate transport provenance"),
+        "{job}"
+    );
+    assert!(job.contains("workflow_id"), "{job}");
+    assert!(job.contains(".workflow_run.id | tonumber"), "{job}");
+    assert!(job.contains("actions: read\n      contents: read"), "{job}");
+    assert!(job.contains("run_attempt"), "{job}");
+    assert!(job.contains("target_repository_id"), "{job}");
+    assert!(job.contains("--network=none"), "{job}");
+    assert!(job.contains("--read-only"), "{job}");
+    assert!(job.contains("--pid=private"), "{job}");
+    assert!(job.contains("--cap-drop=ALL"), "{job}");
+    assert!(
+        job.contains("--tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m"),
+        "{job}"
+    );
+    assert!(job.contains("nr_inodes=4096"), "{job}");
+    assert!(job.contains("--ulimit fsize=67108864:67108864"), "{job}");
+    assert!(job.contains("--log-driver=none"), "{job}");
+    assert!(
+        job.contains("--security-opt no-new-privileges=true"),
+        "{job}"
+    );
+    assert!(
+        job.contains("--mount \"type=bind,src=$input,dst=/input,readonly"),
+        "{job}"
+    );
+    assert!(
+        job.contains("--mount \"type=bind,src=$candidate,dst=/candidate,readonly"),
+        "{job}"
+    );
+    assert!(
+        job.contains("--candidate-render \"$RUNNER_TEMP/candidate-result/render\""),
+        "{job}"
+    );
+    assert!(job.contains("SANDBOX_IMAGE_DIGEST"), "{job}");
+    assert!(job.contains("test -n \"$SANDBOX_IMAGE_DIGEST\""), "{job}");
+    assert!(!job.contains("gh run download"), "{job}");
+    assert!(
+        !job.contains("--candidate-manifest"),
+        "the hosted verifier consumes result bytes, not the legacy manifest path: {job}"
+    );
+    let template = hosted_entrypoint(PIN_A);
+    let (prefix, _) = template
+        .split_once("jobs:\n")
+        .expect("hosted workflow jobs");
+    let root = entrypoint_tree("entrypoint-owner-pin", &format!("{prefix}jobs:\n{job}"));
+    let audit = must(
+        audit_policy_entrypoint(&root, &VelnorPolicyContract::default()),
+        "audit owner candidate transport",
+    );
+    assert!(audit.trigger.is_empty(), "{:?}\n{job}", audit.trigger);
+    assert!(audit.privileges.is_empty(), "{:?}", audit.privileges);
     let pin = entrypoint_pin(&root, PIN_A);
     assert!(pin.passed, "{:?}", pin.details);
     let drift = entrypoint_pin(&root, PIN_B);

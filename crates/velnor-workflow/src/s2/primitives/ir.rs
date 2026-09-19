@@ -41,7 +41,6 @@ pub(crate) const GITHUB_WORKFLOW_BYTE_LIMIT: usize = 500_000;
 /// contract: the consumer selects this exact namespace after checking the
 /// base-owned workflow contract, never a candidate-provided name.
 const CANDIDATE_PRODUCER_JOB: &str = "candidate_producer";
-const CANDIDATE_ARTIFACT_NAME: &str = "velnor-workflow-candidate-linux-x64";
 
 /// The snapshot namespace the unit-provider compiler snapshots live in.
 const UNIT_SNAPSHOT_NAMESPACE: &str = "velnor-mbx";
@@ -3095,7 +3094,7 @@ impl WorkflowIr {
         let _ = writeln!(
             output,
             r#"  {job}:
-    name: Candidate producer
+    name: candidate_producer
     if: ${{{{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.id == github.repository_id && github.event.pull_request.base.repo.id == github.repository_id }}}}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -3134,12 +3133,12 @@ impl WorkflowIr {
             CANDIDATE_HEAD_SHA="$CANDIDATE_HEAD_SHA" \
             "$cargo_bin" build --locked -p velnor-workflow
           install -m 0755 target/debug/velnor-workflow "$stage/velnor-workflow"
-          sha256sum "$stage/velnor-workflow" | awk '{{print $1}}' > "$stage/binary.sha256"
+          binary_sha256="$(sha256sum "$stage/velnor-workflow" | awk '{{print $1}}')"
           jq -n \
             --arg repository "$GITHUB_REPOSITORY" \
             --arg head_sha "$CANDIDATE_HEAD_SHA" \
             --arg artifact_name "$CANDIDATE_ARTIFACT_NAME" \
-            --arg binary_sha256 "$(cat "$stage/binary.sha256")" \
+            --arg binary_sha256 "$binary_sha256" \
             '{{role: "producer", workflow_path: ".github/workflows/ci-pr.yml", job_name: "candidate_producer", event: "pull_request", repository: $repository, head_sha: $head_sha, artifact_name: $artifact_name, binary_sha256: $binary_sha256}}' > "$stage/candidate-manifest.json"
       - name: Upload candidate generator product
         id: candidate_upload
@@ -3151,7 +3150,7 @@ impl WorkflowIr {
           retention-days: 1
 "#,
             job = CANDIDATE_PRODUCER_JOB,
-            artifact = CANDIDATE_ARTIFACT_NAME,
+            artifact = crate::s2::CANDIDATE_ARTIFACT_NAME,
             checkout = self.pins.checkout,
             upload = self.pins.upload_artifact,
         );
