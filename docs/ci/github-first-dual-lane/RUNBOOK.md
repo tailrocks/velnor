@@ -16,6 +16,46 @@ that its operation succeeded.
 - Before any destructive/release action, resolve exact repository, revision,
   channel, and destination. A stale or moving source invalidates evidence.
 
+## Mandatory PR merge preflight
+
+This is required before every recovery, migration, release, or generated-output
+PR merge. The commands below are procedures, not evidence until run against the
+exact candidate SHA and recorded externally.
+
+1. Read every paginated review, issue comment, inline review comment/thread,
+   bot comment, requested-change event, and feedback added after the latest
+   candidate update. Do not stop at the first page or a review summary.
+
+   ```bash
+   # [PENDING] replace OWNER/REPO and PR with the exact candidate
+   gh api --paginate repos/OWNER/REPO/pulls/PR/reviews
+   gh api --paginate repos/OWNER/REPO/issues/PR/comments
+   gh api --paginate repos/OWNER/REPO/pulls/PR/comments
+   gh pr view PR --repo OWNER/REPO --json reviews,comments,latestReviews,reviewDecision
+   ```
+
+   Use the review-comment data and GitHub's thread state to account for every
+   inline thread, including resolved and bot-authored items. If pagination or
+   thread state cannot be verified, the merge is blocked.
+2. Inspect the actual candidate code, configuration, generated output, tests,
+   and documentation. Fix every valid finding, then rerun affected tests and
+   docs checks. Record the reason and evidence for every rejected suggestion.
+3. After each fix or new feedback event, repeat step 1 from a fresh snapshot.
+   Verify required CI, the final candidate SHA, and the final diff:
+
+   ```bash
+   # [PENDING] exact candidate only
+   gh pr checks PR --repo OWNER/REPO
+   gh pr diff PR --repo OWNER/REPO
+   rtk git diff --check BASE_SHA...HEAD_SHA
+   ```
+
+4. Do not merge while any review, comment, thread, requested change, or CI
+   result is unread, unverified, or actionable. Record the complete review
+   snapshot, finding dispositions, required checks, final diff check, and
+   resulting main SHA under the external evidence root. A green subset or
+   stale review never clears this preflight.
+
 ## Verified G0 setup commands
 
 These commands ran successfully on 2026-09-19. They verify local setup only.

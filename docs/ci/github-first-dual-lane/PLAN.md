@@ -46,6 +46,29 @@ execution success.
 | G6 | G5 | Both lanes pass for eligible fleet workloads and resulting mains | Fleet migration owners |
 | G7 | G6 | Fresh revision/PR audit and deterministic checker + independent review | G0 checker + G0 reviewer |
 
+## Mandatory pull-request merge gate
+
+No recovery, migration, release, or generated-output pull request may merge
+until this complete gate passes for its exact candidate SHA. The owner and
+independent reviewer must read all paginated reviews, issue comments, inline
+threads, bot comments, requested changes, and feedback added after any fix.
+
+1. Inspect the actual code/config/generated-output diff and the relevant tests;
+   do not rely on review labels, summaries, or a green subset.
+2. Fix every valid finding, including test and documentation findings. Rerun
+   affected checks and inspect the final diff.
+3. Record each rejected suggestion and its evidence in the external ledger.
+4. Re-read the complete paginated review/comment/thread/bot/requested-change
+   set after every fix or new feedback event. Verify required CI and the final
+   candidate SHA.
+5. Stop if any feedback or required result is unread, unverified, or
+   actionable. Merge only with a complete disposition and final main-SHA
+   record.
+
+This is an execution prerequisite, not a gate-success claim. The authoritative
+procedure and command boundary are in
+[`RUNBOOK.md`](./RUNBOOK.md#mandatory-pr-merge-preflight).
+
 ## Bounded initial task queue
 
 Every task has one owner, one input revision, explicit evidence, and a separate

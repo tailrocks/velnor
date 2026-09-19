@@ -194,6 +194,33 @@ The following are mandatory requirements, not implementation suggestions:
 - Merge reviewed recovery only after candidate checks pass, then prove the
   resulting main revision. A green PR alone never satisfies G1.
 
+### Mandatory pull-request merge gate
+
+This gate applies to every pull request merged for this recovery, migration,
+release, or generated-output work. Before merge, the owner and independent
+reviewer must read every paginated review, issue comment, inline review thread,
+bot comment, requested-change event, and new feedback item. “Read” means the
+actual changed code and surrounding behavior are understood; a review state or
+summary alone is not evidence.
+
+- Analyze each finding against the actual candidate diff and relevant tests,
+  configuration, generated output, and documentation.
+- Fix every valid finding, including required tests and docs, then rerun the
+  affected checks and inspect the final diff.
+- For every rejected suggestion, record the reason and supporting evidence in
+  the external ledger; rejection is not silent dismissal.
+- After each fix or new review event, repeat the complete paginated review,
+  comment, thread, bot, and requested-change read. Verify required CI and the
+  final candidate SHA after the last feedback.
+- Do not merge while any review, comment, thread, requested change, or CI
+  result is unread, unverified, or actionable. Do not treat a green subset,
+  stale review, or bot summary as clearance.
+
+The merge record must link the exact candidate SHA, complete review/comment
+snapshot, disposition of every finding, required-check results, final diff
+check, and resulting main SHA. This is a merge prerequisite, not a claim that
+any current gate has passed.
+
 ## 6. Release and distribution acceptance
 
 One release contract covers product identity, channel, source revision, version,
