@@ -316,7 +316,7 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
         args.string("registry_username_secret")?.as_deref(),
         args.string("registry_password_secret")?.as_deref(),
     )?;
-    Ok(ReleaseSpec {
+    let spec = ReleaseSpec {
         kind,
         package: args.string("package")?.unwrap_or_default(),
         packages: args.strings("packages")?.unwrap_or_default(),
@@ -377,7 +377,15 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
         registry,
         registry_username_secret,
         registry_password_secret,
-    })
+    };
+    if spec.kind == "apt" && release_contract_complete(&spec) {
+        crate::apt::AptContract::resolve_s2(&spec).map_err(|error| {
+            GeneratorError::usage(format!(
+                "`{family}` has an invalid schema-2 APT contract: {error}"
+            ))
+        })?;
+    }
+    Ok(spec)
 }
 
 /// Parse a declared rolling-preview contract: the preview lane publishes a
@@ -853,6 +861,7 @@ fn incomplete_contract(family: &str, spec: &ReleaseSpec) -> GeneratorError {
         "crates" => "`packages`",
         "rust-binary" => "`package`, `binary`, and `targets`",
         "pages" => "`artifact_path`",
+        "apt" => "`package`, `binary`, `source_repository`, `consumer_repository`, `manifest_schema`, `discovery_script`, canonical application manifest fields, signer, signing secrets, and `apt_feed_url`",
         "docker" => "`image`",
         _ => "the contract",
     };
@@ -906,7 +915,7 @@ pub(crate) fn release_contract_complete(release: &ReleaseSpec) -> bool {
         }
         "pages" => !release.artifact_path.is_empty(),
         "homebrew" => !release.package.is_empty() && !release.source_repository.is_empty(),
-        "apt" => !release.package.is_empty() && !release.consumer_repository.is_empty(),
+        "apt" => crate::apt::AptContract::resolve_s2(release).is_ok(),
         "docker" => {
             !release.image.is_empty()
                 && crate::s2::config::valid_docker_platforms(&release.platforms)
@@ -4210,12 +4219,256 @@ fn render_homebrew_release(config: &ProjectConfig, release: &ReleaseSpec) -> Str
 }
 
 fn render_apt_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
-    render_package_feed(
-        config,
-        "apt",
-        &release.package,
-        &release.consumer_repository,
-    )
+    let Ok(contract) = crate::apt::AptContract::resolve_s2(release) else {
+        return format!(
+            "{GENERATED_HEADER}# Release omitted: the schema-2 APT discovery, manifest, signer, or feed contract is incomplete.\n"
+        );
+    };
+    render_apt_discovery_feed(config, &contract)
+}
+
+/// Render the schema-2 APT publisher. Discovery is a repository-owned helper;
+/// this workflow only persists its immutable selection and passes that exact
+/// path through every typed APT verb. There is no latest/tag/pointer fallback.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the generated APT graph keeps discovery, verification, publication, and deployment auditable"
+)]
+fn render_apt_discovery_feed(config: &ProjectConfig, contract: &crate::apt::AptContract) -> String {
+    let runner = hosted_selector_runs_on(config);
+    let branch = config.default_branch.as_str();
+    let source = shell_quote(&contract.source_repo);
+    let source_raw = &contract.source_repo;
+    let package = shell_quote(&contract.package);
+    let package_raw = &contract.package;
+    let binary = shell_quote(&contract.binary);
+    let consumer = shell_quote(&contract.consumer_repo);
+    let schema = shell_quote(&contract.manifest_schema);
+    let discovery = shell_quote(&contract.discovery_script);
+    let canonical_asset = shell_quote(&contract.canonical_manifest_asset);
+    let canonical_schema = shell_quote(&contract.canonical_manifest_schema);
+    let signer = shell_quote(&contract.signer);
+    let keyring = shell_quote(&contract.keyring);
+    let origin = shell_quote(&contract.origin);
+    let identity = shell_quote(&contract.identity_dir);
+    let feed = shell_quote(&contract.feed_url);
+    let description = shell_quote(&contract.description);
+    let arches = contract.arches.join(",");
+    let secret = &contract.passphrase_secret;
+    let key_secret = &contract.signing_key_secret;
+    let checkout = ActionPin::Checkout.reference();
+    let upload = ActionPin::UploadArtifact.reference();
+    let download = ActionPin::DownloadArtifact.reference();
+    let runtime = workflow_runtime_setup(
+        ProviderId::GithubHosted,
+        &config.repository,
+        &config.workflow_revision,
+    );
+    let policy = policy_enforcement_step();
+    let mut output = String::from(GENERATED_HEADER);
+    output.push_str(
+        "name: Package feed\nrun-name: Package feed · apt · ${{ github.event_name }}\n\n\
+         on:\n  schedule:\n    - cron: '17 4 * * *'\n  workflow_dispatch:\n    inputs:\n      providers:\n        description: Provider scope (APT mutation is hosted-only)\n        required: false\n        default: github-hosted\n        type: string\n      channel:\n        description: Package channel\n        required: false\n        default: stable\n        type: choice\n        options:\n          - stable\n          - preview\n      version:\n        description: Exact product version (empty discovers the channel head)\n        required: false\n        default: ''\n        type: string\n      commit:\n        description: Exact source commit (empty uses discovery)\n        required: false\n        default: ''\n        type: string\n\nconcurrency:\n  group: package-feed-apt-${{ github.repository }}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n",
+    );
+    output.push_str("  admit-provider:\n    name: Admit hosted APT provider\n    runs-on: ");
+    output.push_str(&runner);
+    output.push_str(
+        "\n    timeout-minutes: 5\n    steps:\n      - name: Reject non-hosted feed mutation\n        if: ${{ github.event_name == 'workflow_dispatch' && inputs.providers != '' && !contains(format(',{0},', inputs.providers), ',github-hosted,') }}\n        run: |\n          echo 'APT feed mutation publishes from GitHub-hosted only' >&2\n          exit 1\n",
+    );
+    output.push_str("  verify:\n    name: Discover and verify APT feed\n    needs: [admit-provider]\n    runs-on: ");
+    output.push_str(&runner);
+    output.push_str(
+        "\n    timeout-minutes: 30\n    outputs:\n      version: ${{ steps.feed.outputs.version }}\n      commit: ${{ steps.feed.outputs.commit }}\n      channel: ${{ steps.feed.outputs.channel }}\n    steps:\n      - name: Checkout\n        uses: ",
+    );
+    output.push_str(checkout);
+    output.push_str("\n        with:\n");
+    output.push_str(POLICY_CHECKOUT_WITH);
+    output.push_str(&runtime);
+    output.push_str(policy);
+    output.push_str(
+        "      - name: Discover immutable application release\n        id: feed\n        env:\n          CHANNEL: ${{ github.event.inputs.channel || 'stable' }}\n          INPUT_VERSION: ${{ github.event.inputs.version || '' }}\n          INPUT_COMMIT: ${{ github.event.inputs.commit || '' }}\n          GH_TOKEN: ${{ github.token }}\n        run: |\n          set -euo pipefail\n          case \"$CHANNEL\" in stable|preview) ;; *) echo \"::error::unknown channel $CHANNEL\" >&2; exit 1 ;; esac\n          rm -rf incoming selection.json\n          bash ",
+    );
+    output.push_str(&discovery);
+    output.push_str(" --channel \"$CHANNEL\" --version \"$INPUT_VERSION\" --source-repository ");
+    output.push_str(&source);
+    output.push_str(" --package ");
+    output.push_str(&package);
+    output.push_str(" --manifest-asset ");
+    output.push_str(&canonical_asset);
+    output.push_str(" > selection.json\n          jq -e --arg channel \"$CHANNEL\" --arg schema ");
+    output.push_str(&canonical_schema);
+    output.push_str(
+        " '.channel == $channel and .manifest_schema == $schema and (.release_assets | length > 0)' selection.json >/dev/null\n          selected_version=\"$(jq -er .version selection.json)\"\n          selected_ref=\"$(jq -er .source_ref selection.json)\"\n          selected_commit=\"$(jq -er .source_commit selection.json)\"\n          selected_tag=\"$(jq -er .release_tag selection.json)\"\n          case \"$CHANNEL\" in\n            stable) apt_version=\"v$selected_version\" ;;\n            preview) apt_version=\"${selected_version/-preview./~preview.}\" ;;\n          esac\n          if [ -n \"$INPUT_VERSION\" ] && [ \"$INPUT_VERSION\" != \"$selected_version\" ] && [ \"$INPUT_VERSION\" != \"$selected_tag\" ]; then\n            echo \"::error::requested version does not match immutable discovery\" >&2\n            exit 1\n          fi\n          if [ -n \"$INPUT_COMMIT\" ] && [ \"$INPUT_COMMIT\" != \"$selected_commit\" ]; then\n            echo \"::error::requested commit does not match immutable discovery\" >&2\n            exit 1\n          fi\n          velnor-workflow release apt-fetch --selection selection.json --dir incoming\n          shopt -s nullglob\n          subjects=(incoming/*.deb)\n          [ \"${#subjects[@]}\" -gt 0 ] || { echo \"::error::discovery produced no APT assets\" >&2; exit 1; }\n          for subject in \"${subjects[@]}\"; do\n            gh attestation verify \"$subject\" --repo ",
+    );
+    output.push_str(source_raw);
+    output.push_str(" --signer-workflow \"");
+    output.push_str(source_raw);
+    output.push_str(
+        "/.github/workflows/ci-release-package-signer.yml\" --source-ref \"$selected_ref\" --source-digest \"$selected_commit\"\n          done\n          live_fpr=\"$(gpg --show-keys --with-colons ",
+    );
+    output.push_str(&keyring);
+    output.push_str(
+        " | awk -F: '/^fpr:/{print $10; exit}')\"\n          verify_args=(--selection selection.json --suite \"$CHANNEL\" --source-repo ",
+    );
+    output.push_str(&source);
+    output.push_str(" --package ");
+    output.push_str(&package);
+    output.push_str(" --binary ");
+    output.push_str(&binary);
+    output.push_str(" --identity-dir ");
+    output.push_str(&identity);
+    output.push_str(" --manifest-schema ");
+    output.push_str(&schema);
+    output.push_str(
+        " --source-ref \"$selected_ref\" --release-tag \"$selected_tag\" --incoming incoming --commit \"$selected_commit\" --signer \"$live_fpr\" --expect-signer ",
+    );
+    output.push_str(&signer);
+    output.push_str(
+        "\n          if [ \"$CHANNEL\" = stable ]; then verify_args+=(--verify-oci true); fi\n          velnor-workflow release apt-verify \"${verify_args[@]}\"\n          printf 'version=%s\\ncommit=%s\\nchannel=%s\\n' \"$apt_version\" \"$selected_commit\" \"$CHANNEL\" >> \"$GITHUB_OUTPUT\"\n      - name: Upload verified feed inputs\n        uses: ",
+    );
+    output.push_str(upload);
+    output.push_str(
+        "\n        with:\n          name: apt-incoming\n          path: incoming\n          include-hidden-files: true\n          if-no-files-found: error\n          retention-days: 2\n  publish:\n    name: Publish APT feed\n    needs: [admit-provider, verify]\n    if: ${{ github.ref == 'refs/heads/",
+    );
+    output.push_str(branch);
+    output.push_str(
+        "' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.event.inputs.providers == '' || contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) }}\n    runs-on: ",
+    );
+    output.push_str(&runner);
+    output.push_str(
+        "\n    timeout-minutes: 30\n    environment: package-feed\n    permissions:\n      contents: write\n    steps:\n      - name: Checkout\n        uses: ",
+    );
+    output.push_str(checkout);
+    output.push_str("\n        with:\n          persist-credentials: false\n");
+    output.push_str(&runtime);
+    output.push_str("      - name: Download verified feed inputs\n        uses: ");
+    output.push_str(download);
+    output.push_str(
+        "\n        with:\n          name: apt-incoming\n          path: incoming\n      - name: Recover retained channel state\n        id: prior\n        env:\n          CHANNEL: ${{ needs.verify.outputs.channel }}\n          VERSION: ${{ needs.verify.outputs.version }}\n        run: |\n          set -euo pipefail\n          selection=incoming/discovery.json\n          rm -rf prev\n          mkdir -p prev\n          feed=",
+    );
+    output.push_str(&feed);
+    output.push_str(
+        "\n          echo 'bootstrap=false' >> \"$GITHUB_OUTPUT\"\n          case \"$CHANNEL\" in\n            stable)\n              prior_tag=\"$(curl --fail --show-error --silent --location \"$feed/last-publish\")\"\n              prior_version=\"${prior_tag#v}\"\n              case \"$prior_version\" in ''|*[!0-9.]*) echo \"::error::live last-publish is not a version: $prior_tag\" >&2; exit 1 ;; esac\n              for arch in amd64 arm64; do\n                curl --fail --show-error --silent --location --retry 3 -o \"prev/",
+    );
+    output.push_str(package_raw);
+    output.push_str("-$prior_version-$arch.deb\" \"$feed/pool/main/");
+    output.push_str(&crate::apt::pool_letter(package_raw));
+    output.push_str("/");
+    output.push_str(package_raw);
+    output.push_str("/");
+    output.push_str(package_raw);
+    output.push_str(
+        "_${prior_version}_${arch}.deb\"\n              done\n              candidate_sha=\"$(awk '{print $1}' incoming/release-record.json.sha256)\"\n              curl --fail --show-error --silent --location -o published.json \"$feed/publication-record.json\"\n              velnor-workflow release apt-previous-pointer --selection \"$selection\" --suite stable --published published.json --prior \"$prior_tag\" --candidate \"$VERSION\" --candidate-sha \"$candidate_sha\" > previous-pointer.json\n              ;;\n            preview)\n              if curl --fail --show-error --silent --location --output /dev/null \"$feed/dists/preview/InRelease\"; then\n                curl --fail --show-error --silent --location -o live-packages \"$feed/dists/preview/main/binary-amd64/Packages\"\n                rollback=\"$(awk '$1==\"Package:\"{p=$2} p==\"",
+    );
+    output.push_str(package_raw);
+    output.push_str(
+        "\" && $1==\"Version:\"{print $2}' live-packages | sort -u | grep -Fxv \"$VERSION\")\"\n                [ -n \"$rollback\" ] || { echo '::error::no retained preview rollback' >&2; exit 1; }\n                [ \"$(printf '%s\\n' \"$rollback\" | wc -l | tr -d ' ')\" = 1 ] || { echo '::error::preview retains more than one rollback' >&2; exit 1; }\n                for arch in amd64 arm64; do\n                  curl --fail --show-error --silent --location --retry 3 -o \"prev/",
+    );
+    output.push_str(package_raw);
+    output.push_str("_${rollback}_${arch}.deb\" \"$feed/pool/preview/main/");
+    output.push_str(&crate::apt::pool_letter(package_raw));
+    output.push_str("/");
+    output.push_str(package_raw);
+    output.push_str("/");
+    output.push_str(package_raw);
+    output.push_str(
+        "_${rollback}_${arch}.deb\"\n                done\n                velnor-workflow release apt-previous-pointer --selection \"$selection\" --suite preview > previous-pointer.json\n              else\n                velnor-workflow release apt-previous-pointer --selection \"$selection\" --suite preview --bootstrap true > previous-pointer.json\n                echo 'bootstrap=true' >> \"$GITHUB_OUTPUT\"\n              fi\n              ;;\n          esac\n      - name: Publish the staged suite\n        env:\n          CHANNEL: ${{ needs.verify.outputs.channel }}\n          VERSION: ${{ needs.verify.outputs.version }}\n          COMMIT: ${{ needs.verify.outputs.commit }}\n          ",
+    );
+    output.push_str(secret);
+    output.push_str(": ${{ secrets.");
+    output.push_str(secret);
+    output.push_str(" }}\n          ");
+    output.push_str(key_secret);
+    output.push_str(": ${{ secrets.");
+    output.push_str(key_secret);
+    output.push_str(
+        " }}\n        run: |\n          set -euo pipefail\n          selection=incoming/discovery.json\n          args=(--selection \"$selection\" --suite \"$CHANNEL\" --source-repo ",
+    );
+    output.push_str(&source);
+    output.push_str(" --package ");
+    output.push_str(&package);
+    output.push_str(" --binary ");
+    output.push_str(&binary);
+    output.push_str(" --consumer-repo ");
+    output.push_str(&consumer);
+    output.push_str(" --manifest-schema ");
+    output.push_str(&schema);
+    output.push_str(" --discovery-script ");
+    output.push_str(&discovery);
+    output.push_str(" --canonical-manifest-asset ");
+    output.push_str(&canonical_asset);
+    output.push_str(" --canonical-manifest-schema ");
+    output.push_str(&canonical_schema);
+    output.push_str(" --apt-arches ");
+    output.push_str(&arches);
+    output.push_str(" --signer ");
+    output.push_str(&signer);
+    output.push_str(" --passphrase-env ");
+    output.push_str(secret);
+    output.push_str(" --key-env ");
+    output.push_str(key_secret);
+    output.push_str(" --keyring ");
+    output.push_str(&keyring);
+    output.push_str(" --origin ");
+    output.push_str(&origin);
+    output.push_str(" --identity-dir ");
+    output.push_str(&identity);
+    output.push_str(" --feed-url ");
+    output.push_str(&feed);
+    output.push_str(" --description ");
+    output.push_str(&description);
+    output.push_str(
+        " --incoming incoming --previous-pointer previous-pointer.json --staging public)\n          if [ \"${{ steps.prior.outputs.bootstrap }}\" = true ]; then args+=(--bootstrap true); else args+=(--prev-dir prev); fi\n          velnor-workflow release apt-publish \"${args[@]}\"\n          source_ref=\"$(jq -er .source_ref \"$selection\")\"\n          manifest=incoming/manifest.json\n          if [ \"$CHANNEL\" = preview ]; then manifest=incoming/release-manifest.json; fi\n          velnor-workflow release apt-channel-update --selection \"$selection\" --suite \"$CHANNEL\" --source-repo ",
+    );
+    output.push_str(&source);
+    output.push_str(" --source-ref \"$source_ref\" --commit \"$COMMIT\" --package ");
+    output.push_str(&package);
+    output.push_str(
+        " --incoming incoming --manifest \"$manifest\" --staging public\n      - name: Upload staged feed tree\n        uses: ",
+    );
+    output.push_str(upload);
+    output.push_str(
+        "\n        with:\n          name: apt-staging\n          path: public\n          if-no-files-found: error\n          retention-days: 2\n  deploy:\n    name: Deploy APT feed\n    needs: [admit-provider, publish]\n    if: ${{ github.ref == 'refs/heads/",
+    );
+    output.push_str(branch);
+    output.push_str(
+        "' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.event.inputs.providers == '' || contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) }}\n    runs-on: ",
+    );
+    output.push_str(&runner);
+    output.push_str(
+        "\n    timeout-minutes: 20\n    environment: github-pages\n    permissions:\n      contents: read\n      pages: write\n      id-token: write\n    steps:\n      - name: Checkout\n        uses: ",
+    );
+    output.push_str(checkout);
+    output.push_str("\n        with:\n          persist-credentials: false\n");
+    output.push_str(&runtime);
+    output.push_str("      - name: Download staged feed tree\n        uses: ");
+    output.push_str(download);
+    output.push_str(
+        "\n        with:\n          name: apt-staging\n          path: public\n      - name: Guard against a rollback deploy\n        env:\n          CHANNEL: ${{ needs.publish.outputs.channel }}\n        run: |\n          set -euo pipefail\n          if [ \"$CHANNEL\" = stable ]; then last=last-publish; else last=last-publish-preview; fi\n          live=unknown\n          if curl --fail --show-error --silent --location -o live-last-publish ",
+    );
+    output.push_str(&feed);
+    output.push_str(
+        "/$last; then live=\"$(cat live-last-publish)\"; fi\n          velnor-workflow release apt-deploy-guard --suite \"$CHANNEL\" --staged public --live-version \"$live\"\n      - name: Configure Pages\n        uses: ",
+    );
+    output.push_str(ActionPin::ConfigurePages.reference());
+    output.push_str("\n      - name: Upload Pages artifact\n        uses: ");
+    output.push_str(ActionPin::UploadPages.reference());
+    output.push_str(
+        "\n        with:\n          path: public\n      - name: Deploy Pages\n        uses: ",
+    );
+    output.push_str(ActionPin::DeployPages.reference());
+    output.push_str(
+        "\n  feed-result:\n    name: APT feed result\n    needs: [admit-provider, verify, publish, deploy]\n    if: ${{ always() }}\n    runs-on: ",
+    );
+    output.push_str(&runner);
+    output.push_str(
+        "\n    timeout-minutes: 5\n    steps:\n      - name: Fail closed unless verification and deployment succeeded\n        env:\n          REF: ${{ github.ref }}\n          VERIFY: ${{ needs.verify.result }}\n          PUBLISH: ${{ needs.publish.result }}\n          DEPLOY: ${{ needs.deploy.result }}\n        run: |\n          set -euo pipefail\n          [ \"$VERIFY\" = success ] || { echo \"::error::feed verification did not succeed: $VERIFY\" >&2; exit 1; }\n          if [ \"$REF\" = \"refs/heads/",
+    );
+    output.push_str(branch);
+    output.push_str(
+        "\" ]; then\n            [ \"$PUBLISH\" = success ] || { echo \"::error::feed publication did not succeed: $PUBLISH\" >&2; exit 1; }\n            [ \"$DEPLOY\" = success ] || { echo \"::error::feed deployment did not succeed: $DEPLOY\" >&2; exit 1; }\n          else\n            [ \"$PUBLISH\" = skipped ] || { echo \"::error::unexpected publication state: $PUBLISH\" >&2; exit 1; }\n            [ \"$DEPLOY\" = skipped ] || { echo \"::error::unexpected deployment state: $DEPLOY\" >&2; exit 1; }\n          fi\n",
+    );
+    output
 }
 
 fn render_package_feed(
@@ -5143,6 +5396,30 @@ mod tests {
         }
     }
 
+    fn apt_spec() -> ReleaseSpec {
+        ReleaseSpec {
+            kind: "apt".to_owned(),
+            package: "example".to_owned(),
+            binary: "example".to_owned(),
+            source_repository: "example/app".to_owned(),
+            consumer_repository: "example/apt".to_owned(),
+            manifest_schema: "velnor.package-release.v1".to_owned(),
+            discovery_script: "scripts/release-discovery.sh".to_owned(),
+            canonical_manifest_asset: crate::apt::PRODUCT_MANIFEST_ASSET.to_owned(),
+            canonical_manifest_schema: crate::apt::PRODUCT_MANIFEST_SCHEMA.to_owned(),
+            apt_arches: vec!["amd64".to_owned(), "arm64".to_owned()],
+            signer_fingerprint: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            passphrase_secret: "APT_GPG_PASSPHRASE".to_owned(),
+            signing_key_secret: "APT_GPG_PRIVATE_KEY".to_owned(),
+            keyring_path: "example.gpg".to_owned(),
+            apt_origin: "Example".to_owned(),
+            apt_identity_dir: "example-id".to_owned(),
+            apt_feed_url: "https://apt.example.test".to_owned(),
+            description: "example APT feed".to_owned(),
+            ..ReleaseSpec::default()
+        }
+    }
+
     /// A standalone multi-arch OCI publisher over a consumer-owned
     /// Dockerfile. All coordinates are fixture-local.
     fn docker_spec() -> ReleaseSpec {
@@ -5383,9 +5660,7 @@ mod tests {
         let mut pages = binary_spec();
         pages.kind = "pages".to_owned();
         pages.artifact_path = "site".to_owned();
-        let mut apt = binary_spec();
-        apt.kind = "apt".to_owned();
-        apt.consumer_repository = "example/apt".to_owned();
+        let apt = apt_spec();
         let mut homebrew = binary_spec();
         homebrew.kind = "homebrew".to_owned();
         homebrew.source_repository = "example/app".to_owned();
@@ -7779,9 +8054,9 @@ mod tests {
 
     #[test]
     fn a_declared_apt_feed_mutates_from_github_only() {
-        for (name, package, consumer) in [
-            ("apt-feed", "example", "example/apt"),
-            ("apt-feed-acme", "widget", "acme/apt"),
+        for (name, package, source, consumer) in [
+            ("apt-feed", "example", "example/app", "example/apt"),
+            ("apt-feed-acme", "widget", "acme/widget", "acme/apt"),
         ] {
             let root = scanned_root(name);
             let surface = generate(
@@ -7790,23 +8065,77 @@ mod tests {
                 Some(&format!(
                     "[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n\
                      [declare.args]\nkind = \"apt\"\npackage = \"{package}\"\n\
-                     consumer_repository = \"{consumer}\"\n"
+                     binary = \"{package}\"\nsource_repository = \"{source}\"\n\
+                     consumer_repository = \"{consumer}\"\nmanifest_schema = \"velnor.package-release.v1\"\n\
+                     discovery_script = \"scripts/release-discovery.sh\"\n\
+                     canonical_manifest_asset = \"product-manifest.json\"\n\
+                     canonical_manifest_schema = \"velnor.product-manifest/v1\"\n\
+                     apt_arches = [\"amd64\", \"arm64\"]\n\
+                     signer_fingerprint = \"0123456789abcdef0123456789abcdef01234567\"\n\
+                     passphrase_secret = \"APT_GPG_PASSPHRASE\"\n\
+                     signing_key_secret = \"APT_GPG_PRIVATE_KEY\"\n\
+                     keyring_path = \"example.gpg\"\napt_origin = \"Example\"\n\
+                     apt_identity_dir = \"example-id\"\napt_feed_url = \"https://apt.example.test\"\n\
+                     "
                 )),
             );
             let release = surface
                 .files
                 .get(&PathBuf::from(".github/workflows/release.yml"))
                 .unwrap_or_else(|| panic!("an apt feed must render release.yml"));
-            assert!(release.contains("Package feed"), "{release}");
-            assert!(release.contains("--kind apt"), "{release}");
             assert!(
-                release.contains(&format!("--package {package}")),
+                release.contains("Discover immutable application release"),
                 "{release}"
             );
+            assert!(
+                release.contains("scripts/release-discovery.sh"),
+                "{release}"
+            );
+            assert!(
+                release.contains("apt-fetch --selection selection.json --dir incoming"),
+                "{release}"
+            );
+            assert!(
+                release.contains("apt-verify \"${verify_args[@]}\""),
+                "{release}"
+            );
+            assert!(release.contains("apt-publish \"${args[@]}\""), "{release}");
+            assert!(
+                release.contains("apt-channel-update --selection"),
+                "{release}"
+            );
+            assert!(release.contains("include-hidden-files: true"), "{release}");
+            assert!(!release.contains("gh release list"), "{release}");
+            assert!(!release.contains("release verify-feed"), "{release}");
             assert!(release.contains(consumer), "{release}");
+            assert!(release.contains(source), "{release}");
             assert!(release.contains("default: github"), "{release}");
             let _ = fs::remove_dir_all(root);
         }
+    }
+
+    #[test]
+    fn a_declared_apt_discovery_contract_fails_closed_when_incomplete() {
+        let root = scanned_root("apt-feed-incomplete");
+        let error = match try_generate(
+            &root,
+            &config(&[], None),
+            Some(
+                "[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n\n\
+                 [declare.args]\nkind = \"apt\"\npackage = \"example\"\nbinary = \"example\"\n\
+                 source_repository = \"example/app\"\nconsumer_repository = \"example/apt\"\n\
+                 manifest_schema = \"velnor.package-release.v1\"\n",
+            ),
+        ) {
+            Ok(_) => panic!("an incomplete APT discovery contract must fail closed"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("incomplete release contract"), "{error}");
+        assert!(
+            error.contains("schema-2 APT") || error.contains("discovery_script"),
+            "{error}"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

@@ -2785,16 +2785,7 @@ impl RepoGenerationConfig {
                         .as_deref()
                         .is_some_and(|value| !value.is_empty())
             }
-            "apt" => {
-                release
-                    .package
-                    .as_deref()
-                    .is_some_and(|value| !value.is_empty())
-                    && release
-                        .consumer_repository
-                        .as_deref()
-                        .is_some_and(|value| !value.is_empty())
-            }
+            "apt" => Self::apt_release_contract_complete(release),
             "docker" => {
                 release
                     .image
@@ -2827,6 +2818,57 @@ impl RepoGenerationConfig {
             RELEASE_KINDS.join(", "),
             crate::s2::RELEASE_WORKFLOW
         )))
+    }
+
+    /// Schema-2 APT generation is an immutable application-selection lane.
+    /// Keep the configuration reader's completeness predicate in lockstep
+    /// with the typed `AptContract::resolve_s2` adapter used by the renderer;
+    /// an old package-only row must not silently select the generic feed path.
+    fn apt_release_contract_complete(release: &ReleaseSection) -> bool {
+        release
+            .package
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+            && release
+                .binary
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+            && release
+                .source_repository
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+            && release
+                .consumer_repository
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+            && release
+                .manifest_schema
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+            && release
+                .discovery_script
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+            && release.canonical_manifest_asset.as_deref()
+                == Some(crate::apt::PRODUCT_MANIFEST_ASSET)
+            && release.canonical_manifest_schema.as_deref()
+                == Some(crate::apt::PRODUCT_MANIFEST_SCHEMA)
+            && release
+                .signer_fingerprint
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+            && release
+                .passphrase_secret
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+            && release
+                .signing_key_secret
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+            && release
+                .apt_feed_url
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
     }
 
     fn validate_docs(&self) -> Result<(), GeneratorError> {
