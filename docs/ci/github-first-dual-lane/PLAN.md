@@ -101,12 +101,35 @@ not the stale 28-row `audit_ci` estate.
 
 G0 requires fresh, independently bound default/PR/workflow/run/provider,
 workload, dependency/access, source/revision/digest, and child-job evidence.
+The static manifest's `default_branch` and `default_branch_sha` are only seed
+claims: each must reconcile to an independent live/default-branch snapshot and
+UTC observation. The dependency record is a typed graph, not only IDs or child
+links, and includes workload→child, workload→required-check, workload→release,
+and workload→package edges with relation, stage, applicability, provenance,
+and unknown/blocker status.
 Missing, stale, queued, canceled, timed-out, skipped, failed, manual-only,
 wrong-provider/source, empty-expected, stale-SHA, missing-repository, absent
 child-log, or artifact-mismatch evidence fails closed. `N/A` is exclusion-only.
 Release/tag/feed/tap/install identity and functional results are stage-aware
 G2+ evidence, not a G0 prerequisite. `audit_ci` and `lane_compare` are
 diagnostic helpers only; neither can close G0 or G7.
+
+G0 inventories the dependency/dependent-workload graph and leaves execution
+unknown where not observed. G2+ proves applicable release/package execution and
+functional results; it may not downgrade a required applicable dependency to
+`N/A`. The typed graph shape and neutral example are canonical in
+[`SPEC.md`](./SPEC.md#evidence-schema-and-checker-contract); the separate
+checker schema and examples must adopt them before authoritative use.
+
+`fleet.json` remains a flat nullable scope inventory. Its static count/uniqueness
+check is not a G0 result, and `gate_status: "pending"` is not success. The
+conversion boundary is explicit: enrich the inventory into the checker-owned
+`config/github-first-dual-lane/manifest.json`, collect the independent live
+`evidence/current-snapshot.json`, and normalize bound execution/package records
+into `evidence/records.json`. These paths are outside this source tree and are
+not yet verified or populated here. `/root/g0_checker` must publish the strict
+schema conversion and exact working invocation; no guessed command, synthesized
+fact, or self-attested record can satisfy G0.
 
 The bounded external follow-ups are `/root/g0_fleet` in a new isolated tree
 for baseline scope reconciliation, `/root/g1_run_operations` in a new
@@ -124,13 +147,13 @@ reviewer. Unknown thread/worktree metadata stays `unknown` until observed.
 
 | ID | Repository/component | Owner | Dependencies | Owned files/worktree | Acceptance commands | Evidence output | Reviewer |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `G0-inventory` | Fixed 32-repository fleet | `/root/g0_inventory` | none | External ledger inventory only; worktree `unknown` | `[pending]` live GitHub inventory with pagination; `git rev-parse HEAD` | `G0/inventory.json`, access and dependency records | `/root/g0-reviewer` |
+| `G0-inventory` | Fixed 32-repository fleet | `/root/g0_inventory` | none | External ledger inventory only; worktree `unknown` | `[pending]` live GitHub inventory with pagination; reconcile static `default_branch`/SHA; type dependency/dependent-workload edges | `G0/inventory.json`, access and dependency graph records | `/root/g0-reviewer` |
 | `G0-bootstrap` | Velnor generator/runtime bootstrap | `/root/g0_bootstrap` | `G0-inventory` findings as needed | Generator worktree `unknown`; no records in source | `[pending]` clean/shallow checkout bootstrap and pin/artifact checks | `G0/bootstrap.json` with source/artifact/output identities | `/root/g0-reviewer` |
 | `G0-distribution` | Velnor, `velnor-apt`, `homebrew-velnor` | `/root/g0_distribution` | `G0-inventory` | Distribution investigation worktree `unknown`; external evidence only | `[pending]` release discovery/feed/formula inventory | `G0/distribution.json` and access gaps | `/root/g0-reviewer` |
 | `G0-fleet` | Fleet categories/workload matrix | `/root/g0_fleet` | `G0-inventory` | Fleet worktree `unknown`; source edits prohibited in this wave | `[observed]` read-only 32-row workload/platform projection; exact emitted scanner IDs remain partial | External `G0/workload-matrix.json` plus fleet refresh files | `/root/g0-reviewer` |
 | `G0-runtime` | macOS/OrbStack capability analysis | `/root/g0_runtime` | `G0-inventory` | Runtime investigation worktree `unknown`; no live host mutation | `[pending]` source capability and host-access checks | `G0/runtime-capabilities.json` | `/root/g0-reviewer` |
 | `G0-records` | Canonical execution records | `/root/g0_records` | none | `/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-records`; this directory's five docs only | `[verified]` RTK/version/git/model metadata; `[pending]` checker schema validation | These five source docs; external session ownership amendments | `/root/g0-reviewer` |
-| `G0-checker` | Deterministic evidence checker | `/root/g0_checker` | `G0-records` schema | `/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-checker`; checker-owned code/tests | `[rejected]` initial b3b6 unit hygiene passed but semantic review found false-green paths; v2 architecture/implementation/review remain pending | External checker review and hostile fixtures | `/root/g0-reviewer` |
+| `G0-checker` | Deterministic evidence checker | `/root/g0_checker` | `G0-records` schema | `/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-checker`; checker-owned code/tests | `[rejected]` initial b3b6 unit hygiene passed but semantic review found false-green paths; v2 must bind static/live branch identity and typed dependency edges before review | External checker review and hostile fixtures | `/root/g0-reviewer` |
 | `G0-reviewer` | Independent G0 records/evidence review | `/root/g0_reviewer` | all initial outputs | Review-only worktree `unknown`; no author approval | `[pending]` fresh read of source docs and external raw evidence | Independent findings and disposition | `/root` |
 | `G1-cache-semantics` | Hosted cache compatibility | `/root/g1_cache_semantics` (Luna/max) | `G0-inventory`, `G0-bootstrap` | Thread `01a0ba76-f725-7022-9cfa-f28456ab67b2`; external findings | `[observed]` stale fixture and PR953 cache-contract diagnosis; refresh pending | `G0/cache-semantics/findings.md` | `/root/g0-reviewer` |
 | `G1-hosted-config` | Hosted-first generator policy | `/root/g1_hosted_config` (Luna/max) | `G0-inventory`, `G0-bootstrap` | Thread `01a0ba77-5222-7e63-97fa-553849b96d7b`; worktree `hosted→g1_hosted_config` | `[in progress]` typed config/regeneration/policy checks | G1 candidate/source/output identity | `/root/g0-reviewer` |

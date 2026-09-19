@@ -111,6 +111,41 @@ PR heads, checks, workload inventories, and evidence are unknown until live G0
 inventory proves them. `fleet.json` uses `null` plus `evidence_status: "unknown"`
 for facts not observed; `null` is not success and is not an exemption.
 
+`fleet.json` is a static scope seed, not authority for default-branch identity.
+For every row, G0 must reconcile its declared `default_branch` and
+`default_branch_sha` with an independently fetched live/default-branch snapshot,
+including repository identity and UTC observation. A mismatch, missing snapshot,
+or stale SHA is an explicit G0 blocker; the static manifest cannot self-attest
+its own current branch or revision.
+
+The checked-in `fleet.json` is manifest-only inventory. Its flat nullable fields,
+`scope.manifest_check`, and row `gate_status: "pending"` do not constitute a
+G0 pass; `manifest_check` only records static shape/count validation. It does
+not contain the live snapshot, dependency/access graph, or execution records.
+Do not fill nulls or replace `pending` with success without observed evidence.
+
+### Scope inventory to checker-input contract
+
+The authoritative checker consumes a separately collected, enriched contract;
+it does not read `fleet.json` as if it were live evidence. The checker worktree's
+expected paths are recorded here as a producer/consumer contract, not as files
+already present or as an invented invocation:
+
+| Artifact | Producer responsibility | Required content | Consumer/status |
+| --- | --- | --- | --- |
+| `config/github-first-dual-lane/manifest.json` | G0 inventory/fleet conversion, reviewed by the independent auditor | Exact 32 identities plus independently reconciled default branch/SHA, workload/provider/dependency graph, and explicit unknown/blocker fields; no count-only substitution | `/root/g0_checker`; schema/path conversion pending exact committed checker contract |
+| `evidence/current-snapshot.json` | Independent live collector | Current default/PR/workflow/check/run identity, UTC/API provenance, head/base/merge semantics, required Apps, provider/host, and freshness; required live fields non-null or explicit failed/unknown disposition | `/root/g0_checker`; not present/verified in this records tree |
+| `evidence/records.json` | Evidence normalizer bound to the snapshot and graph | Typed workload→child/check/release/package edges, expected/actual jobs and terminal conclusions, typed logs/artifacts, applicability, and reviewer binding | `/root/g0_checker` and `/root/g0_reviewer`; producer/schema/invocation pending |
+
+Conversion must preserve source SHA, field provenance, null/unknown status, and
+failure disposition. It must never synthesize live facts from the static scope
+seed or self-attested booleans. The checker owner must publish the exact
+working invocation and strict schema validation before implementation review;
+until then, no command or path is claimed verified and no G0 result may use
+these artifacts.
+
+### Canonical repository names
+
 The fixed names are:
 
 ```text
@@ -427,6 +462,7 @@ configuration_digest, generated_tree_digest, scan_state_digest
 runtime_release_version, runtime_source_sha, job_image_digest
 expected_workload_ids, required_check_contexts_and_apps
 workload_platform_architecture, provider_eligibility, justified_exclusions
+dependency_graph_edges, dependent_workload_graph
 PR_number, PR_head_sha, PR_base_sha, tested_merge_sha, merge_group_sha
 workflow_path, workflow_revision, event, run_id, run_attempt, run_url
 trigger_source_sha, actual_checkout_sha, provider, runner_name, host_id
@@ -436,6 +472,47 @@ APT_feed_revision_suite_and_candidate, Homebrew_tap_revision_and_formula
 install_upgrade_test_environment, installed_binary_identity, functional_result
 owner, reviewer, gate_status, blocker, next_action
 ```
+
+`dependency_graph_edges` and `dependent_workload_graph` are typed records, not
+an unstructured list of IDs or a shorthand for `child_run_links`. Each edge
+records its stable edge ID, typed `from`/`to` node kinds and IDs, relation,
+stage, required/applicability state, source revision, UTC observation,
+evidence reference, and observed status. The graph must represent at least
+`workload → child`, `workload → release`, `workload → package`, and
+`workload → required_check` edges. A dependent-workload node records the
+workload's repository, platform/architecture, provider eligibility, expected
+child/release/package/check edge IDs, and unknown/blocker status.
+
+The minimum shape is illustrated without asserting that any edge is currently
+observed or successful:
+
+```json
+{
+  "dependent_workload_graph": [{
+    "workload_id": "workload:<repository>:<name>",
+    "repository": "<canonical repository>",
+    "stage": "G0-inventory",
+    "platform": "<platform>",
+    "architecture": "<architecture>",
+    "provider_eligibility": ["<provider>"],
+    "dependency_edge_ids": ["edge-workload-child", "edge-workload-release", "edge-workload-package", "edge-workload-check"],
+    "status": "unknown",
+    "blocker": "live dependency and execution evidence pending"
+  }],
+  "dependency_graph_edges": [
+    {"edge_id":"edge-workload-child","from":{"kind":"workload","id":"workload:<repository>:<name>"},"to":{"kind":"child","id":"child:<run>"},"relation":"requires_child_completion","stage":"G0-inventory","required":true,"applicability":"unknown","source_revision":"<source SHA>","observed_at_utc":"<UTC>","evidence_ref":null,"status":"unknown"},
+    {"edge_id":"edge-workload-release","from":{"kind":"workload","id":"workload:<repository>:<name>"},"to":{"kind":"release","id":"release:<identity>"},"relation":"produces_or_consumes_release","stage":"G2+","required":true,"applicability":"unknown","source_revision":"<source SHA>","observed_at_utc":"<UTC>","evidence_ref":null,"status":"unknown"},
+    {"edge_id":"edge-workload-package","from":{"kind":"workload","id":"workload:<repository>:<name>"},"to":{"kind":"package","id":"package:<identity>"},"relation":"requires_package_identity","stage":"G2+","required":true,"applicability":"unknown","source_revision":"<source SHA>","observed_at_utc":"<UTC>","evidence_ref":null,"status":"unknown"},
+    {"edge_id":"edge-workload-check","from":{"kind":"workload","id":"workload:<repository>:<name>"},"to":{"kind":"required_check","id":"check:<context>"},"relation":"requires_check_context","stage":"G0-inventory","required":true,"applicability":"unknown","source_revision":"<source SHA>","observed_at_utc":"<UTC>","evidence_ref":null,"status":"unknown"}
+  ]
+}
+```
+
+G0 inventories dependency/dependent-workload edges and records unknowns; G2+
+proves applicable release/package execution and functional results. The checker
+schema and examples in its separate worktree must adopt these fields before
+authoritative use; this records task/schema requirements, not implementation
+completion.
 
 The target checker contract requires exactly 32 coverage/uniqueness, immutable
 canonical scope, pins/digests, current revision correspondence, nonempty
@@ -465,10 +542,24 @@ baseline for the findings below is Velnor revision
 `abe9ad82a2d4d01b706bbc6122ab6ccb150faad9`; later integration and candidate
 revisions remain separate evidence.
 
+The baseline scope mismatch is explicit: `28 - 6 extras + 10 missing = 32`.
+The six `audit_ci` extras are `ChainArgos/java-monorepo`,
+`ChainArgos/blockchain-nodes`, `ChainArgos/jackin-agent-brown`,
+`tailrocks/velnor-actions-fixture`, `jackin-project/jackin-dev`, and
+`tailrocks/tailrocks-skills`. The ten canonical rows it misses are
+`tailrocks/termpane`, `tailrocks/homebrew-velnor`,
+`tailrocks/tailrocks-typescript-skills`,
+`tailrocks/tailrocks-skill-authoring-skills`,
+`tailrocks/tailrocks-rust-skills`, `tailrocks/tailrocks-roadmap-skills`,
+`tailrocks/tailrocks-pull-request-skills`, `tailrocks/tailrocks-open-source-skills`,
+`tailrocks/tailrocks-macos-skills`, and
+`tailrocks/tailrocks-code-quality-skills`. This is a baseline diagnostic, not a candidate fix; any
+auxiliary scope ref remains external, isolated, and independently reviewed.
+
 G0 must prove, from independently captured and revision-bound evidence:
 
 - exactly 32 unique repositories with no extras, each live default-branch SHA
-  and UTC observation;
+  and UTC observation reconciled against the static manifest's branch claim;
 - every open PR, including drafts, bots, and forks, with head/base SHA, tested
   merge or merge-group SHA, trust/applicability, required checks, and producing
   Apps;
@@ -476,7 +567,8 @@ G0 must prove, from independently captured and revision-bound evidence:
   inventory;
 - nonempty expected workloads with platform, architecture, provider eligibility,
   and explicit exclusions;
-- the durable dependency graph and access gaps;
+- the typed dependency/dependent-workload graph and access gaps, including
+  workload-to-child, release, package, and required-check edges;
 - generator source/revision/artifact digest, runtime-product source/image digest,
   configuration digest, generated-scan digest, and related pin identity;
 - run event source, actual checkout SHA, provider, runner/host identity,

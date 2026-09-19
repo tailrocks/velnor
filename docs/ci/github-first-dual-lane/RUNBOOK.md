@@ -324,8 +324,15 @@ default-branch SHA/UTC, every open PR including drafts/bots/forks and tested
 merge or merge-group identity, complete workflow/reusable-action/scanner/state/
 trigger inventory, nonempty expected workloads, dependency/access gaps,
 source/revision/digest records, and run/provider/host/checkout/job/child
-identity. Every required expected job must have an independently verified
-terminal-success conclusion and complete child links/logs. A fresh default/PR snapshot is required; newest-run, overall-green,
+identity. Reconcile every static manifest `default_branch`/`default_branch_sha`
+to an independent live/default-branch snapshot and UTC observation; never trust
+the manifest claim alone. Every required expected job must have an independently
+verified terminal-success conclusion and complete child links/logs. Record a
+typed dependency/dependent-workload graph with workload→child,
+workload→required-check, workload→release, and workload→package edges; each
+edge binds relation, stage, applicability, source revision, observation time,
+evidence reference, and status. G0 inventories these edges; G2+ proves
+applicable release/package execution. A fresh default/PR snapshot is required; newest-run, overall-green,
 or `github.sha` shortcuts are invalid. `N/A` is exclusion-only.
 
 Release/tag/feed/tap/install identity and functional results are G2+ stage
