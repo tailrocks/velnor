@@ -1,0 +1,126 @@
+{
+  "$schema": "g3.skills-adapter-independent-review.v1",
+  "schema_version": 1,
+  "observed_at_utc": "2026-09-19T17:07:00Z",
+  "reviewer": {
+    "model": "gpt-5.6-luna",
+    "reasoning_effort": "max",
+    "rtk_version": "0.49.0"
+  },
+  "implementation": {
+    "worktree": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-skills-adapter",
+    "revision": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+    "clean": false,
+    "skills_implementation_present": "uncommitted_schema2_only",
+    "review_status": "not_approvable_compile_failure_and_contract_gaps",
+    "uncommitted_paths": [
+      "crates/velnor-workflow/src/s2/mod.rs",
+      "crates/velnor-workflow/src/s2/primitives/ir.rs",
+      "crates/velnor-workflow/src/s2/primitives/mod.rs",
+      "crates/velnor-workflow/src/s2/primitives/pipeline.rs",
+      "crates/velnor-workflow/src/s2/primitives/watch.rs",
+      "crates/velnor-workflow/src/s2/scan/mod.rs",
+      "crates/velnor-workflow/src/s2/scan/skills.rs"
+    ]
+  },
+  "scope": {
+    "repository_count": 8,
+    "exact_revisions_recorded": true,
+    "no_source_or_remote_mutation": true,
+    "no_vlnor_packaging_requirement_for_consumers": true
+  },
+  "findings": [
+    {
+      "id": "F-01",
+      "severity": "blocker",
+      "title": "No Skills implementation at reviewed revision",
+      "evidence": [
+        "UnitKind has no Skills variant in legacy or schema-2 source",
+        "Neither scan pipeline registers a Skills detector",
+        "No central Skills validator exists"
+      ],
+      "required_proof": "Re-review exact committed implementation head, not baseline plan or snapshots"
+    },
+    {
+      "id": "F-02",
+      "severity": "blocker",
+      "title": "Malformed candidates must hard-fail instead of falling through to docs/no-op",
+      "required_proof": "Candidate recognition separate from strict validation; malformed catalog/frontmatter/provider metadata returns scan error"
+    },
+    {
+      "id": "F-03",
+      "severity": "high",
+      "title": "Share one Skills contract across legacy and schema-2 adapters",
+      "required_proof": "Both pipelines test the same validator; no copied second generator framework"
+    },
+    {
+      "id": "F-04",
+      "severity": "blocker",
+      "title": "Template boundary must include helper-owned nested templates without globally hiding templates",
+      "required_proof": "Filtered file view used by every detector; helper manifests outside boundary remain visible; template manifests do not trigger language units"
+    },
+    {
+      "id": "F-05",
+      "severity": "high",
+      "title": "Executable helper inventory and safe validation are undefined",
+      "required_proof": "Typed/inferred helper set; pinned bounded syntax/build checks; temp-copy generator execution; no arbitrary mutation/network helper execution"
+    },
+    {
+      "id": "F-06",
+      "severity": "blocker",
+      "title": "Strict frontmatter parser required",
+      "required_proof": "Duplicate keys, wrong types, malformed delimiters/YAML, required fields, license and identity negatives fail"
+    },
+    {
+      "id": "F-07",
+      "severity": "high",
+      "title": "Catalog/provider checks must be structural and version-relational",
+      "required_proof": "No hardcoded 0.28.0 or repository names; names/skills paths/marketplace source/provider versions agree"
+    },
+    {
+      "id": "F-08",
+      "severity": "high",
+      "title": "References require safe resolver and explicit placeholder syntax",
+      "required_proof": "Recursive local links resolve with traversal/fragment/encoding checks; arbitrary missing links fail"
+    },
+    {
+      "id": "F-09",
+      "severity": "blocker",
+      "title": "Generated docs drift must fail independently of docs lint",
+      "required_proof": "Disposable-copy helper generation, byte comparison, repeat stability, and seven known stale snapshots repaired"
+    },
+    {
+      "id": "F-10",
+      "severity": "high",
+      "title": "Bun runtime must be centrally pinned",
+      "required_proof": "Generated unit records exact Bun version/artifact identity on eligible providers"
+    },
+    {
+      "id": "F-11",
+      "severity": "high",
+      "title": "Real helper manifests preserved without duplicate ownership",
+      "required_proof": "Fixtures prove executable package/Cargo manifests remain meaningful while embedded template manifests are excluded"
+    },
+    {
+      "id": "F-12",
+      "severity": "high",
+      "title": "All-eight no-hardcoding acceptance proof missing",
+      "required_proof": "Legacy/S2 scans, generated workflows, malformed fixtures, synthetic non-Tailrocks fixture, and exact eight SHAs pass"
+    }
+  ],
+  "live_diff_checks": {
+    "cargo_check_passing": false,
+    "cargo_check_failures": [
+      "s2/scan/skills.rs calls unit with four arguments instead of five",
+      "s2/scan/skills.rs BTreeMap value type inference failure"
+    ],
+    "cargo_fmt_check_passing": true,
+    "legacy_pipeline_updated": false,
+    "strict_json_duplicate_rejection": false,
+    "strict_yaml_frontmatter_parser": false,
+    "helper_template_boundary_complete": false,
+    "pinned_bun_contract": false,
+    "all_eight_scan_evidence": false
+  },
+  "evidence_report": "report.md"
+}

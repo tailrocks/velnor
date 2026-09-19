@@ -1,0 +1,425 @@
+{
+  "$schema": "g3.distribution-consumer-audit.v1",
+  "schema_version": 1,
+  "observed_at_utc": "2026-09-19T16:28:59Z",
+  "worker": {
+    "thread_id": "01a0ba7d-e457-7723-81ba-1f7ed038212c",
+    "model": "gpt-5.6-luna",
+    "reasoning_effort": "max",
+    "cli_version": "0.155.0",
+    "agent_path": "/root/g3_distribution_consumers"
+  },
+  "scope": {
+    "repositories": [
+      "tailrocks/homebrew-tablerock",
+      "tailrocks/homebrew-ruxel",
+      "tailrocks/homebrew-parallax",
+      "tailrocks/homebrew-holla",
+      "tailrocks/holla-apt",
+      "jackin-project/homebrew-tap"
+    ],
+    "read_only": true,
+    "research_clone_root": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/distribution-consumers/clones",
+    "no_unrelated_velnor_packaging_requirement": true
+  },
+  "repos": [
+    {
+      "repository": "tailrocks/homebrew-tablerock",
+      "repository_role": "homebrew_tap",
+      "default_branch": "main",
+      "default_branch_sha": "7d376cad41088420e92e49bf4030d761180a3512",
+      "generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09a",
+      "generator_artifact_digest": "not_observed",
+      "configuration_digest": "not_observed",
+      "generated_tree_digest": "not_observed",
+      "workflow_paths": [
+        ".github/workflows/ci-main.yml",
+        ".github/workflows/ci-policy.yml",
+        ".github/workflows/ci-pr.yml",
+        ".github/workflows/ci-unit-homebrew.yml",
+        ".github/workflows/maintenance.yml",
+        ".github/workflows/nightly.yml"
+      ],
+      "expected_workloads": [
+        "formula_audit_and_version_test",
+        "native_cask_audit_and_install_test",
+        "stable_preview_update_and_checksum_contract"
+      ],
+      "observed_release_contract": {
+        "stable": "0.1.0, source e18cc91bc8efef3ca6b3ed9470468cf274c5af1b, four formula targets plus arm64 macOS app",
+        "preview": "0.1.0-preview.867+a37344a, source a37344a, four formula targets plus arm64 macOS app",
+        "checksums": "formula and cask SHA values match observed release manifests",
+        "native_boundary": "arm64 macOS only; source Package.swift requires macOS 26"
+      },
+      "verification": {
+        "updater_fixture": "pass",
+        "native_cask_audit": "fail: stable and preview require immutable/versioned URL handling; preview also triggers GitHub pre-release audit",
+        "clean_native_install": "not_implemented",
+        "formula_install_version": "not_implemented"
+      },
+      "recent_runs": [
+        {
+          "run_id": "35430875676",
+          "conclusion": "failure",
+          "failure": "generated-tree drift; live ruleset lacks required Policy context"
+        }
+      ],
+      "gate_status": "blocked",
+      "next_action": "Repair immutable cask URL/preview contract, add native arm64 audit/install smoke, regenerate with reviewed generator epoch, repair Policy ruleset."
+    },
+    {
+      "repository": "tailrocks/homebrew-ruxel",
+      "repository_role": "homebrew_tap",
+      "default_branch": "main",
+      "default_branch_sha": "ce29c817d29c54563bc479bce3966e4ea32845e6",
+      "generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09a",
+      "generator_artifact_digest": "not_observed",
+      "configuration_digest": "not_observed",
+      "generated_tree_digest": "not_observed",
+      "workflow_paths": [
+        ".github/workflows/ci-main.yml",
+        ".github/workflows/ci-policy.yml",
+        ".github/workflows/ci-pr.yml",
+        ".github/workflows/ci-unit-homebrew.yml",
+        ".github/workflows/maintenance.yml",
+        ".github/workflows/nightly.yml"
+      ],
+      "expected_workloads": [
+        "formula_audit_and_version_test",
+        "preview_update_source_identity_checksum_contract"
+      ],
+      "observed_release_contract": {
+        "stable": "disabled; mutable archive/refs/heads/main.tar.gz; no checksum",
+        "preview_tap": "0.1.0-preview.85+cb5d1e9, source cb5d1e9",
+        "preview_live": "0.1.0-preview.89+110ed62, source 110ed62; four current artifact digests differ from tap",
+        "channel_conflict": "stable does not declare conflict with preview"
+      },
+      "verification": {
+        "updater_fixture": "not_present",
+        "ruby_syntax": "pass",
+        "native_formula_audit": "fail: missing stable/preview conflict and mutable stable source",
+        "clean_install_version": "not_implemented"
+      },
+      "recent_runs": [
+        {
+          "run_id": "35431073357",
+          "conclusion": "failure",
+          "failure": "generated-tree drift; live ruleset lacks required Policy context"
+        }
+      ],
+      "gate_status": "blocked",
+      "next_action": "Refresh preview to live release, add typed updater/source/checksum checks, resolve channel conflict and stable source contract, add install/version test, regenerate and repair Policy ruleset."
+    },
+    {
+      "repository": "tailrocks/homebrew-parallax",
+      "repository_role": "homebrew_tap",
+      "default_branch": "main",
+      "default_branch_sha": "c9c59277f35cb1e81988c2bef0be2c688dadd608",
+      "generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09a",
+      "generator_artifact_digest": "not_observed",
+      "configuration_digest": "not_observed",
+      "generated_tree_digest": "not_observed",
+      "workflow_paths": [
+        ".github/workflows/ci-main.yml",
+        ".github/workflows/ci-policy.yml",
+        ".github/workflows/ci-pr.yml",
+        ".github/workflows/ci-unit-homebrew.yml",
+        ".github/workflows/maintenance.yml",
+        ".github/workflows/nightly.yml"
+      ],
+      "expected_workloads": [
+        "formula_audit_and_version_test",
+        "stable_preview_update_and_checksum_contract",
+        "serve_behavior_smoke_test"
+      ],
+      "observed_release_contract": {
+        "stable": "0.1.0, source da3ce716ecbe50f6d5e00ce89948a7f376636f12, four targets",
+        "preview": "0.1.0-preview.2526+1fa9666, source 1fa9666, four targets",
+        "checksums": "formula SHA values match observed release manifests",
+        "channel_conflict": "stable and preview conflict declarations present"
+      },
+      "verification": {
+        "updater_fixture": "pass for stable path",
+        "preview_updater": "not_implemented",
+        "native_formula_audit": "fail: stable explicit version redundant with URL",
+        "clean_install_version": "not_implemented",
+        "serve_behavior": "not_implemented; formula test only checks --version"
+      },
+      "recent_runs": [
+        {
+          "run_id": "35431119313",
+          "conclusion": "failure",
+          "failure": "generated-tree drift; live ruleset lacks required Policy context"
+        }
+      ],
+      "gate_status": "blocked",
+      "next_action": "Generate typed formula/cask verification, remove redundant formula metadata, cover preview update and clean install/version plus serve smoke, regenerate and repair Policy ruleset."
+    },
+    {
+      "repository": "tailrocks/homebrew-holla",
+      "repository_role": "homebrew_tap",
+      "default_branch": "main",
+      "default_branch_sha": "cc25db8fd911cdf965652d3b094c10d006d056ee",
+      "generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09a",
+      "generator_artifact_digest": "not_observed",
+      "configuration_digest": "not_observed",
+      "generated_tree_digest": "not_observed",
+      "workflow_paths": [
+        ".github/workflows/ci-main.yml",
+        ".github/workflows/ci-policy.yml",
+        ".github/workflows/ci-pr.yml",
+        ".github/workflows/ci-unit-homebrew.yml",
+        ".github/workflows/maintenance.yml",
+        ".github/workflows/nightly.yml"
+      ],
+      "expected_workloads": [
+        "formula_audit_and_version_test",
+        "stable_preview_update_and_checksum_contract"
+      ],
+      "observed_release_contract": {
+        "stable": "1.0.3, four targets; no source-sha identity comment",
+        "preview": "1.0.3-preview.285+fca7d0c, source fca7d0c, four targets",
+        "checksums": "formula SHA values match observed release manifests",
+        "channel_conflict": "one-sided; stable lacks conflict with preview"
+      },
+      "verification": {
+        "updater_fixture": "pass for stable path",
+        "preview_updater": "not_implemented",
+        "native_formula_audit": "fail: stable/preview conflict missing on stable side and redundant stable version",
+        "clean_install_version": "not_implemented"
+      },
+      "recent_runs": [
+        {
+          "run_id": "35431027006",
+          "conclusion": "failure",
+          "failure": "generated-tree drift; Policy context is present in live ruleset"
+        }
+      ],
+      "gate_status": "blocked",
+      "next_action": "Add stable source identity and symmetric channel conflict, typed preview/update checks, native formula install/version proof, regenerate with reviewed generator epoch."
+    },
+    {
+      "repository": "tailrocks/holla-apt",
+      "repository_role": "apt_repository",
+      "default_branch": "main",
+      "default_branch_sha": "0636074d4a16be4771685bd95bf2cec739cf359c",
+      "generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09a",
+      "generator_artifact_digest": "not_observed",
+      "configuration_digest": "not_observed",
+      "generated_tree_digest": "not_observed",
+      "workflow_paths": [
+        ".github/workflows/ci-unit-docs.yml"
+      ],
+      "expected_workloads": [
+        "package_state_source_identity_checksum_verification",
+        "signed_reprepro_index_generation_amd64_arm64",
+        "trusted_pages_publish_and_dispatch_contract",
+        "clean_apt_install_upgrade_and_signature_check"
+      ],
+      "observed_contract": {
+        "configuration_profile": "apt-repository with docs-only unit and empty watch/command lists",
+        "omission_marker": ".github-gen/NO_WORKFLOWS_REQUIRED.md explicitly omits publish, updater, aggregate, and signed feed primitives",
+        "package_state": "Holla 1.0.3, source 17501fbf0409a4d27b5f617edf851b23b863051d, two .deb assets",
+        "distribution": "stable; amd64 arm64; SignWith E5BC87724E0F3E0A",
+        "live_feed": "signed stable InRelease observed 2026-08-13 with Holla 1.0.3 for amd64 and arm64"
+      },
+      "verification": {
+        "docs_fixture": "fail: test-package-update.sh exits 2 because referenced .github/workflows/publish.yml is absent",
+        "feed_generation_workflow": "absent",
+        "clean_apt_install_upgrade": "not_implemented",
+        "signature_check": "live retained feed signed; current automation absent"
+      },
+      "recent_runs": [
+        {
+          "run_id": "35082144161",
+          "conclusion": "failure",
+          "failure": "entrypoint-pin, pull-request-target, required-checks on omission branch"
+        }
+      ],
+      "gate_status": "blocked_critical",
+      "next_action": "Replace docs-only omission with typed apt-repository primitive and generated signed publish/feed/update/install workflows, preserving holla-apt package identity/key contract."
+    },
+    {
+      "repository": "jackin-project/homebrew-tap",
+      "repository_role": "homebrew_tap",
+      "default_branch": "main",
+      "default_branch_sha": "f1669391582f92c95da1aa5958de4397dfedca09",
+      "generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09a",
+      "generator_artifact_digest": "not_observed",
+      "configuration_digest": "not_observed",
+      "generated_tree_digest": "not_observed",
+      "workflow_paths": [
+        ".github/workflows/ci-main.yml",
+        ".github/workflows/ci-policy.yml",
+        ".github/workflows/ci-pr.yml",
+        ".github/workflows/ci-unit-homebrew.yml",
+        ".github/workflows/maintenance.yml",
+        ".github/workflows/nightly.yml"
+      ],
+      "expected_workloads": [
+        "formula_audit_and_version_test",
+        "preview_update_source_identity_checksum_contract",
+        "conditional_native_cask_audit_and_install_test"
+      ],
+      "observed_release_contract": {
+        "preview": "0.6.4-preview.1181+a506eee, source a506eee, six assets including macOS/Linux CLI and capsule resources",
+        "stable": "jackin disabled until stable release; source-builds from HEAD",
+        "dev": "tap 0.1.39; latest observed live release 0.1.52",
+        "cask": "no current Casks tree; updater creates desktop cask only for complete stable desktop manifest"
+      },
+      "verification": {
+        "updater_fixture": "pass",
+        "hosted_checks": "pass for main dispatch 35431020697 and PR #494 run 35455135058",
+        "native_formula_audit": "fail: invalid HEAD Git URL for disabled stable and redundant jackin-dev version",
+        "native_cask_audit_install": "not_implemented",
+        "clean_install_version": "not_implemented",
+        "scan_coverage": "Formula/** and Casks/** excluded; Homebrew unit is manually declared"
+      },
+      "recent_runs": [
+        {
+          "run_id": "35431020697",
+          "conclusion": "success",
+          "failure": null
+        },
+        {
+          "run_id": "35455135058",
+          "conclusion": "success",
+          "failure": null
+        }
+      ],
+      "open_prs": [
+        {
+          "number": 492,
+          "head_sha": "9255223b26d4a7340d92ec20fef7f95474aa4a58",
+          "purpose": "generator pin and generated workflow update"
+        },
+        {
+          "number": 494,
+          "head_sha": "17b5cfa00b04486c52d043885576cfeb40c55471",
+          "purpose": "preview formula audit ordering/description fix"
+        }
+      ],
+      "gate_status": "incomplete",
+      "next_action": "Keep product-specific stable/preview behavior, add typed native Homebrew coverage when cask exists, refresh jackin-dev, fix formula audit contracts, and regenerate only through reviewed generator path.",
+      "refresh_history": [
+        {
+          "event": "post_pr494_merge",
+          "observed_at_utc": "2026-09-19T17:30:57Z",
+          "previous_snapshot_sha": "f1669391582f92c95da1aa5958de4397dfedca09",
+          "current_main_sha": "2281ae9c95dfcb5bf82dfd025fdf58a50658b1d1",
+          "revision_resolution": {
+            "fleet_main_revisions": "dual-lane-evidence/G0/fleet/main-revisions.tsv:30",
+            "fleet_required_sha": "dual-lane-evidence/G0/fleet/requirements.json",
+            "github_api_confirmed": true
+          },
+          "merge": {
+            "pull_request": 494,
+            "state": "closed",
+            "merged": true,
+            "merged_at": "2026-09-19T16:36:35Z",
+            "head_sha": "17b5cfa00b04486c52d043885576cfeb40c55471",
+            "merge_commit_sha": "2281ae9c95dfcb5bf82dfd025fdf58a50658b1d1",
+            "title": "fix: satisfy preview formula audit"
+          },
+          "exact_delta": {
+            "files": [
+              "Formula/jackin-preview.rb",
+              "scripts/package-update.sh"
+            ],
+            "insertions": 6,
+            "deletions": 6,
+            "behavior": "preview description shortened for audit compliance; preview/stable conflict declaration moved before resources; manifest, asset, checksum, extraction, and version checks unchanged"
+          },
+          "current_responsibilities": {
+            "preview_formula": "0.6.4-preview.1181+a506eee; four CLI targets, two Linux capsule resources, source-sha identity, symmetric stable conflict, version test",
+            "stable_formula": "disabled until stable release; mutable HEAD source build with Rust and optional Docker; conflicts with preview",
+            "dev_formula": "static 0.1.39 four-target formula without source identity/updater; latest live jackin-dev release is 0.1.52",
+            "cask": "no Casks tree or cask tokens; stable updater can create arm64-only Casks/jackin-desktop.rb from a complete seven-asset manifest",
+            "updater": "verified identity/release manifests; preview exact six-asset/checksum/extraction contract; stable seven-asset formula plus desktop cask generation",
+            "generated_ci": "generator b9c3156cdb88e63c11b9e595a3e694b02238c09a; six workflows; one homebrew unit on GitHub Ubuntu 24.04 running mise run check; Formula/** and Casks/** excluded from scan; release disabled"
+          },
+          "verification": {
+            "updater_fixture": "pass: scripts/test-package-update.sh",
+            "native_preview_formula_audit": "pass: brew audit --strict --online against exact detached revision",
+            "native_all_formula_audit": "fail: disabled stable HEAD URL and jackin-dev redundant URL-scanned version",
+            "native_cask_audit": "not_applicable: no Casks tree or cask token",
+            "clean_install_version": "not_implemented",
+            "source_tree_status": "clean detached checkout at current_main_sha"
+          },
+          "hosted_proof": {
+            "pr_ci_run": {
+              "run_id": 35455135058,
+              "head_sha": "17b5cfa00b04486c52d043885576cfeb40c55471",
+              "conclusion": "success"
+            },
+            "pr_policy_run": {
+              "run_id": 35455133359,
+              "conclusion": "success"
+            },
+            "pr_dco_check": {
+              "check_run_id": 105928955669,
+              "conclusion": "success"
+            },
+            "main_run": {
+              "run_id": 35455507231,
+              "head_sha": "2281ae9c95dfcb5bf82dfd025fdf58a50658b1d1",
+              "conclusion": "success",
+              "jobs": {
+                "homebrew_github": {
+                  "job_id": 105930230847,
+                  "conclusion": "success"
+                },
+                "ci_required": {
+                  "job_id": 105930256962,
+                  "conclusion": "success"
+                },
+                "policy": {
+                  "job_id": 105929945743,
+                  "conclusion": "success"
+                }
+              },
+              "optional_sonar_check": {
+                "check_run_id": 105929985761,
+                "conclusion": "failure",
+                "run_conclusion_unaffected": true
+              }
+            }
+          },
+          "live_open_prs": [
+            {
+              "number": 492,
+              "head_sha": "9255223b26d4a7340d92ec20fef7f95474aa4a58",
+              "purpose": "generator pin and generated workflow update"
+            }
+          ],
+          "gap_status": {
+            "preview_formula_audit": "fixed_by_pr494",
+            "pr494_merge": "fixed",
+            "native_cask_and_clean_install": "still_missing",
+            "stable_head_audit": "still_failing",
+            "jackin_dev_refresh": "still_stale",
+            "generated_native_homebrew_verification": "still_missing",
+            "release_automation": "still_fail_closed"
+          },
+          "gate_status": "incomplete"
+        }
+      ]
+    }
+  ],
+  "cross_repo_findings": [
+    "All six default branches are main and pin generator b9c3156cdb88e63c11b9e595a3e694b02238c09.",
+    "The five Homebrew consumers lack generated native macOS cask/clean-install verification; Ubuntu brew audit is not a substitute.",
+    "Four generic Homebrew main runs fail generated-tree and required-check policy; Holla has live Policy but still generated-tree drift.",
+    "Holla APT is a docs-only omission despite a real signed feed and package-state contract; retained feed state does not prove current automation.",
+    "Central primitives must model each consumer's existing release/update/feed ownership. Do not impose Velnor packaging on unrelated products."
+  ],
+  "bounded_central_tasks": [
+    "Reviewed generator epoch, generated-tree regeneration, and live required-check repair.",
+    "Typed Homebrew formula/cask inventory with manifest-bound checksums, channel conflicts, native architecture eligibility, and clean install/version tests.",
+    "Immutable/versioned cask URL contract, especially TableRock rolling preview.",
+    "Typed formula source-identity/update checks and stale consumer refreshes.",
+    "Typed apt-repository primitive for signed reprepro indexes, trusted publication, dispatch/update contracts, clean installation/upgrade, and feed signatures.",
+    "Hostile fixtures for absent publisher, wrong source/checksum, stale metadata, architecture mismatch, channel conflict, failed retry, unsigned feed, and generated drift."
+  ],
+  "evidence_report": "report.md"
+}

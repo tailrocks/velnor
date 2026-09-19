@@ -1,0 +1,5351 @@
+{
+  "schema": "g0-pr-checks-requirements/v1",
+  "generated_at": "2026-09-19T17:03:32Z",
+  "access": {
+    "method": "GitHub GraphQL + REST via gh, read-only",
+    "remote_writes": false,
+    "runs_rerun": false,
+    "dispatch": false
+  },
+  "snapshot_reconciliation": {
+    "baseline_snapshot_pr_count": 78,
+    "current_open_pr_count": 77,
+    "current_repo_count": 12,
+    "common_tuple_keys": 77,
+    "closed_snapshot_prs": [
+      {
+        "repo": "jackin-project/homebrew-tap",
+        "pr": 494,
+        "old_head_sha": "17b5cfa00b04486c52d043885576cfeb40c55471",
+        "old_base_sha": "f1669391582f92c95da1aa5958de4397dfedca09",
+        "status": "merged",
+        "merged_sha": "2281ae9c95dfcb5bf82dfd025fdf58a50658b1d1",
+        "observed_at": "2026-09-19T16:36:35Z"
+      }
+    ],
+    "head_changes": [
+      {
+        "repo": "tailrocks/velnor",
+        "pr": 953,
+        "old_head_sha": "af31b644aa01eb352ba6240fca957e900174d067",
+        "current_head_sha": "db77f0b5a5f43b5250fda6e7bb341b21a7d36b83"
+      }
+    ],
+    "added_snapshot_keys": [],
+    "missing_current_keys": [],
+    "tuple_match_basis": "repository+PR common key; all 77 current rows captured at current head SHA",
+    "head_stability_checked_at": "2026-09-19T17:02:04Z",
+    "head_changes_after_checks_snapshot": []
+  },
+  "required_context_semantics": {
+    "rollup_observation": "Status contexts and check runs are observations on the exact queried commit.",
+    "required_status_checks_contract": "Required contexts come from the active protect-main ruleset; never inferred from green/red.",
+    "external_approval_not_assumed": "protect-main required_approving_review_count is retained per repo; PR review observations are evidence only."
+  },
+  "main_verification_evidence_file": "main-verification.json",
+  "main_verification_refreshed_at": "2026-09-19T17:03:32Z",
+  "context_pagination_followups": {
+    "tailrocks/parallax#110": {
+      "commit_sha": "de3fd1c7d347ec8cc98bf4f811b73ec639506236",
+      "first_page_count": 100,
+      "second_page_count": 1,
+      "combined_count": 101,
+      "second_page_has_next": false,
+      "second_page_failed": [],
+      "second_page_pending": [],
+      "second_page_skipped": [],
+      "note": "The capped first-page row in pr-checks.tsv is completed by context-pages.json; no additional failure/pending/skipped evidence."
+    },
+    "jackin-project/jackin#975": {
+      "commit_sha": "50576297e7ec4131608ac1a446f86a84d0af43de",
+      "first_page_count": 100,
+      "second_page_count": 9,
+      "combined_count": 109,
+      "second_page_has_next": false,
+      "second_page_failed": ["Swift / Packages / GitHub / swift-package-native", "ci-required", "Required"],
+      "second_page_pending": [],
+      "second_page_skipped": ["group-rust-2 / Velnor / rust-jackin-usage", "group-rust-2 / Velnor / rust-jackin-usage-ffi", "group-rust-2 / Velnor / rust-jackin-xtask", "group-rust-2 / Velnor / rust-desktop-xcframework"],
+      "note": "The capped first-page row in pr-checks.tsv is completed by context-pages.json; additional failures are included as evidence, not inferred from PR title/actor."
+    }
+  },
+  "repositories": {
+    "tailrocks/velnor": {
+      "default_branch": "main",
+      "default_sha": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+      "open_pr_count": 4,
+      "open_pr_numbers": [
+        948,
+        952,
+        953,
+        954
+      ],
+      "current_pr_heads": [
+        {
+          "pr": 948,
+          "head_sha": "ab82b08746ec312558981f8461a32a1e3350d802",
+          "classification": "mixed-failure-candidate",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 952,
+          "head_sha": "a5c1c0bd5c92c4c52d58ccb21042b1b2c0b08637",
+          "classification": "mixed-failure-candidate",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 953,
+          "head_sha": "db77f0b5a5f43b5250fda6e7bb341b21a7d36b83",
+          "classification": "pending",
+          "incomplete_flags": "pending"
+        },
+        {
+          "pr": 954,
+          "head_sha": "f16592ea165ced141bf0bb1c43466a95d7df8b2e",
+          "classification": "infrastructure-or-generator-candidate",
+          "incomplete_flags": "pending+skipped"
+        }
+      ],
+      "ruleset_contract": {
+        "branch_protection": {
+          "http_status": 404,
+          "body": {
+            "message": "Branch not protected",
+            "documentation_url": "https://docs.github.com/rest/branches/branch-protection#get-branch-protection",
+            "status": "404"
+          }
+        },
+        "required_contexts": [
+          "DCO",
+          "Policy",
+          "ci-required"
+        ],
+        "protect_main": {
+          "id": 19573071,
+          "name": "protect-main",
+          "target": "branch",
+          "enforcement": "active",
+          "conditions": {
+            "ref_name": {
+              "exclude": [],
+              "include": [
+                "~DEFAULT_BRANCH"
+              ]
+            }
+          },
+          "rules": [
+            {
+              "type": "deletion"
+            },
+            {
+              "type": "non_fast_forward"
+            },
+            {
+              "type": "pull_request",
+              "parameters": {
+                "required_approving_review_count": 0,
+                "dismiss_stale_reviews_on_push": true,
+                "required_reviewers": [],
+                "require_code_owner_review": false,
+                "dismissal_restriction": {
+                  "enabled": false,
+                  "allowed_actors": []
+                },
+                "require_last_push_approval": false,
+                "required_review_thread_resolution": false,
+                "require_extra_approval_for_unattributed_changes": true,
+                "allowed_merge_methods": [
+                  "merge",
+                  "squash",
+                  "rebase"
+                ]
+              }
+            },
+            {
+              "type": "required_status_checks",
+              "parameters": {
+                "strict_required_status_checks_policy": false,
+                "do_not_enforce_on_create": false,
+                "required_status_checks": [
+                  {
+                    "context": "DCO"
+                  },
+                  {
+                    "context": "ci-required"
+                  },
+                  {
+                    "context": "Policy"
+                  }
+                ]
+              }
+            }
+          ],
+          "updated_at": "2026-09-16T08:47:23.561+07:00",
+          "bypass_actors": [
+            {
+              "actor_id": 5,
+              "actor_type": "RepositoryRole",
+              "bypass_mode": "always"
+            }
+          ],
+          "current_user_can_bypass": "always",
+          "html_url": "https://github.com/tailrocks/velnor/rules/19573071"
+        },
+        "all_rulesets": [
+          {
+            "id": 19573071,
+            "name": "protect-main",
+            "target": "branch",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "exclude": [],
+                "include": [
+                  "~DEFAULT_BRANCH"
+                ]
+              }
+            },
+            "rules": [
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "non_fast_forward"
+              },
+              {
+                "type": "pull_request",
+                "parameters": {
+                  "required_approving_review_count": 0,
+                  "dismiss_stale_reviews_on_push": true,
+                  "required_reviewers": [],
+                  "require_code_owner_review": false,
+                  "dismissal_restriction": {
+                    "enabled": false,
+                    "allowed_actors": []
+                  },
+                  "require_last_push_approval": false,
+                  "required_review_thread_resolution": false,
+                  "require_extra_approval_for_unattributed_changes": true,
+                  "allowed_merge_methods": [
+                    "merge",
+                    "squash",
+                    "rebase"
+                  ]
+                }
+              },
+              {
+                "type": "required_status_checks",
+                "parameters": {
+                  "strict_required_status_checks_policy": false,
+                  "do_not_enforce_on_create": false,
+                  "required_status_checks": [
+                    {
+                      "context": "DCO"
+                    },
+                    {
+                      "context": "ci-required"
+                    },
+                    {
+                      "context": "Policy"
+                    }
+                  ]
+                }
+              }
+            ],
+            "updated_at": "2026-09-16T08:47:23.561+07:00",
+            "bypass_actors": [
+              {
+                "actor_id": 5,
+                "actor_type": "RepositoryRole",
+                "bypass_mode": "always"
+              }
+            ],
+            "current_user_can_bypass": "always",
+            "html_url": "https://github.com/tailrocks/velnor/rules/19573071"
+          },
+          {
+            "id": 19573007,
+            "name": "protect-tags",
+            "target": "tag",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "exclude": [
+                  "refs/tags/preview"
+                ],
+                "include": [
+                  "~ALL"
+                ]
+              }
+            },
+            "rules": [
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "non_fast_forward"
+              }
+            ],
+            "updated_at": "2026-09-14T00:45:07.477+07:00",
+            "bypass_actors": [],
+            "current_user_can_bypass": "never",
+            "html_url": "https://github.com/tailrocks/velnor/rules/19573007"
+          }
+        ]
+      },
+      "observed_required_contexts_on_prs": [
+        "DCO=COMPLETED/SUCCESS",
+        "Policy=COMPLETED/FAILURE",
+        "Policy=COMPLETED/SUCCESS",
+        "Policy=IN_PROGRESS/",
+        "ci-required=COMPLETED/FAILURE"
+      ],
+      "observed_app_ids": [
+        "DCO-2#974774",
+        "GitHub Actions#15368"
+      ],
+      "pr_classification_counts": {
+        "mixed-failure-candidate": 2,
+        "pending": 1,
+        "infrastructure-or-generator-candidate": 1
+      },
+      "pr_incomplete_counts": {
+        "skipped": 2,
+        "pending": 1,
+        "pending+skipped": 1
+      },
+      "main_verification": {
+        "default_branch": "main",
+        "sha": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+        "check_count": 50,
+        "checkrun_count": 50,
+        "statuscontext_count": 0,
+        "contexts_has_next": false,
+        "status_counts": {
+          "COMPLETED": 50
+        },
+        "conclusion_counts": {
+          "FAILURE": 4,
+          "SKIPPED": 40,
+          "SUCCESS": 6
+        },
+        "required_like": [
+          "Policy=COMPLETED/FAILURE",
+          "ci-required=COMPLETED/FAILURE"
+        ],
+        "app_ids": [
+          "GitHub Actions#15368"
+        ],
+        "failed": [
+          {
+            "name": "Resolve preview identity",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351916/job/105578342575",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351916"
+          },
+          {
+            "name": "Policy",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105578346708",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "ci-required",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582308300",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Control / Required",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582327904",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          }
+        ],
+        "pending": [],
+        "skipped": [
+          {
+            "name": "Guest payload ${{ matrix.arch }}",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351916/job/105578383561",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351916"
+          },
+          {
+            "name": "Bun · Bun package (velnor) · github-hosted — bun-velnor",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582307275",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Compile preview metadata once",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351916/job/105578383707",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351916"
+          },
+          {
+            "name": "Build ${{ matrix.arch }} preview deb",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351916/job/105578384956",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351916"
+          },
+          {
+            "name": "Bun · Bun package (velnor) · velnor — bun-velnor",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306532",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Sign ${{ matrix.arch }} preview deb",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351916/job/105578384524",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351916"
+          },
+          {
+            "name": "Replace the rolling preview release",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351916/job/105578385122",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351916"
+          },
+          {
+            "name": "Docker · Docker · github-hosted — docker",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582307380",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Docker · Docker · velnor — docker",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306837",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Documentation · Documentation · github-hosted — docs",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582307246",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Documentation · Documentation · velnor — docs",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306838",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "OpenTofu · OpenTofu · github-hosted — opentofu",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306651",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "OpenTofu · OpenTofu · velnor — opentofu",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306868",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Control / Prepare Cargo",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306266",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Rust · Rust dependency policy · github-hosted — rust-policy",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582307412",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Rust · unit-collector · github-hosted — rust-unit-collector",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306635",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Rust · velnor-bench · github-hosted — rust-velnor-bench",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306719",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Rust · velnor-client · github-hosted — rust-velnor-client",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306775",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Rust · velnor-control · github-hosted — rust-velnor-control",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306969",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Rust · velnor-model · github-hosted — rust-velnor-model",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582307143",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Rust · velnor-render · github-hosted — rust-velnor-render",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306947",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Rust · velnor-runner · github-hosted — rust-velnor-runner",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306770",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Rust · velnor-tools · github-hosted — rust-velnor-tools",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582307230",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Rust · velnor-workflow · github-hosted — rust-velnor-workflow",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306723",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Rust · velnor-workflow-contract · github-hosted — rust-velnor-workflow-contract",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306836",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Rust · velnorctl · github-hosted — rust-velnorctl",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306855",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Rust · Rust production topology · github-hosted — rust-production-topology",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582307222",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Rust · Rust dependency policy · velnor — rust-policy",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582307815",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Rust · unit-collector · velnor — rust-unit-collector",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582307807",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Rust · velnor-model · velnor — rust-velnor-model",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582307591",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Rust · velnor-workflow-contract · velnor — rust-velnor-workflow-contract",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582307389",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Rust · Rust production topology · velnor — rust-production-topology",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582307736",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Rust · velnor-client · velnor — rust-velnor-client",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582308203",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Rust · velnor-control · velnor — rust-velnor-control",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582308037",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Rust · velnor-render · velnor — rust-velnor-render",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582308211",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Rust · velnor-tools · velnor — rust-velnor-tools",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582308504",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Rust · velnor-runner · velnor — rust-velnor-runner",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582308498",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Rust · velnor-bench · velnor — rust-velnor-bench",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582309083",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Rust · velnor-workflow · velnor — rust-velnor-workflow",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582309075",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "name": "Rust · velnorctl · velnor — rust-velnorctl",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582309072",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          }
+        ]
+      },
+      "latest_main_runs": {
+        "fetched_count": 0,
+        "event_counts": {},
+        "matching_head_sha_count": 0,
+        "latest_head_sha_runs": [],
+        "latest_runs": [],
+        "child_dispatch_candidates": [],
+        "child_dispatch_note": "No workflow_run/repository_dispatch/workflow_dispatch run in fetched latest-20 main list; relation not discoverable here."
+      }
+    },
+    "tailrocks/velnor-apt": {
+      "default_branch": "main",
+      "default_sha": "b24d7d4370001119cd5ddcb6f9e07aa9007051e7",
+      "open_pr_count": 3,
+      "open_pr_numbers": [
+        224,
+        225,
+        227
+      ],
+      "current_pr_heads": [
+        {
+          "pr": 224,
+          "head_sha": "58c29949c012a635b05d3d3469e9c558456e0d78",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 225,
+          "head_sha": "d5f1dc73e1b069ce02b6095b5d8783086f75cf78",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 227,
+          "head_sha": "61f97d506637d8d517d487c73b6a3d188feb0a5b",
+          "classification": "mixed-failure-candidate",
+          "incomplete_flags": "skipped"
+        }
+      ],
+      "ruleset_contract": {
+        "branch_protection": {
+          "http_status": 404,
+          "message": "Branch not protected",
+          "raw": "{\"message\":\"Branch not protected\",\"documentation_url\":\"https://docs.github.com/rest/branches/branch-protection#get-branch-protection\",\"status\":\"404\"}gh: Branch not protected (HTTP 404)"
+        },
+        "required_contexts": [
+          "DCO",
+          "Policy",
+          "ci-required"
+        ],
+        "protect_main": {
+          "id": 19572991,
+          "name": "protect-main",
+          "target": "branch",
+          "enforcement": "active",
+          "conditions": {
+            "ref_name": {
+              "exclude": [],
+              "include": [
+                "~DEFAULT_BRANCH"
+              ]
+            }
+          },
+          "rules": [
+            {
+              "type": "deletion"
+            },
+            {
+              "type": "pull_request",
+              "parameters": {
+                "required_approving_review_count": 0,
+                "dismiss_stale_reviews_on_push": true,
+                "required_reviewers": [],
+                "require_code_owner_review": false,
+                "dismissal_restriction": {
+                  "enabled": false,
+                  "allowed_actors": []
+                },
+                "require_last_push_approval": false,
+                "required_review_thread_resolution": false,
+                "require_extra_approval_for_unattributed_changes": true,
+                "allowed_merge_methods": [
+                  "merge",
+                  "squash",
+                  "rebase"
+                ]
+              }
+            },
+            {
+              "type": "non_fast_forward"
+            },
+            {
+              "type": "required_status_checks",
+              "parameters": {
+                "strict_required_status_checks_policy": false,
+                "do_not_enforce_on_create": false,
+                "required_status_checks": [
+                  {
+                    "context": "DCO"
+                  },
+                  {
+                    "context": "ci-required"
+                  },
+                  {
+                    "context": "Policy"
+                  }
+                ]
+              }
+            }
+          ],
+          "updated_at": "2026-09-18T04:42:49.365+07:00",
+          "bypass_actors": [
+            {
+              "actor_id": 5,
+              "actor_type": "RepositoryRole",
+              "bypass_mode": "always"
+            }
+          ],
+          "current_user_can_bypass": "always",
+          "html_url": "https://github.com/tailrocks/velnor-apt/rules/19572991"
+        },
+        "all_rulesets": [
+          {
+            "id": 19572991,
+            "name": "protect-main",
+            "target": "branch",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "exclude": [],
+                "include": [
+                  "~DEFAULT_BRANCH"
+                ]
+              }
+            },
+            "rules": [
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "pull_request",
+                "parameters": {
+                  "required_approving_review_count": 0,
+                  "dismiss_stale_reviews_on_push": true,
+                  "required_reviewers": [],
+                  "require_code_owner_review": false,
+                  "dismissal_restriction": {
+                    "enabled": false,
+                    "allowed_actors": []
+                  },
+                  "require_last_push_approval": false,
+                  "required_review_thread_resolution": false,
+                  "require_extra_approval_for_unattributed_changes": true,
+                  "allowed_merge_methods": [
+                    "merge",
+                    "squash",
+                    "rebase"
+                  ]
+                }
+              },
+              {
+                "type": "non_fast_forward"
+              },
+              {
+                "type": "required_status_checks",
+                "parameters": {
+                  "strict_required_status_checks_policy": false,
+                  "do_not_enforce_on_create": false,
+                  "required_status_checks": [
+                    {
+                      "context": "DCO"
+                    },
+                    {
+                      "context": "ci-required"
+                    },
+                    {
+                      "context": "Policy"
+                    }
+                  ]
+                }
+              }
+            ],
+            "updated_at": "2026-09-18T04:42:49.365+07:00",
+            "bypass_actors": [
+              {
+                "actor_id": 5,
+                "actor_type": "RepositoryRole",
+                "bypass_mode": "always"
+              }
+            ],
+            "current_user_can_bypass": "always",
+            "html_url": "https://github.com/tailrocks/velnor-apt/rules/19572991"
+          },
+          {
+            "id": 19572989,
+            "name": "protect-tags",
+            "target": "tag",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "exclude": [],
+                "include": [
+                  "~ALL"
+                ]
+              }
+            },
+            "rules": [
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "non_fast_forward"
+              }
+            ],
+            "updated_at": "2026-07-23T00:48:12.082+07:00",
+            "bypass_actors": [],
+            "current_user_can_bypass": "never",
+            "html_url": "https://github.com/tailrocks/velnor-apt/rules/19572989"
+          }
+        ]
+      },
+      "observed_required_contexts_on_prs": [
+        "DCO=COMPLETED/SUCCESS",
+        "Policy=COMPLETED/FAILURE",
+        "ci-required=COMPLETED/FAILURE",
+        "ci-required=COMPLETED/SUCCESS"
+      ],
+      "observed_app_ids": [
+        "DCO-2#974774",
+        "GitHub Actions#15368"
+      ],
+      "pr_classification_counts": {
+        "green-or-nonblocking": 2,
+        "mixed-failure-candidate": 1
+      },
+      "pr_incomplete_counts": {
+        "skipped": 3
+      },
+      "main_verification": {
+        "default_branch": "main",
+        "sha": "b24d7d4370001119cd5ddcb6f9e07aa9007051e7",
+        "check_count": 9,
+        "checkrun_count": 9,
+        "statuscontext_count": 0,
+        "contexts_has_next": false,
+        "status_counts": {
+          "COMPLETED": 9
+        },
+        "conclusion_counts": {
+          "CANCELLED": 1,
+          "FAILURE": 2,
+          "SKIPPED": 3,
+          "SUCCESS": 3
+        },
+        "required_like": [
+          "Policy=COMPLETED/SUCCESS",
+          "ci-required=COMPLETED/FAILURE"
+        ],
+        "app_ids": [
+          "GitHub Actions#15368"
+        ],
+        "failed": [
+          {
+            "name": "ci-required",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/velnor-apt/actions/runs/35334381736/job/105881920390",
+            "app": "GitHub Actions#15368",
+            "run_id": "35334381736"
+          },
+          {
+            "name": "Control / Required",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/velnor-apt/actions/runs/35334381736/job/105881931457",
+            "app": "GitHub Actions#15368",
+            "run_id": "35334381736"
+          }
+        ],
+        "pending": [],
+        "skipped": [
+          {
+            "name": "Control / Velnor admission",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor-apt/actions/runs/35334381736/job/105565736969",
+            "app": "GitHub Actions#15368",
+            "run_id": "35334381736"
+          },
+          {
+            "name": "Documentation · Documentation / Velnor",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor-apt/actions/runs/35334381736/job/105565864072",
+            "app": "GitHub Actions#15368",
+            "run_id": "35334381736"
+          },
+          {
+            "name": "Documentation · Documentation / GitHub",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor-apt/actions/runs/35334381736/job/105565864023",
+            "app": "GitHub Actions#15368",
+            "run_id": "35334381736"
+          }
+        ]
+      },
+      "latest_main_runs": {
+        "fetched_count": 9,
+        "event_counts": {
+          "schedule": 4,
+          "workflow_dispatch": 1,
+          "push": 4
+        },
+        "matching_head_sha_count": 5,
+        "latest_head_sha_runs": [
+          {
+            "id": 35437419982,
+            "run_number": 348,
+            "name": "Renovate · schedule",
+            "display_title": "Renovate · schedule",
+            "event": "schedule",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "b24d7d4370001119cd5ddcb6f9e07aa9007051e7",
+            "head_branch": "main",
+            "workflow_id": 291395170,
+            "path": ".github/workflows/renovate.yml",
+            "created_at": "2026-09-19T10:26:41Z",
+            "updated_at": "2026-09-19T10:27:22Z",
+            "html_url": "https://github.com/tailrocks/velnor-apt/actions/runs/35437419982"
+          },
+          {
+            "id": 35433047049,
+            "run_number": 4,
+            "name": "Package feed · apt · schedule",
+            "display_title": "Package feed · apt · schedule",
+            "event": "schedule",
+            "status": "completed",
+            "conclusion": "failure",
+            "head_sha": "b24d7d4370001119cd5ddcb6f9e07aa9007051e7",
+            "head_branch": "main",
+            "workflow_id": 360913357,
+            "path": ".github/workflows/release.yml",
+            "created_at": "2026-09-19T08:49:37Z",
+            "updated_at": "2026-09-19T08:49:57Z",
+            "html_url": "https://github.com/tailrocks/velnor-apt/actions/runs/35433047049"
+          },
+          {
+            "id": 35431325827,
+            "run_number": 6,
+            "name": "Maintenance · schedule",
+            "display_title": "Maintenance · schedule",
+            "event": "schedule",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "b24d7d4370001119cd5ddcb6f9e07aa9007051e7",
+            "head_branch": "main",
+            "workflow_id": 359486920,
+            "path": ".github/workflows/maintenance.yml",
+            "created_at": "2026-09-19T08:11:18Z",
+            "updated_at": "2026-09-19T08:11:32Z",
+            "html_url": "https://github.com/tailrocks/velnor-apt/actions/runs/35431325827"
+          },
+          {
+            "id": 35430878317,
+            "run_number": 6,
+            "name": "CI / main · workflow_dispatch · main",
+            "display_title": "CI / main · workflow_dispatch · main",
+            "event": "workflow_dispatch",
+            "status": "queued",
+            "conclusion": null,
+            "head_sha": "b24d7d4370001119cd5ddcb6f9e07aa9007051e7",
+            "head_branch": "main",
+            "workflow_id": 359486916,
+            "path": ".github/workflows/ci-main.yml",
+            "created_at": "2026-09-19T08:01:22Z",
+            "updated_at": "2026-09-19T08:01:39Z",
+            "html_url": "https://github.com/tailrocks/velnor-apt/actions/runs/35430878317"
+          },
+          {
+            "id": 35430873514,
+            "run_number": 2,
+            "name": "Nightly · schedule · main",
+            "display_title": "Nightly · schedule · main",
+            "event": "schedule",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "b24d7d4370001119cd5ddcb6f9e07aa9007051e7",
+            "head_branch": "main",
+            "workflow_id": 359486922,
+            "path": ".github/workflows/nightly.yml",
+            "created_at": "2026-09-19T08:01:16Z",
+            "updated_at": "2026-09-19T08:01:25Z",
+            "html_url": "https://github.com/tailrocks/velnor-apt/actions/runs/35430873514"
+          }
+        ],
+        "latest_runs": [
+          {
+            "id": 35437419982,
+            "run_number": 348,
+            "name": "Renovate · schedule",
+            "display_title": "Renovate · schedule",
+            "event": "schedule",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "b24d7d4370001119cd5ddcb6f9e07aa9007051e7",
+            "head_branch": "main",
+            "workflow_id": 291395170,
+            "path": ".github/workflows/renovate.yml",
+            "created_at": "2026-09-19T10:26:41Z",
+            "updated_at": "2026-09-19T10:27:22Z",
+            "html_url": "https://github.com/tailrocks/velnor-apt/actions/runs/35437419982"
+          },
+          {
+            "id": 35433047049,
+            "run_number": 4,
+            "name": "Package feed · apt · schedule",
+            "display_title": "Package feed · apt · schedule",
+            "event": "schedule",
+            "status": "completed",
+            "conclusion": "failure",
+            "head_sha": "b24d7d4370001119cd5ddcb6f9e07aa9007051e7",
+            "head_branch": "main",
+            "workflow_id": 360913357,
+            "path": ".github/workflows/release.yml",
+            "created_at": "2026-09-19T08:49:37Z",
+            "updated_at": "2026-09-19T08:49:57Z",
+            "html_url": "https://github.com/tailrocks/velnor-apt/actions/runs/35433047049"
+          },
+          {
+            "id": 35431325827,
+            "run_number": 6,
+            "name": "Maintenance · schedule",
+            "display_title": "Maintenance · schedule",
+            "event": "schedule",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "b24d7d4370001119cd5ddcb6f9e07aa9007051e7",
+            "head_branch": "main",
+            "workflow_id": 359486920,
+            "path": ".github/workflows/maintenance.yml",
+            "created_at": "2026-09-19T08:11:18Z",
+            "updated_at": "2026-09-19T08:11:32Z",
+            "html_url": "https://github.com/tailrocks/velnor-apt/actions/runs/35431325827"
+          },
+          {
+            "id": 35430878317,
+            "run_number": 6,
+            "name": "CI / main · workflow_dispatch · main",
+            "display_title": "CI / main · workflow_dispatch · main",
+            "event": "workflow_dispatch",
+            "status": "queued",
+            "conclusion": null,
+            "head_sha": "b24d7d4370001119cd5ddcb6f9e07aa9007051e7",
+            "head_branch": "main",
+            "workflow_id": 359486916,
+            "path": ".github/workflows/ci-main.yml",
+            "created_at": "2026-09-19T08:01:22Z",
+            "updated_at": "2026-09-19T08:01:39Z",
+            "html_url": "https://github.com/tailrocks/velnor-apt/actions/runs/35430878317"
+          },
+          {
+            "id": 35430873514,
+            "run_number": 2,
+            "name": "Nightly · schedule · main",
+            "display_title": "Nightly · schedule · main",
+            "event": "schedule",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "b24d7d4370001119cd5ddcb6f9e07aa9007051e7",
+            "head_branch": "main",
+            "workflow_id": 359486922,
+            "path": ".github/workflows/nightly.yml",
+            "created_at": "2026-09-19T08:01:16Z",
+            "updated_at": "2026-09-19T08:01:25Z",
+            "html_url": "https://github.com/tailrocks/velnor-apt/actions/runs/35430873514"
+          },
+          {
+            "id": 35078678277,
+            "run_number": 346,
+            "name": "Renovate",
+            "display_title": "Regenerate velnor-workflow outputs (#226)",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "12669a519ecb35a64e3a6c584f4178ecb7be6d50",
+            "head_branch": "main",
+            "workflow_id": 291395170,
+            "path": ".github/workflows/renovate.yml",
+            "created_at": "2026-09-16T09:18:38Z",
+            "updated_at": "2026-09-16T09:29:02Z",
+            "html_url": "https://github.com/tailrocks/velnor-apt/actions/runs/35078678277"
+          },
+          {
+            "id": 35078678750,
+            "run_number": 1,
+            "name": "CI / main · push · main",
+            "display_title": "CI / main · push · main",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "failure",
+            "head_sha": "12669a519ecb35a64e3a6c584f4178ecb7be6d50",
+            "head_branch": "main",
+            "workflow_id": 359486916,
+            "path": ".github/workflows/ci-main.yml",
+            "created_at": "2026-09-16T09:18:38Z",
+            "updated_at": "2026-09-16T09:31:50Z",
+            "html_url": "https://github.com/tailrocks/velnor-apt/actions/runs/35078678750"
+          },
+          {
+            "id": 35078678609,
+            "run_number": 462,
+            "name": "CI",
+            "display_title": "CI",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "12669a519ecb35a64e3a6c584f4178ecb7be6d50",
+            "head_branch": "main",
+            "workflow_id": 333397143,
+            "path": ".github/workflows/ci.yml",
+            "created_at": "2026-09-16T09:18:38Z",
+            "updated_at": "2026-09-16T09:32:19Z",
+            "html_url": "https://github.com/tailrocks/velnor-apt/actions/runs/35078678609"
+          },
+          {
+            "id": 35073269894,
+            "run_number": 458,
+            "name": "CI",
+            "display_title": "CI",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "64047d822a8c9ac33eedfe37a0a920a494965cc3",
+            "head_branch": "main",
+            "workflow_id": 333397143,
+            "path": ".github/workflows/ci.yml",
+            "created_at": "2026-09-16T08:20:51Z",
+            "updated_at": "2026-09-16T08:21:51Z",
+            "html_url": "https://github.com/tailrocks/velnor-apt/actions/runs/35073269894"
+          }
+        ],
+        "child_dispatch_candidates": [
+          {
+            "id": 35430878317,
+            "run_number": 6,
+            "name": "CI / main · workflow_dispatch · main",
+            "display_title": "CI / main · workflow_dispatch · main",
+            "event": "workflow_dispatch",
+            "status": "queued",
+            "conclusion": null,
+            "head_sha": "b24d7d4370001119cd5ddcb6f9e07aa9007051e7",
+            "head_branch": "main",
+            "workflow_id": 359486916,
+            "path": ".github/workflows/ci-main.yml",
+            "created_at": "2026-09-19T08:01:22Z",
+            "updated_at": "2026-09-19T08:01:39Z",
+            "html_url": "https://github.com/tailrocks/velnor-apt/actions/runs/35430878317",
+            "relation_basis": "event=workflow_dispatch;parent_run_id_not_exposed_by_list_runs"
+          }
+        ],
+        "child_dispatch_note": "Candidate only; list-runs exposes event/head SHA but no parent run ID. Do not infer lineage."
+      }
+    },
+    "tailrocks/parallax": {
+      "default_branch": "main",
+      "default_sha": "6a12bf47a816b63e848b563aaa45ef9694159c79",
+      "open_pr_count": 3,
+      "open_pr_numbers": [
+        109,
+        110,
+        111
+      ],
+      "current_pr_heads": [
+        {
+          "pr": 109,
+          "head_sha": "93cee3556b3bf08c9ba38a43aace43312c233c0a",
+          "classification": "mixed-failure-candidate",
+          "incomplete_flags": ""
+        },
+        {
+          "pr": 110,
+          "head_sha": "de3fd1c7d347ec8cc98bf4f811b73ec639506236",
+          "classification": "mixed-failure-candidate",
+          "incomplete_flags": "context-pagination+skipped"
+        },
+        {
+          "pr": 111,
+          "head_sha": "6fcc10be6409e73cfb5e9eeb7eb48dbaadbec05d",
+          "classification": "mixed-failure-candidate",
+          "incomplete_flags": "skipped"
+        }
+      ],
+      "ruleset_contract": {
+        "branch_protection": {
+          "http_status": 404,
+          "body": {
+            "message": "Branch not protected",
+            "documentation_url": "https://docs.github.com/rest/branches/branch-protection#get-branch-protection",
+            "status": "404"
+          }
+        },
+        "required_contexts": [
+          "DCO",
+          "Policy",
+          "ci-required"
+        ],
+        "protect_main": {
+          "id": 19573072,
+          "name": "protect-main",
+          "target": "branch",
+          "enforcement": "active",
+          "conditions": {
+            "ref_name": {
+              "exclude": [],
+              "include": [
+                "~DEFAULT_BRANCH"
+              ]
+            }
+          },
+          "rules": [
+            {
+              "type": "deletion"
+            },
+            {
+              "type": "non_fast_forward"
+            },
+            {
+              "type": "pull_request",
+              "parameters": {
+                "required_approving_review_count": 0,
+                "dismiss_stale_reviews_on_push": true,
+                "required_reviewers": [],
+                "require_code_owner_review": false,
+                "dismissal_restriction": {
+                  "enabled": false,
+                  "allowed_actors": []
+                },
+                "require_last_push_approval": false,
+                "required_review_thread_resolution": false,
+                "require_extra_approval_for_unattributed_changes": true,
+                "allowed_merge_methods": [
+                  "merge",
+                  "squash",
+                  "rebase"
+                ]
+              }
+            },
+            {
+              "type": "required_status_checks",
+              "parameters": {
+                "strict_required_status_checks_policy": false,
+                "do_not_enforce_on_create": false,
+                "required_status_checks": [
+                  {
+                    "context": "DCO"
+                  },
+                  {
+                    "context": "Policy"
+                  },
+                  {
+                    "context": "ci-required"
+                  }
+                ]
+              }
+            }
+          ],
+          "updated_at": "2026-09-16T15:28:14.197+07:00",
+          "bypass_actors": [
+            {
+              "actor_id": 5,
+              "actor_type": "RepositoryRole",
+              "bypass_mode": "always"
+            }
+          ],
+          "current_user_can_bypass": "always",
+          "html_url": "https://github.com/tailrocks/parallax/rules/19573072"
+        },
+        "all_rulesets": [
+          {
+            "id": 19573072,
+            "name": "protect-main",
+            "target": "branch",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "exclude": [],
+                "include": [
+                  "~DEFAULT_BRANCH"
+                ]
+              }
+            },
+            "rules": [
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "non_fast_forward"
+              },
+              {
+                "type": "pull_request",
+                "parameters": {
+                  "required_approving_review_count": 0,
+                  "dismiss_stale_reviews_on_push": true,
+                  "required_reviewers": [],
+                  "require_code_owner_review": false,
+                  "dismissal_restriction": {
+                    "enabled": false,
+                    "allowed_actors": []
+                  },
+                  "require_last_push_approval": false,
+                  "required_review_thread_resolution": false,
+                  "require_extra_approval_for_unattributed_changes": true,
+                  "allowed_merge_methods": [
+                    "merge",
+                    "squash",
+                    "rebase"
+                  ]
+                }
+              },
+              {
+                "type": "required_status_checks",
+                "parameters": {
+                  "strict_required_status_checks_policy": false,
+                  "do_not_enforce_on_create": false,
+                  "required_status_checks": [
+                    {
+                      "context": "DCO"
+                    },
+                    {
+                      "context": "Policy"
+                    },
+                    {
+                      "context": "ci-required"
+                    }
+                  ]
+                }
+              }
+            ],
+            "updated_at": "2026-09-16T15:28:14.197+07:00",
+            "bypass_actors": [
+              {
+                "actor_id": 5,
+                "actor_type": "RepositoryRole",
+                "bypass_mode": "always"
+              }
+            ],
+            "current_user_can_bypass": "always",
+            "html_url": "https://github.com/tailrocks/parallax/rules/19573072"
+          },
+          {
+            "id": 19572998,
+            "name": "protect-tags",
+            "target": "tag",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "exclude": [],
+                "include": [
+                  "~ALL"
+                ]
+              }
+            },
+            "rules": [
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "non_fast_forward"
+              }
+            ],
+            "updated_at": "2026-07-23T00:48:25.543+07:00",
+            "bypass_actors": [],
+            "current_user_can_bypass": "never",
+            "html_url": "https://github.com/tailrocks/parallax/rules/19572998"
+          },
+          {
+            "id": 19090444,
+            "name": "stable tag protection",
+            "target": "tag",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "exclude": [],
+                "include": [
+                  "refs/tags/v*"
+                ]
+              }
+            },
+            "rules": [
+              {
+                "type": "creation"
+              },
+              {
+                "type": "update"
+              },
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "non_fast_forward"
+              }
+            ],
+            "updated_at": "2026-07-17T14:19:57.265+07:00",
+            "bypass_actors": [
+              {
+                "actor_id": 5,
+                "actor_type": "RepositoryRole",
+                "bypass_mode": "always"
+              }
+            ],
+            "current_user_can_bypass": "always",
+            "html_url": "https://github.com/tailrocks/parallax/rules/19090444"
+          }
+        ]
+      },
+      "observed_required_contexts_on_prs": [
+        "DCO=COMPLETED/SUCCESS",
+        "Policy=COMPLETED/FAILURE",
+        "Policy=COMPLETED/SUCCESS",
+        "ci-required=COMPLETED/FAILURE"
+      ],
+      "observed_app_ids": [
+        "DCO-2#974774",
+        "GitHub Actions#15368"
+      ],
+      "pr_classification_counts": {
+        "mixed-failure-candidate": 3
+      },
+      "pr_incomplete_counts": {
+        "context-pagination+skipped": 1,
+        "skipped": 1
+      },
+      "main_verification": {
+        "default_branch": "main",
+        "sha": "6a12bf47a816b63e848b563aaa45ef9694159c79",
+        "check_count": 52,
+        "checkrun_count": 52,
+        "statuscontext_count": 0,
+        "contexts_has_next": false,
+        "status_counts": {
+          "COMPLETED": 52
+        },
+        "conclusion_counts": {
+          "FAILURE": 3,
+          "SKIPPED": 48,
+          "SUCCESS": 1
+        },
+        "required_like": [
+          "Policy=COMPLETED/FAILURE",
+          "ci-required=COMPLETED/FAILURE"
+        ],
+        "app_ids": [
+          "GitHub Actions#15368"
+        ],
+        "failed": [
+          {
+            "name": "Policy",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104859545334",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "ci-required",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864291702",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Control / Required",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104865105540",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          }
+        ],
+        "pending": [],
+        "skipped": [
+          {
+            "name": "Control / Velnor admission",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104859547120",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Bun · Bun package (ui)",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864291089",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Bun · Bun package (ui)",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864291098",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Docker · Docker (bench/otlp-fanout/maple)",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290673",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Docker · Docker (bench/otlp-fanout/maple)",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290585",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Docker · Docker (crates/parallax-sentry-proxy)",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864291328",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Docker · Docker (crates/parallax-sentry-proxy)",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290098",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Control / Prepare Cargo",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290921",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · nextest-evidence-fixture",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864291300",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-analysis",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864291611",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-api",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864291319",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-cli",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290996",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-evidence",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290875",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-greptime",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290419",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-ingest",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290872",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-mcp",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864291526",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-metadata",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864291527",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-model",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864291813",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-proto",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864291472",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-redaction",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864291693",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-semconv",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290732",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-sentry-proxy",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290871",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-server",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290511",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-spool",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290914",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-storage",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290525",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-test-support",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864291561",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-xtask",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290910",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · Rust dependency policy",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290855",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · nextest-evidence-fixture",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864292782",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-analysis",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864292410",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-api",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864293591",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-cli",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864292888",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-evidence",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864292842",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-greptime",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864292928",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-ingest",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864292712",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-mcp",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864293394",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-metadata",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864292490",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-model",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864292798",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-proto",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864292121",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-redaction",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864293453",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-semconv",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864293507",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-sentry-proxy",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864293437",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-server",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864293242",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-spool",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864293451",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-storage",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864293290",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-test-support",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864293483",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · parallax-xtask",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864292286",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "name": "Rust · Rust dependency policy",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864292898",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          }
+        ]
+      },
+      "latest_main_runs": {
+        "fetched_count": 0,
+        "event_counts": {},
+        "matching_head_sha_count": 0,
+        "latest_head_sha_runs": [],
+        "latest_runs": [],
+        "child_dispatch_candidates": [],
+        "child_dispatch_note": "No workflow_run/repository_dispatch/workflow_dispatch run in fetched latest-20 main list; relation not discoverable here."
+      }
+    },
+    "tailrocks/homebrew-holla": {
+      "default_branch": "main",
+      "default_sha": "cc25db8fd911cdf965652d3b094c10d006d056ee",
+      "open_pr_count": 2,
+      "open_pr_numbers": [
+        139,
+        142
+      ],
+      "current_pr_heads": [
+        {
+          "pr": 139,
+          "head_sha": "3417b0dfcbea8012b16e1df7accabdcc65fe472d",
+          "classification": "infrastructure-or-generator-candidate",
+          "incomplete_flags": ""
+        },
+        {
+          "pr": 142,
+          "head_sha": "6d99218e94de4be7280e26ec642fbdf3f5773555",
+          "classification": "infrastructure-or-generator-candidate",
+          "incomplete_flags": ""
+        }
+      ],
+      "ruleset_contract": {
+        "branch_protection": {
+          "http_status": 404,
+          "body": {
+            "message": "Branch not protected",
+            "documentation_url": "https://docs.github.com/rest/branches/branch-protection#get-branch-protection",
+            "status": "404"
+          }
+        },
+        "required_contexts": [
+          "DCO",
+          "Policy",
+          "ci-required"
+        ],
+        "protect_main": {
+          "id": 19573039,
+          "name": "protect-main",
+          "target": "branch",
+          "enforcement": "active",
+          "conditions": {
+            "ref_name": {
+              "exclude": [],
+              "include": [
+                "~DEFAULT_BRANCH"
+              ]
+            }
+          },
+          "rules": [
+            {
+              "type": "deletion"
+            },
+            {
+              "type": "pull_request",
+              "parameters": {
+                "required_approving_review_count": 0,
+                "dismiss_stale_reviews_on_push": true,
+                "required_reviewers": [],
+                "require_code_owner_review": false,
+                "dismissal_restriction": {
+                  "enabled": false,
+                  "allowed_actors": []
+                },
+                "require_last_push_approval": false,
+                "required_review_thread_resolution": false,
+                "require_extra_approval_for_unattributed_changes": true,
+                "allowed_merge_methods": [
+                  "merge",
+                  "squash",
+                  "rebase"
+                ]
+              }
+            },
+            {
+              "type": "non_fast_forward"
+            },
+            {
+              "type": "required_status_checks",
+              "parameters": {
+                "strict_required_status_checks_policy": false,
+                "do_not_enforce_on_create": false,
+                "required_status_checks": [
+                  {
+                    "context": "DCO"
+                  },
+                  {
+                    "context": "Policy"
+                  },
+                  {
+                    "context": "ci-required"
+                  }
+                ]
+              }
+            }
+          ],
+          "updated_at": "2026-09-16T15:11:42.864+07:00",
+          "bypass_actors": [
+            {
+              "actor_id": 5,
+              "actor_type": "RepositoryRole",
+              "bypass_mode": "always"
+            }
+          ],
+          "current_user_can_bypass": "always",
+          "html_url": "https://github.com/tailrocks/homebrew-holla/rules/19573039"
+        },
+        "all_rulesets": [
+          {
+            "id": 19573039,
+            "name": "protect-main",
+            "target": "branch",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "exclude": [],
+                "include": [
+                  "~DEFAULT_BRANCH"
+                ]
+              }
+            },
+            "rules": [
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "pull_request",
+                "parameters": {
+                  "required_approving_review_count": 0,
+                  "dismiss_stale_reviews_on_push": true,
+                  "required_reviewers": [],
+                  "require_code_owner_review": false,
+                  "dismissal_restriction": {
+                    "enabled": false,
+                    "allowed_actors": []
+                  },
+                  "require_last_push_approval": false,
+                  "required_review_thread_resolution": false,
+                  "require_extra_approval_for_unattributed_changes": true,
+                  "allowed_merge_methods": [
+                    "merge",
+                    "squash",
+                    "rebase"
+                  ]
+                }
+              },
+              {
+                "type": "non_fast_forward"
+              },
+              {
+                "type": "required_status_checks",
+                "parameters": {
+                  "strict_required_status_checks_policy": false,
+                  "do_not_enforce_on_create": false,
+                  "required_status_checks": [
+                    {
+                      "context": "DCO"
+                    },
+                    {
+                      "context": "Policy"
+                    },
+                    {
+                      "context": "ci-required"
+                    }
+                  ]
+                }
+              }
+            ],
+            "updated_at": "2026-09-16T15:11:42.864+07:00",
+            "bypass_actors": [
+              {
+                "actor_id": 5,
+                "actor_type": "RepositoryRole",
+                "bypass_mode": "always"
+              }
+            ],
+            "current_user_can_bypass": "always",
+            "html_url": "https://github.com/tailrocks/homebrew-holla/rules/19573039"
+          },
+          {
+            "id": 19573001,
+            "name": "protect-tags",
+            "target": "tag",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "exclude": [],
+                "include": [
+                  "~ALL"
+                ]
+              }
+            },
+            "rules": [
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "non_fast_forward"
+              }
+            ],
+            "updated_at": "2026-07-23T00:48:27.107+07:00",
+            "bypass_actors": [],
+            "current_user_can_bypass": "never",
+            "html_url": "https://github.com/tailrocks/homebrew-holla/rules/19573001"
+          }
+        ]
+      },
+      "observed_required_contexts_on_prs": [
+        "DCO=COMPLETED/SUCCESS",
+        "Policy=COMPLETED/FAILURE",
+        "ci-required=COMPLETED/SUCCESS"
+      ],
+      "observed_app_ids": [
+        "DCO-2#974774",
+        "GitHub Actions#15368"
+      ],
+      "pr_classification_counts": {
+        "infrastructure-or-generator-candidate": 2
+      },
+      "pr_incomplete_counts": {},
+      "main_verification": {
+        "default_branch": "main",
+        "sha": "cc25db8fd911cdf965652d3b094c10d006d056ee",
+        "check_count": 7,
+        "checkrun_count": 7,
+        "statuscontext_count": 0,
+        "contexts_has_next": false,
+        "status_counts": {
+          "COMPLETED": 7
+        },
+        "conclusion_counts": {
+          "FAILURE": 3,
+          "SKIPPED": 3,
+          "SUCCESS": 1
+        },
+        "required_like": [
+          "Policy=COMPLETED/FAILURE",
+          "ci-required=COMPLETED/FAILURE"
+        ],
+        "app_ids": [
+          "GitHub Actions#15368"
+        ],
+        "failed": [
+          {
+            "name": "Policy",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/homebrew-holla/actions/runs/35115278586/job/104859001994",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115278586"
+          },
+          {
+            "name": "ci-required",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/homebrew-holla/actions/runs/35115278586/job/104868305025",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115278586"
+          },
+          {
+            "name": "Control / Required",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/homebrew-holla/actions/runs/35115278586/job/104874789046",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115278586"
+          }
+        ],
+        "pending": [],
+        "skipped": [
+          {
+            "name": "Control / Velnor admission",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/homebrew-holla/actions/runs/35115278586/job/104859003798",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115278586"
+          },
+          {
+            "name": "Homebrew · Homebrew",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/homebrew-holla/actions/runs/35115278586/job/104868305383",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115278586"
+          },
+          {
+            "name": "Homebrew · Homebrew",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/homebrew-holla/actions/runs/35115278586/job/104868305488",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115278586"
+          }
+        ]
+      },
+      "latest_main_runs": {
+        "fetched_count": 0,
+        "event_counts": {},
+        "matching_head_sha_count": 0,
+        "latest_head_sha_runs": [],
+        "latest_runs": [],
+        "child_dispatch_candidates": [],
+        "child_dispatch_note": "No workflow_run/repository_dispatch/workflow_dispatch run in fetched latest-20 main list; relation not discoverable here."
+      }
+    },
+    "tailrocks/holla-apt": {
+      "default_branch": "main",
+      "default_sha": "0636074d4a16be4771685bd95bf2cec739cf359c",
+      "open_pr_count": 4,
+      "open_pr_numbers": [
+        75,
+        78,
+        80,
+        82
+      ],
+      "current_pr_heads": [
+        {
+          "pr": 75,
+          "head_sha": "656321c1b2c622c6b0ce3b328639c92fe7af5a11",
+          "classification": "mixed-failure-candidate",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 78,
+          "head_sha": "d2cc7b899d1ddbc6b64f6bebddc3df7577a7c045",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 80,
+          "head_sha": "13bdcc9759943194181edecb22d59c11442619f5",
+          "classification": "mixed-failure-candidate",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 82,
+          "head_sha": "cb22936ba2628b6c74e4a073f260f9b4b1f3a579",
+          "classification": "mixed-failure-candidate",
+          "incomplete_flags": "skipped"
+        }
+      ],
+      "ruleset_contract": {
+        "branch_protection": {
+          "http_status": 404,
+          "body": {
+            "message": "Branch not protected",
+            "documentation_url": "https://docs.github.com/rest/branches/branch-protection#get-branch-protection",
+            "status": "404"
+          }
+        },
+        "required_contexts": [
+          "DCO",
+          "ci-required"
+        ],
+        "protect_main": {
+          "id": 19573059,
+          "name": "protect-main",
+          "target": "branch",
+          "enforcement": "active",
+          "conditions": {
+            "ref_name": {
+              "exclude": [],
+              "include": [
+                "~DEFAULT_BRANCH"
+              ]
+            }
+          },
+          "rules": [
+            {
+              "type": "deletion"
+            },
+            {
+              "type": "pull_request",
+              "parameters": {
+                "required_approving_review_count": 0,
+                "dismiss_stale_reviews_on_push": true,
+                "required_reviewers": [],
+                "require_code_owner_review": false,
+                "dismissal_restriction": {
+                  "enabled": false,
+                  "allowed_actors": []
+                },
+                "require_last_push_approval": false,
+                "required_review_thread_resolution": false,
+                "require_extra_approval_for_unattributed_changes": true,
+                "allowed_merge_methods": [
+                  "merge",
+                  "squash",
+                  "rebase"
+                ]
+              }
+            },
+            {
+              "type": "non_fast_forward"
+            },
+            {
+              "type": "required_status_checks",
+              "parameters": {
+                "strict_required_status_checks_policy": false,
+                "do_not_enforce_on_create": false,
+                "required_status_checks": [
+                  {
+                    "context": "DCO"
+                  },
+                  {
+                    "context": "ci-required"
+                  }
+                ]
+              }
+            }
+          ],
+          "updated_at": "2026-09-16T15:27:32.563+07:00",
+          "bypass_actors": [
+            {
+              "actor_id": 5,
+              "actor_type": "RepositoryRole",
+              "bypass_mode": "always"
+            }
+          ],
+          "current_user_can_bypass": "always",
+          "html_url": "https://github.com/tailrocks/holla-apt/rules/19573059"
+        },
+        "all_rulesets": [
+          {
+            "id": 19573059,
+            "name": "protect-main",
+            "target": "branch",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "exclude": [],
+                "include": [
+                  "~DEFAULT_BRANCH"
+                ]
+              }
+            },
+            "rules": [
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "pull_request",
+                "parameters": {
+                  "required_approving_review_count": 0,
+                  "dismiss_stale_reviews_on_push": true,
+                  "required_reviewers": [],
+                  "require_code_owner_review": false,
+                  "dismissal_restriction": {
+                    "enabled": false,
+                    "allowed_actors": []
+                  },
+                  "require_last_push_approval": false,
+                  "required_review_thread_resolution": false,
+                  "require_extra_approval_for_unattributed_changes": true,
+                  "allowed_merge_methods": [
+                    "merge",
+                    "squash",
+                    "rebase"
+                  ]
+                }
+              },
+              {
+                "type": "non_fast_forward"
+              },
+              {
+                "type": "required_status_checks",
+                "parameters": {
+                  "strict_required_status_checks_policy": false,
+                  "do_not_enforce_on_create": false,
+                  "required_status_checks": [
+                    {
+                      "context": "DCO"
+                    },
+                    {
+                      "context": "ci-required"
+                    }
+                  ]
+                }
+              }
+            ],
+            "updated_at": "2026-09-16T15:27:32.563+07:00",
+            "bypass_actors": [
+              {
+                "actor_id": 5,
+                "actor_type": "RepositoryRole",
+                "bypass_mode": "always"
+              }
+            ],
+            "current_user_can_bypass": "always",
+            "html_url": "https://github.com/tailrocks/holla-apt/rules/19573059"
+          },
+          {
+            "id": 19573011,
+            "name": "protect-tags",
+            "target": "tag",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "exclude": [],
+                "include": [
+                  "~ALL"
+                ]
+              }
+            },
+            "rules": [
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "non_fast_forward"
+              }
+            ],
+            "updated_at": "2026-07-23T00:48:33.531+07:00",
+            "bypass_actors": [],
+            "current_user_can_bypass": "never",
+            "html_url": "https://github.com/tailrocks/holla-apt/rules/19573011"
+          }
+        ]
+      },
+      "observed_required_contexts_on_prs": [
+        "DCO=COMPLETED/SUCCESS",
+        "Policy=COMPLETED/FAILURE",
+        "ci-required=COMPLETED/FAILURE",
+        "ci-required=COMPLETED/SUCCESS"
+      ],
+      "observed_app_ids": [
+        "DCO-2#974774",
+        "GitHub Actions#15368"
+      ],
+      "pr_classification_counts": {
+        "mixed-failure-candidate": 3,
+        "green-or-nonblocking": 1
+      },
+      "pr_incomplete_counts": {
+        "skipped": 4
+      },
+      "main_verification": {
+        "default_branch": "main",
+        "sha": "0636074d4a16be4771685bd95bf2cec739cf359c",
+        "check_count": 0,
+        "checkrun_count": 0,
+        "statuscontext_count": 0,
+        "contexts_has_next": false,
+        "status_counts": {},
+        "conclusion_counts": {},
+        "required_like": [],
+        "app_ids": [],
+        "failed": [],
+        "pending": [],
+        "skipped": []
+      },
+      "latest_main_runs": {
+        "fetched_count": 9,
+        "event_counts": {
+          "push": 5,
+          "schedule": 4
+        },
+        "matching_head_sha_count": 0,
+        "latest_head_sha_runs": [],
+        "latest_runs": [
+          {
+            "id": 35078736034,
+            "run_number": 172,
+            "name": "CI",
+            "display_title": "CI",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "6f0c97e961568df6d1fb0cd0efe88a229e3fd386",
+            "head_branch": "main",
+            "workflow_id": 333397206,
+            "path": ".github/workflows/ci.yml",
+            "created_at": "2026-09-16T09:19:14Z",
+            "updated_at": "2026-09-16T09:33:02Z",
+            "html_url": "https://github.com/tailrocks/holla-apt/actions/runs/35078736034"
+          },
+          {
+            "id": 35078735910,
+            "run_number": 2,
+            "name": "CI / main · push · main",
+            "display_title": "CI / main · push · main",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "failure",
+            "head_sha": "6f0c97e961568df6d1fb0cd0efe88a229e3fd386",
+            "head_branch": "main",
+            "workflow_id": 359389345,
+            "path": ".github/workflows/ci-main.yml",
+            "created_at": "2026-09-16T09:19:14Z",
+            "updated_at": "2026-09-16T09:33:28Z",
+            "html_url": "https://github.com/tailrocks/holla-apt/actions/runs/35078735910"
+          },
+          {
+            "id": 35078735591,
+            "run_number": 202,
+            "name": "Renovate",
+            "display_title": "Regenerate velnor-workflow outputs (#84)",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "6f0c97e961568df6d1fb0cd0efe88a229e3fd386",
+            "head_branch": "main",
+            "workflow_id": 291395038,
+            "path": ".github/workflows/renovate.yml",
+            "created_at": "2026-09-16T09:19:14Z",
+            "updated_at": "2026-09-16T09:31:23Z",
+            "html_url": "https://github.com/tailrocks/holla-apt/actions/runs/35078735591"
+          },
+          {
+            "id": 35074058840,
+            "run_number": 168,
+            "name": "CI",
+            "display_title": "CI",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "e1361d305733b0c559fb7152cee05f0e8853102d",
+            "head_branch": "main",
+            "workflow_id": 333397206,
+            "path": ".github/workflows/ci.yml",
+            "created_at": "2026-09-16T08:29:29Z",
+            "updated_at": "2026-09-16T08:30:10Z",
+            "html_url": "https://github.com/tailrocks/holla-apt/actions/runs/35074058840"
+          },
+          {
+            "id": 35074058606,
+            "run_number": 201,
+            "name": "Renovate",
+            "display_title": "fix(ci): add fleet:check task and declare DCO policy (#83)",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "e1361d305733b0c559fb7152cee05f0e8853102d",
+            "head_branch": "main",
+            "workflow_id": 291395038,
+            "path": ".github/workflows/renovate.yml",
+            "created_at": "2026-09-16T08:29:29Z",
+            "updated_at": "2026-09-16T08:31:05Z",
+            "html_url": "https://github.com/tailrocks/holla-apt/actions/runs/35074058606"
+          },
+          {
+            "id": 34843756483,
+            "run_number": 198,
+            "name": "Renovate",
+            "display_title": "Renovate",
+            "event": "schedule",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "d76974ffeac2abf2e17a6a4251392c62b5b63b18",
+            "head_branch": "main",
+            "workflow_id": 291395038,
+            "path": ".github/workflows/renovate.yml",
+            "created_at": "2026-09-14T12:30:05Z",
+            "updated_at": "2026-09-14T12:31:21Z",
+            "html_url": "https://github.com/tailrocks/holla-apt/actions/runs/34843756483"
+          },
+          {
+            "id": 34808983880,
+            "run_number": 133,
+            "name": "Package update",
+            "display_title": "Package update",
+            "event": "schedule",
+            "status": "completed",
+            "conclusion": "cancelled",
+            "head_sha": "d76974ffeac2abf2e17a6a4251392c62b5b63b18",
+            "head_branch": "main",
+            "workflow_id": 332747355,
+            "path": ".github/workflows/package-update.yml",
+            "created_at": "2026-09-14T05:15:49Z",
+            "updated_at": "2026-09-14T13:09:20Z",
+            "html_url": "https://github.com/tailrocks/holla-apt/actions/runs/34808983880"
+          },
+          {
+            "id": 34782456028,
+            "run_number": 132,
+            "name": "Package update",
+            "display_title": "Package update",
+            "event": "schedule",
+            "status": "completed",
+            "conclusion": "cancelled",
+            "head_sha": "d76974ffeac2abf2e17a6a4251392c62b5b63b18",
+            "head_branch": "main",
+            "workflow_id": 332747355,
+            "path": ".github/workflows/package-update.yml",
+            "created_at": "2026-09-13T20:59:56Z",
+            "updated_at": "2026-09-14T05:15:50Z",
+            "html_url": "https://github.com/tailrocks/holla-apt/actions/runs/34782456028"
+          },
+          {
+            "id": 34768885671,
+            "run_number": 131,
+            "name": "Package update",
+            "display_title": "Package update",
+            "event": "schedule",
+            "status": "completed",
+            "conclusion": "cancelled",
+            "head_sha": "d76974ffeac2abf2e17a6a4251392c62b5b63b18",
+            "head_branch": "main",
+            "workflow_id": 332747355,
+            "path": ".github/workflows/package-update.yml",
+            "created_at": "2026-09-13T16:32:23Z",
+            "updated_at": "2026-09-13T20:59:57Z",
+            "html_url": "https://github.com/tailrocks/holla-apt/actions/runs/34768885671"
+          }
+        ],
+        "child_dispatch_candidates": [],
+        "child_dispatch_note": "No workflow_run/repository_dispatch/workflow_dispatch run in fetched latest-20 main list; relation not discoverable here."
+      }
+    },
+    "tailrocks/holla": {
+      "default_branch": "main",
+      "default_sha": "027dac6be2070b7e836c1ca123861fcbade72003",
+      "open_pr_count": 9,
+      "open_pr_numbers": [
+        197,
+        198,
+        199,
+        200,
+        201,
+        202,
+        203,
+        204,
+        205
+      ],
+      "current_pr_heads": [
+        {
+          "pr": 197,
+          "head_sha": "ff0380b60f0d421d613415058e31f38a04d093e7",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 198,
+          "head_sha": "78bef1342e78be846b2f6a671575f0862e863b1e",
+          "classification": "mixed-failure-candidate",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 199,
+          "head_sha": "302aa82b97ffc9a19c9f7754ab847fc85af7adf5",
+          "classification": "mixed-failure-candidate",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 200,
+          "head_sha": "7fa500bfed3a8a674f98e2e26748886ba463b3a0",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 201,
+          "head_sha": "0ac85d5f48c9cee4777c4e9ffa5023ce747f543b",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 202,
+          "head_sha": "560b51105c76c7f90673989b06843b091a51a90a",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 203,
+          "head_sha": "da506eec7455a3ddf2559bea3aca1e223b4619f0",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 204,
+          "head_sha": "ffd1b8b396469fd3bbdaa1f9d19d40d1d81cab2f",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 205,
+          "head_sha": "198b53881d1a51d3140a92c9c73f62c9fc2bdbd7",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        }
+      ],
+      "ruleset_contract": {
+        "branch_protection": {
+          "http_status": 404,
+          "body": {
+            "message": "Branch not protected",
+            "documentation_url": "https://docs.github.com/rest/branches/branch-protection#get-branch-protection",
+            "status": "404"
+          }
+        },
+        "required_contexts": [
+          "DCO",
+          "ci-required"
+        ],
+        "protect_main": {
+          "id": 19573066,
+          "name": "protect-main",
+          "target": "branch",
+          "enforcement": "active",
+          "conditions": {
+            "ref_name": {
+              "exclude": [],
+              "include": [
+                "~DEFAULT_BRANCH"
+              ]
+            }
+          },
+          "rules": [
+            {
+              "type": "deletion"
+            },
+            {
+              "type": "pull_request",
+              "parameters": {
+                "required_approving_review_count": 0,
+                "dismiss_stale_reviews_on_push": true,
+                "required_reviewers": [],
+                "require_code_owner_review": false,
+                "dismissal_restriction": {
+                  "enabled": false,
+                  "allowed_actors": []
+                },
+                "require_last_push_approval": false,
+                "required_review_thread_resolution": false,
+                "require_extra_approval_for_unattributed_changes": true,
+                "allowed_merge_methods": [
+                  "merge",
+                  "squash",
+                  "rebase"
+                ]
+              }
+            },
+            {
+              "type": "non_fast_forward"
+            },
+            {
+              "type": "required_status_checks",
+              "parameters": {
+                "strict_required_status_checks_policy": false,
+                "do_not_enforce_on_create": false,
+                "required_status_checks": [
+                  {
+                    "context": "DCO"
+                  },
+                  {
+                    "context": "ci-required"
+                  }
+                ]
+              }
+            }
+          ],
+          "updated_at": "2026-09-15T18:29:29.886+07:00",
+          "bypass_actors": [
+            {
+              "actor_id": 5,
+              "actor_type": "RepositoryRole",
+              "bypass_mode": "always"
+            }
+          ],
+          "current_user_can_bypass": "always",
+          "html_url": "https://github.com/tailrocks/holla/rules/19573066"
+        },
+        "all_rulesets": [
+          {
+            "id": 19573066,
+            "name": "protect-main",
+            "target": "branch",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "exclude": [],
+                "include": [
+                  "~DEFAULT_BRANCH"
+                ]
+              }
+            },
+            "rules": [
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "pull_request",
+                "parameters": {
+                  "required_approving_review_count": 0,
+                  "dismiss_stale_reviews_on_push": true,
+                  "required_reviewers": [],
+                  "require_code_owner_review": false,
+                  "dismissal_restriction": {
+                    "enabled": false,
+                    "allowed_actors": []
+                  },
+                  "require_last_push_approval": false,
+                  "required_review_thread_resolution": false,
+                  "require_extra_approval_for_unattributed_changes": true,
+                  "allowed_merge_methods": [
+                    "merge",
+                    "squash",
+                    "rebase"
+                  ]
+                }
+              },
+              {
+                "type": "non_fast_forward"
+              },
+              {
+                "type": "required_status_checks",
+                "parameters": {
+                  "strict_required_status_checks_policy": false,
+                  "do_not_enforce_on_create": false,
+                  "required_status_checks": [
+                    {
+                      "context": "DCO"
+                    },
+                    {
+                      "context": "ci-required"
+                    }
+                  ]
+                }
+              }
+            ],
+            "updated_at": "2026-09-15T18:29:29.886+07:00",
+            "bypass_actors": [
+              {
+                "actor_id": 5,
+                "actor_type": "RepositoryRole",
+                "bypass_mode": "always"
+              }
+            ],
+            "current_user_can_bypass": "always",
+            "html_url": "https://github.com/tailrocks/holla/rules/19573066"
+          },
+          {
+            "id": 19573079,
+            "name": "protect-tags",
+            "target": "tag",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "exclude": [],
+                "include": [
+                  "~ALL"
+                ]
+              }
+            },
+            "rules": [
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "non_fast_forward"
+              }
+            ],
+            "updated_at": "2026-07-23T00:49:26.905+07:00",
+            "bypass_actors": [],
+            "current_user_can_bypass": "never",
+            "html_url": "https://github.com/tailrocks/holla/rules/19573079"
+          }
+        ]
+      },
+      "observed_required_contexts_on_prs": [
+        "DCO=COMPLETED/SUCCESS",
+        "ci-required=COMPLETED/FAILURE",
+        "ci-required=COMPLETED/SUCCESS"
+      ],
+      "observed_app_ids": [
+        "DCO-2#974774",
+        "GitHub Actions#15368"
+      ],
+      "pr_classification_counts": {
+        "green-or-nonblocking": 7,
+        "mixed-failure-candidate": 2
+      },
+      "pr_incomplete_counts": {
+        "skipped": 9
+      },
+      "main_verification": {
+        "default_branch": "main",
+        "sha": "027dac6be2070b7e836c1ca123861fcbade72003",
+        "check_count": 8,
+        "checkrun_count": 8,
+        "statuscontext_count": 0,
+        "contexts_has_next": false,
+        "status_counts": {
+          "COMPLETED": 8
+        },
+        "conclusion_counts": {
+          "FAILURE": 3,
+          "SKIPPED": 4,
+          "SUCCESS": 1
+        },
+        "required_like": [
+          "Policy=COMPLETED/FAILURE",
+          "ci-required=COMPLETED/FAILURE"
+        ],
+        "app_ids": [
+          "GitHub Actions#15368"
+        ],
+        "failed": [
+          {
+            "name": "Policy",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/holla/actions/runs/35115219281/job/104858801865",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115219281"
+          },
+          {
+            "name": "ci-required",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/holla/actions/runs/35115219281/job/104868713512",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115219281"
+          },
+          {
+            "name": "Control / Required",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/holla/actions/runs/35115219281/job/104875151265",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115219281"
+          }
+        ],
+        "pending": [],
+        "skipped": [
+          {
+            "name": "Control / Velnor admission",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/holla/actions/runs/35115219281/job/104858803464",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115219281"
+          },
+          {
+            "name": "Control / Prepare Cargo",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/holla/actions/runs/35115219281/job/104868713029",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115219281"
+          },
+          {
+            "name": "Rust · holla-cli",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/holla/actions/runs/35115219281/job/104868713679",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115219281"
+          },
+          {
+            "name": "Rust · holla-cli",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/holla/actions/runs/35115219281/job/104868713942",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115219281"
+          }
+        ]
+      },
+      "latest_main_runs": {
+        "fetched_count": 0,
+        "event_counts": {},
+        "matching_head_sha_count": 0,
+        "latest_head_sha_runs": [],
+        "latest_runs": [],
+        "child_dispatch_candidates": [],
+        "child_dispatch_note": "No workflow_run/repository_dispatch/workflow_dispatch run in fetched latest-20 main list; relation not discoverable here."
+      }
+    },
+    "jackin-project/jackin": {
+      "default_branch": "main",
+      "default_sha": "665f7e3735c1f76ce5ee8a9e27c676381a474cfb",
+      "open_pr_count": 2,
+      "open_pr_numbers": [
+        975,
+        1002
+      ],
+      "current_pr_heads": [
+        {
+          "pr": 975,
+          "head_sha": "50576297e7ec4131608ac1a446f86a84d0af43de",
+          "classification": "mixed-failure-candidate",
+          "incomplete_flags": "context-pagination+skipped"
+        },
+        {
+          "pr": 1002,
+          "head_sha": "67be01c9d112b005c2d029062aca5ee1688c96e1",
+          "classification": "mixed-failure-candidate",
+          "incomplete_flags": ""
+        }
+      ],
+      "ruleset_contract": {
+        "branch_protection": {
+          "http_status": 404,
+          "body": {
+            "message": "Branch not protected",
+            "documentation_url": "https://docs.github.com/rest/branches/branch-protection#get-branch-protection",
+            "status": "404"
+          }
+        },
+        "required_contexts": [
+          "DCO",
+          "Policy",
+          "ci-required"
+        ],
+        "protect_main": {
+          "id": 14746904,
+          "name": "protect-main",
+          "target": "branch",
+          "enforcement": "active",
+          "conditions": {
+            "ref_name": {
+              "exclude": [],
+              "include": [
+                "~DEFAULT_BRANCH"
+              ]
+            }
+          },
+          "rules": [
+            {
+              "type": "deletion"
+            },
+            {
+              "type": "pull_request",
+              "parameters": {
+                "required_approving_review_count": 0,
+                "dismiss_stale_reviews_on_push": true,
+                "required_reviewers": [],
+                "require_code_owner_review": false,
+                "dismissal_restriction": {
+                  "enabled": false,
+                  "allowed_actors": []
+                },
+                "require_last_push_approval": false,
+                "required_review_thread_resolution": false,
+                "require_extra_approval_for_unattributed_changes": true,
+                "allowed_merge_methods": [
+                  "merge",
+                  "squash",
+                  "rebase"
+                ]
+              }
+            },
+            {
+              "type": "required_status_checks",
+              "parameters": {
+                "strict_required_status_checks_policy": false,
+                "do_not_enforce_on_create": false,
+                "required_status_checks": [
+                  {
+                    "context": "DCO"
+                  },
+                  {
+                    "context": "Policy"
+                  },
+                  {
+                    "context": "ci-required"
+                  }
+                ]
+              }
+            },
+            {
+              "type": "non_fast_forward"
+            }
+          ],
+          "updated_at": "2026-09-17T06:16:20.922+07:00",
+          "bypass_actors": [
+            {
+              "actor_id": 5,
+              "actor_type": "RepositoryRole",
+              "bypass_mode": "always"
+            }
+          ],
+          "current_user_can_bypass": "always",
+          "html_url": "https://github.com/jackin-project/jackin/rules/14746904"
+        },
+        "all_rulesets": [
+          {
+            "id": 14746904,
+            "name": "protect-main",
+            "target": "branch",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "exclude": [],
+                "include": [
+                  "~DEFAULT_BRANCH"
+                ]
+              }
+            },
+            "rules": [
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "pull_request",
+                "parameters": {
+                  "required_approving_review_count": 0,
+                  "dismiss_stale_reviews_on_push": true,
+                  "required_reviewers": [],
+                  "require_code_owner_review": false,
+                  "dismissal_restriction": {
+                    "enabled": false,
+                    "allowed_actors": []
+                  },
+                  "require_last_push_approval": false,
+                  "required_review_thread_resolution": false,
+                  "require_extra_approval_for_unattributed_changes": true,
+                  "allowed_merge_methods": [
+                    "merge",
+                    "squash",
+                    "rebase"
+                  ]
+                }
+              },
+              {
+                "type": "required_status_checks",
+                "parameters": {
+                  "strict_required_status_checks_policy": false,
+                  "do_not_enforce_on_create": false,
+                  "required_status_checks": [
+                    {
+                      "context": "DCO"
+                    },
+                    {
+                      "context": "Policy"
+                    },
+                    {
+                      "context": "ci-required"
+                    }
+                  ]
+                }
+              },
+              {
+                "type": "non_fast_forward"
+              }
+            ],
+            "updated_at": "2026-09-17T06:16:20.922+07:00",
+            "bypass_actors": [
+              {
+                "actor_id": 5,
+                "actor_type": "RepositoryRole",
+                "bypass_mode": "always"
+              }
+            ],
+            "current_user_can_bypass": "always",
+            "html_url": "https://github.com/jackin-project/jackin/rules/14746904"
+          },
+          {
+            "id": 15179226,
+            "name": "protect-tags",
+            "target": "tag",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "exclude": [],
+                "include": [
+                  "~ALL"
+                ]
+              }
+            },
+            "rules": [
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "non_fast_forward"
+              }
+            ],
+            "updated_at": "2026-05-11T03:07:40.534+07:00",
+            "bypass_actors": [],
+            "current_user_can_bypass": "never",
+            "html_url": "https://github.com/jackin-project/jackin/rules/15179226"
+          }
+        ]
+      },
+      "observed_required_contexts_on_prs": [
+        "DCO=COMPLETED/SUCCESS",
+        "Policy=COMPLETED/FAILURE",
+        "ci-required=COMPLETED/FAILURE"
+      ],
+      "observed_app_ids": [
+        "DCO-2#974774",
+        "GitHub Actions#15368"
+      ],
+      "pr_classification_counts": {
+        "mixed-failure-candidate": 2
+      },
+      "pr_incomplete_counts": {
+        "context-pagination+skipped": 1
+      },
+      "main_verification": {
+        "default_branch": "main",
+        "sha": "665f7e3735c1f76ce5ee8a9e27c676381a474cfb",
+        "check_count": 46,
+        "checkrun_count": 46,
+        "statuscontext_count": 0,
+        "contexts_has_next": false,
+        "status_counts": {
+          "COMPLETED": 46
+        },
+        "conclusion_counts": {
+          "FAILURE": 3,
+          "SUCCESS": 43
+        },
+        "required_like": [
+          "Policy=COMPLETED/SUCCESS",
+          "ci-required=COMPLETED/FAILURE"
+        ],
+        "app_ids": [
+          "GitHub Actions#15368"
+        ],
+        "failed": [
+          {
+            "name": "Rust · jackin / GitHub",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/jackin-project/jackin/actions/runs/35443450628/job/105898301807",
+            "app": "GitHub Actions#15368",
+            "run_id": "35443450628"
+          },
+          {
+            "name": "ci-required",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/jackin-project/jackin/actions/runs/35443450628/job/105900051835",
+            "app": "GitHub Actions#15368",
+            "run_id": "35443450628"
+          },
+          {
+            "name": "Control / Required",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/jackin-project/jackin/actions/runs/35443450628/job/105900063639",
+            "app": "GitHub Actions#15368",
+            "run_id": "35443450628"
+          }
+        ],
+        "pending": [],
+        "skipped": []
+      },
+      "latest_main_runs": {
+        "fetched_count": 9,
+        "event_counts": {
+          "push": 9
+        },
+        "matching_head_sha_count": 3,
+        "latest_head_sha_runs": [
+          {
+            "id": 35443450628,
+            "run_number": 43,
+            "name": "CI / main · push · main",
+            "display_title": "CI / main · push · main",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "failure",
+            "head_sha": "665f7e3735c1f76ce5ee8a9e27c676381a474cfb",
+            "head_branch": "main",
+            "workflow_id": 357877882,
+            "path": ".github/workflows/ci-main.yml",
+            "created_at": "2026-09-19T12:38:46Z",
+            "updated_at": "2026-09-19T12:53:12Z",
+            "html_url": "https://github.com/jackin-project/jackin/actions/runs/35443450628"
+          },
+          {
+            "id": 35443450402,
+            "run_number": 37,
+            "name": "Renovate upstream sources · push",
+            "display_title": "Renovate upstream sources · push",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "665f7e3735c1f76ce5ee8a9e27c676381a474cfb",
+            "head_branch": "main",
+            "workflow_id": 360297320,
+            "path": ".github/workflows/renovate-upstream-sources.yml",
+            "created_at": "2026-09-19T12:38:46Z",
+            "updated_at": "2026-09-19T12:39:04Z",
+            "html_url": "https://github.com/jackin-project/jackin/actions/runs/35443450402"
+          },
+          {
+            "id": 35443450406,
+            "run_number": 6,
+            "name": "Desktop merge cadence · push",
+            "display_title": "Desktop merge cadence · push",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "665f7e3735c1f76ce5ee8a9e27c676381a474cfb",
+            "head_branch": "main",
+            "workflow_id": 360371403,
+            "path": ".github/workflows/desktop-merge.yml",
+            "created_at": "2026-09-19T12:38:46Z",
+            "updated_at": "2026-09-19T13:20:14Z",
+            "html_url": "https://github.com/jackin-project/jackin/actions/runs/35443450406"
+          }
+        ],
+        "latest_runs": [
+          {
+            "id": 35443450628,
+            "run_number": 43,
+            "name": "CI / main · push · main",
+            "display_title": "CI / main · push · main",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "failure",
+            "head_sha": "665f7e3735c1f76ce5ee8a9e27c676381a474cfb",
+            "head_branch": "main",
+            "workflow_id": 357877882,
+            "path": ".github/workflows/ci-main.yml",
+            "created_at": "2026-09-19T12:38:46Z",
+            "updated_at": "2026-09-19T12:53:12Z",
+            "html_url": "https://github.com/jackin-project/jackin/actions/runs/35443450628"
+          },
+          {
+            "id": 35443450402,
+            "run_number": 37,
+            "name": "Renovate upstream sources · push",
+            "display_title": "Renovate upstream sources · push",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "665f7e3735c1f76ce5ee8a9e27c676381a474cfb",
+            "head_branch": "main",
+            "workflow_id": 360297320,
+            "path": ".github/workflows/renovate-upstream-sources.yml",
+            "created_at": "2026-09-19T12:38:46Z",
+            "updated_at": "2026-09-19T12:39:04Z",
+            "html_url": "https://github.com/jackin-project/jackin/actions/runs/35443450402"
+          },
+          {
+            "id": 35443450406,
+            "run_number": 6,
+            "name": "Desktop merge cadence · push",
+            "display_title": "Desktop merge cadence · push",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "665f7e3735c1f76ce5ee8a9e27c676381a474cfb",
+            "head_branch": "main",
+            "workflow_id": 360371403,
+            "path": ".github/workflows/desktop-merge.yml",
+            "created_at": "2026-09-19T12:38:46Z",
+            "updated_at": "2026-09-19T13:20:14Z",
+            "html_url": "https://github.com/jackin-project/jackin/actions/runs/35443450406"
+          },
+          {
+            "id": 35442270725,
+            "run_number": 35,
+            "name": "Renovate upstream sources · push",
+            "display_title": "Renovate upstream sources · push",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "00cba4a3aef6c3b1258cdb9441993cfaac4cede4",
+            "head_branch": "main",
+            "workflow_id": 360297320,
+            "path": ".github/workflows/renovate-upstream-sources.yml",
+            "created_at": "2026-09-19T12:13:58Z",
+            "updated_at": "2026-09-19T12:14:10Z",
+            "html_url": "https://github.com/jackin-project/jackin/actions/runs/35442270725"
+          },
+          {
+            "id": 35442270734,
+            "run_number": 5,
+            "name": "Desktop merge cadence · push",
+            "display_title": "Desktop merge cadence · push",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "failure",
+            "head_sha": "00cba4a3aef6c3b1258cdb9441993cfaac4cede4",
+            "head_branch": "main",
+            "workflow_id": 360371403,
+            "path": ".github/workflows/desktop-merge.yml",
+            "created_at": "2026-09-19T12:13:58Z",
+            "updated_at": "2026-09-19T12:14:37Z",
+            "html_url": "https://github.com/jackin-project/jackin/actions/runs/35442270734"
+          },
+          {
+            "id": 35216754970,
+            "run_number": 4,
+            "name": "Desktop merge cadence · push",
+            "display_title": "Desktop merge cadence · push",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "failure",
+            "head_sha": "278cdbe517164564fc7206f37becff0e2b92b0b2",
+            "head_branch": "main",
+            "workflow_id": 360371403,
+            "path": ".github/workflows/desktop-merge.yml",
+            "created_at": "2026-09-17T11:38:31Z",
+            "updated_at": "2026-09-17T11:39:14Z",
+            "html_url": "https://github.com/jackin-project/jackin/actions/runs/35216754970"
+          },
+          {
+            "id": 35211127552,
+            "run_number": 3,
+            "name": "Desktop merge cadence · push",
+            "display_title": "Desktop merge cadence · push",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "failure",
+            "head_sha": "6023f430dc88ae3f409f526a961c77024ea899c9",
+            "head_branch": "main",
+            "workflow_id": 360371403,
+            "path": ".github/workflows/desktop-merge.yml",
+            "created_at": "2026-09-17T10:33:42Z",
+            "updated_at": "2026-09-17T10:34:22Z",
+            "html_url": "https://github.com/jackin-project/jackin/actions/runs/35211127552"
+          },
+          {
+            "id": 35211128040,
+            "run_number": 38,
+            "name": "CI / main · push · main",
+            "display_title": "CI / main · push · main",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "failure",
+            "head_sha": "6023f430dc88ae3f409f526a961c77024ea899c9",
+            "head_branch": "main",
+            "workflow_id": 357877882,
+            "path": ".github/workflows/ci-main.yml",
+            "created_at": "2026-09-17T10:33:42Z",
+            "updated_at": "2026-09-17T10:46:06Z",
+            "html_url": "https://github.com/jackin-project/jackin/actions/runs/35211128040"
+          },
+          {
+            "id": 35211127506,
+            "run_number": 9,
+            "name": "Renovate upstream sources · push",
+            "display_title": "Renovate upstream sources · push",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "6023f430dc88ae3f409f526a961c77024ea899c9",
+            "head_branch": "main",
+            "workflow_id": 360297320,
+            "path": ".github/workflows/renovate-upstream-sources.yml",
+            "created_at": "2026-09-17T10:33:41Z",
+            "updated_at": "2026-09-17T10:33:53Z",
+            "html_url": "https://github.com/jackin-project/jackin/actions/runs/35211127506"
+          }
+        ],
+        "child_dispatch_candidates": [],
+        "child_dispatch_note": "No workflow_run/repository_dispatch/workflow_dispatch run in fetched latest-20 main list; relation not discoverable here."
+      }
+    },
+    "jackin-project/jackin-agent-smith": {
+      "default_branch": "main",
+      "default_sha": "08cb1c2f82519bab1aa0c164879955a84d35463b",
+      "open_pr_count": 9,
+      "open_pr_numbers": [
+        181,
+        182,
+        183,
+        184,
+        188,
+        189,
+        190,
+        191,
+        206
+      ],
+      "current_pr_heads": [
+        {
+          "pr": 181,
+          "head_sha": "842b9519f067f22e1ee5c639b03eb01db96696d7",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 182,
+          "head_sha": "52b07df8c81fe8cf277f8b7da5fce3905da530c7",
+          "classification": "mixed-failure-candidate",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 183,
+          "head_sha": "4d87e333a3b52693d1d04319571752855cb52885",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 184,
+          "head_sha": "0049e6025849c538949143755c840a3e80507a2f",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 188,
+          "head_sha": "5589b0460d388884e990b3c721e40a5498e53b69",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 189,
+          "head_sha": "84996698e3ae2eef36c9054a65fcb44f097cd67b",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 190,
+          "head_sha": "3b799438fb64e1877bbb10701b7bb4296b6eaf9d",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 191,
+          "head_sha": "f4ff5a6c53459e57853454d214a8f1e08cae8131",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 206,
+          "head_sha": "b9db5b149cc46baba9c49549432307c29e3972b0",
+          "classification": "infrastructure-or-generator-candidate",
+          "incomplete_flags": ""
+        }
+      ],
+      "ruleset_contract": {
+        "branch_protection": {
+          "http_status": 404,
+          "body": {
+            "message": "Branch not protected",
+            "documentation_url": "https://docs.github.com/rest/branches/branch-protection#get-branch-protection",
+            "status": "404"
+          }
+        },
+        "required_contexts": [
+          "DCO",
+          "Policy",
+          "ci-required"
+        ],
+        "protect_main": {
+          "id": 14742580,
+          "name": "protect-main",
+          "target": "branch",
+          "enforcement": "active",
+          "conditions": {
+            "ref_name": {
+              "exclude": [],
+              "include": [
+                "~DEFAULT_BRANCH"
+              ]
+            }
+          },
+          "rules": [
+            {
+              "type": "deletion"
+            },
+            {
+              "type": "pull_request",
+              "parameters": {
+                "required_approving_review_count": 0,
+                "dismiss_stale_reviews_on_push": true,
+                "required_reviewers": [],
+                "require_code_owner_review": false,
+                "dismissal_restriction": {
+                  "enabled": false,
+                  "allowed_actors": []
+                },
+                "require_last_push_approval": false,
+                "required_review_thread_resolution": false,
+                "require_extra_approval_for_unattributed_changes": true,
+                "allowed_merge_methods": [
+                  "merge",
+                  "squash",
+                  "rebase"
+                ]
+              }
+            },
+            {
+              "type": "non_fast_forward"
+            },
+            {
+              "type": "required_status_checks",
+              "parameters": {
+                "strict_required_status_checks_policy": false,
+                "do_not_enforce_on_create": false,
+                "required_status_checks": [
+                  {
+                    "context": "DCO"
+                  },
+                  {
+                    "context": "Policy"
+                  },
+                  {
+                    "context": "ci-required"
+                  }
+                ]
+              }
+            }
+          ],
+          "updated_at": "2026-09-16T21:29:04.197+07:00",
+          "bypass_actors": [],
+          "current_user_can_bypass": "never",
+          "html_url": "https://github.com/jackin-project/jackin-agent-smith/rules/14742580"
+        },
+        "all_rulesets": [
+          {
+            "id": 14742580,
+            "name": "protect-main",
+            "target": "branch",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "exclude": [],
+                "include": [
+                  "~DEFAULT_BRANCH"
+                ]
+              }
+            },
+            "rules": [
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "pull_request",
+                "parameters": {
+                  "required_approving_review_count": 0,
+                  "dismiss_stale_reviews_on_push": true,
+                  "required_reviewers": [],
+                  "require_code_owner_review": false,
+                  "dismissal_restriction": {
+                    "enabled": false,
+                    "allowed_actors": []
+                  },
+                  "require_last_push_approval": false,
+                  "required_review_thread_resolution": false,
+                  "require_extra_approval_for_unattributed_changes": true,
+                  "allowed_merge_methods": [
+                    "merge",
+                    "squash",
+                    "rebase"
+                  ]
+                }
+              },
+              {
+                "type": "non_fast_forward"
+              },
+              {
+                "type": "required_status_checks",
+                "parameters": {
+                  "strict_required_status_checks_policy": false,
+                  "do_not_enforce_on_create": false,
+                  "required_status_checks": [
+                    {
+                      "context": "DCO"
+                    },
+                    {
+                      "context": "Policy"
+                    },
+                    {
+                      "context": "ci-required"
+                    }
+                  ]
+                }
+              }
+            ],
+            "updated_at": "2026-09-16T21:29:04.197+07:00",
+            "bypass_actors": [],
+            "current_user_can_bypass": "never",
+            "html_url": "https://github.com/jackin-project/jackin-agent-smith/rules/14742580"
+          },
+          {
+            "id": 15179228,
+            "name": "protect-tags",
+            "target": "tag",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "exclude": [],
+                "include": [
+                  "~ALL"
+                ]
+              }
+            },
+            "rules": [
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "non_fast_forward"
+              }
+            ],
+            "updated_at": "2026-04-21T15:49:21.742+07:00",
+            "bypass_actors": [],
+            "current_user_can_bypass": "never",
+            "html_url": "https://github.com/jackin-project/jackin-agent-smith/rules/15179228"
+          }
+        ]
+      },
+      "observed_required_contexts_on_prs": [
+        "DCO=COMPLETED/SUCCESS",
+        "Policy=COMPLETED/FAILURE",
+        "ci-required=COMPLETED/FAILURE",
+        "ci-required=COMPLETED/SUCCESS"
+      ],
+      "observed_app_ids": [
+        "DCO-2#974774",
+        "GitHub Actions#15368",
+        "SonarQubeCloud#12526"
+      ],
+      "pr_classification_counts": {
+        "green-or-nonblocking": 7,
+        "mixed-failure-candidate": 1,
+        "infrastructure-or-generator-candidate": 1
+      },
+      "pr_incomplete_counts": {
+        "skipped": 8
+      },
+      "main_verification": {
+        "default_branch": "main",
+        "sha": "08cb1c2f82519bab1aa0c164879955a84d35463b",
+        "check_count": 6,
+        "checkrun_count": 6,
+        "statuscontext_count": 0,
+        "contexts_has_next": false,
+        "status_counts": {
+          "COMPLETED": 6
+        },
+        "conclusion_counts": {
+          "FAILURE": 1,
+          "SUCCESS": 5
+        },
+        "required_like": [
+          "Policy=COMPLETED/SUCCESS",
+          "ci-required=COMPLETED/SUCCESS"
+        ],
+        "app_ids": [
+          "GitHub Actions#15368",
+          "SonarQubeCloud#12526"
+        ],
+        "failed": [
+          {
+            "name": "SonarCloud Code Analysis",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://sonarcloud.io/dashboard?id=jackin-project_jackin-agent-smith&branch=main",
+            "app": "SonarQubeCloud#12526",
+            "run_id": ""
+          }
+        ],
+        "pending": [],
+        "skipped": []
+      },
+      "latest_main_runs": {
+        "fetched_count": 9,
+        "event_counts": {
+          "schedule": 3,
+          "workflow_dispatch": 2,
+          "push": 4
+        },
+        "matching_head_sha_count": 5,
+        "latest_head_sha_runs": [
+          {
+            "id": 35431480191,
+            "run_number": 18,
+            "name": "Maintenance · schedule",
+            "display_title": "Maintenance · schedule",
+            "event": "schedule",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "08cb1c2f82519bab1aa0c164879955a84d35463b",
+            "head_branch": "main",
+            "workflow_id": 359395173,
+            "path": ".github/workflows/maintenance.yml",
+            "created_at": "2026-09-19T08:14:49Z",
+            "updated_at": "2026-09-19T08:14:59Z",
+            "html_url": "https://github.com/jackin-project/jackin-agent-smith/actions/runs/35431480191"
+          },
+          {
+            "id": 35431022929,
+            "run_number": 16,
+            "name": "CI / main · workflow_dispatch · main",
+            "display_title": "CI / main · workflow_dispatch · main",
+            "event": "workflow_dispatch",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "08cb1c2f82519bab1aa0c164879955a84d35463b",
+            "head_branch": "main",
+            "workflow_id": 359395169,
+            "path": ".github/workflows/ci-main.yml",
+            "created_at": "2026-09-19T08:04:32Z",
+            "updated_at": "2026-09-19T08:07:27Z",
+            "html_url": "https://github.com/jackin-project/jackin-agent-smith/actions/runs/35431022929"
+          },
+          {
+            "id": 35431019258,
+            "run_number": 3,
+            "name": "Nightly · schedule · main",
+            "display_title": "Nightly · schedule · main",
+            "event": "schedule",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "08cb1c2f82519bab1aa0c164879955a84d35463b",
+            "head_branch": "main",
+            "workflow_id": 359395175,
+            "path": ".github/workflows/nightly.yml",
+            "created_at": "2026-09-19T08:04:27Z",
+            "updated_at": "2026-09-19T08:04:35Z",
+            "html_url": "https://github.com/jackin-project/jackin-agent-smith/actions/runs/35431019258"
+          },
+          {
+            "id": 35324435482,
+            "run_number": 17,
+            "name": "Maintenance · schedule",
+            "display_title": "Maintenance · schedule",
+            "event": "schedule",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "08cb1c2f82519bab1aa0c164879955a84d35463b",
+            "head_branch": "main",
+            "workflow_id": 359395173,
+            "path": ".github/workflows/maintenance.yml",
+            "created_at": "2026-09-18T08:27:05Z",
+            "updated_at": "2026-09-18T08:27:22Z",
+            "html_url": "https://github.com/jackin-project/jackin-agent-smith/actions/runs/35324435482"
+          },
+          {
+            "id": 35323546374,
+            "run_number": 15,
+            "name": "CI / main · workflow_dispatch · main",
+            "display_title": "CI / main · workflow_dispatch · main",
+            "event": "workflow_dispatch",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "08cb1c2f82519bab1aa0c164879955a84d35463b",
+            "head_branch": "main",
+            "workflow_id": 359395169,
+            "path": ".github/workflows/ci-main.yml",
+            "created_at": "2026-09-18T08:16:34Z",
+            "updated_at": "2026-09-18T08:19:24Z",
+            "html_url": "https://github.com/jackin-project/jackin-agent-smith/actions/runs/35323546374"
+          }
+        ],
+        "latest_runs": [
+          {
+            "id": 35431480191,
+            "run_number": 18,
+            "name": "Maintenance · schedule",
+            "display_title": "Maintenance · schedule",
+            "event": "schedule",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "08cb1c2f82519bab1aa0c164879955a84d35463b",
+            "head_branch": "main",
+            "workflow_id": 359395173,
+            "path": ".github/workflows/maintenance.yml",
+            "created_at": "2026-09-19T08:14:49Z",
+            "updated_at": "2026-09-19T08:14:59Z",
+            "html_url": "https://github.com/jackin-project/jackin-agent-smith/actions/runs/35431480191"
+          },
+          {
+            "id": 35431022929,
+            "run_number": 16,
+            "name": "CI / main · workflow_dispatch · main",
+            "display_title": "CI / main · workflow_dispatch · main",
+            "event": "workflow_dispatch",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "08cb1c2f82519bab1aa0c164879955a84d35463b",
+            "head_branch": "main",
+            "workflow_id": 359395169,
+            "path": ".github/workflows/ci-main.yml",
+            "created_at": "2026-09-19T08:04:32Z",
+            "updated_at": "2026-09-19T08:07:27Z",
+            "html_url": "https://github.com/jackin-project/jackin-agent-smith/actions/runs/35431022929"
+          },
+          {
+            "id": 35431019258,
+            "run_number": 3,
+            "name": "Nightly · schedule · main",
+            "display_title": "Nightly · schedule · main",
+            "event": "schedule",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "08cb1c2f82519bab1aa0c164879955a84d35463b",
+            "head_branch": "main",
+            "workflow_id": 359395175,
+            "path": ".github/workflows/nightly.yml",
+            "created_at": "2026-09-19T08:04:27Z",
+            "updated_at": "2026-09-19T08:04:35Z",
+            "html_url": "https://github.com/jackin-project/jackin-agent-smith/actions/runs/35431019258"
+          },
+          {
+            "id": 35324435482,
+            "run_number": 17,
+            "name": "Maintenance · schedule",
+            "display_title": "Maintenance · schedule",
+            "event": "schedule",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "08cb1c2f82519bab1aa0c164879955a84d35463b",
+            "head_branch": "main",
+            "workflow_id": 359395173,
+            "path": ".github/workflows/maintenance.yml",
+            "created_at": "2026-09-18T08:27:05Z",
+            "updated_at": "2026-09-18T08:27:22Z",
+            "html_url": "https://github.com/jackin-project/jackin-agent-smith/actions/runs/35324435482"
+          },
+          {
+            "id": 35323546374,
+            "run_number": 15,
+            "name": "CI / main · workflow_dispatch · main",
+            "display_title": "CI / main · workflow_dispatch · main",
+            "event": "workflow_dispatch",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "08cb1c2f82519bab1aa0c164879955a84d35463b",
+            "head_branch": "main",
+            "workflow_id": 359395169,
+            "path": ".github/workflows/ci-main.yml",
+            "created_at": "2026-09-18T08:16:34Z",
+            "updated_at": "2026-09-18T08:19:24Z",
+            "html_url": "https://github.com/jackin-project/jackin-agent-smith/actions/runs/35323546374"
+          },
+          {
+            "id": 35102844337,
+            "run_number": 8,
+            "name": "CI / main · push · main",
+            "display_title": "CI / main · push · main",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "failure",
+            "head_sha": "5fedfebff5cca238ddb1083f5093032c9a839aae",
+            "head_branch": "main",
+            "workflow_id": 359395169,
+            "path": ".github/workflows/ci-main.yml",
+            "created_at": "2026-09-16T13:34:59Z",
+            "updated_at": "2026-09-16T13:38:22Z",
+            "html_url": "https://github.com/jackin-project/jackin-agent-smith/actions/runs/35102844337"
+          },
+          {
+            "id": 35101350751,
+            "run_number": 7,
+            "name": "CI / main · push · main",
+            "display_title": "CI / main · push · main",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "failure",
+            "head_sha": "5cb9021bc0dfea86273b1e94989c1f51d01dba8a",
+            "head_branch": "main",
+            "workflow_id": 359395169,
+            "path": ".github/workflows/ci-main.yml",
+            "created_at": "2026-09-16T13:21:07Z",
+            "updated_at": "2026-09-16T13:23:52Z",
+            "html_url": "https://github.com/jackin-project/jackin-agent-smith/actions/runs/35101350751"
+          },
+          {
+            "id": 35098656218,
+            "run_number": 6,
+            "name": "CI / main · push · main",
+            "display_title": "CI / main · push · main",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "failure",
+            "head_sha": "648f2027c8596fc4802560dd164039ee639f6a4f",
+            "head_branch": "main",
+            "workflow_id": 359395169,
+            "path": ".github/workflows/ci-main.yml",
+            "created_at": "2026-09-16T12:55:13Z",
+            "updated_at": "2026-09-16T12:58:21Z",
+            "html_url": "https://github.com/jackin-project/jackin-agent-smith/actions/runs/35098656218"
+          },
+          {
+            "id": 35095347112,
+            "run_number": 5,
+            "name": "CI / main · push · main",
+            "display_title": "CI / main · push · main",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "failure",
+            "head_sha": "24703861df23b0a23476f7f1816bc8144bae0239",
+            "head_branch": "main",
+            "workflow_id": 359395169,
+            "path": ".github/workflows/ci-main.yml",
+            "created_at": "2026-09-16T12:21:30Z",
+            "updated_at": "2026-09-16T12:24:36Z",
+            "html_url": "https://github.com/jackin-project/jackin-agent-smith/actions/runs/35095347112"
+          }
+        ],
+        "child_dispatch_candidates": [
+          {
+            "id": 35431022929,
+            "run_number": 16,
+            "name": "CI / main · workflow_dispatch · main",
+            "display_title": "CI / main · workflow_dispatch · main",
+            "event": "workflow_dispatch",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "08cb1c2f82519bab1aa0c164879955a84d35463b",
+            "head_branch": "main",
+            "workflow_id": 359395169,
+            "path": ".github/workflows/ci-main.yml",
+            "created_at": "2026-09-19T08:04:32Z",
+            "updated_at": "2026-09-19T08:07:27Z",
+            "html_url": "https://github.com/jackin-project/jackin-agent-smith/actions/runs/35431022929",
+            "relation_basis": "event=workflow_dispatch;parent_run_id_not_exposed_by_list_runs"
+          },
+          {
+            "id": 35323546374,
+            "run_number": 15,
+            "name": "CI / main · workflow_dispatch · main",
+            "display_title": "CI / main · workflow_dispatch · main",
+            "event": "workflow_dispatch",
+            "status": "completed",
+            "conclusion": "success",
+            "head_sha": "08cb1c2f82519bab1aa0c164879955a84d35463b",
+            "head_branch": "main",
+            "workflow_id": 359395169,
+            "path": ".github/workflows/ci-main.yml",
+            "created_at": "2026-09-18T08:16:34Z",
+            "updated_at": "2026-09-18T08:19:24Z",
+            "html_url": "https://github.com/jackin-project/jackin-agent-smith/actions/runs/35323546374",
+            "relation_basis": "event=workflow_dispatch;parent_run_id_not_exposed_by_list_runs"
+          }
+        ],
+        "child_dispatch_note": "Candidate only; list-runs exposes event/head SHA but no parent run ID. Do not infer lineage."
+      }
+    },
+    "jackin-project/homebrew-tap": {
+      "default_branch": "main",
+      "default_sha": "2281ae9c95dfcb5bf82dfd025fdf58a50658b1d1",
+      "open_pr_count": 1,
+      "open_pr_numbers": [
+        492
+      ],
+      "current_pr_heads": [
+        {
+          "pr": 492,
+          "head_sha": "9255223b26d4a7340d92ec20fef7f95474aa4a58",
+          "classification": "infrastructure-or-generator-candidate",
+          "incomplete_flags": ""
+        }
+      ],
+      "ruleset_contract": {
+        "branch_protection": {
+          "http_status": 404,
+          "body": {
+            "message": "Branch not protected",
+            "documentation_url": "https://docs.github.com/rest/branches/branch-protection#get-branch-protection",
+            "status": "404"
+          }
+        },
+        "required_contexts": [
+          "DCO",
+          "Policy",
+          "ci-required"
+        ],
+        "protect_main": {
+          "id": 15170998,
+          "name": "protect-main",
+          "target": "branch",
+          "enforcement": "active",
+          "conditions": {
+            "ref_name": {
+              "exclude": [],
+              "include": [
+                "~DEFAULT_BRANCH"
+              ]
+            }
+          },
+          "rules": [
+            {
+              "type": "deletion"
+            },
+            {
+              "type": "pull_request",
+              "parameters": {
+                "required_approving_review_count": 0,
+                "dismiss_stale_reviews_on_push": true,
+                "required_reviewers": [],
+                "require_code_owner_review": false,
+                "dismissal_restriction": {
+                  "enabled": false,
+                  "allowed_actors": []
+                },
+                "require_last_push_approval": false,
+                "required_review_thread_resolution": false,
+                "require_extra_approval_for_unattributed_changes": true,
+                "allowed_merge_methods": [
+                  "merge",
+                  "squash",
+                  "rebase"
+                ]
+              }
+            },
+            {
+              "type": "non_fast_forward"
+            },
+            {
+              "type": "required_status_checks",
+              "parameters": {
+                "strict_required_status_checks_policy": false,
+                "do_not_enforce_on_create": false,
+                "required_status_checks": [
+                  {
+                    "context": "DCO"
+                  },
+                  {
+                    "context": "Policy"
+                  },
+                  {
+                    "context": "ci-required"
+                  }
+                ]
+              }
+            }
+          ],
+          "updated_at": "2026-09-16T15:11:41.170+07:00",
+          "bypass_actors": [],
+          "current_user_can_bypass": "never",
+          "html_url": "https://github.com/jackin-project/homebrew-tap/rules/15170998"
+        },
+        "all_rulesets": [
+          {
+            "id": 15170998,
+            "name": "protect-main",
+            "target": "branch",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "exclude": [],
+                "include": [
+                  "~DEFAULT_BRANCH"
+                ]
+              }
+            },
+            "rules": [
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "pull_request",
+                "parameters": {
+                  "required_approving_review_count": 0,
+                  "dismiss_stale_reviews_on_push": true,
+                  "required_reviewers": [],
+                  "require_code_owner_review": false,
+                  "dismissal_restriction": {
+                    "enabled": false,
+                    "allowed_actors": []
+                  },
+                  "require_last_push_approval": false,
+                  "required_review_thread_resolution": false,
+                  "require_extra_approval_for_unattributed_changes": true,
+                  "allowed_merge_methods": [
+                    "merge",
+                    "squash",
+                    "rebase"
+                  ]
+                }
+              },
+              {
+                "type": "non_fast_forward"
+              },
+              {
+                "type": "required_status_checks",
+                "parameters": {
+                  "strict_required_status_checks_policy": false,
+                  "do_not_enforce_on_create": false,
+                  "required_status_checks": [
+                    {
+                      "context": "DCO"
+                    },
+                    {
+                      "context": "Policy"
+                    },
+                    {
+                      "context": "ci-required"
+                    }
+                  ]
+                }
+              }
+            ],
+            "updated_at": "2026-09-16T15:11:41.170+07:00",
+            "bypass_actors": [],
+            "current_user_can_bypass": "never",
+            "html_url": "https://github.com/jackin-project/homebrew-tap/rules/15170998"
+          },
+          {
+            "id": 15179223,
+            "name": "protect-tags",
+            "target": "tag",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "exclude": [],
+                "include": [
+                  "~ALL"
+                ]
+              }
+            },
+            "rules": [
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "non_fast_forward"
+              }
+            ],
+            "updated_at": "2026-04-21T15:49:15.968+07:00",
+            "bypass_actors": [],
+            "current_user_can_bypass": "never",
+            "html_url": "https://github.com/jackin-project/homebrew-tap/rules/15179223"
+          }
+        ]
+      },
+      "observed_required_contexts_on_prs": [
+        "DCO=COMPLETED/SUCCESS",
+        "Policy=COMPLETED/FAILURE",
+        "ci-required=COMPLETED/SUCCESS"
+      ],
+      "observed_app_ids": [
+        "DCO-2#974774",
+        "GitHub Actions#15368",
+        "SonarQubeCloud#12526"
+      ],
+      "pr_classification_counts": {
+        "infrastructure-or-generator-candidate": 1
+      },
+      "pr_incomplete_counts": {},
+      "main_verification": {
+        "default_branch": "main",
+        "sha": "2281ae9c95dfcb5bf82dfd025fdf58a50658b1d1",
+        "check_count": 6,
+        "checkrun_count": 6,
+        "statuscontext_count": 0,
+        "contexts_has_next": false,
+        "status_counts": {
+          "COMPLETED": 6
+        },
+        "conclusion_counts": {
+          "FAILURE": 1,
+          "SUCCESS": 5
+        },
+        "required_like": [
+          "Policy=COMPLETED/SUCCESS",
+          "ci-required=COMPLETED/SUCCESS"
+        ],
+        "app_ids": [
+          "GitHub Actions#15368",
+          "SonarQubeCloud#12526"
+        ],
+        "failed": [
+          {
+            "name": "SonarCloud Code Analysis",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://sonarcloud.io/dashboard?id=jackin-project_homebrew-tap&branch=main",
+            "app": "SonarQubeCloud#12526",
+            "run_id": ""
+          }
+        ],
+        "pending": [],
+        "skipped": []
+      },
+      "latest_main_runs": {
+        "fetched_count": 0,
+        "event_counts": {},
+        "matching_head_sha_count": 0,
+        "latest_head_sha_runs": [],
+        "latest_runs": [],
+        "child_dispatch_candidates": [],
+        "child_dispatch_note": "No workflow_run/repository_dispatch/workflow_dispatch run in fetched latest-20 main list; relation not discoverable here."
+      }
+    },
+    "jackin-project/jackin-the-architect": {
+      "default_branch": "main",
+      "default_sha": "d0956f0192d2605cbd26d84bf8911211a727b6c0",
+      "open_pr_count": 21,
+      "open_pr_numbers": [
+        418,
+        419,
+        420,
+        421,
+        425,
+        426,
+        427,
+        428,
+        429,
+        430,
+        431,
+        432,
+        433,
+        434,
+        436,
+        437,
+        438,
+        440,
+        441,
+        455,
+        456
+      ],
+      "current_pr_heads": [
+        {
+          "pr": 418,
+          "head_sha": "f883cd096e164e0447088d434b9e69a749ee3848",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 419,
+          "head_sha": "20874a71b47d83b6f6d5b0f0b278337ad77ee023",
+          "classification": "mixed-failure-candidate",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 420,
+          "head_sha": "9bfa429c31142fbeec0e44e028ba293c45929e0b",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 421,
+          "head_sha": "506cb518f36f45fbffd1c22cef37806a3d585b8f",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 425,
+          "head_sha": "137eec43c37762f2481f0b513ea6d45fc089b5f9",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 426,
+          "head_sha": "8374c0fbbd44bcc43c1824a763dabcfdf57cf38a",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 427,
+          "head_sha": "7501b50bfad703cc1c3b1a9b573cf689217acfb7",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 428,
+          "head_sha": "740674e7d835d121f0977d51fe35d617b946c0c3",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 429,
+          "head_sha": "f5fe2e109c06e694d70a91cd451316cfeb2fd70d",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 430,
+          "head_sha": "c183fcf076d63b920932f96c5ccdcd058096b928",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 431,
+          "head_sha": "6725b98f3efda134e7d6afa488faa77a799955d0",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 432,
+          "head_sha": "8e229c2f4dc8d0cc16ae4afb8206e98f02550997",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 433,
+          "head_sha": "10ed53bc177c760594aaa42c58839f32f4e7dbfc",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 434,
+          "head_sha": "6fb48dd91a8c4f3c6803d64e52af8e6bcfd05488",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 436,
+          "head_sha": "c5fa516a4cc7258f90aef76cbd528342c31fbb44",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 437,
+          "head_sha": "b9fdce0ad9ddab61d29d723aca0017a2f25b4f24",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 438,
+          "head_sha": "0c0d40a8797ca5bd1308e04400742e92f3ab29cc",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 440,
+          "head_sha": "e1d42c30b3162cff9224fe738e32d2f8b044f023",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 441,
+          "head_sha": "e792c1c1f17db6f93b18a3a17cd33998b789647e",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 455,
+          "head_sha": "5443ee65e68729448b88fc4f21d5fd5fbf350f13",
+          "classification": "infrastructure-or-generator-candidate",
+          "incomplete_flags": ""
+        },
+        {
+          "pr": 456,
+          "head_sha": "eaf9c16399b70fc9c325394e683145007a19d710",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": ""
+        }
+      ],
+      "ruleset_contract": {
+        "branch_protection": {
+          "http_status": 404,
+          "body": {
+            "message": "Branch not protected",
+            "documentation_url": "https://docs.github.com/rest/branches/branch-protection#get-branch-protection",
+            "status": "404"
+          }
+        },
+        "required_contexts": [
+          "DCO",
+          "Policy",
+          "ci-required"
+        ],
+        "protect_main": {
+          "id": 14742576,
+          "name": "protect-main",
+          "target": "branch",
+          "enforcement": "active",
+          "conditions": {
+            "ref_name": {
+              "exclude": [],
+              "include": [
+                "~DEFAULT_BRANCH"
+              ]
+            }
+          },
+          "rules": [
+            {
+              "type": "deletion"
+            },
+            {
+              "type": "pull_request",
+              "parameters": {
+                "required_approving_review_count": 0,
+                "dismiss_stale_reviews_on_push": true,
+                "required_reviewers": [],
+                "require_code_owner_review": false,
+                "dismissal_restriction": {
+                  "enabled": false,
+                  "allowed_actors": []
+                },
+                "require_last_push_approval": false,
+                "required_review_thread_resolution": false,
+                "require_extra_approval_for_unattributed_changes": true,
+                "allowed_merge_methods": [
+                  "merge",
+                  "squash",
+                  "rebase"
+                ]
+              }
+            },
+            {
+              "type": "non_fast_forward"
+            },
+            {
+              "type": "required_status_checks",
+              "parameters": {
+                "strict_required_status_checks_policy": false,
+                "do_not_enforce_on_create": false,
+                "required_status_checks": [
+                  {
+                    "context": "DCO"
+                  },
+                  {
+                    "context": "Policy"
+                  },
+                  {
+                    "context": "ci-required"
+                  }
+                ]
+              }
+            }
+          ],
+          "updated_at": "2026-09-16T15:25:02.884+07:00",
+          "bypass_actors": [],
+          "current_user_can_bypass": "never",
+          "html_url": "https://github.com/jackin-project/jackin-the-architect/rules/14742576"
+        },
+        "all_rulesets": [
+          {
+            "id": 14742576,
+            "name": "protect-main",
+            "target": "branch",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "exclude": [],
+                "include": [
+                  "~DEFAULT_BRANCH"
+                ]
+              }
+            },
+            "rules": [
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "pull_request",
+                "parameters": {
+                  "required_approving_review_count": 0,
+                  "dismiss_stale_reviews_on_push": true,
+                  "required_reviewers": [],
+                  "require_code_owner_review": false,
+                  "dismissal_restriction": {
+                    "enabled": false,
+                    "allowed_actors": []
+                  },
+                  "require_last_push_approval": false,
+                  "required_review_thread_resolution": false,
+                  "require_extra_approval_for_unattributed_changes": true,
+                  "allowed_merge_methods": [
+                    "merge",
+                    "squash",
+                    "rebase"
+                  ]
+                }
+              },
+              {
+                "type": "non_fast_forward"
+              },
+              {
+                "type": "required_status_checks",
+                "parameters": {
+                  "strict_required_status_checks_policy": false,
+                  "do_not_enforce_on_create": false,
+                  "required_status_checks": [
+                    {
+                      "context": "DCO"
+                    },
+                    {
+                      "context": "Policy"
+                    },
+                    {
+                      "context": "ci-required"
+                    }
+                  ]
+                }
+              }
+            ],
+            "updated_at": "2026-09-16T15:25:02.884+07:00",
+            "bypass_actors": [],
+            "current_user_can_bypass": "never",
+            "html_url": "https://github.com/jackin-project/jackin-the-architect/rules/14742576"
+          },
+          {
+            "id": 15179230,
+            "name": "protect-tags",
+            "target": "tag",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "exclude": [],
+                "include": [
+                  "~ALL"
+                ]
+              }
+            },
+            "rules": [
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "non_fast_forward"
+              }
+            ],
+            "updated_at": "2026-04-21T15:49:26.879+07:00",
+            "bypass_actors": [],
+            "current_user_can_bypass": "never",
+            "html_url": "https://github.com/jackin-project/jackin-the-architect/rules/15179230"
+          }
+        ]
+      },
+      "observed_required_contexts_on_prs": [
+        "DCO=COMPLETED/SUCCESS",
+        "Policy=COMPLETED/FAILURE",
+        "Policy=COMPLETED/SUCCESS",
+        "ci-required=COMPLETED/FAILURE",
+        "ci-required=COMPLETED/SUCCESS"
+      ],
+      "observed_app_ids": [
+        "DCO-2#974774",
+        "GitHub Actions#15368",
+        "SonarQubeCloud#12526"
+      ],
+      "pr_classification_counts": {
+        "green-or-nonblocking": 19,
+        "mixed-failure-candidate": 1,
+        "infrastructure-or-generator-candidate": 1
+      },
+      "pr_incomplete_counts": {
+        "skipped": 19
+      },
+      "main_verification": {
+        "default_branch": "main",
+        "sha": "d0956f0192d2605cbd26d84bf8911211a727b6c0",
+        "check_count": 6,
+        "checkrun_count": 6,
+        "statuscontext_count": 0,
+        "contexts_has_next": false,
+        "status_counts": {
+          "COMPLETED": 6
+        },
+        "conclusion_counts": {
+          "FAILURE": 1,
+          "SUCCESS": 5
+        },
+        "required_like": [
+          "Policy=COMPLETED/SUCCESS",
+          "ci-required=COMPLETED/SUCCESS"
+        ],
+        "app_ids": [
+          "GitHub Actions#15368",
+          "SonarQubeCloud#12526"
+        ],
+        "failed": [
+          {
+            "name": "SonarCloud Code Analysis",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://sonarcloud.io/dashboard?id=jackin-project_jackin-the-architect&branch=main",
+            "app": "SonarQubeCloud#12526",
+            "run_id": ""
+          }
+        ],
+        "pending": [],
+        "skipped": []
+      },
+      "latest_main_runs": {
+        "fetched_count": 0,
+        "event_counts": {},
+        "matching_head_sha_count": 0,
+        "latest_head_sha_runs": [],
+        "latest_runs": [],
+        "child_dispatch_candidates": [],
+        "child_dispatch_note": "No workflow_run/repository_dispatch/workflow_dispatch run in fetched latest-20 main list; relation not discoverable here."
+      }
+    },
+    "jackin-project/jackin-sentinel": {
+      "default_branch": "main",
+      "default_sha": "a668b869b9a31622f3088c1d891c45716e94cff2",
+      "open_pr_count": 9,
+      "open_pr_numbers": [
+        117,
+        118,
+        119,
+        120,
+        124,
+        125,
+        126,
+        143,
+        144
+      ],
+      "current_pr_heads": [
+        {
+          "pr": 117,
+          "head_sha": "4a80ff7190dcf4cb14b649df97011125e5231e55",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 118,
+          "head_sha": "72421c6f29c18976cb755d54e1595e1b1e171dfd",
+          "classification": "mixed-failure-candidate",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 119,
+          "head_sha": "5fc7dd4c999df2cd0ed9ee7a6cdaa5a60682c962",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 120,
+          "head_sha": "38942dd30c5f8048e174c64042241c290e316a9b",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 124,
+          "head_sha": "ebb2decffea5e0749ff8e2f971930252aba78016",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 125,
+          "head_sha": "64f57cc997e1034c5ebe32659136f2537a1eb749",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 126,
+          "head_sha": "91ec78f45db9de44aea843e6157597cb6e0aab65",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 143,
+          "head_sha": "cc6dac7b22bf22fb0e79ab0b884c299c1f900249",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": ""
+        },
+        {
+          "pr": 144,
+          "head_sha": "cdf18c2b19f7b95a85868c824b6bdffb88156b3d",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": ""
+        }
+      ],
+      "ruleset_contract": {
+        "branch_protection": {
+          "http_status": 404,
+          "body": {
+            "message": "Branch not protected",
+            "documentation_url": "https://docs.github.com/rest/branches/branch-protection#get-branch-protection",
+            "status": "404"
+          }
+        },
+        "required_contexts": [
+          "DCO",
+          "Policy",
+          "ci-required"
+        ],
+        "protect_main": {
+          "id": 17461058,
+          "name": "protect-main",
+          "target": "branch",
+          "enforcement": "active",
+          "conditions": {
+            "ref_name": {
+              "exclude": [],
+              "include": [
+                "~DEFAULT_BRANCH"
+              ]
+            }
+          },
+          "rules": [
+            {
+              "type": "deletion"
+            },
+            {
+              "type": "pull_request",
+              "parameters": {
+                "required_approving_review_count": 0,
+                "dismiss_stale_reviews_on_push": true,
+                "required_reviewers": [],
+                "require_code_owner_review": false,
+                "dismissal_restriction": {
+                  "enabled": false,
+                  "allowed_actors": []
+                },
+                "require_last_push_approval": false,
+                "required_review_thread_resolution": false,
+                "require_extra_approval_for_unattributed_changes": true,
+                "allowed_merge_methods": [
+                  "merge",
+                  "squash",
+                  "rebase"
+                ]
+              }
+            },
+            {
+              "type": "non_fast_forward"
+            },
+            {
+              "type": "required_status_checks",
+              "parameters": {
+                "strict_required_status_checks_policy": false,
+                "do_not_enforce_on_create": false,
+                "required_status_checks": [
+                  {
+                    "context": "DCO"
+                  },
+                  {
+                    "context": "Policy"
+                  },
+                  {
+                    "context": "ci-required"
+                  }
+                ]
+              }
+            }
+          ],
+          "updated_at": "2026-09-16T19:41:19.426+07:00",
+          "bypass_actors": [],
+          "current_user_can_bypass": "never",
+          "html_url": "https://github.com/jackin-project/jackin-sentinel/rules/17461058"
+        },
+        "all_rulesets": [
+          {
+            "id": 17461058,
+            "name": "protect-main",
+            "target": "branch",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "exclude": [],
+                "include": [
+                  "~DEFAULT_BRANCH"
+                ]
+              }
+            },
+            "rules": [
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "pull_request",
+                "parameters": {
+                  "required_approving_review_count": 0,
+                  "dismiss_stale_reviews_on_push": true,
+                  "required_reviewers": [],
+                  "require_code_owner_review": false,
+                  "dismissal_restriction": {
+                    "enabled": false,
+                    "allowed_actors": []
+                  },
+                  "require_last_push_approval": false,
+                  "required_review_thread_resolution": false,
+                  "require_extra_approval_for_unattributed_changes": true,
+                  "allowed_merge_methods": [
+                    "merge",
+                    "squash",
+                    "rebase"
+                  ]
+                }
+              },
+              {
+                "type": "non_fast_forward"
+              },
+              {
+                "type": "required_status_checks",
+                "parameters": {
+                  "strict_required_status_checks_policy": false,
+                  "do_not_enforce_on_create": false,
+                  "required_status_checks": [
+                    {
+                      "context": "DCO"
+                    },
+                    {
+                      "context": "Policy"
+                    },
+                    {
+                      "context": "ci-required"
+                    }
+                  ]
+                }
+              }
+            ],
+            "updated_at": "2026-09-16T19:41:19.426+07:00",
+            "bypass_actors": [],
+            "current_user_can_bypass": "never",
+            "html_url": "https://github.com/jackin-project/jackin-sentinel/rules/17461058"
+          },
+          {
+            "id": 17461059,
+            "name": "protect-tags",
+            "target": "tag",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "exclude": [],
+                "include": [
+                  "~ALL"
+                ]
+              }
+            },
+            "rules": [
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "non_fast_forward"
+              }
+            ],
+            "updated_at": "2026-06-09T23:46:11.913+07:00",
+            "bypass_actors": [],
+            "current_user_can_bypass": "never",
+            "html_url": "https://github.com/jackin-project/jackin-sentinel/rules/17461059"
+          }
+        ]
+      },
+      "observed_required_contexts_on_prs": [
+        "DCO=COMPLETED/SUCCESS",
+        "Policy=COMPLETED/SUCCESS",
+        "ci-required=COMPLETED/FAILURE",
+        "ci-required=COMPLETED/SUCCESS"
+      ],
+      "observed_app_ids": [
+        "DCO-2#974774",
+        "GitHub Actions#15368",
+        "SonarQubeCloud#12526"
+      ],
+      "pr_classification_counts": {
+        "green-or-nonblocking": 8,
+        "mixed-failure-candidate": 1
+      },
+      "pr_incomplete_counts": {
+        "skipped": 7
+      },
+      "main_verification": {
+        "default_branch": "main",
+        "sha": "a668b869b9a31622f3088c1d891c45716e94cff2",
+        "check_count": 6,
+        "checkrun_count": 6,
+        "statuscontext_count": 0,
+        "contexts_has_next": false,
+        "status_counts": {
+          "COMPLETED": 6
+        },
+        "conclusion_counts": {
+          "NEUTRAL": 1,
+          "SUCCESS": 5
+        },
+        "required_like": [
+          "Policy=COMPLETED/SUCCESS",
+          "ci-required=COMPLETED/SUCCESS"
+        ],
+        "app_ids": [
+          "GitHub Actions#15368",
+          "SonarQubeCloud#12526"
+        ],
+        "failed": [],
+        "pending": [],
+        "skipped": []
+      },
+      "latest_main_runs": {
+        "fetched_count": 0,
+        "event_counts": {},
+        "matching_head_sha_count": 0,
+        "latest_head_sha_runs": [],
+        "latest_runs": [],
+        "child_dispatch_candidates": [],
+        "child_dispatch_note": "No workflow_run/repository_dispatch/workflow_dispatch run in fetched latest-20 main list; relation not discoverable here."
+      }
+    },
+    "jackin-project/jackin-role-action": {
+      "default_branch": "main",
+      "default_sha": "8882236041e149153491ada7091382e76be1c313",
+      "open_pr_count": 10,
+      "open_pr_numbers": [
+        157,
+        158,
+        159,
+        160,
+        164,
+        165,
+        166,
+        167,
+        181,
+        182
+      ],
+      "current_pr_heads": [
+        {
+          "pr": 157,
+          "head_sha": "3b89ee29ed362fa1290bc5cfb4d47fc721edb216",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 158,
+          "head_sha": "b459e3088635b9dd503b98452630ac2a5eb39823",
+          "classification": "mixed-failure-candidate",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 159,
+          "head_sha": "9b524cf22f5c7fd93e69ac31e5fa9da537ac72f8",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 160,
+          "head_sha": "3df1559270c87e1d789447e3eeab3da678cb675b",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 164,
+          "head_sha": "5e0f99cf761306d3b202b025c944dd21d4df2b7f",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 165,
+          "head_sha": "db452f4ee7a285917ab9132397e873b9a085cb69",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 166,
+          "head_sha": "449057cf889cdbbac4f296ba3adb7ae2e1d5cdaf",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 167,
+          "head_sha": "1faaef2420bac36d5b67c92b6ae4d3c61ca48295",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": "skipped"
+        },
+        {
+          "pr": 181,
+          "head_sha": "b4bd446c0da372d5c8f89b2102dacb7fc2ea4d16",
+          "classification": "infrastructure-or-generator-candidate",
+          "incomplete_flags": ""
+        },
+        {
+          "pr": 182,
+          "head_sha": "8ea816d2cfd33645ecce61b20bdf9655e4781307",
+          "classification": "green-or-nonblocking",
+          "incomplete_flags": ""
+        }
+      ],
+      "ruleset_contract": {
+        "branch_protection": {
+          "http_status": 404,
+          "body": {
+            "message": "Branch not protected",
+            "documentation_url": "https://docs.github.com/rest/branches/branch-protection#get-branch-protection",
+            "status": "404"
+          }
+        },
+        "required_contexts": [
+          "DCO",
+          "Policy",
+          "ci-required"
+        ],
+        "protect_main": {
+          "id": 15170996,
+          "name": "protect-main",
+          "target": "branch",
+          "enforcement": "active",
+          "conditions": {
+            "ref_name": {
+              "exclude": [],
+              "include": [
+                "~DEFAULT_BRANCH"
+              ]
+            }
+          },
+          "rules": [
+            {
+              "type": "deletion"
+            },
+            {
+              "type": "pull_request",
+              "parameters": {
+                "required_approving_review_count": 0,
+                "dismiss_stale_reviews_on_push": true,
+                "required_reviewers": [],
+                "require_code_owner_review": false,
+                "dismissal_restriction": {
+                  "enabled": false,
+                  "allowed_actors": []
+                },
+                "require_last_push_approval": false,
+                "required_review_thread_resolution": false,
+                "require_extra_approval_for_unattributed_changes": true,
+                "allowed_merge_methods": [
+                  "merge",
+                  "squash",
+                  "rebase"
+                ]
+              }
+            },
+            {
+              "type": "non_fast_forward"
+            },
+            {
+              "type": "required_status_checks",
+              "parameters": {
+                "strict_required_status_checks_policy": false,
+                "do_not_enforce_on_create": false,
+                "required_status_checks": [
+                  {
+                    "context": "DCO"
+                  },
+                  {
+                    "context": "Policy"
+                  },
+                  {
+                    "context": "ci-required"
+                  }
+                ]
+              }
+            }
+          ],
+          "updated_at": "2026-09-16T15:25:00.430+07:00",
+          "bypass_actors": [],
+          "current_user_can_bypass": "never",
+          "html_url": "https://github.com/jackin-project/jackin-role-action/rules/15170996"
+        },
+        "all_rulesets": [
+          {
+            "id": 15170996,
+            "name": "protect-main",
+            "target": "branch",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "exclude": [],
+                "include": [
+                  "~DEFAULT_BRANCH"
+                ]
+              }
+            },
+            "rules": [
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "pull_request",
+                "parameters": {
+                  "required_approving_review_count": 0,
+                  "dismiss_stale_reviews_on_push": true,
+                  "required_reviewers": [],
+                  "require_code_owner_review": false,
+                  "dismissal_restriction": {
+                    "enabled": false,
+                    "allowed_actors": []
+                  },
+                  "require_last_push_approval": false,
+                  "required_review_thread_resolution": false,
+                  "require_extra_approval_for_unattributed_changes": true,
+                  "allowed_merge_methods": [
+                    "merge",
+                    "squash",
+                    "rebase"
+                  ]
+                }
+              },
+              {
+                "type": "non_fast_forward"
+              },
+              {
+                "type": "required_status_checks",
+                "parameters": {
+                  "strict_required_status_checks_policy": false,
+                  "do_not_enforce_on_create": false,
+                  "required_status_checks": [
+                    {
+                      "context": "DCO"
+                    },
+                    {
+                      "context": "Policy"
+                    },
+                    {
+                      "context": "ci-required"
+                    }
+                  ]
+                }
+              }
+            ],
+            "updated_at": "2026-09-16T15:25:00.430+07:00",
+            "bypass_actors": [],
+            "current_user_can_bypass": "never",
+            "html_url": "https://github.com/jackin-project/jackin-role-action/rules/15170996"
+          },
+          {
+            "id": 16515394,
+            "name": "protect-tags",
+            "target": "tag",
+            "enforcement": "active",
+            "conditions": {
+              "ref_name": {
+                "exclude": [],
+                "include": [
+                  "~ALL"
+                ]
+              }
+            },
+            "rules": [
+              {
+                "type": "deletion"
+              },
+              {
+                "type": "non_fast_forward"
+              }
+            ],
+            "updated_at": "2026-05-18T08:45:10.850+07:00",
+            "bypass_actors": [],
+            "current_user_can_bypass": "never",
+            "html_url": "https://github.com/jackin-project/jackin-role-action/rules/16515394"
+          }
+        ]
+      },
+      "observed_required_contexts_on_prs": [
+        "DCO=COMPLETED/SUCCESS",
+        "Policy=COMPLETED/FAILURE",
+        "Policy=COMPLETED/SUCCESS",
+        "ci-required=COMPLETED/FAILURE",
+        "ci-required=COMPLETED/SUCCESS"
+      ],
+      "observed_app_ids": [
+        "DCO-2#974774",
+        "GitHub Actions#15368",
+        "SonarQubeCloud#12526"
+      ],
+      "pr_classification_counts": {
+        "green-or-nonblocking": 8,
+        "mixed-failure-candidate": 1,
+        "infrastructure-or-generator-candidate": 1
+      },
+      "pr_incomplete_counts": {
+        "skipped": 8
+      },
+      "main_verification": {
+        "default_branch": "main",
+        "sha": "8882236041e149153491ada7091382e76be1c313",
+        "check_count": 6,
+        "checkrun_count": 6,
+        "statuscontext_count": 0,
+        "contexts_has_next": false,
+        "status_counts": {
+          "COMPLETED": 6
+        },
+        "conclusion_counts": {
+          "FAILURE": 1,
+          "SUCCESS": 5
+        },
+        "required_like": [
+          "Policy=COMPLETED/SUCCESS",
+          "ci-required=COMPLETED/SUCCESS"
+        ],
+        "app_ids": [
+          "GitHub Actions#15368",
+          "SonarQubeCloud#12526"
+        ],
+        "failed": [
+          {
+            "name": "SonarCloud Code Analysis",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://sonarcloud.io/dashboard?id=jackin-project_validate-agent-action&branch=main",
+            "app": "SonarQubeCloud#12526",
+            "run_id": ""
+          }
+        ],
+        "pending": [],
+        "skipped": []
+      },
+      "latest_main_runs": {
+        "fetched_count": 0,
+        "event_counts": {},
+        "matching_head_sha_count": 0,
+        "latest_head_sha_runs": [],
+        "latest_runs": [],
+        "child_dispatch_candidates": [],
+        "child_dispatch_note": "No workflow_run/repository_dispatch/workflow_dispatch run in fetched latest-20 main list; relation not discoverable here."
+      }
+    }
+  }
+}

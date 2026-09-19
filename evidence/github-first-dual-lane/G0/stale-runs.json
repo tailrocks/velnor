@@ -1,0 +1,29 @@
+{
+  "schema": "velnor.operational-action.v1",
+  "repository": "tailrocks/velnor",
+  "date_utc": "2026-09-19",
+  "action": "cancel obsolete pull_request CI runs",
+  "reason": "Superseded heads remained queued on unavailable self-hosted velnor-target-mvp jobs; current heads were pending without jobs and policy candidate acquisition timed out.",
+  "execution": {
+    "input_revision": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+    "observed_at_utc": "2026-09-19T16:32:43Z",
+    "runtime_model": "gpt-5.6-luna",
+    "reasoning_effort": "max",
+    "launcher_defaults": {"default_subagent_model": "gpt-5.6-luna", "default_subagent_reasoning_effort": "max", "max_concurrent_threads_per_session": 256}
+  },
+  "runs": [
+    {"id":35452270126,"head":"29b7f08de144b92f29022461af275f49ff237f42","superseded_by_head":"856a222bd551f71de49468d70952e91a724060bc","current_run":35453339277,"request_result":"accepted","standard_cancel_observed":"queued at 2026-09-19T16:27:57Z","force_cancel":{"endpoint":"POST /repos/tailrocks/velnor/actions/runs/35452270126/force-cancel","docs":"https://docs.github.com/en/rest/actions/workflow-runs#force-cancel-a-workflow-run","requested_at":"2026-09-19T16:28:53Z","http_status":202},"terminal_status":"completed","terminal_conclusion":"cancelled","terminal_observed":"2026-09-19T16:29:45Z","queued_jobs_after_terminal":0},
+    {"id":35445034780,"head":"bf2bb9d749d38da3e9c221cdf7db02e6a98c1498","superseded_by_head":"af31b644aa01eb352ba6240fca957e900174d067","current_run":35453601367,"request_result":"accepted","standard_cancel_observed":"queued at 2026-09-19T16:27:57Z","force_cancel":{"endpoint":"POST /repos/tailrocks/velnor/actions/runs/35445034780/force-cancel","docs":"https://docs.github.com/en/rest/actions/workflow-runs#force-cancel-a-workflow-run","requested_at":"2026-09-19T16:28:54Z","http_status":202},"terminal_status":"completed","terminal_conclusion":"cancelled","terminal_observed":"2026-09-19T16:29:45Z","queued_jobs_after_terminal":0}
+  ],
+  "newer_runs": [
+    {"pr":954,"head":"f16592ea165ced141bf0bb1c43466a95d7df8b2e","run":35454970877,"observed_at":"2026-09-19T16:32:43Z","status":"queued","provider_jobs":{"github_hosted":{"completed_success":8,"completed_skipped":3,"in_progress":5,"failures":0},"velnor":{"queued":5,"runner_ids":[0],"host":"unavailable/no Velnor host launched"}},"blocker":"Velnor lane remains queued; hosted lane still running"},
+    {"pr":953,"head":"af31b644aa01eb352ba6240fca957e900174d067","run":35453601367,"observed_at":"2026-09-19T16:32:43Z","status":"queued","provider_jobs":{"github_hosted":{"completed_success":7,"completed_skipped":3,"in_progress":6,"failures":1,"failed_job":"105928872280 Rust · velnor-workflow-contract · github-hosted — rust-velnor-workflow-contract / GitHub · hosted"},"velnor":{"queued":5,"runner_ids":[0],"host":"unavailable/no Velnor host launched"}},"blocker":"cache compatibility test failure plus Velnor lane queued"}
+  ],
+  "pipeline_findings": {
+    "failed_job": "https://github.com/tailrocks/velnor/actions/runs/35453601367/job/105928872280",
+    "failure": "parameterized_callees_resolve_to_the_pre_parameterization_cache_keys: github-hosted-rust-policy primary key changed",
+    "cache_observation": "rustup/mold/cargo exact; MBX prefix; docker seed null",
+    "current_pr954_contract": "success on hosted lane at job 105928871444; Velnor jobs remain queued with runner_id 0"
+  },
+  "completion_claim":false
+}

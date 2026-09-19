@@ -1,0 +1,3877 @@
+{
+  "$schema": "g0-workload-matrix.v1",
+  "schema_version": 1,
+  "kind": "g0_workload_matrix",
+  "observed_at_utc": "2026-09-19T17:05:57Z",
+  "source_contract": {
+    "source_repository": "tailrocks/velnor",
+    "source_revision": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+    "specification_path": "dual-lane-records/docs/ci/github-first-dual-lane/SPEC.md",
+    "fleet_revision_snapshot": "fleet/main-revisions.tsv",
+    "read_only_projection": true
+  },
+  "scope": {
+    "expected_repository_count": 32,
+    "actual_repository_count": 32,
+    "unique_repository_count": 32,
+    "duplicate_repositories": [],
+    "revision_source": "fleet/main-revisions.tsv",
+    "coverage_status": "complete_inventory_partial_execution_evidence"
+  },
+  "semantics": {
+    "required_observed_responsibilities": "Source-observed logical duties that must remain represented; they are not claims that a generated unit executed them.",
+    "generator_actual_scan_unit_ids": "Only scanner IDs explicitly emitted by a reviewed category report are listed. Empty means the category did not capture an exact emitted ID; it is not a fabricated success.",
+    "native_workloads": "Apple-bound or native-package obligations with their required executor. Native-only exclusion from Velnor is explicit and does not count as a pass.",
+    "platform_matrix": "Required or configured executor/platform evidence, with unexecuted and misrouted states retained.",
+    "trust_eligibility": "Provider/source trust posture observed in reports. Configured is not the same as executed or passed.",
+    "missing_or_unsupported": "Known absent, unmeasured, misrouted, or unsupported responsibilities. Unknown data remains a blocker."
+  },
+  "category_sources": [
+    {
+      "id": "fleet",
+      "path": "fleet/inventory.md",
+      "scope": "32 repositories, workflow/config presence, category notes"
+    },
+    {
+      "id": "revisions",
+      "path": "fleet/main-revisions.tsv",
+      "scope": "exact default-branch SHAs at the latest fleet snapshot"
+    },
+    {
+      "id": "configs",
+      "path": "fleet/configs.tsv",
+      "scope": "generator/config presence and observed generator revisions"
+    },
+    {
+      "id": "rust_consumers",
+      "path": "rust-consumers/inventory.tsv",
+      "scope": "exact scanner IDs, platform/provider config, and run state for eight Rust consumers"
+    },
+    {
+      "id": "rust_report",
+      "path": "rust-consumers/report.md",
+      "scope": "Rust logical responsibilities, scanner limitations, and platform/release gaps"
+    },
+    {
+      "id": "distribution_consumers",
+      "path": "distribution-consumers/consumer-inventory.json",
+      "scope": "six distribution consumer responsibility inventories"
+    },
+    {
+      "id": "distribution_report",
+      "path": "distribution-consumers/report.md",
+      "scope": "Homebrew/APT source behavior and missing install/publish proof"
+    },
+    {
+      "id": "distribution_producer",
+      "path": "distribution/findings.md",
+      "scope": "Velnor APT/Homebrew producer responsibilities and failures"
+    },
+    {
+      "id": "native_routing",
+      "path": "native-routing/report.md",
+      "scope": "Apple-bound workload routing and Velnor exclusions"
+    },
+    {
+      "id": "skills_adapter",
+      "path": "skills-adapter/report.md",
+      "scope": "eight skills repositories, shared shape, and observed scanner results"
+    },
+    {
+      "id": "skills_review",
+      "path": "skills-review/review.json",
+      "scope": "exact reviewed baseline and unapproved/incomplete Skills adapter state"
+    },
+    {
+      "id": "action_roles",
+      "path": "action-roles/findings.md",
+      "scope": "Jackin role-image and action responsibilities"
+    },
+    {
+      "id": "action_review",
+      "path": "action-review/report.md",
+      "scope": "runner-pinned action metadata and consumer proof gaps"
+    },
+    {
+      "id": "runtime",
+      "path": "runtime/report.md",
+      "scope": "provider trust, native runtime boundary, and Velnor execution limits"
+    },
+    {
+      "id": "homebrew_contract",
+      "path": "homebrew-contract/proposal.md",
+      "scope": "Velnor native Homebrew target boundary"
+    },
+    {
+      "id": "fleet_contract",
+      "path": "fleet/requirements.json",
+      "scope": "required check/context snapshot for repositories with open PRs"
+    }
+  ],
+  "repositories": [
+    {
+      "repository": "tailrocks/velnor",
+      "repository_role": "runtime_producer",
+      "default_branch": "main",
+      "default_branch_sha": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+      "generator_revision": "fdeed261bd2247a38db6922a7726cd45d3d6f31e",
+      "workflow_count": 15,
+      "workflow_families": [
+        "ci-main",
+        "ci-policy",
+        "ci-pr",
+        "ci-release-package-signer",
+        "ci-runtime-products",
+        "ci-unit-bun",
+        "ci-unit-docker",
+        "ci-unit-docs",
+        "ci-unit-opentofu",
+        "ci-unit-rust",
+        "maintenance",
+        "nightly",
+        "preview",
+        "release"
+      ],
+      "required_observed_responsibilities": [
+        {
+          "id": "rust-workspace-runtime",
+          "status": "observed",
+          "notes": "Core crates, runner/control/runtime behavior, and Rust unit path."
+        },
+        {
+          "id": "bun-docker-docs-opentofu-units",
+          "status": "observed",
+          "notes": "Workflow inventory names each generated unit family."
+        },
+        {
+          "id": "candidate-policy-and-check-contract",
+          "status": "partial",
+          "notes": "Bootstrap and check-contract evidence show candidate acquisition and required-context blockers."
+        },
+        {
+          "id": "runtime-product-release-and-package-signer",
+          "status": "partial",
+          "notes": "Runtime/application publication namespaces and product manifest are source obligations; hosted recovery is incomplete."
+        },
+        {
+          "id": "trusted-linux-and-mac-runtime-boundary",
+          "status": "partial",
+          "notes": "Linux lease boundary exists; trusted Mac nested-Docker ownership is blocked by transport design."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [],
+      "scan_units_observation": "No exact emitted scanner IDs were captured by the reviewed G0 category reports; workflow family names are not substituted as scanner IDs.",
+      "native_workloads": [
+        {
+          "id": "native-macos-product-package",
+          "status": "required_not_executed",
+          "platform": "macos",
+          "architecture": "arm64",
+          "executor": "authorized_actual_mac",
+          "velnor": "excluded_until_mac_boundary_proof"
+        }
+      ],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "rust-workspace-runtime",
+            "bun-docker-docs-opentofu-units"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "configured_not_executed_in_this_projection",
+          "velnor": "linux_only_static_capability"
+        },
+        {
+          "workloads": [
+            "native-macos-product-package"
+          ],
+          "provider": "github-hosted_or_actual_mac",
+          "runner": "macos",
+          "os": "macos",
+          "architectures": [
+            "arm64"
+          ],
+          "status": "required_but_g4_g5_held_behind_g3",
+          "velnor": "excluded"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "configured",
+        "velnor": "configured_manual_and_automatic_but_unproven",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_trusted_docker",
+        "basis": [
+          "runtime/report.md",
+          "bootstrap/findings.md",
+          "fleet/configs.tsv"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "generator_candidate-bootstrap",
+          "kind": "missing",
+          "reason": "Candidate producer remains coupled to normal plan/unit/dependency paths; independent bootstrap is proposed but not implemented.",
+          "evidence": [
+            "bootstrap/findings.md"
+          ]
+        },
+        {
+          "id": "mac-per-job-docker-ownership",
+          "kind": "unsupported",
+          "reason": "VirtioFS-forwarded socket is not guest-connectable; trusted Mac jobs bypass per-job ownership until a VM-reachable relay exists.",
+          "evidence": [
+            "runtime/report.md"
+          ]
+        },
+        {
+          "id": "live-workload-execution",
+          "kind": "not_observed",
+          "reason": "G0 inventory contains no representative runtime execution proof.",
+          "evidence": [
+            "runtime/report.md",
+            "fleet/inventory.md"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "bootstrap",
+        "check-contract",
+        "runtime",
+        "distribution",
+        "fleet_contract"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "fleet/configs.tsv",
+        "bootstrap/findings.md",
+        "check-contract/check-contract.json",
+        "runtime/report.md",
+        "distribution/findings.md",
+        "fleet/requirements.json"
+      ],
+      "gate_status": "G0_inventory_partial_G1_G3_G4_G5_pending",
+      "blocker": "Candidate/bootstrap, package handoff, Mac transport ownership, and live execution are not proven."
+    },
+    {
+      "repository": "tailrocks/velnor-apt",
+      "repository_role": "apt_distribution_consumer",
+      "default_branch": "main",
+      "default_branch_sha": "b24d7d4370001119cd5ddcb6f9e07aa9007051e7",
+      "generator_revision": "fdeed261bd2247a38db6922a7726cd45d3d6f31e",
+      "workflow_count": 9,
+      "workflow_families": [
+        "ci-main",
+        "ci-policy",
+        "ci-pr",
+        "ci-unit-docs",
+        "maintenance",
+        "nightly",
+        "release",
+        "renovate-validate",
+        "renovate"
+      ],
+      "required_observed_responsibilities": [
+        {
+          "id": "apt-package-state",
+          "status": "observed",
+          "notes": "APT profile and package velnor-runner."
+        },
+        {
+          "id": "signed-apt-feed-and-publish",
+          "status": "partial",
+          "notes": "Feed/signature/publish contract is present; delivery and hidden-sentinel behavior are not green."
+        },
+        {
+          "id": "stable-preview-runtime-discovery",
+          "status": "partial",
+          "notes": "Stable discovery selected runtime namespace; preview source endpoint is absent."
+        },
+        {
+          "id": "clean-apt-install-upgrade",
+          "status": "unknown",
+          "notes": "No clean-client proof in reviewed G0 evidence."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [],
+      "scan_units_observation": "APT category reports did not capture exact emitted scanner IDs.",
+      "native_workloads": [],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "apt-package-state",
+            "signed-apt-feed-and-publish",
+            "stable-preview-runtime-discovery"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "amd64",
+            "arm64"
+          ],
+          "status": "configured_partial_not_executed_clean_client",
+          "velnor": "not_evidenced"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "configured",
+        "velnor": "not_evidenced",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_publish",
+        "basis": [
+          "distribution/findings.md",
+          "fleet/configs.tsv"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "apt-hidden-sentinel-handoff",
+          "kind": "missing",
+          "reason": "Verified-to-publish hidden sentinel was dropped by upload artifact defaults.",
+          "evidence": [
+            "distribution/findings.md"
+          ]
+        },
+        {
+          "id": "apt-preview-source-endpoint",
+          "kind": "missing",
+          "reason": "Preview source endpoint is absent; generated preview verification cannot prove source identity.",
+          "evidence": [
+            "distribution/findings.md"
+          ]
+        },
+        {
+          "id": "apt-clean-install-upgrade",
+          "kind": "not_observed",
+          "reason": "No clean install, upgrade, or signature verification transcript was reviewed.",
+          "evidence": [
+            "distribution/findings.md"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "distribution",
+        "distribution-review"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "fleet/configs.tsv",
+        "distribution/findings.md",
+        "distribution-review/report.md"
+      ],
+      "gate_status": "blocked_distribution_contract",
+      "blocker": "APT publish/handoff and preview identity are not proven."
+    },
+    {
+      "repository": "tailrocks/parallax",
+      "repository_role": "polyglot_consumer",
+      "default_branch": "main",
+      "default_branch_sha": "6a12bf47a816b63e848b563aaa45ef9694159c79",
+      "generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09",
+      "workflow_count": 8,
+      "workflow_families": [
+        "ci-main",
+        "ci-policy",
+        "ci-pr",
+        "ci-unit-bun",
+        "ci-unit-docker",
+        "ci-unit-rust",
+        "maintenance",
+        "nightly"
+      ],
+      "required_observed_responsibilities": [
+        {
+          "id": "bun-ui",
+          "status": "observed",
+          "notes": "Scanner emitted bun-ui."
+        },
+        {
+          "id": "docker-image-builds",
+          "status": "observed",
+          "notes": "Two Docker build units were emitted."
+        },
+        {
+          "id": "rust-workspace-and-policy",
+          "status": "observed",
+          "notes": "Workspace members, fixture, xtask, and policy units were emitted."
+        },
+        {
+          "id": "greptimedb-turso-otlp-service-exercise",
+          "status": "partial",
+          "notes": "Runtime/service ports and database behavior are source obligations, not typed service workloads."
+        },
+        {
+          "id": "release-archive-and-cross-targets",
+          "status": "partial",
+          "notes": "Release docs require deterministic archives and Apple/Linux targets while release is disabled in config."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [
+        "bun-ui",
+        "docker-bench-otlp-fanout-maple",
+        "docker-crates-parallax-sentry-proxy",
+        "rust-nextest-evidence-fixture",
+        "rust-parallax-analysis",
+        "rust-parallax-api",
+        "rust-parallax-cli",
+        "rust-parallax-evidence",
+        "rust-parallax-greptime",
+        "rust-parallax-ingest",
+        "rust-parallax-mcp",
+        "rust-parallax-metadata",
+        "rust-parallax-model",
+        "rust-parallax-proto",
+        "rust-parallax-redaction",
+        "rust-parallax-semconv",
+        "rust-parallax-sentry-proxy",
+        "rust-parallax-server",
+        "rust-parallax-spool",
+        "rust-parallax-storage",
+        "rust-parallax-test-support",
+        "rust-parallax-xtask",
+        "rust-policy"
+      ],
+      "scan_units_observation": "Exact 23 IDs are from the Rust-consumer dry-run inventory; this is static planning, not a passing execution.",
+      "native_workloads": [
+        {
+          "id": "apple-release-targets",
+          "status": "required_not_executed",
+          "platform": "macos_or_apple_target",
+          "architecture": "not_fully_observed",
+          "executor": "hosted_native_or_declared_cross_target",
+          "velnor": "excluded_until_target_proof"
+        }
+      ],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "bun-ui",
+            "docker-image-builds",
+            "rust-workspace-and-policy"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-26.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "static_plan_policy_failed_before_workloads",
+          "velnor": "configured_manual_unproven"
+        },
+        {
+          "workloads": [
+            "apple-release-targets"
+          ],
+          "provider": "github-hosted",
+          "runner": "macos_or_cross_target",
+          "os": "macos_or_apple_target",
+          "architectures": [
+            "arm64",
+            "x86_64"
+          ],
+          "status": "source_obligation_not_executed",
+          "velnor": "not_admitted"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "configured_but_policy_failed",
+        "velnor": "configured_manual_unproven",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_release",
+        "basis": [
+          "rust-consumers/inventory.tsv",
+          "rust-consumers/report.md"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "parallax-service-capability",
+          "kind": "missing",
+          "reason": "Docker units build images only; GreptimeDB/Turso/OTLP service exercise is not represented.",
+          "evidence": [
+            "rust-consumers/report.md"
+          ]
+        },
+        {
+          "id": "parallax-release-adapter",
+          "kind": "missing",
+          "reason": "Release is disabled and Apple/Linux artifact obligations have no accepted proof.",
+          "evidence": [
+            "rust-consumers/report.md"
+          ]
+        },
+        {
+          "id": "parallax-policy-gate",
+          "kind": "not_observed",
+          "reason": "Policy failed before workload/provider jobs executed.",
+          "evidence": [
+            "rust-consumers/inventory.tsv"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "rust-consumers"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "fleet/configs.tsv",
+        "rust-consumers/inventory.tsv",
+        "rust-consumers/report.md"
+      ],
+      "gate_status": "G0_evidence_policy_failed",
+      "blocker": "Service/release duties are not typed; policy failed before workload execution."
+    },
+    {
+      "repository": "tailrocks/tracing-request-level",
+      "repository_role": "rust_consumer",
+      "default_branch": "main",
+      "default_branch_sha": "f234158eb3d5caddda83b19e527ffb7d0f675a23",
+      "generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09",
+      "workflow_count": 6,
+      "workflow_families": [
+        "ci-main",
+        "ci-policy",
+        "ci-pr",
+        "ci-unit-rust",
+        "maintenance",
+        "nightly"
+      ],
+      "required_observed_responsibilities": [
+        {
+          "id": "rust-tracing-request-level",
+          "status": "observed",
+          "notes": "One Rust package with seven optional feature paths."
+        },
+        {
+          "id": "locked-dependency-resolution",
+          "status": "missing",
+          "notes": "No Cargo.lock; a locked dependency claim is unavailable."
+        },
+        {
+          "id": "package-and-release-identity",
+          "status": "missing",
+          "notes": "Cargo metadata identifies donbeave/* while fleet identity is tailrocks/*."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [
+        "rust-tracing-request-level"
+      ],
+      "scan_units_observation": "Exact one-unit ID from the Rust-consumer dry-run inventory; policy failed before execution.",
+      "native_workloads": [],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "rust-tracing-request-level"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "static_plan_policy_failed_before_workloads",
+          "velnor": "configured_manual_unproven"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "configured_but_policy_failed",
+        "velnor": "configured_manual_unproven",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_release",
+        "basis": [
+          "rust-consumers/inventory.tsv",
+          "rust-consumers/report.md"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "cargo-lock",
+          "kind": "missing",
+          "reason": "No Cargo.lock; locked dependency behavior cannot be claimed.",
+          "evidence": [
+            "rust-consumers/report.md"
+          ]
+        },
+        {
+          "id": "repository-identity",
+          "kind": "unknown",
+          "reason": "Package metadata and fleet repository identity differ; release ownership unresolved.",
+          "evidence": [
+            "rust-consumers/report.md"
+          ]
+        },
+        {
+          "id": "policy-gate",
+          "kind": "not_observed",
+          "reason": "Policy failed before workload/provider jobs executed.",
+          "evidence": [
+            "rust-consumers/inventory.tsv"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "rust-consumers"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "fleet/configs.tsv",
+        "rust-consumers/inventory.tsv",
+        "rust-consumers/report.md"
+      ],
+      "gate_status": "G0_evidence_policy_failed",
+      "blocker": "Identity and lock/release contract unresolved."
+    },
+    {
+      "repository": "tailrocks/termrock",
+      "repository_role": "polyglot_consumer",
+      "default_branch": "main",
+      "default_branch_sha": "936982e60bce6d19cf33ae09b53545a955f1073d",
+      "generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09",
+      "workflow_count": 0,
+      "workflow_families": [],
+      "required_observed_responsibilities": [
+        {
+          "id": "termrock-rust-workspaces",
+          "status": "observed",
+          "notes": "Five root crates plus detached old-revision and contract-audit workspaces."
+        },
+        {
+          "id": "termrock-bun-docs-wasm",
+          "status": "observed",
+          "notes": "Fumadocs/Playwright, WASM preview, generated catalog/content checks."
+        },
+        {
+          "id": "termrock-native-catalog-raster",
+          "status": "observed",
+          "notes": "Native catalog/raster/snapshot and crossterm/serde paths."
+        },
+        {
+          "id": "termrock-release-targets",
+          "status": "partial",
+          "notes": "Historical generated release declared Linux x86_64/aarch64 binaries."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [],
+      "scan_units_observation": "Current scanner emitted no plan because dynamic include_str! resolution failed. Historical IDs are deliberately not counted as current actual IDs.",
+      "native_workloads": [
+        {
+          "id": "termrock-native-catalog-raster",
+          "status": "required_not_executed",
+          "platform": "linux",
+          "architecture": "x86_64_or_aarch64",
+          "executor": "hosted_linux",
+          "velnor": "unknown"
+        }
+      ],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "termrock-rust-workspaces",
+            "termrock-bun-docs-wasm",
+            "termrock-native-catalog-raster"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64",
+            "aarch64",
+            "wasm32"
+          ],
+          "status": "required_but_no_current_plan",
+          "velnor": "unknown"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "not_configured_currently",
+        "velnor": "not_configured_currently",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_release",
+        "basis": [
+          "rust-consumers/report.md",
+          "fleet/inventory.md"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "termrock-current-scan-plan",
+          "kind": "missing",
+          "reason": "NO_WORKFLOWS_REQUIRED marker suppresses meaningful workloads; scanner aborts on dynamic include_str!.",
+          "evidence": [
+            "rust-consumers/report.md",
+            "fleet/inventory.md"
+          ]
+        },
+        {
+          "id": "termrock-static-macro-resolver",
+          "kind": "missing",
+          "reason": "Central deterministic macro-path resolver is required before honest regeneration.",
+          "evidence": [
+            "rust-consumers/report.md"
+          ]
+        },
+        {
+          "id": "termrock-hosted-execution",
+          "kind": "not_observed",
+          "reason": "No current workflow or workload run exists.",
+          "evidence": [
+            "fleet/inventory.md"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "rust-consumers"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "fleet/configs.tsv",
+        "rust-consumers/report.md",
+        "rust-consumers/inventory.tsv"
+      ],
+      "gate_status": "blocked_scanner_false_negative",
+      "blocker": "A meaningful workload exists but current scanner emits no plan."
+    },
+    {
+      "repository": "tailrocks/termpane",
+      "repository_role": "rust_consumer",
+      "default_branch": "main",
+      "default_branch_sha": "7602430f18852350cc3155e58bb96799234cbfe5",
+      "generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09",
+      "workflow_count": 6,
+      "workflow_families": [
+        "ci-main",
+        "ci-policy",
+        "ci-pr",
+        "ci-unit-rust",
+        "maintenance",
+        "nightly"
+      ],
+      "required_observed_responsibilities": [
+        {
+          "id": "rust-termpane",
+          "status": "observed",
+          "notes": "Root crate, policy, and detached fuzz crate."
+        },
+        {
+          "id": "termpane-benches-heap-and-fixtures",
+          "status": "observed",
+          "notes": "Criterion benches, dhat heap, proptest/serialization fixtures."
+        },
+        {
+          "id": "termpane-fuzz",
+          "status": "partial",
+          "notes": "Fuzz binary is present; CI/release treatment is not independently proven."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [
+        "rust-policy",
+        "rust-termpane",
+        "rust-termpane-fuzz"
+      ],
+      "scan_units_observation": "Exact three-unit IDs from the Rust-consumer dry-run inventory; policy failed before execution.",
+      "native_workloads": [],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "rust-termpane",
+            "termpane-benches-heap-and-fixtures",
+            "termpane-fuzz"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "static_plan_policy_failed_before_workloads",
+          "velnor": "configured_manual_unproven"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "configured_but_policy_failed",
+        "velnor": "configured_manual_unproven",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_release",
+        "basis": [
+          "rust-consumers/inventory.tsv",
+          "rust-consumers/report.md"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "termpane-fuzz-ci-contract",
+          "kind": "unknown",
+          "reason": "Presence is observed but a separate accepted fuzz/bench execution contract is not proven.",
+          "evidence": [
+            "rust-consumers/report.md"
+          ]
+        },
+        {
+          "id": "policy-gate",
+          "kind": "not_observed",
+          "reason": "Policy failed before workload/provider jobs executed.",
+          "evidence": [
+            "rust-consumers/inventory.tsv"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "rust-consumers"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "fleet/configs.tsv",
+        "rust-consumers/inventory.tsv",
+        "rust-consumers/report.md"
+      ],
+      "gate_status": "G0_evidence_policy_failed",
+      "blocker": "Fuzz/bench contract and workload execution remain unproven."
+    },
+    {
+      "repository": "tailrocks/tablerock",
+      "repository_role": "native_polyglot_consumer",
+      "default_branch": "main",
+      "default_branch_sha": "e2fe040c9d9cbf0eb3994d8b6cdffd0a772de6fc",
+      "generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09",
+      "workflow_count": 7,
+      "workflow_families": [
+        "ci-main",
+        "ci-policy",
+        "ci-pr",
+        "ci-unit-rust",
+        "ci-unit-swift",
+        "maintenance",
+        "nightly"
+      ],
+      "required_observed_responsibilities": [
+        {
+          "id": "tablerock-rust-and-policy",
+          "status": "observed",
+          "notes": "Portable Rust/mise/policy checks."
+        },
+        {
+          "id": "swift-package-native",
+          "status": "observed",
+          "notes": "macOS 26 SwiftPM, AppKit/SwiftUI, Cargo FFI."
+        },
+        {
+          "id": "swift-xcodeproj-tablerock",
+          "status": "observed",
+          "notes": "XcodeGen/Xcode app, tests, XCFramework, Apple frameworks."
+        },
+        {
+          "id": "ffi-xcframework-producer",
+          "status": "missing",
+          "notes": "Clean checkout lacks ignored XCFramework; generated consumer edge is absent."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [],
+      "scan_units_observation": "Native-routing report names the two Swift units but does not provide exact scanner-emitted IDs; names are not promoted to IDs.",
+      "native_workloads": [
+        {
+          "id": "swift-package-native",
+          "status": "required_misrouted",
+          "platform": "macos",
+          "architecture": "arm64_and_x86_64",
+          "executor": "github-hosted-macos-26",
+          "velnor": "excluded"
+        },
+        {
+          "id": "swift-xcodeproj-tablerock",
+          "status": "required_misrouted",
+          "platform": "macos",
+          "architecture": "arm64_and_x86_64",
+          "executor": "github-hosted-macos-26",
+          "velnor": "excluded"
+        }
+      ],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "tablerock-rust-and-policy"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "configured",
+          "velnor": "eligible_in_principle"
+        },
+        {
+          "workloads": [
+            "swift-package-native",
+            "swift-xcodeproj-tablerock"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "misrouted_darwin_required",
+          "velnor": "excluded"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "configured",
+        "velnor": "portable_only",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_native_release",
+        "basis": [
+          "native-routing/report.md",
+          "fleet/configs.tsv"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "tablerock-swift-routing",
+          "kind": "misrouted",
+          "reason": "Both Apple-bound Swift units currently run under Ubuntu according to the audit.",
+          "evidence": [
+            "native-routing/report.md"
+          ]
+        },
+        {
+          "id": "tablerock-xcframework-edge",
+          "kind": "missing",
+          "reason": "Clean clone has no ignored XCFramework and generated unit lacks its producer prerequisite.",
+          "evidence": [
+            "native-routing/report.md"
+          ]
+        },
+        {
+          "id": "tablerock-native-execution",
+          "kind": "not_observed",
+          "reason": "No clean hosted macOS/native install proof in G0 evidence.",
+          "evidence": [
+            "native-routing/report.md"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "native-routing"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "fleet/configs.tsv",
+        "native-routing/report.md"
+      ],
+      "gate_status": "blocked_native_routing",
+      "blocker": "Apple workloads are misrouted and the XCFramework prerequisite is unproven."
+    },
+    {
+      "repository": "tailrocks/schemalane",
+      "repository_role": "rust_service_consumer",
+      "default_branch": "main",
+      "default_branch_sha": "ab49e2dd910ee41e96daea97ad6998f7961e5cfc",
+      "generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09",
+      "workflow_count": 6,
+      "workflow_families": [
+        "ci-main",
+        "ci-policy",
+        "ci-pr",
+        "ci-unit-rust",
+        "maintenance",
+        "nightly"
+      ],
+      "required_observed_responsibilities": [
+        {
+          "id": "schemalane-rust-workspace",
+          "status": "observed",
+          "notes": "Six Rust units: pg-query-fmt, CLI, core, embed-tests, macros, version."
+        },
+        {
+          "id": "postgres-testcontainers",
+          "status": "observed",
+          "notes": "Ignored integration tests start Docker Postgres."
+        },
+        {
+          "id": "migration-embed-and-proc-macro-fixtures",
+          "status": "observed",
+          "notes": "Embed tests and trybuild/proc-macro paths remain logical duties."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [
+        "rust-pg-query-fmt",
+        "rust-schemalane-cli",
+        "rust-schemalane-core",
+        "rust-schemalane-embed-tests",
+        "rust-schemalane-macros",
+        "rust-schemalane-version"
+      ],
+      "scan_units_observation": "Exact six-unit IDs from the Rust-consumer dry-run inventory; ignored Postgres tests are not treated as a passing service unit.",
+      "native_workloads": [],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "schemalane-rust-workspace",
+            "migration-embed-and-proc-macro-fixtures"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "static_plan_policy_failed_before_workloads",
+          "velnor": "configured_manual_unproven"
+        },
+        {
+          "workloads": [
+            "postgres-testcontainers"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04_with_docker_service",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "required_service_capability_not_modeled",
+          "velnor": "not_admitted_until_boundary_proof"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "configured_but_policy_failed",
+        "velnor": "configured_manual_unproven",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_service_access",
+        "basis": [
+          "rust-consumers/inventory.tsv",
+          "rust-consumers/report.md"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "schemalane-postgres-service-adapter",
+          "kind": "missing",
+          "reason": "Ignored Docker Postgres integration is not represented by the six Rust units.",
+          "evidence": [
+            "rust-consumers/report.md"
+          ]
+        },
+        {
+          "id": "policy-gate",
+          "kind": "not_observed",
+          "reason": "Policy failed before workload/provider jobs executed.",
+          "evidence": [
+            "rust-consumers/inventory.tsv"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "rust-consumers"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "fleet/configs.tsv",
+        "rust-consumers/inventory.tsv",
+        "rust-consumers/report.md"
+      ],
+      "gate_status": "G0_evidence_policy_failed",
+      "blocker": "Docker Postgres integration is not modeled or executed."
+    },
+    {
+      "repository": "tailrocks/ruxel",
+      "repository_role": "rust_docker_consumer",
+      "default_branch": "main",
+      "default_branch_sha": "3d34049820a6d4ce3707e574f407cbf4047ff932",
+      "generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09",
+      "workflow_count": 7,
+      "workflow_families": [
+        "ci-main",
+        "ci-policy",
+        "ci-pr",
+        "ci-unit-docker",
+        "ci-unit-rust",
+        "maintenance",
+        "nightly"
+      ],
+      "required_observed_responsibilities": [
+        {
+          "id": "ruxel-rust-workspace",
+          "status": "observed",
+          "notes": "Policy and five Rust units."
+        },
+        {
+          "id": "ruxel-docker-image-build",
+          "status": "observed",
+          "notes": "Docker fixture image build unit."
+        },
+        {
+          "id": "ruxel-ssh-privileged-storage-fixture",
+          "status": "observed",
+          "notes": "SSH, systemd/iptables, mounts/storage, PostgreSQL, and multi-host parity scripts are source obligations."
+        },
+        {
+          "id": "ruxel-target-matrix",
+          "status": "partial",
+          "notes": "Toolchain requests musl/gnu and Apple targets."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [
+        "docker-tools-fixtures-docker",
+        "rust-policy",
+        "rust-ruxel-agent",
+        "rust-ruxel-cli",
+        "rust-ruxel-core",
+        "rust-ruxel-proto",
+        "rust-ruxel-spec-extract"
+      ],
+      "scan_units_observation": "Exact seven-unit IDs from the Rust-consumer dry-run inventory; Docker ID proves image build only, not privileged fixture behavior.",
+      "native_workloads": [
+        {
+          "id": "ruxel-apple-targets",
+          "status": "required_not_executed",
+          "platform": "apple_target",
+          "architecture": "arm64_and_x86_64",
+          "executor": "hosted_native_or_declared_cross_target",
+          "velnor": "excluded_until_target_proof"
+        }
+      ],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "ruxel-rust-workspace",
+            "ruxel-docker-image-build"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "static_plan_policy_failed_before_workloads",
+          "velnor": "configured_manual_unproven"
+        },
+        {
+          "workloads": [
+            "ruxel-ssh-privileged-storage-fixture"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04_with_privileged_fixture",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "capability_not_modeled",
+          "velnor": "not_admitted_until_boundary_proof"
+        },
+        {
+          "workloads": [
+            "ruxel-apple-targets"
+          ],
+          "provider": "github-hosted",
+          "runner": "macos_or_cross_target",
+          "os": "macos_or_apple_target",
+          "architectures": [
+            "arm64",
+            "x86_64"
+          ],
+          "status": "source_obligation_not_executed",
+          "velnor": "not_admitted"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "configured_but_policy_failed",
+        "velnor": "configured_manual_unproven",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_privileged_fixture",
+        "basis": [
+          "rust-consumers/inventory.tsv",
+          "rust-consumers/report.md"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "ruxel-privileged-fixture-adapter",
+          "kind": "missing",
+          "reason": "Image build does not prove SSH/systemd/iptables/mount/storage/Postgres/multi-host behavior.",
+          "evidence": [
+            "rust-consumers/report.md"
+          ]
+        },
+        {
+          "id": "ruxel-target-release-adapter",
+          "kind": "missing",
+          "reason": "Requested target matrix and release artifact identity have no accepted proof.",
+          "evidence": [
+            "rust-consumers/report.md"
+          ]
+        },
+        {
+          "id": "policy-gate",
+          "kind": "not_observed",
+          "reason": "Policy failed before workload/provider jobs executed.",
+          "evidence": [
+            "rust-consumers/inventory.tsv"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "rust-consumers"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "fleet/configs.tsv",
+        "rust-consumers/inventory.tsv",
+        "rust-consumers/report.md"
+      ],
+      "gate_status": "G0_evidence_policy_failed",
+      "blocker": "Privileged fixture and target/release duties are not modeled."
+    },
+    {
+      "repository": "tailrocks/pg-bigdecimal",
+      "repository_role": "rust_consumer",
+      "default_branch": "main",
+      "default_branch_sha": "7dc5267d855801dbffb54aa12fc87791aa000a93",
+      "generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09",
+      "workflow_count": 6,
+      "workflow_families": [
+        "ci-main",
+        "ci-policy",
+        "ci-pr",
+        "ci-unit-rust",
+        "maintenance",
+        "nightly"
+      ],
+      "required_observed_responsibilities": [
+        {
+          "id": "rust-pg-bigdecimal",
+          "status": "observed",
+          "notes": "Single Rust crate and local NUMERIC encode/decode tests."
+        },
+        {
+          "id": "package-and-release-identity",
+          "status": "missing",
+          "notes": "Cargo metadata identifies donbeave/* while fleet identity is tailrocks/*."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [
+        "rust-pg-bigdecimal"
+      ],
+      "scan_units_observation": "Exact one-unit ID from the Rust-consumer dry-run inventory; policy failed before execution.",
+      "native_workloads": [],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "rust-pg-bigdecimal"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "static_plan_policy_failed_before_workloads",
+          "velnor": "configured_manual_unproven"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "configured_but_policy_failed",
+        "velnor": "configured_manual_unproven",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_release",
+        "basis": [
+          "rust-consumers/inventory.tsv",
+          "rust-consumers/report.md"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "repository-identity",
+          "kind": "unknown",
+          "reason": "Package metadata and fleet repository identity differ; release ownership unresolved.",
+          "evidence": [
+            "rust-consumers/report.md"
+          ]
+        },
+        {
+          "id": "policy-gate",
+          "kind": "not_observed",
+          "reason": "Policy failed before workload/provider jobs executed.",
+          "evidence": [
+            "rust-consumers/inventory.tsv"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "rust-consumers"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "fleet/configs.tsv",
+        "rust-consumers/inventory.tsv",
+        "rust-consumers/report.md"
+      ],
+      "gate_status": "G0_evidence_policy_failed",
+      "blocker": "Package identity/release ownership unresolved."
+    },
+    {
+      "repository": "tailrocks/parallax-telemetry-playground",
+      "repository_role": "polyglot_native_consumer",
+      "default_branch": "main",
+      "default_branch_sha": "54d09bf71181dcfc72d6829fabec3c53f55aacf9",
+      "generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09",
+      "workflow_count": 10,
+      "workflow_families": [
+        "ci-main",
+        "ci-policy",
+        "ci-pr",
+        "ci-unit-bun",
+        "ci-unit-docker",
+        "ci-unit-gradle",
+        "ci-unit-rust",
+        "ci-unit-swift",
+        "maintenance",
+        "nightly"
+      ],
+      "required_observed_responsibilities": [
+        {
+          "id": "playground-rust-bun-gradle-docker",
+          "status": "observed",
+          "notes": "Portable generated unit families are present."
+        },
+        {
+          "id": "swift-package-macos",
+          "status": "observed",
+          "notes": "macOS 13 package uses Darwin, MachO, MetricKit, and os APIs."
+        },
+        {
+          "id": "playground-native-context",
+          "status": "observed",
+          "notes": "Thermal/sysctl/process/Mach-O/MetricKit behavior is Apple-bound."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [],
+      "scan_units_observation": "Workflow/config names are present, but the reviewed native-routing report does not capture exact emitted scanner IDs.",
+      "native_workloads": [
+        {
+          "id": "swift-package-macos",
+          "status": "required_misrouted",
+          "platform": "macos",
+          "architecture": "arm64",
+          "executor": "github-hosted-macos",
+          "velnor": "excluded"
+        }
+      ],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "playground-rust-bun-gradle-docker"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "configured",
+          "velnor": "eligible_in_principle"
+        },
+        {
+          "workloads": [
+            "swift-package-macos"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "misrouted_darwin_required",
+          "velnor": "excluded"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "configured",
+        "velnor": "portable_only",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_native_api",
+        "basis": [
+          "native-routing/report.md",
+          "fleet/configs.tsv"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "playground-swift-routing",
+          "kind": "misrouted",
+          "reason": "Swift package is routed to Ubuntu despite macOS/Darwin API requirements.",
+          "evidence": [
+            "native-routing/report.md"
+          ]
+        },
+        {
+          "id": "playground-native-execution",
+          "kind": "not_observed",
+          "reason": "No hosted macOS native test transcript is present.",
+          "evidence": [
+            "native-routing/report.md"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "native-routing"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "fleet/configs.tsv",
+        "native-routing/report.md"
+      ],
+      "gate_status": "blocked_native_routing",
+      "blocker": "Apple-bound Swift package is misrouted and no native execution proof exists."
+    },
+    {
+      "repository": "tailrocks/homebrew-tablerock",
+      "repository_role": "homebrew_tap",
+      "default_branch": "main",
+      "default_branch_sha": "7d376cad41088420e92e49bf4030d761180a3512",
+      "generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09",
+      "workflow_count": 6,
+      "workflow_families": [
+        "ci-main",
+        "ci-policy",
+        "ci-pr",
+        "ci-unit-homebrew",
+        "maintenance",
+        "nightly"
+      ],
+      "required_observed_responsibilities": [
+        {
+          "id": "formula-audit-and-version",
+          "status": "observed",
+          "notes": "Stable and preview formulas with release identity/checksums."
+        },
+        {
+          "id": "native-cask-audit-and-install",
+          "status": "partial",
+          "notes": "Arm64 stable/preview casks exist; audit fails and clean install is absent."
+        },
+        {
+          "id": "stable-preview-update-checksum",
+          "status": "partial",
+          "notes": "Stable updater fixture passes; preview/update/native behavior remains incomplete."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [],
+      "scan_units_observation": "Consumer report records one generic Homebrew unit but does not expose its exact generated scanner ID; expected workload names are not substituted.",
+      "native_workloads": [
+        {
+          "id": "native-cask-arm64",
+          "status": "required_audit_failed_install_unimplemented",
+          "platform": "macos-tahoe",
+          "architecture": "arm64",
+          "executor": "actual_mac_or_hosted_macos",
+          "velnor": "excluded"
+        }
+      ],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "formula-audit-and-version",
+            "stable-preview-update-checksum"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "generic_homebrew_unit_configured",
+          "velnor": "not_evidenced"
+        },
+        {
+          "workloads": [
+            "native-cask-arm64"
+          ],
+          "provider": "actual_mac_or_hosted_macos",
+          "runner": "macos",
+          "os": "macos",
+          "architectures": [
+            "arm64"
+          ],
+          "status": "audit_failed_clean_install_missing",
+          "velnor": "excluded"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "configured_generic_only",
+        "velnor": "not_evidenced",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_release",
+        "basis": [
+          "distribution-consumers/consumer-inventory.json",
+          "distribution-consumers/report.md"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "table-rock-cask-audit",
+          "kind": "failed",
+          "reason": "Stable/preview cask URLs are unversioned for strict audit; preview also triggers prerelease audit failure.",
+          "evidence": [
+            "distribution-consumers/report.md"
+          ]
+        },
+        {
+          "id": "table-rock-clean-native-install",
+          "kind": "not_implemented",
+          "reason": "No clean native cask install/version test.",
+          "evidence": [
+            "distribution-consumers/consumer-inventory.json"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "distribution-consumers"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "fleet/configs.tsv",
+        "distribution-consumers/consumer-inventory.json",
+        "distribution-consumers/report.md"
+      ],
+      "gate_status": "blocked_native_homebrew",
+      "blocker": "Native cask audit fails; clean install is unimplemented."
+    },
+    {
+      "repository": "tailrocks/homebrew-ruxel",
+      "repository_role": "homebrew_tap",
+      "default_branch": "main",
+      "default_branch_sha": "ce29c817d29c54563bc479bce3966e4ea32845e6",
+      "generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09",
+      "workflow_count": 6,
+      "workflow_families": [
+        "ci-main",
+        "ci-policy",
+        "ci-pr",
+        "ci-unit-homebrew",
+        "maintenance",
+        "nightly"
+      ],
+      "required_observed_responsibilities": [
+        {
+          "id": "formula-audit-and-version",
+          "status": "partial",
+          "notes": "Stable formula is disabled/mutable; preview is stale."
+        },
+        {
+          "id": "preview-update-source-identity-checksum",
+          "status": "missing",
+          "notes": "No package-update/source identity check."
+        },
+        {
+          "id": "stable-preview-channel-conflict",
+          "status": "missing",
+          "notes": "Stable/preview conflict declaration is incomplete."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [],
+      "scan_units_observation": "Generic Homebrew unit is described but exact scanner ID was not captured.",
+      "native_workloads": [
+        {
+          "id": "native-formula-audit",
+          "status": "failed",
+          "platform": "macos",
+          "architecture": "arm64",
+          "executor": "actual_mac_or_hosted_macos",
+          "velnor": "excluded"
+        }
+      ],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "formula-audit-and-version",
+            "preview-update-source-identity-checksum"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "generic_homebrew_unit_configured",
+          "velnor": "not_evidenced"
+        },
+        {
+          "workloads": [
+            "native-formula-audit"
+          ],
+          "provider": "actual_mac_or_hosted_macos",
+          "runner": "macos",
+          "os": "macos",
+          "architectures": [
+            "arm64"
+          ],
+          "status": "audit_failed",
+          "velnor": "excluded"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "configured_generic_only",
+        "velnor": "not_evidenced",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_release",
+        "basis": [
+          "distribution-consumers/consumer-inventory.json",
+          "distribution-consumers/report.md"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "ruxel-stable-source",
+          "kind": "unsupported",
+          "reason": "Stable formula points at mutable main archive without checksum and is disabled.",
+          "evidence": [
+            "distribution-consumers/report.md"
+          ]
+        },
+        {
+          "id": "ruxel-preview-refresh",
+          "kind": "stale",
+          "reason": "Preview formula assets differ from current live preview release.",
+          "evidence": [
+            "distribution-consumers/report.md"
+          ]
+        },
+        {
+          "id": "ruxel-clean-install",
+          "kind": "not_implemented",
+          "reason": "No clean install/version proof.",
+          "evidence": [
+            "distribution-consumers/consumer-inventory.json"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "distribution-consumers"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "fleet/configs.tsv",
+        "distribution-consumers/consumer-inventory.json",
+        "distribution-consumers/report.md"
+      ],
+      "gate_status": "blocked_distribution_consumer",
+      "blocker": "Mutable/stale formula and missing update/install proof."
+    },
+    {
+      "repository": "tailrocks/homebrew-parallax",
+      "repository_role": "homebrew_tap",
+      "default_branch": "main",
+      "default_branch_sha": "c9c59277f35cb1e81988c2bef0be2c688dadd608",
+      "generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09",
+      "workflow_count": 6,
+      "workflow_families": [
+        "ci-main",
+        "ci-policy",
+        "ci-pr",
+        "ci-unit-homebrew",
+        "maintenance",
+        "nightly"
+      ],
+      "required_observed_responsibilities": [
+        {
+          "id": "formula-audit-and-version",
+          "status": "partial",
+          "notes": "Stable/preview formula digests match; strict audit flags redundant version."
+        },
+        {
+          "id": "stable-preview-update-checksum",
+          "status": "partial",
+          "notes": "Stable updater fixture passes; preview updater is not implemented."
+        },
+        {
+          "id": "serve-behavior-smoke",
+          "status": "missing",
+          "notes": "Formula tests assert version only; GreptimeDB/serve behavior is not exercised."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [],
+      "scan_units_observation": "Generic Homebrew unit is described but exact scanner ID was not captured.",
+      "native_workloads": [
+        {
+          "id": "native-formula-audit",
+          "status": "failed",
+          "platform": "macos",
+          "architecture": "arm64",
+          "executor": "actual_mac_or_hosted_macos",
+          "velnor": "excluded"
+        }
+      ],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "formula-audit-and-version",
+            "stable-preview-update-checksum",
+            "serve-behavior-smoke"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "generic_homebrew_unit_configured",
+          "velnor": "not_evidenced"
+        },
+        {
+          "workloads": [
+            "native-formula-audit"
+          ],
+          "provider": "actual_mac_or_hosted_macos",
+          "runner": "macos",
+          "os": "macos",
+          "architectures": [
+            "arm64"
+          ],
+          "status": "audit_failed_clean_install_missing",
+          "velnor": "excluded"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "configured_generic_only",
+        "velnor": "not_evidenced",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_release",
+        "basis": [
+          "distribution-consumers/consumer-inventory.json",
+          "distribution-consumers/report.md"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "parallax-stable-audit",
+          "kind": "failed",
+          "reason": "Stable formula explicit version is redundant with URL under native audit.",
+          "evidence": [
+            "distribution-consumers/report.md"
+          ]
+        },
+        {
+          "id": "parallax-preview-updater",
+          "kind": "not_implemented",
+          "reason": "Preview updater path is static/unimplemented.",
+          "evidence": [
+            "distribution-consumers/consumer-inventory.json"
+          ]
+        },
+        {
+          "id": "parallax-serve-smoke",
+          "kind": "not_implemented",
+          "reason": "Serve/GreptimeDB behavior is not tested by the tap.",
+          "evidence": [
+            "distribution-consumers/report.md"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "distribution-consumers"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "fleet/configs.tsv",
+        "distribution-consumers/consumer-inventory.json",
+        "distribution-consumers/report.md"
+      ],
+      "gate_status": "blocked_distribution_consumer",
+      "blocker": "Preview updater/serve proof missing and native audit fails."
+    },
+    {
+      "repository": "tailrocks/homebrew-holla",
+      "repository_role": "homebrew_tap",
+      "default_branch": "main",
+      "default_branch_sha": "cc25db8fd911cdf965652d3b094c10d006d056ee",
+      "generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09",
+      "workflow_count": 6,
+      "workflow_families": [
+        "ci-main",
+        "ci-policy",
+        "ci-pr",
+        "ci-unit-homebrew",
+        "maintenance",
+        "nightly"
+      ],
+      "required_observed_responsibilities": [
+        {
+          "id": "formula-audit-and-version",
+          "status": "partial",
+          "notes": "Stable/preview digests match; stable identity/audit contract is incomplete."
+        },
+        {
+          "id": "stable-preview-update-checksum",
+          "status": "partial",
+          "notes": "Stable updater fixture passes; preview updater remains static."
+        },
+        {
+          "id": "stable-preview-channel-conflict",
+          "status": "missing",
+          "notes": "Conflict declaration is one-sided."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [],
+      "scan_units_observation": "Generic Homebrew unit is described but exact scanner ID was not captured.",
+      "native_workloads": [
+        {
+          "id": "native-formula-audit",
+          "status": "failed",
+          "platform": "macos",
+          "architecture": "arm64",
+          "executor": "actual_mac_or_hosted_macos",
+          "velnor": "excluded"
+        }
+      ],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "formula-audit-and-version",
+            "stable-preview-update-checksum",
+            "stable-preview-channel-conflict"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "generic_homebrew_unit_configured",
+          "velnor": "not_evidenced"
+        },
+        {
+          "workloads": [
+            "native-formula-audit"
+          ],
+          "provider": "actual_mac_or_hosted_macos",
+          "runner": "macos",
+          "os": "macos",
+          "architectures": [
+            "arm64"
+          ],
+          "status": "audit_failed_clean_install_missing",
+          "velnor": "excluded"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "configured_generic_only",
+        "velnor": "not_evidenced",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_release",
+        "basis": [
+          "distribution-consumers/consumer-inventory.json",
+          "distribution-consumers/report.md"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "holla-stable-identity",
+          "kind": "missing",
+          "reason": "Stable formula lacks source-sha identity comment.",
+          "evidence": [
+            "distribution-consumers/report.md"
+          ]
+        },
+        {
+          "id": "holla-preview-updater",
+          "kind": "not_implemented",
+          "reason": "Preview updater path is static/unimplemented.",
+          "evidence": [
+            "distribution-consumers/consumer-inventory.json"
+          ]
+        },
+        {
+          "id": "holla-channel-conflict",
+          "kind": "missing",
+          "reason": "Stable/preview conflict declaration is not symmetric.",
+          "evidence": [
+            "distribution-consumers/report.md"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "distribution-consumers"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "fleet/configs.tsv",
+        "distribution-consumers/consumer-inventory.json",
+        "distribution-consumers/report.md"
+      ],
+      "gate_status": "blocked_distribution_consumer",
+      "blocker": "Native audit/channel/update proof incomplete."
+    },
+    {
+      "repository": "tailrocks/holla-apt",
+      "repository_role": "apt_distribution_consumer",
+      "default_branch": "main",
+      "default_branch_sha": "0636074d4a16be4771685bd95bf2cec739cf359c",
+      "generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09",
+      "workflow_count": 1,
+      "workflow_families": [
+        "ci-unit-docs"
+      ],
+      "required_observed_responsibilities": [
+        {
+          "id": "apt-package-state-source-identity-checksum",
+          "status": "observed",
+          "notes": "package-update.sh validates typed Holla release identity and two deb assets."
+        },
+        {
+          "id": "signed-reprepro-index-amd64-arm64",
+          "status": "observed",
+          "notes": "conf/distributions declares amd64/arm64 and signing key."
+        },
+        {
+          "id": "trusted-pages-publish-dispatch",
+          "status": "missing",
+          "notes": "README contract names publisher/dispatch, but workflows are absent."
+        },
+        {
+          "id": "clean-apt-install-upgrade-signature",
+          "status": "unknown",
+          "notes": "Retained signed feed exists; current automation and clean-client proof are absent."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [],
+      "scan_units_observation": "Only docs workflow is present; no exact generated workload IDs for the APT responsibilities were captured.",
+      "native_workloads": [],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "apt-package-state-source-identity-checksum",
+            "signed-reprepro-index-amd64-arm64"
+          ],
+          "provider": "github-hosted",
+          "runner": "not_configured_for_apt",
+          "os": "linux",
+          "architectures": [
+            "amd64",
+            "arm64"
+          ],
+          "status": "docs_only",
+          "velnor": "not_evidenced"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "docs_only",
+        "velnor": "not_evidenced",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_publish",
+        "basis": [
+          "distribution-consumers/consumer-inventory.json",
+          "distribution-consumers/report.md",
+          "fleet/configs.tsv"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "holla-apt-publisher",
+          "kind": "missing",
+          "reason": "No ci-main, ci-pr, ci-policy, publish, Pages, or feed workflow exists.",
+          "evidence": [
+            "distribution-consumers/report.md"
+          ]
+        },
+        {
+          "id": "holla-apt-fixture",
+          "kind": "failed",
+          "reason": "test-package-update.sh exits 2 because referenced publish.yml is absent.",
+          "evidence": [
+            "distribution-consumers/consumer-inventory.json",
+            "distribution-consumers/report.md"
+          ]
+        },
+        {
+          "id": "holla-apt-clean-client",
+          "kind": "not_observed",
+          "reason": "No clean APT install/upgrade/signature transcript.",
+          "evidence": [
+            "distribution-consumers/consumer-inventory.json"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "distribution-consumers"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "fleet/configs.tsv",
+        "distribution-consumers/consumer-inventory.json",
+        "distribution-consumers/report.md"
+      ],
+      "gate_status": "blocked_critical_missing_publisher",
+      "blocker": "APT publisher and meaningful workflow are absent."
+    },
+    {
+      "repository": "tailrocks/holla",
+      "repository_role": "rust_package_consumer",
+      "default_branch": "main",
+      "default_branch_sha": "027dac6be2070b7e836c1ca123861fcbade72003",
+      "generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09",
+      "workflow_count": 6,
+      "workflow_families": [
+        "ci-main",
+        "ci-policy",
+        "ci-pr",
+        "ci-unit-rust",
+        "maintenance",
+        "nightly"
+      ],
+      "required_observed_responsibilities": [
+        {
+          "id": "rust-holla-cli",
+          "status": "observed",
+          "notes": "Single Rust binary with build script."
+        },
+        {
+          "id": "debian-amd64-arm64",
+          "status": "partial",
+          "notes": "Docs/mise promise cargo-deb and cross-target package paths."
+        },
+        {
+          "id": "homebrew-preview",
+          "status": "partial",
+          "notes": "Docs promise Homebrew preview, but generated source has no release adapter."
+        },
+        {
+          "id": "signed-apt-publication",
+          "status": "partial",
+          "notes": "Cross-repo signed APT publication is a source contract, not current generic-unit proof."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [
+        "rust-holla-cli"
+      ],
+      "scan_units_observation": "Exact one-unit ID from the Rust-consumer dry-run inventory; policy failed before execution.",
+      "native_workloads": [
+        {
+          "id": "holla-macos-cfg",
+          "status": "source_native_cfg_not_executed",
+          "platform": "macos",
+          "architecture": "not_observed",
+          "executor": "hosted_native_or_cross_target",
+          "velnor": "excluded_until_proof"
+        }
+      ],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "rust-holla-cli"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "static_plan_policy_failed_before_workloads",
+          "velnor": "configured_manual_unproven"
+        },
+        {
+          "workloads": [
+            "debian-amd64-arm64"
+          ],
+          "provider": "github-hosted",
+          "runner": "linux_cross_target",
+          "os": "linux",
+          "architectures": [
+            "amd64",
+            "arm64"
+          ],
+          "status": "source_obligation_not_executed",
+          "velnor": "not_admitted_until_release_proof"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "configured_but_policy_failed",
+        "velnor": "configured_manual_unproven",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_publish",
+        "basis": [
+          "rust-consumers/inventory.tsv",
+          "rust-consumers/report.md",
+          "distribution-consumers/report.md"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "holla-release-adapter",
+          "kind": "missing",
+          "reason": "Generic Rust unit does not preserve Debian/Homebrew/signed APT release duties.",
+          "evidence": [
+            "rust-consumers/report.md"
+          ]
+        },
+        {
+          "id": "holla-native-target",
+          "kind": "not_observed",
+          "reason": "macOS cfg/native and cross-target package execution are unproven.",
+          "evidence": [
+            "rust-consumers/report.md"
+          ]
+        },
+        {
+          "id": "policy-gate",
+          "kind": "not_observed",
+          "reason": "Policy failed before workload/provider jobs executed.",
+          "evidence": [
+            "rust-consumers/inventory.tsv"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "rust-consumers",
+        "distribution-consumers"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "fleet/configs.tsv",
+        "rust-consumers/inventory.tsv",
+        "rust-consumers/report.md",
+        "distribution-consumers/report.md"
+      ],
+      "gate_status": "G0_evidence_policy_failed",
+      "blocker": "Package/release duties are not represented by the generic Rust unit."
+    },
+    {
+      "repository": "tailrocks/homebrew-velnor",
+      "repository_role": "homebrew_product_consumer",
+      "default_branch": "main",
+      "default_branch_sha": "7af1249f3d69c9f2e548583cdc9f3e737da41b81",
+      "generator_revision": "not_configured",
+      "workflow_count": 0,
+      "workflow_families": [],
+      "required_observed_responsibilities": [
+        {
+          "id": "velnor-stable-formula",
+          "status": "observed",
+          "notes": "Formula/velnorctl source-builds the product."
+        },
+        {
+          "id": "velnor-preview-stable-channel",
+          "status": "missing",
+          "notes": "No complete stable/preview product-channel automation."
+        },
+        {
+          "id": "velnor-native-install-version",
+          "status": "missing",
+          "notes": "No generated CI or clean native install/version proof."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [],
+      "scan_units_observation": "No generator config or workflow exists; no scanner ID is claimed.",
+      "native_workloads": [
+        {
+          "id": "velnor-homebrew-arm64",
+          "status": "required_contract_not_proven",
+          "platform": "macos",
+          "architecture": "arm64",
+          "executor": "actual_mac_or_hosted_macos",
+          "velnor": "excluded"
+        }
+      ],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "velnor-stable-formula",
+            "velnor-native-install-version"
+          ],
+          "provider": "github-hosted",
+          "runner": "macos",
+          "os": "macos",
+          "architectures": [
+            "arm64"
+          ],
+          "status": "required_but_no_workflow",
+          "velnor": "excluded"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "not_configured",
+        "velnor": "not_configured",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_release",
+        "basis": [
+          "distribution/findings.md",
+          "homebrew-contract/proposal.md",
+          "fleet/inventory.md"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "velnor-product-manifest-handoff",
+          "kind": "missing",
+          "reason": "Producer handoff lacks canonical product manifest and immutable app archive for the updater.",
+          "evidence": [
+            "homebrew-contract/proposal.md"
+          ]
+        },
+        {
+          "id": "velnor-homebrew-ci",
+          "kind": "missing",
+          "reason": "No generator config or workflow.",
+          "evidence": [
+            "distribution/findings.md",
+            "fleet/inventory.md"
+          ]
+        },
+        {
+          "id": "velnor-homebrew-clean-install",
+          "kind": "not_observed",
+          "reason": "No native clean install/version transcript.",
+          "evidence": [
+            "homebrew-contract/proposal.md"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "distribution",
+        "homebrew-contract"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "fleet/configs.tsv",
+        "distribution/findings.md",
+        "homebrew-contract/proposal.md"
+      ],
+      "gate_status": "blocked_product_handoff_no_ci",
+      "blocker": "Formula exists, but product manifest/archive and native CI proof are absent."
+    },
+    {
+      "repository": "tailrocks/tailrocks-typescript-skills",
+      "repository_role": "skills_plugin_provider",
+      "default_branch": "main",
+      "default_branch_sha": "f434715f7c664af431f0be62982aa379400102de",
+      "generator_revision": "not_configured",
+      "workflow_count": 0,
+      "workflow_families": [],
+      "required_observed_responsibilities": [
+        {
+          "id": "skills-catalog-frontmatter",
+          "status": "observed",
+          "notes": "Root catalog plus 12 skill directories/frontmatter."
+        },
+        {
+          "id": "skills-docs-provider-metadata",
+          "status": "observed",
+          "notes": "Generated docs and provider plugin manifests agree structurally."
+        },
+        {
+          "id": "skills-helper-template-reference-validation",
+          "status": "partial",
+          "notes": "Helper/template/reference checks are source obligations; central adapter is not approved."
+        },
+        {
+          "id": "skills-generated-doc-drift",
+          "status": "partial",
+          "notes": "Four generated definitions drift in this repository."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [
+        "bun-your-app"
+      ],
+      "scan_units_observation": "The only emitted ID is a concrete false positive from a nested template package.json; it is not accepted as a valid Skills unit.",
+      "native_workloads": [],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "skills-catalog-frontmatter",
+            "skills-docs-provider-metadata",
+            "skills-helper-template-reference-validation"
+          ],
+          "provider": "none_configured",
+          "runner": "not_configured",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "candidate_linux_portable_not_generated",
+          "velnor": "not_configured"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "not_configured",
+        "velnor": "not_configured",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_helper_execution",
+        "basis": [
+          "skills-adapter/report.md",
+          "skills-review/review.json"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "skills-central-unit",
+          "kind": "missing",
+          "reason": "No approved Skills/Plugins scanner, validator, or generated unit.",
+          "evidence": [
+            "skills-adapter/report.md",
+            "skills-review/review.json"
+          ]
+        },
+        {
+          "id": "skills-template-boundary",
+          "kind": "misclassified",
+          "reason": "Nested template package is emitted as bun-your-app; embedded templates must not become executable units.",
+          "evidence": [
+            "skills-adapter/report.md"
+          ]
+        },
+        {
+          "id": "skills-doc-drift",
+          "kind": "failed",
+          "reason": "Generated docs drift is observed.",
+          "evidence": [
+            "skills-adapter/report.md"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "skills-adapter",
+        "skills-review"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "skills-adapter/report.md",
+        "skills-review/review.json"
+      ],
+      "gate_status": "blocked_skills_adapter",
+      "blocker": "False-positive template scan and missing approved central Skills unit."
+    },
+    {
+      "repository": "tailrocks/tailrocks-skill-authoring-skills",
+      "repository_role": "skills_plugin_provider",
+      "default_branch": "main",
+      "default_branch_sha": "9e25890fd63f7ca6c587490ba7cc432f5fdd98d6",
+      "generator_revision": "not_configured",
+      "workflow_count": 0,
+      "workflow_families": [],
+      "required_observed_responsibilities": [
+        {
+          "id": "skills-catalog-frontmatter",
+          "status": "observed",
+          "notes": "Root catalog plus four skill directories/frontmatter."
+        },
+        {
+          "id": "skills-docs-provider-metadata",
+          "status": "observed",
+          "notes": "Generated docs and provider plugin manifests agree structurally."
+        },
+        {
+          "id": "skills-helper-template-reference-validation",
+          "status": "partial",
+          "notes": "Helper/template/reference checks are source obligations; central adapter is not approved."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [],
+      "scan_units_observation": "Current scanner returns no supported project shape; no ID is invented.",
+      "native_workloads": [],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "skills-catalog-frontmatter",
+            "skills-docs-provider-metadata",
+            "skills-helper-template-reference-validation"
+          ],
+          "provider": "none_configured",
+          "runner": "not_configured",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "candidate_linux_portable_not_generated",
+          "velnor": "not_configured"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "not_configured",
+        "velnor": "not_configured",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_helper_execution",
+        "basis": [
+          "skills-adapter/report.md",
+          "skills-review/review.json"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "skills-central-unit",
+          "kind": "missing",
+          "reason": "No approved Skills/Plugins scanner or validator; current scan says no supported shape.",
+          "evidence": [
+            "skills-adapter/report.md",
+            "skills-review/review.json"
+          ]
+        },
+        {
+          "id": "skills-workflow",
+          "kind": "missing",
+          "reason": "No generator config or workflow.",
+          "evidence": [
+            "fleet/inventory.md"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "skills-adapter",
+        "skills-review"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "skills-adapter/report.md",
+        "skills-review/review.json"
+      ],
+      "gate_status": "blocked_skills_adapter",
+      "blocker": "No central Skills unit or workflow."
+    },
+    {
+      "repository": "tailrocks/tailrocks-rust-skills",
+      "repository_role": "skills_plugin_provider",
+      "default_branch": "main",
+      "default_branch_sha": "bcc31b1d935dac4de191a6b71b3091f628d204c0",
+      "generator_revision": "not_configured",
+      "workflow_count": 0,
+      "workflow_families": [],
+      "required_observed_responsibilities": [
+        {
+          "id": "skills-catalog-frontmatter",
+          "status": "observed",
+          "notes": "Root catalog plus 15 skill directories/frontmatter."
+        },
+        {
+          "id": "skills-docs-provider-metadata",
+          "status": "observed",
+          "notes": "Generated docs and provider plugin manifests agree structurally."
+        },
+        {
+          "id": "skills-helper-template-reference-validation",
+          "status": "partial",
+          "notes": "Helper/template/reference checks are source obligations; central adapter is not approved."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [],
+      "scan_units_observation": "Current scanner exits on embedded template Cargo manifests because no root toolchain is recognized; no ID is invented.",
+      "native_workloads": [],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "skills-catalog-frontmatter",
+            "skills-docs-provider-metadata",
+            "skills-helper-template-reference-validation"
+          ],
+          "provider": "none_configured",
+          "runner": "not_configured",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "candidate_linux_portable_not_generated",
+          "velnor": "not_configured"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "not_configured",
+        "velnor": "not_configured",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_helper_execution",
+        "basis": [
+          "skills-adapter/report.md",
+          "skills-review/review.json"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "skills-central-unit",
+          "kind": "missing",
+          "reason": "No approved Skills/Plugins scanner or validator.",
+          "evidence": [
+            "skills-adapter/report.md",
+            "skills-review/review.json"
+          ]
+        },
+        {
+          "id": "skills-template-boundary",
+          "kind": "misclassified",
+          "reason": "Embedded template Cargo manifests trigger root Rust toolchain failure.",
+          "evidence": [
+            "skills-adapter/report.md"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "skills-adapter",
+        "skills-review"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "skills-adapter/report.md",
+        "skills-review/review.json"
+      ],
+      "gate_status": "blocked_skills_adapter",
+      "blocker": "Embedded template manifest causes scanner failure; no central Skills unit."
+    },
+    {
+      "repository": "tailrocks/tailrocks-roadmap-skills",
+      "repository_role": "skills_plugin_provider",
+      "default_branch": "main",
+      "default_branch_sha": "66d9c79f6472ddace0e265335dc8dd36cdeb8a86",
+      "generator_revision": "not_configured",
+      "workflow_count": 0,
+      "workflow_families": [],
+      "required_observed_responsibilities": [
+        {
+          "id": "skills-catalog-frontmatter",
+          "status": "observed",
+          "notes": "Root catalog plus 15 skill directories/frontmatter."
+        },
+        {
+          "id": "skills-docs-provider-metadata",
+          "status": "observed",
+          "notes": "Generated docs and provider plugin manifests agree structurally."
+        },
+        {
+          "id": "skills-helper-template-reference-validation",
+          "status": "partial",
+          "notes": "Helper/template/reference checks are source obligations; central adapter is not approved."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [],
+      "scan_units_observation": "Current scanner reports no supported project shape; no ID is invented.",
+      "native_workloads": [],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "skills-catalog-frontmatter",
+            "skills-docs-provider-metadata",
+            "skills-helper-template-reference-validation"
+          ],
+          "provider": "none_configured",
+          "runner": "not_configured",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "candidate_linux_portable_not_generated",
+          "velnor": "not_configured"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "not_configured",
+        "velnor": "not_configured",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_helper_execution",
+        "basis": [
+          "skills-adapter/report.md",
+          "skills-review/review.json"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "skills-central-unit",
+          "kind": "missing",
+          "reason": "No approved Skills/Plugins scanner or validator; current scan says no supported shape.",
+          "evidence": [
+            "skills-adapter/report.md",
+            "skills-review/review.json"
+          ]
+        },
+        {
+          "id": "skills-workflow",
+          "kind": "missing",
+          "reason": "No generator config or workflow.",
+          "evidence": [
+            "fleet/inventory.md"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "skills-adapter",
+        "skills-review"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "skills-adapter/report.md",
+        "skills-review/review.json"
+      ],
+      "gate_status": "blocked_skills_adapter",
+      "blocker": "No central Skills unit or workflow."
+    },
+    {
+      "repository": "tailrocks/tailrocks-pull-request-skills",
+      "repository_role": "skills_plugin_provider",
+      "default_branch": "main",
+      "default_branch_sha": "2b4f71f49fd27061e64d16b2b7f83d9bd2df5612",
+      "generator_revision": "not_configured",
+      "workflow_count": 0,
+      "workflow_families": [],
+      "required_observed_responsibilities": [
+        {
+          "id": "skills-catalog-frontmatter",
+          "status": "observed",
+          "notes": "Root catalog plus six skill directories/frontmatter."
+        },
+        {
+          "id": "skills-docs-provider-metadata",
+          "status": "observed",
+          "notes": "Generated docs and provider plugin manifests agree structurally."
+        },
+        {
+          "id": "skills-helper-template-reference-validation",
+          "status": "partial",
+          "notes": "Helper/template/reference checks are source obligations; central adapter is not approved."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [],
+      "scan_units_observation": "Current scanner reports no supported project shape; no ID is invented.",
+      "native_workloads": [],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "skills-catalog-frontmatter",
+            "skills-docs-provider-metadata",
+            "skills-helper-template-reference-validation"
+          ],
+          "provider": "none_configured",
+          "runner": "not_configured",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "candidate_linux_portable_not_generated",
+          "velnor": "not_configured"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "not_configured",
+        "velnor": "not_configured",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_helper_execution",
+        "basis": [
+          "skills-adapter/report.md",
+          "skills-review/review.json"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "skills-central-unit",
+          "kind": "missing",
+          "reason": "No approved Skills/Plugins scanner or validator; current scan says no supported shape.",
+          "evidence": [
+            "skills-adapter/report.md",
+            "skills-review/review.json"
+          ]
+        },
+        {
+          "id": "skills-workflow",
+          "kind": "missing",
+          "reason": "No generator config or workflow.",
+          "evidence": [
+            "fleet/inventory.md"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "skills-adapter",
+        "skills-review"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "skills-adapter/report.md",
+        "skills-review/review.json"
+      ],
+      "gate_status": "blocked_skills_adapter",
+      "blocker": "No central Skills unit or workflow."
+    },
+    {
+      "repository": "tailrocks/tailrocks-open-source-skills",
+      "repository_role": "skills_plugin_provider",
+      "default_branch": "main",
+      "default_branch_sha": "6e77a448f9776e837bfc9ab18b833bd5fdc26d3a",
+      "generator_revision": "not_configured",
+      "workflow_count": 0,
+      "workflow_families": [],
+      "required_observed_responsibilities": [
+        {
+          "id": "skills-catalog-frontmatter",
+          "status": "observed",
+          "notes": "Root catalog plus five skill directories/frontmatter."
+        },
+        {
+          "id": "skills-docs-provider-metadata",
+          "status": "observed",
+          "notes": "Generated docs and provider plugin manifests agree structurally."
+        },
+        {
+          "id": "skills-helper-template-reference-validation",
+          "status": "partial",
+          "notes": "Helper/template/reference checks are source obligations; central adapter is not approved."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [],
+      "scan_units_observation": "Current scanner reports no supported project shape; no ID is invented.",
+      "native_workloads": [],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "skills-catalog-frontmatter",
+            "skills-docs-provider-metadata",
+            "skills-helper-template-reference-validation"
+          ],
+          "provider": "none_configured",
+          "runner": "not_configured",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "candidate_linux_portable_not_generated",
+          "velnor": "not_configured"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "not_configured",
+        "velnor": "not_configured",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_helper_execution",
+        "basis": [
+          "skills-adapter/report.md",
+          "skills-review/review.json"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "skills-central-unit",
+          "kind": "missing",
+          "reason": "No approved Skills/Plugins scanner or validator; current scan says no supported shape.",
+          "evidence": [
+            "skills-adapter/report.md",
+            "skills-review/review.json"
+          ]
+        },
+        {
+          "id": "skills-workflow",
+          "kind": "missing",
+          "reason": "No generator config or workflow.",
+          "evidence": [
+            "fleet/inventory.md"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "skills-adapter",
+        "skills-review"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "skills-adapter/report.md",
+        "skills-review/review.json"
+      ],
+      "gate_status": "blocked_skills_adapter",
+      "blocker": "No central Skills unit or workflow."
+    },
+    {
+      "repository": "tailrocks/tailrocks-macos-skills",
+      "repository_role": "skills_plugin_provider",
+      "default_branch": "main",
+      "default_branch_sha": "1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2",
+      "generator_revision": "not_configured",
+      "workflow_count": 0,
+      "workflow_families": [],
+      "required_observed_responsibilities": [
+        {
+          "id": "skills-catalog-frontmatter",
+          "status": "observed",
+          "notes": "Root catalog plus 15 skill directories/frontmatter."
+        },
+        {
+          "id": "skills-docs-provider-metadata",
+          "status": "observed",
+          "notes": "Generated docs and provider plugin manifests agree structurally."
+        },
+        {
+          "id": "skills-helper-template-reference-validation",
+          "status": "partial",
+          "notes": "Helper/template/reference checks are source obligations; central adapter is not approved."
+        },
+        {
+          "id": "skills-generated-doc-drift",
+          "status": "partial",
+          "notes": "Two generated definitions drift in this repository."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [],
+      "scan_units_observation": "Current scanner reports no supported project shape; no ID is invented.",
+      "native_workloads": [],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "skills-catalog-frontmatter",
+            "skills-docs-provider-metadata",
+            "skills-helper-template-reference-validation"
+          ],
+          "provider": "none_configured",
+          "runner": "not_configured",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "candidate_linux_portable_not_generated",
+          "velnor": "not_configured"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "not_configured",
+        "velnor": "not_configured",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_helper_execution",
+        "basis": [
+          "skills-adapter/report.md",
+          "skills-review/review.json"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "skills-central-unit",
+          "kind": "missing",
+          "reason": "No approved Skills/Plugins scanner or validator; current scan says no supported shape.",
+          "evidence": [
+            "skills-adapter/report.md",
+            "skills-review/review.json"
+          ]
+        },
+        {
+          "id": "skills-doc-drift",
+          "kind": "failed",
+          "reason": "Generated docs drift is observed.",
+          "evidence": [
+            "skills-adapter/report.md"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "skills-adapter",
+        "skills-review"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "skills-adapter/report.md",
+        "skills-review/review.json"
+      ],
+      "gate_status": "blocked_skills_adapter",
+      "blocker": "No central Skills unit; generated docs drift remains."
+    },
+    {
+      "repository": "tailrocks/tailrocks-code-quality-skills",
+      "repository_role": "skills_plugin_provider",
+      "default_branch": "main",
+      "default_branch_sha": "0b9a1eaa83ca2ad9b2c895741648e7cde10f6189",
+      "generator_revision": "not_configured",
+      "workflow_count": 0,
+      "workflow_families": [],
+      "required_observed_responsibilities": [
+        {
+          "id": "skills-catalog-frontmatter",
+          "status": "observed",
+          "notes": "Root catalog plus 12 skill directories/frontmatter."
+        },
+        {
+          "id": "skills-docs-provider-metadata",
+          "status": "observed",
+          "notes": "Generated docs and provider plugin manifests agree structurally."
+        },
+        {
+          "id": "skills-helper-template-reference-validation",
+          "status": "partial",
+          "notes": "Helper/template/reference checks are source obligations; central adapter is not approved."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [],
+      "scan_units_observation": "Current scanner reports no supported project shape; no ID is invented.",
+      "native_workloads": [],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "skills-catalog-frontmatter",
+            "skills-docs-provider-metadata",
+            "skills-helper-template-reference-validation"
+          ],
+          "provider": "none_configured",
+          "runner": "not_configured",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "candidate_linux_portable_not_generated",
+          "velnor": "not_configured"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "not_configured",
+        "velnor": "not_configured",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_helper_execution",
+        "basis": [
+          "skills-adapter/report.md",
+          "skills-review/review.json"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "skills-central-unit",
+          "kind": "missing",
+          "reason": "No approved Skills/Plugins scanner or validator; current scan says no supported shape.",
+          "evidence": [
+            "skills-adapter/report.md",
+            "skills-review/review.json"
+          ]
+        },
+        {
+          "id": "skills-workflow",
+          "kind": "missing",
+          "reason": "No generator config or workflow.",
+          "evidence": [
+            "fleet/inventory.md"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "skills-adapter",
+        "skills-review"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "skills-adapter/report.md",
+        "skills-review/review.json"
+      ],
+      "gate_status": "blocked_skills_adapter",
+      "blocker": "No central Skills unit or workflow."
+    },
+    {
+      "repository": "jackin-project/jackin",
+      "repository_role": "native_polyglot_product_consumer",
+      "default_branch": "main",
+      "default_branch_sha": "665f7e3735c1f76ce5ee8a9e27c676381a474cfb",
+      "generator_revision": "06050c9fa58fec8b5fd2c11c46756971e5270ec3",
+      "workflow_count": 15,
+      "workflow_families": [
+        "ci-main",
+        "ci-policy",
+        "ci-pr",
+        "ci-unit-bun",
+        "ci-unit-docker",
+        "ci-unit-rust",
+        "ci-unit-swift",
+        "desktop-merge",
+        "desktop-scheduled",
+        "maintenance",
+        "nightly",
+        "release",
+        "renovate-upstream",
+        "renovate-validate",
+        "renovate"
+      ],
+      "required_observed_responsibilities": [
+        {
+          "id": "jackin-rust-bun-docker-docs",
+          "status": "observed",
+          "notes": "Portable product units and role/runtime support."
+        },
+        {
+          "id": "jackin-swift-package-native",
+          "status": "observed",
+          "notes": "macOS 26, XCFramework, FFI native package."
+        },
+        {
+          "id": "jackin-prototype-xcode-package",
+          "status": "observed",
+          "notes": "AppKit/SwiftUI prototype package with Xcode capability."
+        },
+        {
+          "id": "jackin-desktop-cadence-release",
+          "status": "observed",
+          "notes": "Native desktop merge/scheduled/sign/release jobs."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [],
+      "scan_units_observation": "Native-routing report confirms configured unit names/routing but does not capture exact scanner-emitted IDs.",
+      "native_workloads": [
+        {
+          "id": "jackin-swift-package-native",
+          "status": "configured_macos_not_executed_here",
+          "platform": "macos-26",
+          "architecture": "arm64",
+          "executor": "github-hosted-macos-26",
+          "velnor": "excluded"
+        },
+        {
+          "id": "jackin-prototype-xcode-package",
+          "status": "configured_macos_not_executed_here",
+          "platform": "macos-26",
+          "architecture": "arm64",
+          "executor": "github-hosted-macos-26",
+          "velnor": "excluded"
+        },
+        {
+          "id": "jackin-desktop-cadence-release",
+          "status": "configured_macos_not_executed_here",
+          "platform": "macos-26",
+          "architecture": "arm64",
+          "executor": "github-hosted-macos-26",
+          "velnor": "excluded"
+        }
+      ],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "jackin-rust-bun-docker-docs"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "configured_github_only",
+          "velnor": "not_admitted_by_current_policy"
+        },
+        {
+          "workloads": [
+            "jackin-swift-package-native",
+            "jackin-prototype-xcode-package",
+            "jackin-desktop-cadence-release"
+          ],
+          "provider": "github-hosted",
+          "runner": "macos-26",
+          "os": "macos",
+          "architectures": [
+            "arm64"
+          ],
+          "status": "configured_correct_native_route",
+          "velnor": "excluded"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "configured",
+        "velnor": "not_admitted_by_current_policy",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_signing_or_release",
+        "basis": [
+          "native-routing/report.md",
+          "fleet/configs.tsv"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "jackin-native-clean-proof",
+          "kind": "not_observed",
+          "reason": "Correct macOS routing is static/config evidence; no clean native execution transcript in this projection.",
+          "evidence": [
+            "native-routing/report.md"
+          ]
+        },
+        {
+          "id": "jackin-velnor-portable-policy",
+          "kind": "excluded",
+          "reason": "Current policy keeps non-Apple Jackin units GitHub-only; Velnor eligibility is not a pass claim.",
+          "evidence": [
+            "native-routing/report.md"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "native-routing"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "fleet/configs.tsv",
+        "native-routing/report.md"
+      ],
+      "gate_status": "partial_native_route_static_only",
+      "blocker": "Native route is configured, but clean execution and portable provider policy are unproven."
+    },
+    {
+      "repository": "jackin-project/jackin-agent-smith",
+      "repository_role": "jackin_role_image",
+      "default_branch": "main",
+      "default_branch_sha": "08cb1c2f82519bab1aa0c164879955a84d35463b",
+      "generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09",
+      "workflow_count": 6,
+      "workflow_families": [
+        "ci-main",
+        "ci-policy",
+        "ci-pr",
+        "ci-unit-docker",
+        "maintenance",
+        "nightly"
+      ],
+      "required_observed_responsibilities": [
+        {
+          "id": "smith-role-manifest",
+          "status": "observed",
+          "notes": "jackin.role.toml, Dockerfile, pinned Construct base and published_image."
+        },
+        {
+          "id": "smith-docker-build",
+          "status": "partial",
+          "notes": "Generated unit runs plain docker build only."
+        },
+        {
+          "id": "smith-role-validation",
+          "status": "missing",
+          "notes": "No jackin-role validate unit."
+        },
+        {
+          "id": "smith-runtime-smoke-and-multiarch",
+          "status": "missing",
+          "notes": "No runtime smoke or amd64/arm64 publisher proof."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [],
+      "scan_units_observation": "Role audit states one generic Docker unit, but no exact generated scanner ID is exposed; no ID is invented.",
+      "native_workloads": [],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "smith-docker-build",
+            "smith-role-validation"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "plain_single_arch_build_only",
+          "velnor": "not_admitted_by_current_policy"
+        },
+        {
+          "workloads": [
+            "smith-runtime-smoke-and-multiarch"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04_buildx",
+          "os": "linux",
+          "architectures": [
+            "amd64",
+            "arm64"
+          ],
+          "status": "required_but_missing",
+          "velnor": "not_admitted"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "configured_generic_docker_only",
+        "velnor": "not_admitted_by_current_policy",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_publish_or_sign",
+        "basis": [
+          "action-roles/findings.md",
+          "fleet/configs.tsv"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "role-validate",
+          "kind": "missing",
+          "reason": "Generated Docker unit does not invoke role validator.",
+          "evidence": [
+            "action-roles/findings.md"
+          ]
+        },
+        {
+          "id": "role-runtime-smoke",
+          "kind": "missing",
+          "reason": "No runtime launch/hooks/report smoke.",
+          "evidence": [
+            "action-roles/findings.md"
+          ]
+        },
+        {
+          "id": "role-multiarch-publisher",
+          "kind": "missing",
+          "reason": "No platform matrix, digest merge, registry, or signing proof.",
+          "evidence": [
+            "action-roles/findings.md"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "action-roles"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "fleet/configs.tsv",
+        "action-roles/findings.md"
+      ],
+      "gate_status": "blocked_role_image_semantics",
+      "blocker": "Plain Docker build does not prove role validation/runtime/multiarch publisher."
+    },
+    {
+      "repository": "jackin-project/homebrew-tap",
+      "repository_role": "homebrew_tap",
+      "default_branch": "main",
+      "default_branch_sha": "2281ae9c95dfcb5bf82dfd025fdf58a50658b1d1",
+      "generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09",
+      "workflow_count": 6,
+      "workflow_families": [
+        "ci-main",
+        "ci-policy",
+        "ci-pr",
+        "ci-unit-homebrew",
+        "maintenance",
+        "nightly"
+      ],
+      "required_observed_responsibilities": [
+        {
+          "id": "jackin-formula-audit-and-version",
+          "status": "partial",
+          "notes": "Current preview formula audit passes; all-formula audit still reports the disabled stable HEAD URL and stale jackin-dev version."
+        },
+        {
+          "id": "jackin-preview-update-source-identity-checksum",
+          "status": "observed",
+          "notes": "Current post-PR494 refresh confirms preview identity, six assets, checksums, extraction, version, and updater fixture."
+        },
+        {
+          "id": "jackin-conditional-native-cask-audit-install",
+          "status": "missing",
+          "notes": "No current Casks tree or cask token; conditional stable-manifest cask path remains unexercised and clean install is absent."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [],
+      "scan_units_observation": "Current refresh confirms one manually declared Homebrew unit but does not expose an exact scanner ID; Formula/** and Casks/** remain excluded from static scan.",
+      "native_workloads": [
+        {
+          "id": "jackin-native-cask",
+          "status": "not_applicable_current_tree_conditional_obligation_unimplemented",
+          "platform": "macos",
+          "architecture": "arm64",
+          "executor": "actual_mac_or_hosted_macos",
+          "velnor": "excluded"
+        }
+      ],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "jackin-formula-audit-and-version",
+            "jackin-preview-update-source-identity-checksum"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "hosted_pass_observed_current_main_and_pr",
+          "velnor": "not_evidenced"
+        },
+        {
+          "workloads": [
+            "jackin-conditional-native-cask-audit-install"
+          ],
+          "provider": "actual_mac_or_hosted_macos",
+          "runner": "macos",
+          "os": "macos",
+          "architectures": [
+            "arm64"
+          ],
+          "status": "not_applicable_current_cask_absent_clean_install_missing",
+          "velnor": "excluded"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "configured_generic_only",
+        "velnor": "not_evidenced",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_release",
+        "basis": [
+          "distribution-consumers/report.md",
+          "distribution-consumers/consumer-inventory.json",
+          "fleet/main-revisions.tsv"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "jackin-stable-and-dev-formula-audit",
+          "kind": "failed",
+          "reason": "Current all-formula audit still reports the disabled stable HEAD URL and jackin-dev 0.1.39 redundant URL-scanned version; latest live jackin-dev is 0.1.52.",
+          "evidence": [
+            "distribution-consumers/report.md",
+            "distribution-consumers/consumer-inventory.json"
+          ]
+        },
+        {
+          "id": "jackin-stable-release-cask",
+          "kind": "missing",
+          "reason": "Current revision has no Casks tree or cask token. The updater can create an arm64 cask only from a complete seven-asset stable manifest; that conditional obligation remains unexercised.",
+          "evidence": [
+            "distribution-consumers/report.md",
+            "distribution-consumers/consumer-inventory.json"
+          ]
+        },
+        {
+          "id": "jackin-homebrew-native-install",
+          "kind": "not_observed",
+          "reason": "No clean native install/version transcript.",
+          "evidence": [
+            "distribution-consumers/consumer-inventory.json"
+          ]
+        },
+        {
+          "id": "jackin-generated-native-homebrew",
+          "kind": "missing",
+          "reason": "Hosted GitHub/Ubuntu and native preview audit pass, but no generated native macOS audit/install/version job exists.",
+          "evidence": [
+            "distribution-consumers/report.md"
+          ]
+        }
+      ],
+      "refresh": {
+        "observed_at_utc": "2026-09-19T17:30:57Z",
+        "current_main_sha": "2281ae9c95dfcb5bf82dfd025fdf58a50658b1d1",
+        "previous_audit_main_sha": "f1669391582f92c95da1aa5958de4397dfedca09",
+        "transition": "post_pr494_merge_current_audit_replaces_stale_baseline",
+        "merged_pull_request": 494,
+        "merge_commit_sha": "2281ae9c95dfcb5bf82dfd025fdf58a50658b1d1",
+        "exact_delta": [
+          "Formula/jackin-preview.rb: audit-safe description/conflict ordering",
+          "scripts/package-update.sh: matching preview template change"
+        ],
+        "hosted_runs": {
+          "pr_ci": {
+            "run_id": 35455135058,
+            "conclusion": "success"
+          },
+          "main": {
+            "run_id": 35455507231,
+            "conclusion": "success",
+            "homebrew_job_id": 105930230847,
+            "ci_required_job_id": 105930256962,
+            "policy_job_id": 105929945743
+          }
+        },
+        "native_results": {
+          "preview_formula_audit": "pass",
+          "all_formula_audit": "fail: disabled stable HEAD URL and stale jackin-dev version",
+          "cask_audit": "not_applicable: no Casks tree or cask token",
+          "clean_install_version": "not_implemented"
+        }
+      },
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "distribution-consumers"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "fleet/configs.tsv",
+        "distribution-consumers/consumer-inventory.json",
+        "distribution-consumers/report.md"
+      ],
+      "gate_status": "incomplete_current_refresh_hosted_pass_native_and_formula_gaps",
+      "blocker": "Current hosted and preview-formula checks pass, but stable/dev formula audit defects, conditional cask coverage, generated native verification, and clean install/version proof remain incomplete."
+    },
+    {
+      "repository": "jackin-project/jackin-the-architect",
+      "repository_role": "jackin_role_image",
+      "default_branch": "main",
+      "default_branch_sha": "d0956f0192d2605cbd26d84bf8911211a727b6c0",
+      "generator_revision": "541d8926737213542156ee32e420010817f8a323",
+      "workflow_count": 6,
+      "workflow_families": [
+        "ci-main",
+        "ci-policy",
+        "ci-pr",
+        "ci-unit-docker",
+        "maintenance",
+        "nightly"
+      ],
+      "required_observed_responsibilities": [
+        {
+          "id": "architect-role-manifest",
+          "status": "observed",
+          "notes": "Toolchain-heavy Dockerfile, role manifest, hooks/config."
+        },
+        {
+          "id": "architect-docker-build",
+          "status": "partial",
+          "notes": "Generated unit runs plain docker build only."
+        },
+        {
+          "id": "architect-role-validation",
+          "status": "missing",
+          "notes": "No jackin-role validate unit."
+        },
+        {
+          "id": "architect-runtime-smoke-and-multiarch",
+          "status": "missing",
+          "notes": "No runtime smoke or amd64/arm64 publisher proof."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [],
+      "scan_units_observation": "Role audit states one generic Docker unit, but no exact generated scanner ID is exposed.",
+      "native_workloads": [],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "architect-docker-build",
+            "architect-role-validation"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "plain_single_arch_build_only",
+          "velnor": "not_admitted_by_current_policy"
+        },
+        {
+          "workloads": [
+            "architect-runtime-smoke-and-multiarch"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04_buildx",
+          "os": "linux",
+          "architectures": [
+            "amd64",
+            "arm64"
+          ],
+          "status": "required_but_missing",
+          "velnor": "not_admitted"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "configured_generic_docker_only",
+        "velnor": "not_admitted_by_current_policy",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_publish_or_sign",
+        "basis": [
+          "action-roles/findings.md",
+          "fleet/configs.tsv"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "role-validate",
+          "kind": "missing",
+          "reason": "Generated Docker unit does not invoke role validator.",
+          "evidence": [
+            "action-roles/findings.md"
+          ]
+        },
+        {
+          "id": "role-runtime-smoke",
+          "kind": "missing",
+          "reason": "No runtime launch/hooks/report smoke.",
+          "evidence": [
+            "action-roles/findings.md"
+          ]
+        },
+        {
+          "id": "role-multiarch-publisher",
+          "kind": "missing",
+          "reason": "No platform matrix, digest merge, registry, or signing proof.",
+          "evidence": [
+            "action-roles/findings.md"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "action-roles"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "fleet/configs.tsv",
+        "action-roles/findings.md"
+      ],
+      "gate_status": "blocked_role_image_semantics",
+      "blocker": "Plain Docker build does not prove role validation/runtime/multiarch publisher."
+    },
+    {
+      "repository": "jackin-project/jackin-sentinel",
+      "repository_role": "jackin_role_image",
+      "default_branch": "main",
+      "default_branch_sha": "a668b869b9a31622f3088c1d891c45716e94cff2",
+      "generator_revision": "541d8926737213542156ee32e420010817f8a323",
+      "workflow_count": 6,
+      "workflow_families": [
+        "ci-main",
+        "ci-policy",
+        "ci-pr",
+        "ci-unit-docker",
+        "maintenance",
+        "nightly"
+      ],
+      "required_observed_responsibilities": [
+        {
+          "id": "sentinel-role-manifest",
+          "status": "observed",
+          "notes": "Role manifest includes agents, hooks, env prompts, selects, and dependency interpolation."
+        },
+        {
+          "id": "sentinel-docker-build",
+          "status": "partial",
+          "notes": "Generated unit runs plain docker build only."
+        },
+        {
+          "id": "sentinel-role-validation",
+          "status": "missing",
+          "notes": "No jackin-role validate unit."
+        },
+        {
+          "id": "sentinel-runtime-smoke-and-multiarch",
+          "status": "missing",
+          "notes": "README describes rich runtime/report/cleanup behavior but generated CI does not exercise it."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [],
+      "scan_units_observation": "Role audit states one generic Docker unit, but no exact generated scanner ID is exposed.",
+      "native_workloads": [],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "sentinel-docker-build",
+            "sentinel-role-validation"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "plain_single_arch_build_only",
+          "velnor": "not_admitted_by_current_policy"
+        },
+        {
+          "workloads": [
+            "sentinel-runtime-smoke-and-multiarch"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04_buildx",
+          "os": "linux",
+          "architectures": [
+            "amd64",
+            "arm64"
+          ],
+          "status": "required_but_missing",
+          "velnor": "not_admitted"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "configured_generic_docker_only",
+        "velnor": "not_admitted_by_current_policy",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_publish_or_sign",
+        "basis": [
+          "action-roles/findings.md",
+          "fleet/configs.tsv"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "role-validate",
+          "kind": "missing",
+          "reason": "Generated Docker unit does not invoke role validator.",
+          "evidence": [
+            "action-roles/findings.md"
+          ]
+        },
+        {
+          "id": "role-runtime-smoke",
+          "kind": "missing",
+          "reason": "No runtime launch/hooks/report/dirty-worktree cleanup smoke.",
+          "evidence": [
+            "action-roles/findings.md"
+          ]
+        },
+        {
+          "id": "role-multiarch-publisher",
+          "kind": "missing",
+          "reason": "No platform matrix, digest merge, registry, or signing proof.",
+          "evidence": [
+            "action-roles/findings.md"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "action-roles"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "fleet/configs.tsv",
+        "action-roles/findings.md"
+      ],
+      "gate_status": "blocked_role_image_semantics",
+      "blocker": "Plain Docker build does not prove sentinel runtime/validation/multiarch publisher."
+    },
+    {
+      "repository": "jackin-project/jackin-role-action",
+      "repository_role": "github_action_role_provider",
+      "default_branch": "main",
+      "default_branch_sha": "8882236041e149153491ada7091382e76be1c313",
+      "generator_revision": "541d8926737213542156ee32e420010817f8a323",
+      "workflow_count": 6,
+      "workflow_families": [
+        "ci-main",
+        "ci-policy",
+        "ci-pr",
+        "ci-unit-docs",
+        "maintenance",
+        "nightly"
+      ],
+      "required_observed_responsibilities": [
+        {
+          "id": "action-metadata-and-runner-contract",
+          "status": "observed",
+          "notes": "Composite action metadata, inputs, shell/uses steps, and runner-pinned parsing contract."
+        },
+        {
+          "id": "download-version-checksum",
+          "status": "partial",
+          "notes": "Downloader supports version/latest-build and checksum paths; generated docs unit does not exercise it."
+        },
+        {
+          "id": "role-validation-and-hadolint",
+          "status": "partial",
+          "notes": "Action source invokes validator/linter, but no generated consumer proof."
+        },
+        {
+          "id": "single_arch_build_cache",
+          "status": "partial",
+          "notes": "Composite action source declares pinned Buildx/cache behavior, not current generated proof."
+        },
+        {
+          "id": "reusable_multiarch_publisher",
+          "status": "missing",
+          "notes": "Current main lacks the reusable publish.yml path required by existing callers."
+        },
+        {
+          "id": "immutable_consumer_fixture",
+          "status": "missing",
+          "notes": "Direct consumer fixtures use mutable refs or are not executed by generated unit."
+        },
+        {
+          "id": "docs-reuse",
+          "status": "partial",
+          "notes": "Generated docs unit runs mise check; semantic action behavior remains uncovered."
+        }
+      ],
+      "generator_actual_scan_unit_ids": [],
+      "scan_units_observation": "Action audit reports a generated docs unit, but does not expose an exact scanner ID; no ID is invented.",
+      "native_workloads": [],
+      "platform_matrix": [
+        {
+          "workloads": [
+            "action-metadata-and-runner-contract",
+            "download-version-checksum",
+            "role-validation-and-hadolint",
+            "single_arch_build_cache",
+            "immutable-consumer-fixture"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "docs_unit_only_semantics_unexecuted",
+          "velnor": "not_admitted_by_current_policy"
+        },
+        {
+          "workloads": [
+            "reusable_multiarch_publisher"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04_buildx",
+          "os": "linux",
+          "architectures": [
+            "amd64",
+            "arm64"
+          ],
+          "status": "required_but_missing",
+          "velnor": "not_admitted"
+        }
+      ],
+      "trust_eligibility": {
+        "github_hosted": "configured_docs_only",
+        "velnor": "not_admitted_by_current_policy",
+        "trusted_source": "eligible_for_static_review",
+        "fork_or_untrusted": "not_eligible_for_download_publish_or_sign",
+        "basis": [
+          "action-roles/findings.md",
+          "action-review/report.md",
+          "fleet/configs.tsv"
+        ]
+      },
+      "missing_or_unsupported": [
+        {
+          "id": "action-reusable-publisher",
+          "kind": "missing",
+          "reason": "Current main lacks .github/workflows/publish.yml while historical callers pin it.",
+          "evidence": [
+            "action-roles/findings.md"
+          ]
+        },
+        {
+          "id": "action-consumer-execution",
+          "kind": "missing",
+          "reason": "Generated docs/unit checks do not execute immutable consumer success/failure fixtures.",
+          "evidence": [
+            "action-review/report.md"
+          ]
+        },
+        {
+          "id": "action-runner-parity",
+          "kind": "unknown",
+          "reason": "Exact candidate must be reviewed against actions/runner at a clean commit; current report is preliminary/dirty-snapshot evidence.",
+          "evidence": [
+            "action-review/report.md"
+          ]
+        }
+      ],
+      "category_coverage": [
+        "fleet",
+        "revisions",
+        "configs",
+        "action-roles",
+        "action-review"
+      ],
+      "evidence_paths": [
+        "fleet/main-revisions.tsv",
+        "fleet/inventory.md",
+        "fleet/configs.tsv",
+        "action-roles/findings.md",
+        "action-review/report.md"
+      ],
+      "gate_status": "blocked_action_contract",
+      "blocker": "Reusable publisher and immutable consumer execution proof are missing."
+    }
+  ]
+}

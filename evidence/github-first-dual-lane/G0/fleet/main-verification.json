@@ -1,0 +1,1535 @@
+{
+  "schema": "g0-main-verification/v1",
+  "generated_at": "2026-09-19T17:03:32Z",
+  "method": "GraphQL default-branch Commit.statusCheckRollup plus REST actions/runs?branch=main&per_page=20 (read-only)",
+  "repositories": {
+    "tailrocks/velnor": {
+      "default_branch": "main",
+      "default_sha": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+      "rollup": {
+        "check_count": 50,
+        "checkrun_count": 50,
+        "statuscontext_count": 0,
+        "contexts_has_next": false,
+        "status_counts": {
+          "COMPLETED": 50
+        },
+        "conclusion_counts": {
+          "FAILURE": 4,
+          "SKIPPED": 40,
+          "SUCCESS": 6
+        },
+        "required_like": [
+          "Policy=COMPLETED/FAILURE",
+          "ci-required=COMPLETED/FAILURE"
+        ],
+        "app_ids": [
+          "GitHub Actions#15368"
+        ],
+        "failed": [
+          {
+            "kind": "check",
+            "name": "Resolve preview identity",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351916/job/105578342575",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351916"
+          },
+          {
+            "kind": "check",
+            "name": "Policy",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105578346708",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "ci-required",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582308300",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Control / Required",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582327904",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          }
+        ],
+        "pending": [],
+        "skipped": [
+          {
+            "kind": "check",
+            "name": "Guest payload ${{ matrix.arch }}",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351916/job/105578383561",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351916"
+          },
+          {
+            "kind": "check",
+            "name": "Bun · Bun package (velnor) · github-hosted — bun-velnor",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582307275",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Compile preview metadata once",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351916/job/105578383707",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351916"
+          },
+          {
+            "kind": "check",
+            "name": "Build ${{ matrix.arch }} preview deb",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351916/job/105578384956",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351916"
+          },
+          {
+            "kind": "check",
+            "name": "Bun · Bun package (velnor) · velnor — bun-velnor",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306532",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Sign ${{ matrix.arch }} preview deb",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351916/job/105578384524",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351916"
+          },
+          {
+            "kind": "check",
+            "name": "Replace the rolling preview release",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351916/job/105578385122",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351916"
+          },
+          {
+            "kind": "check",
+            "name": "Docker · Docker · github-hosted — docker",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582307380",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Docker · Docker · velnor — docker",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306837",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Documentation · Documentation · github-hosted — docs",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582307246",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Documentation · Documentation · velnor — docs",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306838",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "OpenTofu · OpenTofu · github-hosted — opentofu",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306651",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "OpenTofu · OpenTofu · velnor — opentofu",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306868",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Control / Prepare Cargo",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306266",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · Rust dependency policy · github-hosted — rust-policy",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582307412",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · unit-collector · github-hosted — rust-unit-collector",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306635",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · velnor-bench · github-hosted — rust-velnor-bench",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306719",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · velnor-client · github-hosted — rust-velnor-client",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306775",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · velnor-control · github-hosted — rust-velnor-control",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306969",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · velnor-model · github-hosted — rust-velnor-model",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582307143",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · velnor-render · github-hosted — rust-velnor-render",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306947",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · velnor-runner · github-hosted — rust-velnor-runner",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306770",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · velnor-tools · github-hosted — rust-velnor-tools",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582307230",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · velnor-workflow · github-hosted — rust-velnor-workflow",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306723",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · velnor-workflow-contract · github-hosted — rust-velnor-workflow-contract",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306836",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · velnorctl · github-hosted — rust-velnorctl",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582306855",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · Rust production topology · github-hosted — rust-production-topology",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582307222",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · Rust dependency policy · velnor — rust-policy",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582307815",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · unit-collector · velnor — rust-unit-collector",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582307807",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · velnor-model · velnor — rust-velnor-model",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582307591",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · velnor-workflow-contract · velnor — rust-velnor-workflow-contract",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582307389",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · Rust production topology · velnor — rust-production-topology",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582307736",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · velnor-client · velnor — rust-velnor-client",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582308203",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · velnor-control · velnor — rust-velnor-control",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582308037",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · velnor-render · velnor — rust-velnor-render",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582308211",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · velnor-tools · velnor — rust-velnor-tools",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582308504",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · velnor-runner · velnor — rust-velnor-runner",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582308498",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · velnor-bench · velnor — rust-velnor-bench",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582309083",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · velnor-workflow · velnor — rust-velnor-workflow",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582309075",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · velnorctl · velnor — rust-velnorctl",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor/actions/runs/35338351942/job/105582309072",
+            "app": "GitHub Actions#15368",
+            "run_id": "35338351942"
+          }
+        ]
+      },
+      "actions": {
+        "fetched_count": 0,
+        "event_counts": {},
+        "matching_head_sha_count": 0,
+        "latest_head_sha_runs": [],
+        "latest_runs": [],
+        "child_dispatch_candidates": [],
+        "child_dispatch_note": "No workflow_run/repository_dispatch/workflow_dispatch run in fetched latest-20 main list; relation not discoverable here."
+      }
+    },
+    "tailrocks/velnor-apt": {
+      "default_branch": "main",
+      "default_sha": "b24d7d4370001119cd5ddcb6f9e07aa9007051e7",
+      "rollup": {
+        "check_count": 9,
+        "checkrun_count": 9,
+        "statuscontext_count": 0,
+        "contexts_has_next": false,
+        "status_counts": {
+          "COMPLETED": 9
+        },
+        "conclusion_counts": {
+          "CANCELLED": 1,
+          "FAILURE": 2,
+          "SKIPPED": 3,
+          "SUCCESS": 3
+        },
+        "required_like": [
+          "Policy=COMPLETED/SUCCESS",
+          "ci-required=COMPLETED/FAILURE"
+        ],
+        "app_ids": [
+          "GitHub Actions#15368"
+        ],
+        "failed": [
+          {
+            "kind": "check",
+            "name": "ci-required",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/velnor-apt/actions/runs/35334381736/job/105881920390",
+            "app": "GitHub Actions#15368",
+            "run_id": "35334381736"
+          },
+          {
+            "kind": "check",
+            "name": "Control / Required",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/velnor-apt/actions/runs/35334381736/job/105881931457",
+            "app": "GitHub Actions#15368",
+            "run_id": "35334381736"
+          }
+        ],
+        "pending": [],
+        "skipped": [
+          {
+            "kind": "check",
+            "name": "Control / Velnor admission",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor-apt/actions/runs/35334381736/job/105565736969",
+            "app": "GitHub Actions#15368",
+            "run_id": "35334381736"
+          },
+          {
+            "kind": "check",
+            "name": "Documentation · Documentation / Velnor",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor-apt/actions/runs/35334381736/job/105565864072",
+            "app": "GitHub Actions#15368",
+            "run_id": "35334381736"
+          },
+          {
+            "kind": "check",
+            "name": "Documentation · Documentation / GitHub",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/velnor-apt/actions/runs/35334381736/job/105565864023",
+            "app": "GitHub Actions#15368",
+            "run_id": "35334381736"
+          }
+        ]
+      },
+      "actions": {
+        "fetched_count": 0,
+        "event_counts": {},
+        "matching_head_sha_count": 0,
+        "latest_head_sha_runs": [],
+        "latest_runs": [],
+        "child_dispatch_candidates": [],
+        "child_dispatch_note": "No workflow_run/repository_dispatch/workflow_dispatch run in fetched latest-20 main list; relation not discoverable here."
+      }
+    },
+    "tailrocks/parallax": {
+      "default_branch": "main",
+      "default_sha": "6a12bf47a816b63e848b563aaa45ef9694159c79",
+      "rollup": {
+        "check_count": 52,
+        "checkrun_count": 52,
+        "statuscontext_count": 0,
+        "contexts_has_next": false,
+        "status_counts": {
+          "COMPLETED": 52
+        },
+        "conclusion_counts": {
+          "FAILURE": 3,
+          "SKIPPED": 48,
+          "SUCCESS": 1
+        },
+        "required_like": [
+          "Policy=COMPLETED/FAILURE",
+          "ci-required=COMPLETED/FAILURE"
+        ],
+        "app_ids": [
+          "GitHub Actions#15368"
+        ],
+        "failed": [
+          {
+            "kind": "check",
+            "name": "Policy",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104859545334",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "ci-required",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864291702",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Control / Required",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104865105540",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          }
+        ],
+        "pending": [],
+        "skipped": [
+          {
+            "kind": "check",
+            "name": "Control / Velnor admission",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104859547120",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Bun · Bun package (ui)",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864291089",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Bun · Bun package (ui)",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864291098",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Docker · Docker (bench/otlp-fanout/maple)",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290673",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Docker · Docker (bench/otlp-fanout/maple)",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290585",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Docker · Docker (crates/parallax-sentry-proxy)",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864291328",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Docker · Docker (crates/parallax-sentry-proxy)",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290098",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Control / Prepare Cargo",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290921",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · nextest-evidence-fixture",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864291300",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-analysis",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864291611",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-api",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864291319",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-cli",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290996",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-evidence",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290875",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-greptime",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290419",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-ingest",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290872",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-mcp",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864291526",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-metadata",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864291527",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-model",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864291813",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-proto",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864291472",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-redaction",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864291693",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-semconv",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290732",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-sentry-proxy",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290871",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-server",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290511",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-spool",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290914",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-storage",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290525",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-test-support",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864291561",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-xtask",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290910",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · Rust dependency policy",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864290855",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · nextest-evidence-fixture",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864292782",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-analysis",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864292410",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-api",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864293591",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-cli",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864292888",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-evidence",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864292842",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-greptime",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864292928",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-ingest",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864292712",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-mcp",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864293394",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-metadata",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864292490",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-model",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864292798",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-proto",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864292121",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-redaction",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864293453",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-semconv",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864293507",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-sentry-proxy",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864293437",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-server",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864293242",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-spool",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864293451",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-storage",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864293290",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-test-support",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864293483",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · parallax-xtask",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864292286",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · Rust dependency policy",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/parallax/actions/runs/35115433217/job/104864292898",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115433217"
+          }
+        ]
+      },
+      "actions": {
+        "fetched_count": 0,
+        "event_counts": {},
+        "matching_head_sha_count": 0,
+        "latest_head_sha_runs": [],
+        "latest_runs": [],
+        "child_dispatch_candidates": [],
+        "child_dispatch_note": "No workflow_run/repository_dispatch/workflow_dispatch run in fetched latest-20 main list; relation not discoverable here."
+      }
+    },
+    "tailrocks/homebrew-holla": {
+      "default_branch": "main",
+      "default_sha": "cc25db8fd911cdf965652d3b094c10d006d056ee",
+      "rollup": {
+        "check_count": 7,
+        "checkrun_count": 7,
+        "statuscontext_count": 0,
+        "contexts_has_next": false,
+        "status_counts": {
+          "COMPLETED": 7
+        },
+        "conclusion_counts": {
+          "FAILURE": 3,
+          "SKIPPED": 3,
+          "SUCCESS": 1
+        },
+        "required_like": [
+          "Policy=COMPLETED/FAILURE",
+          "ci-required=COMPLETED/FAILURE"
+        ],
+        "app_ids": [
+          "GitHub Actions#15368"
+        ],
+        "failed": [
+          {
+            "kind": "check",
+            "name": "Policy",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/homebrew-holla/actions/runs/35115278586/job/104859001994",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115278586"
+          },
+          {
+            "kind": "check",
+            "name": "ci-required",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/homebrew-holla/actions/runs/35115278586/job/104868305025",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115278586"
+          },
+          {
+            "kind": "check",
+            "name": "Control / Required",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/homebrew-holla/actions/runs/35115278586/job/104874789046",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115278586"
+          }
+        ],
+        "pending": [],
+        "skipped": [
+          {
+            "kind": "check",
+            "name": "Control / Velnor admission",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/homebrew-holla/actions/runs/35115278586/job/104859003798",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115278586"
+          },
+          {
+            "kind": "check",
+            "name": "Homebrew · Homebrew",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/homebrew-holla/actions/runs/35115278586/job/104868305383",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115278586"
+          },
+          {
+            "kind": "check",
+            "name": "Homebrew · Homebrew",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/homebrew-holla/actions/runs/35115278586/job/104868305488",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115278586"
+          }
+        ]
+      },
+      "actions": {
+        "fetched_count": 0,
+        "event_counts": {},
+        "matching_head_sha_count": 0,
+        "latest_head_sha_runs": [],
+        "latest_runs": [],
+        "child_dispatch_candidates": [],
+        "child_dispatch_note": "No workflow_run/repository_dispatch/workflow_dispatch run in fetched latest-20 main list; relation not discoverable here."
+      }
+    },
+    "tailrocks/holla-apt": {
+      "default_branch": "main",
+      "default_sha": "0636074d4a16be4771685bd95bf2cec739cf359c",
+      "rollup": {
+        "check_count": 0,
+        "checkrun_count": 0,
+        "statuscontext_count": 0,
+        "contexts_has_next": false,
+        "status_counts": {},
+        "conclusion_counts": {},
+        "required_like": [],
+        "app_ids": [],
+        "failed": [],
+        "pending": [],
+        "skipped": []
+      },
+      "actions": {
+        "fetched_count": 0,
+        "event_counts": {},
+        "matching_head_sha_count": 0,
+        "latest_head_sha_runs": [],
+        "latest_runs": [],
+        "child_dispatch_candidates": [],
+        "child_dispatch_note": "No workflow_run/repository_dispatch/workflow_dispatch run in fetched latest-20 main list; relation not discoverable here."
+      }
+    },
+    "tailrocks/holla": {
+      "default_branch": "main",
+      "default_sha": "027dac6be2070b7e836c1ca123861fcbade72003",
+      "rollup": {
+        "check_count": 8,
+        "checkrun_count": 8,
+        "statuscontext_count": 0,
+        "contexts_has_next": false,
+        "status_counts": {
+          "COMPLETED": 8
+        },
+        "conclusion_counts": {
+          "FAILURE": 3,
+          "SKIPPED": 4,
+          "SUCCESS": 1
+        },
+        "required_like": [
+          "Policy=COMPLETED/FAILURE",
+          "ci-required=COMPLETED/FAILURE"
+        ],
+        "app_ids": [
+          "GitHub Actions#15368"
+        ],
+        "failed": [
+          {
+            "kind": "check",
+            "name": "Policy",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/holla/actions/runs/35115219281/job/104858801865",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115219281"
+          },
+          {
+            "kind": "check",
+            "name": "ci-required",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/holla/actions/runs/35115219281/job/104868713512",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115219281"
+          },
+          {
+            "kind": "check",
+            "name": "Control / Required",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/tailrocks/holla/actions/runs/35115219281/job/104875151265",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115219281"
+          }
+        ],
+        "pending": [],
+        "skipped": [
+          {
+            "kind": "check",
+            "name": "Control / Velnor admission",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/holla/actions/runs/35115219281/job/104858803464",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115219281"
+          },
+          {
+            "kind": "check",
+            "name": "Control / Prepare Cargo",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/holla/actions/runs/35115219281/job/104868713029",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115219281"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · holla-cli",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/holla/actions/runs/35115219281/job/104868713679",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115219281"
+          },
+          {
+            "kind": "check",
+            "name": "Rust · holla-cli",
+            "status": "COMPLETED",
+            "conclusion": "SKIPPED",
+            "details": "https://github.com/tailrocks/holla/actions/runs/35115219281/job/104868713942",
+            "app": "GitHub Actions#15368",
+            "run_id": "35115219281"
+          }
+        ]
+      },
+      "actions": {
+        "fetched_count": 0,
+        "event_counts": {},
+        "matching_head_sha_count": 0,
+        "latest_head_sha_runs": [],
+        "latest_runs": [],
+        "child_dispatch_candidates": [],
+        "child_dispatch_note": "No workflow_run/repository_dispatch/workflow_dispatch run in fetched latest-20 main list; relation not discoverable here."
+      }
+    },
+    "jackin-project/jackin": {
+      "default_branch": "main",
+      "default_sha": "665f7e3735c1f76ce5ee8a9e27c676381a474cfb",
+      "rollup": {
+        "check_count": 46,
+        "checkrun_count": 46,
+        "statuscontext_count": 0,
+        "contexts_has_next": false,
+        "status_counts": {
+          "COMPLETED": 46
+        },
+        "conclusion_counts": {
+          "FAILURE": 3,
+          "SUCCESS": 43
+        },
+        "required_like": [
+          "Policy=COMPLETED/SUCCESS",
+          "ci-required=COMPLETED/FAILURE"
+        ],
+        "app_ids": [
+          "GitHub Actions#15368"
+        ],
+        "failed": [
+          {
+            "kind": "check",
+            "name": "Rust · jackin / GitHub",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/jackin-project/jackin/actions/runs/35443450628/job/105898301807",
+            "app": "GitHub Actions#15368",
+            "run_id": "35443450628"
+          },
+          {
+            "kind": "check",
+            "name": "ci-required",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/jackin-project/jackin/actions/runs/35443450628/job/105900051835",
+            "app": "GitHub Actions#15368",
+            "run_id": "35443450628"
+          },
+          {
+            "kind": "check",
+            "name": "Control / Required",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://github.com/jackin-project/jackin/actions/runs/35443450628/job/105900063639",
+            "app": "GitHub Actions#15368",
+            "run_id": "35443450628"
+          }
+        ],
+        "pending": [],
+        "skipped": []
+      },
+      "actions": {
+        "fetched_count": 0,
+        "event_counts": {},
+        "matching_head_sha_count": 0,
+        "latest_head_sha_runs": [],
+        "latest_runs": [],
+        "child_dispatch_candidates": [],
+        "child_dispatch_note": "No workflow_run/repository_dispatch/workflow_dispatch run in fetched latest-20 main list; relation not discoverable here."
+      }
+    },
+    "jackin-project/jackin-agent-smith": {
+      "default_branch": "main",
+      "default_sha": "08cb1c2f82519bab1aa0c164879955a84d35463b",
+      "rollup": {
+        "check_count": 6,
+        "checkrun_count": 6,
+        "statuscontext_count": 0,
+        "contexts_has_next": false,
+        "status_counts": {
+          "COMPLETED": 6
+        },
+        "conclusion_counts": {
+          "FAILURE": 1,
+          "SUCCESS": 5
+        },
+        "required_like": [
+          "Policy=COMPLETED/SUCCESS",
+          "ci-required=COMPLETED/SUCCESS"
+        ],
+        "app_ids": [
+          "GitHub Actions#15368",
+          "SonarQubeCloud#12526"
+        ],
+        "failed": [
+          {
+            "kind": "check",
+            "name": "SonarCloud Code Analysis",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://sonarcloud.io/dashboard?id=jackin-project_jackin-agent-smith&branch=main",
+            "app": "SonarQubeCloud#12526",
+            "run_id": ""
+          }
+        ],
+        "pending": [],
+        "skipped": []
+      },
+      "actions": {
+        "fetched_count": 0,
+        "event_counts": {},
+        "matching_head_sha_count": 0,
+        "latest_head_sha_runs": [],
+        "latest_runs": [],
+        "child_dispatch_candidates": [],
+        "child_dispatch_note": "No workflow_run/repository_dispatch/workflow_dispatch run in fetched latest-20 main list; relation not discoverable here."
+      }
+    },
+    "jackin-project/homebrew-tap": {
+      "default_branch": "main",
+      "default_sha": "2281ae9c95dfcb5bf82dfd025fdf58a50658b1d1",
+      "rollup": {
+        "check_count": 6,
+        "checkrun_count": 6,
+        "statuscontext_count": 0,
+        "contexts_has_next": false,
+        "status_counts": {
+          "COMPLETED": 6
+        },
+        "conclusion_counts": {
+          "FAILURE": 1,
+          "SUCCESS": 5
+        },
+        "required_like": [
+          "Policy=COMPLETED/SUCCESS",
+          "ci-required=COMPLETED/SUCCESS"
+        ],
+        "app_ids": [
+          "GitHub Actions#15368",
+          "SonarQubeCloud#12526"
+        ],
+        "failed": [
+          {
+            "kind": "check",
+            "name": "SonarCloud Code Analysis",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://sonarcloud.io/dashboard?id=jackin-project_homebrew-tap&branch=main",
+            "app": "SonarQubeCloud#12526",
+            "run_id": ""
+          }
+        ],
+        "pending": [],
+        "skipped": []
+      },
+      "actions": {
+        "fetched_count": 0,
+        "event_counts": {},
+        "matching_head_sha_count": 0,
+        "latest_head_sha_runs": [],
+        "latest_runs": [],
+        "child_dispatch_candidates": [],
+        "child_dispatch_note": "No workflow_run/repository_dispatch/workflow_dispatch run in fetched latest-20 main list; relation not discoverable here."
+      }
+    },
+    "jackin-project/jackin-the-architect": {
+      "default_branch": "main",
+      "default_sha": "d0956f0192d2605cbd26d84bf8911211a727b6c0",
+      "rollup": {
+        "check_count": 6,
+        "checkrun_count": 6,
+        "statuscontext_count": 0,
+        "contexts_has_next": false,
+        "status_counts": {
+          "COMPLETED": 6
+        },
+        "conclusion_counts": {
+          "FAILURE": 1,
+          "SUCCESS": 5
+        },
+        "required_like": [
+          "Policy=COMPLETED/SUCCESS",
+          "ci-required=COMPLETED/SUCCESS"
+        ],
+        "app_ids": [
+          "GitHub Actions#15368",
+          "SonarQubeCloud#12526"
+        ],
+        "failed": [
+          {
+            "kind": "check",
+            "name": "SonarCloud Code Analysis",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://sonarcloud.io/dashboard?id=jackin-project_jackin-the-architect&branch=main",
+            "app": "SonarQubeCloud#12526",
+            "run_id": ""
+          }
+        ],
+        "pending": [],
+        "skipped": []
+      },
+      "actions": {
+        "fetched_count": 0,
+        "event_counts": {},
+        "matching_head_sha_count": 0,
+        "latest_head_sha_runs": [],
+        "latest_runs": [],
+        "child_dispatch_candidates": [],
+        "child_dispatch_note": "No workflow_run/repository_dispatch/workflow_dispatch run in fetched latest-20 main list; relation not discoverable here."
+      }
+    },
+    "jackin-project/jackin-sentinel": {
+      "default_branch": "main",
+      "default_sha": "a668b869b9a31622f3088c1d891c45716e94cff2",
+      "rollup": {
+        "check_count": 6,
+        "checkrun_count": 6,
+        "statuscontext_count": 0,
+        "contexts_has_next": false,
+        "status_counts": {
+          "COMPLETED": 6
+        },
+        "conclusion_counts": {
+          "NEUTRAL": 1,
+          "SUCCESS": 5
+        },
+        "required_like": [
+          "Policy=COMPLETED/SUCCESS",
+          "ci-required=COMPLETED/SUCCESS"
+        ],
+        "app_ids": [
+          "GitHub Actions#15368",
+          "SonarQubeCloud#12526"
+        ],
+        "failed": [],
+        "pending": [],
+        "skipped": []
+      },
+      "actions": {
+        "fetched_count": 0,
+        "event_counts": {},
+        "matching_head_sha_count": 0,
+        "latest_head_sha_runs": [],
+        "latest_runs": [],
+        "child_dispatch_candidates": [],
+        "child_dispatch_note": "No workflow_run/repository_dispatch/workflow_dispatch run in fetched latest-20 main list; relation not discoverable here."
+      }
+    },
+    "jackin-project/jackin-role-action": {
+      "default_branch": "main",
+      "default_sha": "8882236041e149153491ada7091382e76be1c313",
+      "rollup": {
+        "check_count": 6,
+        "checkrun_count": 6,
+        "statuscontext_count": 0,
+        "contexts_has_next": false,
+        "status_counts": {
+          "COMPLETED": 6
+        },
+        "conclusion_counts": {
+          "FAILURE": 1,
+          "SUCCESS": 5
+        },
+        "required_like": [
+          "Policy=COMPLETED/SUCCESS",
+          "ci-required=COMPLETED/SUCCESS"
+        ],
+        "app_ids": [
+          "GitHub Actions#15368",
+          "SonarQubeCloud#12526"
+        ],
+        "failed": [
+          {
+            "kind": "check",
+            "name": "SonarCloud Code Analysis",
+            "status": "COMPLETED",
+            "conclusion": "FAILURE",
+            "details": "https://sonarcloud.io/dashboard?id=jackin-project_validate-agent-action&branch=main",
+            "app": "SonarQubeCloud#12526",
+            "run_id": ""
+          }
+        ],
+        "pending": [],
+        "skipped": []
+      },
+      "actions": {
+        "fetched_count": 0,
+        "event_counts": {},
+        "matching_head_sha_count": 0,
+        "latest_head_sha_runs": [],
+        "latest_runs": [],
+        "child_dispatch_candidates": [],
+        "child_dispatch_note": "No workflow_run/repository_dispatch/workflow_dispatch run in fetched latest-20 main list; relation not discoverable here."
+      }
+    }
+  }
+}

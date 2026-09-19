@@ -1,0 +1,105 @@
+{
+  "schema": "g0-fleet-pr-check-handoff/v1",
+  "generated_at": "2026-09-19T17:05:57Z",
+  "evidence_files": [
+    "inventory.md",
+    "configs.tsv",
+    "open-prs.tsv",
+    "main-revisions.tsv",
+    "pr-checks.tsv",
+    "requirements.json",
+    "context-pages.json",
+    "main-verification.json"
+  ],
+  "scope": {
+    "source_manifest": "exact 32 unique repositories; inventory.md/configs.tsv; main-revisions.tsv is current default-branch verification",
+    "main_revisions_observed_at": "2026-09-19T17:05:57Z",
+    "live_pr_scope": "12 repositories with baseline 78 open PR tuples",
+    "remote_operations": "read-only GitHub GraphQL/REST; no fetch, merge, rerun, dispatch, or writes"
+  },
+  "live_snapshot": {
+    "check_snapshot_at": "2026-09-19T16:52:43Z",
+    "current_open_pr_rows": 77,
+    "current_repo_count": 12,
+    "row_file_line_count": 78,
+    "current_heads_rechecked_at": "2026-09-19T17:02:04Z",
+    "current_heads_changed_after_check_snapshot": false,
+    "historical_tuple_reconciliation": {
+      "baseline_rows": 78,
+      "common_repository_pr_keys": 77,
+      "closed_snapshot_tuple": "jackin-project/homebrew-tap#494",
+      "changed_snapshot_head": "tailrocks/velnor#953",
+      "added_keys": 0,
+      "missing_current_keys": 0
+    },
+    "changes": [
+      {
+        "repo": "jackin-project/homebrew-tap",
+        "pr": 494,
+        "status": "merged_after_baseline",
+        "old_head_sha": "17b5cfa00b04486c52d043885576cfeb40c55471",
+        "old_base_sha": "f1669391582f92c95da1aa5958de4397dfedca09",
+        "merged_sha": "2281ae9c95dfcb5bf82dfd025fdf58a50658b1d1",
+        "observed_at": "2026-09-19T16:36:35Z"
+      },
+      {
+        "repo": "tailrocks/velnor",
+        "pr": 953,
+        "status": "head_changed",
+        "old_head_sha": "af31b644aa01eb352ba6240fca957e900174d067",
+        "current_head_sha": "db77f0b5a5f43b5250fda6e7bb341b21a7d36b83"
+      }
+    ]
+  },
+  "required_contract": {
+    "branch_protection_endpoint": "HTTP 404 Branch not protected for all 12; active protect-main rulesets are the contract",
+    "required_contexts": "requirements.json per-repository protect-main details; mostly DCO, Policy, ci-required; holla/holla-apt omit Policy",
+    "app_ids": "pr-checks.tsv and requirements.json observed check-suite app IDs; not inferred from actor/title",
+    "approval_semantics": "required_approving_review_count retained from ruleset; review observations are evidence only; external approval is not assumed"
+  },
+  "classification": {
+    "method": "check-run/status evidence on exact PR head; infrastructure/generator label is candidate only when Policy/DCO/ci-required or generator/workflow evidence is present",
+    "counts_in_pr_checks": {
+      "green_or_nonblocking": 52,
+      "infrastructure_or_generator_candidate": 7,
+      "mixed_failure_candidate": 17,
+      "pending": 1
+    },
+    "incomplete": {
+      "skipped": 61,
+      "pending": 1,
+      "pending_plus_skipped": 1,
+      "context_pagination_plus_skipped_first_page": 2
+    },
+    "no_unrelated_only_assertion": "No PR is labeled unrelated-feature-only; rows mixing required/infrastructure and feature checks stay mixed/indeterminate."
+  },
+  "pagination": {
+    "tailrocks/parallax#110": {
+      "first_page": 100,
+      "second_page": 1,
+      "combined": 101,
+      "added_failures": 0,
+      "added_pending": 0,
+      "added_skipped": 0
+    },
+    "jackin-project/jackin#975": {
+      "first_page": 100,
+      "second_page": 9,
+      "combined": 109,
+      "added_failures": 3,
+      "added_pending": 0,
+      "added_skipped": 4
+    }
+  },
+  "main_verification": {
+    "file": "main-verification.json",
+    "refreshed_at": "2026-09-19T17:03:32Z",
+    "relation_rule": "default-branch Commit.statusCheckRollup is exact main-head evidence; latest actions runs are auxiliary",
+    "child_dispatch": "Only event/head-SHA candidates recorded; parent run ID is not exposed by list-runs, so lineage is not inferred"
+  },
+  "handoff": {
+    "g0_records": "Use requirements.json snapshot_reconciliation, repositories.default_sha/open_pr_numbers, ruleset_contract, and main-verification.json.",
+    "checker": "Use pr-checks.tsv for all 77 current rows; contexts_has_next rows are completed by context-pages.json.",
+    "category_workers": "Use pr-checks.tsv failure_names/infra_failure_names/feature_failure_names plus exact details URLs; do not repeat fleet metadata audit."
+  }
+}

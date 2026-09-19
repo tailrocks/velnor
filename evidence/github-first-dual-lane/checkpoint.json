@@ -1,0 +1,38 @@
+{
+  "schema": "velnor.external-evidence-checkpoint.v1",
+  "checkpoint_id": "github-first-dual-lane-20260919T181508Z",
+  "checkpointed_at_utc": "2026-09-19T18:17:51Z",
+  "repository": "tailrocks/velnor",
+  "ref": "refs/heads/evidence/github-first-dual-lane-20260919T181508Z",
+  "source_base_revision": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+  "attestation": "none",
+  "gate_status": "not-evaluated",
+  "gate_statement": "Packaging this evidence does not establish G0, G1, G2, G3, G4, G5, G6, or G7 success.",
+  "original_evidence_root": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence",
+  "integrity": {
+    "sha256_manifest": "SHA256SUMS",
+    "inventory": "INVENTORY.tsv",
+    "manifest_scope": "All checkpoint files except SHA256SUMS itself"
+  },
+  "included_file_count_before_manifests": 55,
+  "included_categories": [
+    "G0 checker review, hostile G2 fixtures, contract checks, and job findings",
+    "G0 fleet snapshots, workload matrix, stale-run record, and focused implementation reviews",
+    "G1 integration, scan-integrity, bootstrap, seed-pin, hosted-provider, and runtime audit records",
+    "G2 preview-publication design"
+  ],
+  "source_review_references": {
+    "checker_reviewed_revision": "b3b6b2ef5239ff3354f504b8aeb638129fd0504b",
+    "records_docs_reviewed_revision": "651c69ccc7d5d6aab3e7d63ddd8c936b491bfdb5",
+    "records_prior_reviewed_revision": "df9591e6fd7ca5f79ef2f9b493103e905653106a",
+    "checker_review_report_sha256": "0df74945c639900f752bd9d7dafa88cac368fdaca53b86ddc2c9ae4b6477ad04"
+  },
+  "excluded_boundaries": [
+    "All research trees and cloned repositories",
+    "Build targets, generated binaries, debug outputs, dependency caches, and node_modules",
+    "Raw or huge logs and transient command output",
+    "Credentials, tokens, private keys, and mutable session.json",
+    "Evidence files still being written after the checkpoint timestamp; source originals remain untouched"
+  ],
+  "reproducibility_note": "The included hostile-fixture harness and inputs are synthetic review fixtures. Re-run or interpret them only with the referenced checker revision and source provenance; this ref is an external evidence package, not a source release."
+}

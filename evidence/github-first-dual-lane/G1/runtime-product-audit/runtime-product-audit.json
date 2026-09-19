@@ -1,0 +1,326 @@
+{
+  "schema": "velnor.g1.runtime-product-audit.v1",
+  "observed_at_utc": "2026-09-19T16:53:31Z",
+  "repository": "tailrocks/velnor",
+  "input_main": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+  "worker": {
+    "model": "gpt-5.6-luna",
+    "reasoning_effort": "max",
+    "session": "/Users/donbeave/.codex-chainargos/sessions/2026/09/19/rollout-2026-09-19T23-23-13-01a0ba7a-9d5d-7291-a2f5-357ff78dba5e.jsonl"
+  },
+  "pinned_runtime": {
+    "generator_revision": "fdeed261bd2247a38db6922a7726cd45d3d6f31e",
+    "source_commit": {
+      "sha": "fdeed261bd2247a38db6922a7726cd45d3d6f31e",
+      "tree": "fad81603cb304f412d0429c5a5b824deea6b58e2",
+      "parents": [
+        "9f40f92925f930ef9359a71805fd386f0378d065",
+        "35987f322ca995009e653e8228966ecd6bf23b22"
+      ]
+    },
+    "closure": {
+      "sha256": "81ba31f87a699c4e24e68baa1cf7cd0b5d765e5970934ec72c38b83772b274dc",
+      "tree_entry_count": 187,
+      "paths": [
+        "crates/velnor-workflow",
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "rust-toolchain",
+        ".cargo"
+      ],
+      "footer": "closure-version:1\\nfeatures:\\nprofile:release\\n",
+      "tag_prefix": "velnor-workflow-runtime-v1-",
+      "tag_locator": "velnor-workflow-runtime-v1-81ba31f87a699c4e"
+    },
+    "release": {
+      "id": 391347842,
+      "tag_name": "velnor-workflow-runtime-v1-81ba31f87a699c4e",
+      "target_commitish": "fdeed261bd2247a38db6922a7726cd45d3d6f31e",
+      "tag_ref_object": "fdeed261bd2247a38db6922a7726cd45d3d6f31e",
+      "draft": false,
+      "prerelease": false,
+      "created_at": "2026-09-18T09:16:37Z",
+      "published_at": "2026-09-18T09:19:40Z",
+      "html_url": "https://github.com/tailrocks/velnor/releases/tag/velnor-workflow-runtime-v1-81ba31f87a699c4e",
+      "body_source_revision": "fdeed261bd2247a38db6922a7726cd45d3d6f31e",
+      "body_closure": "81ba31f87a699c4e24e68baa1cf7cd0b5d765e5970934ec72c38b83772b274dc",
+      "attestation_evidence": "Run 35328690937 reported success for asset attestations, manifest attestation, and the producer smoke test, which verifies both subjects against ci-runtime-products.yml and refs/heads/main. This audit did not repeat gh attestation verify locally because that would require downloading a binary."
+    },
+    "manifest": {
+      "asset_id": 572270515,
+      "asset_name": "manifest.json",
+      "size": 671,
+      "release_asset_digest": "sha256:f62da45ca4559249a222214c8ff2bf2d7f009b367f21ab78b47984d1ee3ee205",
+      "retrieved_sha256": "f62da45ca4559249a222214c8ff2bf2d7f009b367f21ab78b47984d1ee3ee205",
+      "document": {
+        "closure": "81ba31f87a699c4e24e68baa1cf7cd0b5d765e5970934ec72c38b83772b274dc",
+        "revision": "fdeed261bd2247a38db6922a7726cd45d3d6f31e",
+        "profile": "release",
+        "features": "",
+        "products": {
+          "Linux-X64": {
+            "binary": "7e51258a4c670df88d4fd2984a8cc175206ada24a3c27d75aeba8ecab853b05c",
+            "asset": "velnor-workflow-Linux-X64"
+          },
+          "Linux-ARM64": {
+            "binary": "46c28001bf4f3ee50bdfc498c0e5aa7b375c3f4dd6ca702f675d959c409d14e4",
+            "asset": "velnor-workflow-Linux-ARM64"
+          },
+          "macOS-ARM64": {
+            "binary": "626cd30e77f2161db2e2771bdefe25f61eed4ae8b92d2b5213a44530daa4431a",
+            "asset": "velnor-workflow-macOS-ARM64"
+          }
+        }
+      }
+    },
+    "assets": [
+      {
+        "id": 572270518,
+        "name": "velnor-workflow-Linux-X64",
+        "size": 10309808,
+        "digest": "sha256:7e51258a4c670df88d4fd2984a8cc175206ada24a3c27d75aeba8ecab853b05c",
+        "manifest_digest_match": true
+      },
+      {
+        "id": 572270517,
+        "name": "velnor-workflow-Linux-ARM64",
+        "size": 8393640,
+        "digest": "sha256:46c28001bf4f3ee50bdfc498c0e5aa7b375c3f4dd6ca702f675d959c409d14e4",
+        "manifest_digest_match": true
+      },
+      {
+        "id": 572270516,
+        "name": "velnor-workflow-macOS-ARM64",
+        "size": 8377392,
+        "digest": "sha256:626cd30e77f2161db2e2771bdefe25f61eed4ae8b92d2b5213a44530daa4431a",
+        "manifest_digest_match": true
+      }
+    ],
+    "supported_platforms": [
+      "Linux-X64",
+      "Linux-ARM64",
+      "macOS-ARM64"
+    ],
+    "unsupported_or_unpublished_platforms": [
+      "macOS-X64",
+      "Windows-X64",
+      "Windows-ARM64"
+    ]
+  },
+  "current_main_product_distinction": {
+    "main_revision": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+    "closure": "63cea86d9b7bf2d5d63b10747f9bd8a1e0c7b378f9d60e0b103374ce630ab590",
+    "tag": "velnor-workflow-runtime-v1-63cea86d9b7bf2d5",
+    "release_id": 391412744,
+    "producer_run_id": 35338351715,
+    "producer_run_number": 67,
+    "producer_event": "push",
+    "producer_conclusion": "success",
+    "why_not_a_pin_product": "The setup action resolves the closure of fdeed261..., which is 81ba31f...; manifest closure equality rejects the 63cea86... product even though it is the latest main product."
+  },
+  "producer": {
+    "workflow_file": ".github/workflows/ci-runtime-products.yml",
+    "workflow_id": 359790572,
+    "state": "active",
+    "triggers": {
+      "push": {
+        "branches": [
+          "main"
+        ]
+      },
+      "workflow_dispatch": true,
+      "effective_admission": "The first closure step requires github.ref == refs/heads/main; dispatches from any other ref fail before checkout/build."
+    },
+    "permissions": {
+      "workflow_default": {
+        "contents": "read"
+      },
+      "build_job": {
+        "contents": "read",
+        "id-token": "write",
+        "attestations": "write"
+      },
+      "publish_job": {
+        "contents": "write",
+        "id-token": "write",
+        "attestations": "write"
+      }
+    },
+    "source_admission": [
+      "checkout persist-credentials=false",
+      "clean checkout required",
+      "closure is computed from HEAD using the fixed six path families and release footer",
+      "binary --closure must equal closure and --revision must equal HEAD before upload",
+      "publish rechecks each transport digest, manifest filter, attestations, closure, revision, and consumer install layout before gh release create",
+      "existing tag causes build/publish skip and publish rechecks immediately before create; no overwrite"
+    ],
+    "platform_matrix": [
+      {
+        "platform": "Linux-X64",
+        "runner": "ubuntu-24.04",
+        "asset": "velnor-workflow-Linux-X64"
+      },
+      {
+        "platform": "Linux-ARM64",
+        "runner": "ubuntu-24.04-arm",
+        "asset": "velnor-workflow-Linux-ARM64"
+      },
+      {
+        "platform": "macOS-ARM64",
+        "runner": "macos-15",
+        "asset": "velnor-workflow-macOS-ARM64"
+      }
+    ],
+    "observed_pinned_run": {
+      "id": 35328690937,
+      "run_number": 62,
+      "event": "push",
+      "head_sha": "fdeed261bd2247a38db6922a7726cd45d3d6f31e",
+      "status": "completed",
+      "conclusion": "success",
+      "jobs": {
+        "closure": {
+          "id": 105547724086,
+          "runner_labels": [
+            "ubuntu-24.04"
+          ],
+          "result": "success"
+        },
+        "build_linux_x64": {
+          "id": 105547758802,
+          "runner_labels": [
+            "ubuntu-24.04"
+          ],
+          "result": "success"
+        },
+        "build_linux_arm64": {
+          "id": 105547758768,
+          "runner_labels": [
+            "ubuntu-24.04-arm"
+          ],
+          "result": "success"
+        },
+        "build_macos_arm64": {
+          "id": 105547758786,
+          "runner_labels": [
+            "macos-15"
+          ],
+          "result": "success"
+        },
+        "publish": {
+          "id": 105548447574,
+          "runner_labels": [
+            "ubuntu-24.04"
+          ],
+          "result": "success"
+        }
+      },
+      "step_order": [
+        "Resolve runtime closure",
+        "Build runtime (Linux-X64)",
+        "Build runtime (Linux-ARM64)",
+        "Build runtime (macOS-ARM64)",
+        "Publish runtime products"
+      ],
+      "provenance_steps": {
+        "asset_attestation": "success for all three build jobs",
+        "manifest_attestation": "success",
+        "consumer_smoke_test": "success",
+        "release_creation": "success"
+      },
+      "note": "Job IDs and step conclusions are from the read-only Actions jobs API; no binary was downloaded or executed during this audit."
+    },
+    "latest_main_run": {
+      "id": 35338351715,
+      "run_number": 67,
+      "event": "push",
+      "head_sha": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+      "status": "completed",
+      "conclusion": "success",
+      "jobs": [
+        {
+          "id": 105578341598,
+          "name": "Resolve runtime closure",
+          "runner_labels": [
+            "ubuntu-24.04"
+          ],
+          "result": "success"
+        },
+        {
+          "id": 105578386229,
+          "name": "Build runtime (Linux-X64)",
+          "runner_labels": [
+            "ubuntu-24.04"
+          ],
+          "result": "success"
+        },
+        {
+          "id": 105578386423,
+          "name": "Build runtime (Linux-ARM64)",
+          "runner_labels": [
+            "ubuntu-24.04-arm"
+          ],
+          "result": "success"
+        },
+        {
+          "id": 105578386345,
+          "name": "Build runtime (macOS-ARM64)",
+          "runner_labels": [
+            "macos-15"
+          ],
+          "result": "success"
+        },
+        {
+          "id": 105579029232,
+          "name": "Publish runtime products",
+          "runner_labels": [
+            "ubuntu-24.04"
+          ],
+          "result": "success"
+        }
+      ]
+    }
+  },
+  "candidate_source_12cc": {
+    "sha": "12cc87b629802c294da9840325cb21087c020df6",
+    "parent": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+    "local_branch": "codex/github-first-generator",
+    "remote_commit_lookup": "not_available: GitHub API returned 422 No commit found for SHA",
+    "changed_source_files": [
+      "crates/velnor-workflow/src/s2/primitives/ir.rs",
+      "crates/velnor-workflow/src/s2/primitives/mod.rs",
+      "crates/velnor-workflow/src/s2/primitives/release.rs"
+    ],
+    "release_closure": "1cbf31ad515ae51365b58394120da0568e313879015f4deb53ed5cdb83f050c0",
+    "candidate_debug_closure": "b622c5e7e1087d337ccf5ce5a824855f342548014a7f4afe09ea89d5a90682c4",
+    "runtime_tag_if_merged_without_closure_input_changes": "velnor-workflow-runtime-v1-1cbf31ad515ae513",
+    "runtime_tag_currently_published": false,
+    "implications": [
+      "12cc changes closure-covered generator source, so its release product cannot reuse 81ba31f... or 63cea86...; the producer must run after the source reaches refs/heads/main.",
+      "The producer manifest revision will be the actual main HEAD built by the push (a merge commit may differ from 12cc), while the closure follows the merged tree.",
+      "The candidate PR path is debug/tui and names b622c5e...; it is not the release product. Same-repository PR admission is required by ci-policy before candidate execution.",
+      "Do not adopt [generator].revision=12cc... before the immutable 1cbf31... release exists; the setup action fails closed when the tag is absent."
+    ]
+  },
+  "shallow_pin_probe": {
+    "method": "fresh git init plus git fetch --no-tags --depth=1 origin fdeed261bd2247a38db6922a7726cd45d3d6f31e",
+    "temporary_checkout": "/tmp/velnor-g1-runtime-audit.r8qGf6",
+    "commit_available": true,
+    "object_type": "commit",
+    "rev_list_count": 1,
+    "shallow_boundary": "fdeed261bd2247a38db6922a7726cd45d3d6f31e",
+    "closure_listing_count": 187,
+    "closure_recomputed": "81ba31f87a699c4e24e68baa1cf7cd0b5d765e5970934ec72c38b83772b274dc",
+    "binary_downloaded_or_executed": false
+  },
+  "source_checksums": {
+    ".github/actions/setup-velnor-workflow/action.yml": "a9d836b3a3aaac30b42ac13caa250efe660062c5f9d9aff1d3cbeb9ee84a77e5",
+    ".github-gen/sources/actions/setup-velnor-workflow/action.yml": "a9d836b3a3aaac30b42ac13caa250efe660062c5f9d9aff1d3cbeb9ee84a77e5",
+    ".github/workflows/ci-runtime-products.yml": "2ecff52a369507c22100b3ee6cabd1fcf268e02359c820f8859addff90014688",
+    "crates/velnor-workflow/src/s2/primitives/runtime_products.rs": "d73031a2a8ecc5ef1b85d5af4e27e8419319c5677be196bac28d89f45f2f9912",
+    "crates/velnor-workflow/src/s2/closure.rs": "b45d63a902f524568dfe931250a2a7e4aebff946ebdbdb069d69c7515ed79172",
+    ".github-gen/velnor-workflow.toml": "9911f537d1621a265ec6037475d8d5f8bf16bf7d918440cb4dd9a0120f3acd54"
+  },
+  "completion_claim": false
+}

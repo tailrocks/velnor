@@ -1,0 +1,33 @@
+repository	default_branch	default_sha	config_entries	config_blob_oid	schema	generator_revision	key_config_observation
+tailrocks/velnor	main	abe9ad82a2d4d01b706bbc6122ab6ccb150faad9	sources,velnor-workflow.toml	e32e18e81fa7eedac49d43459b7becb7f12ff775	2	fdeed261bd2247a38db6922a7726cd45d3d6f31e	providers=github-hosted,velnor;automatic=github-hosted,velnor;dispatch=github-hosted,velnor;profile=rust-workspace-release;release=velnor-runner
+tailrocks/velnor-apt	main	b24d7d4370001119cd5ddcb6f9e07aa9007051e7	FEED_COVERAGE.md,velnor-workflow.toml	672dd0c4644557150e300b6abb6806d68ff9c9a8	1	fdeed261bd2247a38db6922a7726cd45d3d6f31e	profile=apt-repository;release=apt;package=velnor-runner
+tailrocks/parallax	main	6a12bf47a816b63e848b563aaa45ef9694159c79	velnor-workflow.toml	249207cd100b836947606cb2c8537ee4e15b85fc	1	b9c3156cdb88e63c11b9e595a3e694b02238c09a	config present; provider/release fields not in selected key lines
+tailrocks/tracing-request-level	main	f234158eb3d5caddda83b19e527ffb7d0f675a23	velnor-workflow.toml	5a6002a95175a9695ca0f53614b8132475b99815	1	b9c3156cdb88e63c11b9e595a3e694b02238c09a	config present; provider/release fields not in selected key lines
+tailrocks/termrock	main	936982e60bce6d19cf33ae09b53545a955f1073d	NO_WORKFLOWS_REQUIRED.md,velnor-workflow.toml	b2dca3217b787bd8fc7fa194900f7d1a38f1264d	1	b9c3156cdb88e63c11b9e595a3e694b02238c09a	NO_WORKFLOWS_REQUIRED marker present
+tailrocks/termpane	main	7602430f18852350cc3155e58bb96799234cbfe5	velnor-workflow.toml	b0d50b12d1bea8d15475a557e82d91c8372cee89	1	b9c3156cdb88e63c11b9e595a3e694b02238c09a	config present; provider/release fields not in selected key lines
+tailrocks/tablerock	main	e2fe040c9d9cbf0eb3994d8b6cdffd0a772de6fc	velnor-workflow.toml	03c351f4b28a07c2766c2afc23d5db6dc6056421	1	b9c3156cdb88e63c11b9e595a3e694b02238c09a	config present; provider/release fields not in selected key lines
+tailrocks/schemalane	main	ab49e2dd910ee41e96daea97ad6998f7961e5cfc	velnor-workflow.toml	10426736f43928d20b8aae9112dc4b55c9b5d266	1	b9c3156cdb88e63c11b9e595a3e694b02238c09a	config present; provider/release fields not in selected key lines
+tailrocks/ruxel	main	3d34049820a6d4ce3707e574f407cbf4047ff932	velnor-workflow.toml	ea7a4c1479c7200babb6e5d89a9c8843aef5b82b	1	b9c3156cdb88e63c11b9e595a3e694b02238c09a	config present; provider/release fields not in selected key lines
+tailrocks/pg-bigdecimal	main	7dc5267d855801dbffb54aa12fc87791aa000a93	velnor-workflow.toml	63275b66c2f65df6040a11a533f46cb0fb95b0ac	1	b9c3156cdb88e63c11b9e595a3e694b02238c09a	config present; provider/release fields not in selected key lines
+tailrocks/parallax-telemetry-playground	main	54d09bf71181dcfc72d6829fabec3c53f55aacf9	velnor-workflow.toml	5fe937e02454446e1460362f51af5e2963d8e422	1	b9c3156cdb88e63c11b9e595a3e694b02238c09a	config present; polyglot/native workflow output present
+tailrocks/homebrew-tablerock	main	7d376cad41088420e92e49bf4030d761180a3512	velnor-workflow.toml	d144051a34054b882a2549b8b82e47f130e08f22	1	b9c3156cdb88e63c11b9e595a3e694b02238c09a	config present; Homebrew workflow output present
+tailrocks/homebrew-ruxel	main	ce29c817d29c54563bc479bce3966e4ea32845e6	velnor-workflow.toml	5c5c6a476490141c4ce0ad173400713f7272dcc7	1	b9c3156cdb88e63c11b9e595a3e694b02238c09a	config present; Homebrew workflow output present
+tailrocks/homebrew-parallax	main	c9c59277f35cb1e81988c2bef0be2c688dadd608	velnor-workflow.toml	c34f6d8f12c6eb6f78a90f1258e71570f8ba43f4	1	b9c3156cdb88e63c11b9e595a3e694b02238c09a	config present; Homebrew workflow output present
+tailrocks/homebrew-holla	main	cc25db8fd911cdf965652d3b094c10d006d056ee	velnor-workflow.toml	5a21e84e0f064d994818b8e3b2567a723579f307	1	b9c3156cdb88e63c11b9e595a3e694b02238c09a	config present; Homebrew workflow output present
+tailrocks/holla-apt	main	0636074d4a16be4771685bd95bf2cec739cf359c	NO_WORKFLOWS_REQUIRED.md,velnor-workflow.toml	0716e7583cb8f498ef366ac609ac02cc16e6ccdc	1	b9c3156cdb88e63c11b9e595a3e694b02238c09a	profile=apt-repository;NO_WORKFLOWS_REQUIRED marker present
+tailrocks/holla	main	027dac6be2070b7e836c1ca123861fcbade72003	velnor-workflow.toml	9d0eda54ffffe16352063b6da4a4805458993d0e	1	b9c3156cdb88e63c11b9e595a3e694b02238c09a	config present; provider/release fields not in selected key lines
+tailrocks/homebrew-velnor	main	7af1249f3d69c9f2e548583cdc9f3e737da41b81	-	-	-	-	no config
+tailrocks/tailrocks-typescript-skills	main	f434715f7c664af431f0be62982aa379400102de	-	-	-	-	no config
+tailrocks/tailrocks-skill-authoring-skills	main	9e25890fd63f7ca6c587490ba7cc432f5fdd98d6	-	-	-	-	no config
+tailrocks/tailrocks-rust-skills	main	bcc31b1d935dac4de191a6b71b3091f628d204c0	-	-	-	-	no config
+tailrocks/tailrocks-roadmap-skills	main	66d9c79f6472ddace0e265335dc8dd36cdeb8a86	-	-	-	-	no config
+tailrocks/tailrocks-pull-request-skills	main	2b4f71f49fd27061e64d16b2b7f83d9bd2df5612	-	-	-	-	no config
+tailrocks/tailrocks-open-source-skills	main	6e77a448f9776e837bfc9ab18b833bd5fdc26d3a	-	-	-	-	no config
+tailrocks/tailrocks-macos-skills	main	1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2	-	-	-	-	no config
+tailrocks/tailrocks-code-quality-skills	main	0b9a1eaa83ca2ad9b2c895741648e7cde10f6189	-	-	-	-	no config
+jackin-project/jackin	main	665f7e3735c1f76ce5ee8a9e27c676381a474cfb	velnor-workflow.toml	1de662b224db5b23fb7095fbffd2acf15acd08f1	1	06050c9fa58fec8b5fd2c11c46756971e5270ec3	profiles=desktop-merge,desktop-scheduled,renovate-upstream-sources;kind=swift,tasks
+jackin-project/jackin-agent-smith	main	08cb1c2f82519bab1aa0c164879955a84d35463b	velnor-workflow.toml	1bfb1f6fcff56c66ae892d9882acd14f88fe97f3	1	b9c3156cdb88e63c11b9e595a3e694b02238c09a	config present; Docker workflow output present
+jackin-project/homebrew-tap	main	f1669391582f92c95da1aa5958de4397dfedca09	velnor-workflow.toml	b5f224527b3ad243ccab6321cc1e4759be14814d	1	b9c3156cdb88e63c11b9e595a3e694b02238c09a	kind=homebrew
+jackin-project/jackin-the-architect	main	d0956f0192d2605cbd26d84bf8911211a727b6c0	velnor-workflow.toml	2764e6085713dd0fe69eb03fdb7e4afb9ffbfc80	1	541d8926737213542156ee32e420010817f8a323	config present; Docker workflow output present
+jackin-project/jackin-sentinel	main	a668b869b9a31622f3088c1d891c45716e94cff2	velnor-workflow.toml	78357b23d483502a2bca6b5f51aa2b04ac682cea	1	541d8926737213542156ee32e420010817f8a323	config present; Docker workflow output present
+jackin-project/jackin-role-action	main	8882236041e149153491ada7091382e76be1c313	velnor-workflow.toml	aa5624add889b0da8d27e8a3bc3d49cbe728a23d	1	541d8926737213542156ee32e420010817f8a323	kind=docs; action/role audit required

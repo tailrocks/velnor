@@ -1,0 +1,18 @@
+Source: https://github.com/tailrocks/velnor/actions/runs/35453601367/job/105928872280
+Run: 35453601367
+Job: 105928872280
+Observed: 2026-09-19T16:30:26Z
+
+PASS (1/6) velnor-workflow-contract::cache_keys kind_reusables_hold_no_per_unit_step_blocks
+PASS (2/6) velnor-workflow-contract::contract hosted_lane_uses_the_github_mb_boxington_backend
+FAIL (3/6) velnor-workflow-contract::cache_keys parameterized_callees_resolve_to_the_pre_parameterization_cache_keys
+
+test parameterized_callees_resolve_to_the_pre_parameterization_cache_keys ... FAILED
+thread 'parameterized_callees_resolve_to_the_pre_parameterization_cache_keys' (2827) panicked at tests/cache_keys.rs:258:13:
+assertion `left == right` failed: github-hosted-rust-policy -> ci-unit-rust.yml#verify-github-hosted [mbx]: primary key changed
+  left: "velnor-mbx-v3-fe8982552e68-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-policy-${{ hashFiles('.cargo/**', 'Cargo.lock', 'deny.toml') }}-${{ hashFiles('.cargo/audit.toml', '.cargo/deny.toml', 'Cargo.lock', 'audit.toml', 'deny.toml') }}"
+ right: "velnor-mbx-v3-ec62b8b58bab-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-policy-${{ hashFiles('.cargo/**', 'Cargo.lock', 'deny.toml') }}-${{ hashFiles('.cargo/audit.toml', '.cargo/deny.toml', 'Cargo.lock', 'audit.toml', 'deny.toml') }}"
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+Summary: 6 tests run: 5 passed, 1 failed, 0 skipped
+error: CI command failed for unit rust-velnor-workflow-contract with exit status: 100

@@ -1,0 +1,160 @@
+{
+  "schema": "velnor.g0.check-contract.v1",
+  "observed_at_utc": "2026-09-19T16:37:34Z",
+  "revalidated_at_utc": "2026-09-19T16:42:04Z",
+  "repository": "tailrocks/velnor",
+  "source_revision": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+  "default_branch": "main",
+  "ruleset": {
+    "id": 19573071,
+    "name": "protect-main",
+    "target": "branch",
+    "enforcement": "active",
+    "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+    "required_status_checks": {
+      "contexts": ["DCO", "ci-required", "Policy"],
+      "strict_required_status_checks_policy": false,
+      "integration_ids_pinned": false
+    },
+    "other_rules": ["deletion", "non_fast_forward", "pull_request"],
+    "pull_request_parameters": {
+      "required_approving_review_count": 0,
+      "dismiss_stale_reviews_on_push": true,
+      "required_review_thread_resolution": false,
+      "require_code_owner_review": false,
+      "require_extra_approval_for_unattributed_changes": true
+    },
+    "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}]
+  },
+  "permissions": {
+    "classic_branch_protection": "404 Branch not protected; ruleset is the active contract",
+    "actions_enabled": true,
+    "allowed_actions": "all",
+    "sha_pinning_required": false,
+    "default_workflow_permissions": "write",
+    "can_approve_pull_request_reviews": false,
+    "repository_permission_observed": {"admin": true, "maintain": true, "push": true}
+  },
+  "check_producing_apps": [
+    {"context": "DCO", "app_id": 974774, "slug": "dco-2", "name": "DCO-2"},
+    {"context": "ci-required", "app_id": 15368, "slug": "github-actions", "name": "GitHub Actions"},
+    {"context": "Policy", "app_id": 15368, "slug": "github-actions", "name": "GitHub Actions"}
+  ],
+  "main": {
+    "ref": "refs/heads/main",
+    "sha": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+    "latest_relevant_run": {
+      "id": 35430875046,
+      "event": "workflow_dispatch",
+      "status": "completed",
+      "conclusion": "failure",
+      "url": "https://github.com/tailrocks/velnor/actions/runs/35430875046"
+    },
+    "required_context_checks": [
+      {"context": "ci-required", "check_run_id": 105867022907, "app_id": 15368, "suite_id": 95952458471, "conclusion": "failure", "url": "https://github.com/tailrocks/velnor/actions/runs/35430875046/job/105867022907"},
+      {"context": "Policy", "check_run_id": 105865096888, "app_id": 15368, "suite_id": 95952458471, "conclusion": "failure", "url": "https://github.com/tailrocks/velnor/actions/runs/35430875046/job/105865096888"},
+      {"context": "Control / Required", "check_run_id": 105867032979, "app_id": 15368, "suite_id": 95952458471, "conclusion": "failure", "url": "https://github.com/tailrocks/velnor/actions/runs/35430875046/job/105867032979"}
+    ],
+    "dco_suite": {"suite_id": 95704614706, "app_id": 974774, "status": "queued", "latest_check_runs_count": 0, "pull_requests": []},
+    "pr_association": "none; direct workflow_dispatch has no pull_requests association"
+  },
+  "open_pull_requests": [
+    {
+      "number": 953,
+      "state": "open",
+      "base_ref": "main",
+      "declared_base_sha": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+      "head_ref": "codex/s2-desktop-task-release",
+      "head_sha": "af31b644aa01eb352ba6240fca957e900174d067",
+      "merge_commit_sha": "f154d3b414999838b6630f7fe42ced879c6847d7",
+      "merge_commit_parents": ["abe9ad82a2d4d01b706bbc6122ab6ccb150faad9", "af31b644aa01eb352ba6240fca957e900174d067"],
+      "workflow_run": {"id": 35453601367, "event": "pull_request", "status": "queued", "head_sha": "af31b644aa01eb352ba6240fca957e900174d067"},
+      "check_suite": {"suite_id": 96009929573, "app_id": 15368, "status": "queued", "latest_check_runs_count": 59},
+      "required_checks_observed": [
+        {"context": "DCO", "check_run_id": 105924879553, "app_id": 974774, "suite_id": 96009918913, "status": "completed", "conclusion": "success"},
+        {"context": "Policy", "check_run_id": 105924883126, "app_id": 15368, "suite_id": 96009924749, "status": "completed", "conclusion": "failure"},
+        {"context": "ci-required", "status": "not_emitted_in_current_queued_suite"}
+      ],
+      "actual_workflow_checkout_sha": "f154d3b414999838b6630f7fe42ced879c6847d7",
+      "actual_workflow_checkout_parents": ["abe9ad82a2d4d01b706bbc6122ab6ccb150faad9", "af31b644aa01eb352ba6240fca957e900174d067"],
+      "failed_job_id": 105928872280
+    },
+    {
+      "number": 954,
+      "state": "open",
+      "base_ref": "codex/s2-desktop-task-release",
+      "declared_base_sha": "8964876f6b6b6eca624b2fb26f7eff1d5dc5d575",
+      "current_base_ref_tip": "af31b644aa01eb352ba6240fca957e900174d067",
+      "head_ref": "codex/package-release-contract",
+      "head_sha": "f16592ea165ced141bf0bb1c43466a95d7df8b2e",
+      "merge_commit_sha": "2860ef3d961ba269daeafce799387c9918a0a44c",
+      "merge_commit_parents": ["af31b644aa01eb352ba6240fca957e900174d067", "f16592ea165ced141bf0bb1c43466a95d7df8b2e"],
+      "workflow_run": {"id": 35454970877, "event": "pull_request", "status": "queued", "head_sha": "f16592ea165ced141bf0bb1c43466a95d7df8b2e"},
+      "check_suite": {"suite_id": 96013421316, "app_id": 15368, "status": "queued", "latest_check_runs_count": 59},
+      "required_checks_observed": [
+        {"context": "DCO", "check_run_id": 105928522218, "app_id": 974774, "suite_id": 96013413509, "status": "completed", "conclusion": "success"},
+        {"context": "Policy", "check_run_id": 105928525183, "app_id": 15368, "suite_id": 96013418386, "status": "in_progress", "conclusion": null},
+        {"context": "ci-required", "status": "not_emitted_in_current_queued_suite"}
+      ],
+      "actual_workflow_checkout_sha": "2860ef3d961ba269daeafce799387c9918a0a44c",
+      "actual_workflow_checkout_parents": ["af31b644aa01eb352ba6240fca957e900174d067", "f16592ea165ced141bf0bb1c43466a95d7df8b2e"],
+      "selection_base_sha_reported_by_job": "8964876f6b6b6eca624b2fb26f7eff1d5dc5d575"
+    },
+    {
+      "number": 952,
+      "state": "open",
+      "base_ref": "main",
+      "declared_base_sha": "3123f8ae63a1fe98fe1d4dc86fb25b212defcd59",
+      "head_ref": "fix/release-leg-seed-pin-fetch",
+      "head_sha": "a5c1c0bd5c92c4c52d58ccb21042b1b2c0b08637",
+      "merge_commit_sha": "b5b2a1248ea3c099db11634c3ae3d6baaff355e0",
+      "required_checks_observed": [
+        {"context": "DCO", "check_run_id": 105577354630, "app_id": 974774, "conclusion": "success"},
+        {"context": "ci-required", "check_run_id": 105579570881, "app_id": 15368, "conclusion": "failure"},
+        {"context": "Policy", "check_run_id": 105577360850, "app_id": 15368, "conclusion": "success"}
+      ]
+    },
+    {
+      "number": 948,
+      "state": "open",
+      "draft": true,
+      "base_ref": "main",
+      "declared_base_sha": "c2883fb3b1545127e89f290d853dd286e1ce805c",
+      "head_ref": "c1/bastion-host-setup",
+      "head_sha": "ab82b08746ec312558981f8461a32a1e3350d802",
+      "merge_commit_sha": null,
+      "required_checks_observed": [
+        {"context": "DCO", "check_run_id": 105573362555, "app_id": 974774, "conclusion": "success"},
+        {"context": "ci-required", "check_run_id": 105575827029, "app_id": 15368, "conclusion": "failure"},
+        {"context": "Policy", "check_run_id": 105573368379, "app_id": 15368, "conclusion": "success"}
+      ]
+    }
+  ],
+  "raw_failure": {
+    "run_id": 35453601367,
+    "job_id": 105928872280,
+    "url": "https://github.com/tailrocks/velnor/actions/runs/35453601367/job/105928872280",
+    "test": "parameterized_callees_resolve_to_the_pre_parameterization_cache_keys",
+    "message": "github-hosted-rust-policy -> ci-unit-rust.yml#verify-github-hosted [mbx]: primary key changed",
+    "expected_left": "velnor-mbx-v3-fe8982552e68-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-policy-${{ hashFiles('.cargo/**', 'Cargo.lock', 'deny.toml') }}-${{ hashFiles('.cargo/audit.toml', '.cargo/deny.toml', 'Cargo.lock', 'audit.toml', 'deny.toml') }}",
+    "observed_right": "velnor-mbx-v3-ec62b8b58bab-${{ runner.os }}-${{ runner.arch }}-github-hosted-linux-x64-untrusted-ok-rust-policy-${{ hashFiles('.cargo/**', 'Cargo.lock', 'deny.toml') }}-${{ hashFiles('.cargo/audit.toml', '.cargo/deny.toml', 'Cargo.lock', 'audit.toml', 'deny.toml') }}",
+    "log_timestamp": "2026-09-19T16:30:26Z"
+  },
+  "transition": {
+    "neutral_contexts_preserved": ["DCO", "ci-required", "Policy"],
+    "hosted_only_contract": "Each required context must be produced by the declared app on the exact PR integration SHA and complete success; a skipped Velnor job or wrapper success cannot satisfy it.",
+    "sequence": [
+      "Snapshot main tip, PR head/base refs, declared PR merge SHA, and actual checkout merge SHA.",
+      "Repair/rebase the failing candidate and prove hosted DCO, ci-required, and Policy on its current integration SHA; retain context names and app ownership.",
+      "Verify the resulting main SHA after merge; require fresh post-merge ci-required and Policy plus applicable DCO evidence.",
+      "Only after hosted checks are reliable, introduce any additional provider context in a coordinated ruleset/workflow cutover; do not remove or weaken current required contexts.",
+      "For every check, record app ID, check-run ID, suite/run ID, event, declared head SHA, actual checkout SHA, and PR base/head association."
+    ],
+    "current_blockers": [
+      "PR953 hosted Policy failed and current workflow contract failed cache-key compatibility.",
+      "PR953 and PR954 current Velnor jobs remain queued on self-hosted/velnor-target-mvp with no runner.",
+      "PR954 API-declared base SHA (8964876f) differs from actual base ref tip and synthetic merge parent (af31b644); preserve both facts until reconciled."
+    ]
+  },
+  "completion_claim": false
+}

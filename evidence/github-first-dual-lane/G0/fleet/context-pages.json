@@ -1,0 +1,120 @@
+{
+  "schema": "g0-pr-checks-context-pagination/v1",
+  "generated_at": "2026-09-19T17:01:00Z",
+  "pages": {
+    "tailrocks/parallax#110": {
+      "commit_sha": "de3fd1c7d347ec8cc98bf4f811b73ec639506236",
+      "page_after": "MTAw",
+      "page_count": 1,
+      "page_info": {
+        "hasNextPage": false,
+        "endCursor": "MTAx"
+      },
+      "status_counts": {
+        "COMPLETED": 1
+      },
+      "conclusion_counts": {
+        "SUCCESS": 1
+      },
+      "required_like": [
+        "DCO=COMPLETED/SUCCESS"
+      ],
+      "app_ids": [
+        "DCO-2#974774"
+      ],
+      "failed": [],
+      "pending": [],
+      "skipped": [],
+      "incomplete_flags": []
+    },
+    "jackin-project/jackin#975": {
+      "commit_sha": "50576297e7ec4131608ac1a446f86a84d0af43de",
+      "page_after": "MTAw",
+      "page_count": 9,
+      "page_info": {
+        "hasNextPage": false,
+        "endCursor": "MTA5"
+      },
+      "status_counts": {
+        "COMPLETED": 9
+      },
+      "conclusion_counts": {
+        "SKIPPED": 4,
+        "FAILURE": 3,
+        "SUCCESS": 2
+      },
+      "required_like": [
+        "ci-required=COMPLETED/FAILURE",
+        "DCO=COMPLETED/SUCCESS"
+      ],
+      "app_ids": [
+        "DCO-2#974774",
+        "GitHub Actions#15368"
+      ],
+      "failed": [
+        {
+          "name": "Swift / Packages / GitHub / swift-package-native",
+          "status": "COMPLETED",
+          "conclusion": "FAILURE",
+          "details": "https://github.com/jackin-project/jackin/actions/runs/34973440826/job/104464894517",
+          "app": "GitHub Actions#15368",
+          "run_id": "34973440826"
+        },
+        {
+          "name": "ci-required",
+          "status": "COMPLETED",
+          "conclusion": "FAILURE",
+          "details": "https://github.com/jackin-project/jackin/actions/runs/34973440826/job/104473967094",
+          "app": "GitHub Actions#15368",
+          "run_id": "34973440826"
+        },
+        {
+          "name": "Required",
+          "status": "COMPLETED",
+          "conclusion": "FAILURE",
+          "details": "https://github.com/jackin-project/jackin/actions/runs/34973440826/job/104474045035",
+          "app": "GitHub Actions#15368",
+          "run_id": "34973440826"
+        }
+      ],
+      "pending": [],
+      "skipped": [
+        {
+          "name": "group-rust-2 / Velnor / rust-jackin-usage",
+          "status": "COMPLETED",
+          "conclusion": "SKIPPED",
+          "details": "https://github.com/jackin-project/jackin/actions/runs/34973440826/job/104468816325",
+          "app": "GitHub Actions#15368",
+          "run_id": "34973440826"
+        },
+        {
+          "name": "group-rust-2 / Velnor / rust-jackin-usage-ffi",
+          "status": "COMPLETED",
+          "conclusion": "SKIPPED",
+          "details": "https://github.com/jackin-project/jackin/actions/runs/34973440826/job/104468818142",
+          "app": "GitHub Actions#15368",
+          "run_id": "34973440826"
+        },
+        {
+          "name": "group-rust-2 / Velnor / rust-jackin-xtask",
+          "status": "COMPLETED",
+          "conclusion": "SKIPPED",
+          "details": "https://github.com/jackin-project/jackin/actions/runs/34973440826/job/104468816283",
+          "app": "GitHub Actions#15368",
+          "run_id": "34973440826"
+        },
+        {
+          "name": "group-rust-2 / Velnor / rust-desktop-xcframework",
+          "status": "COMPLETED",
+          "conclusion": "SKIPPED",
+          "details": "https://github.com/jackin-project/jackin/actions/runs/34973440826/job/104468817140",
+          "app": "GitHub Actions#15368",
+          "run_id": "34973440826"
+        }
+      ],
+      "incomplete_flags": [
+        "skipped"
+      ]
+    }
+  }
+}
