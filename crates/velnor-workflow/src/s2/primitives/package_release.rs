@@ -68,6 +68,11 @@ impl Primitive for PackageRelease {
 
     fn render(&self, ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<Rendered, GeneratorError> {
         let spec = parse_spec(args)?;
+        if !ctx.config.providers.contains(&ProviderId::GithubHosted) {
+            return Err(GeneratorError::usage(
+                "package-release requires the github-hosted provider for GitHub release and attestation APIs",
+            ));
+        }
         if !ctx.config.repository.is_empty() && ctx.config.repository != spec.source_repository {
             return Err(GeneratorError::usage(format!(
                 "package-release source_repository {} must match scanned repository {}",
@@ -390,6 +395,10 @@ trap 'rm -f -- "$expected_files" "$actual_files" "$expected_names" "$actual_name
     script.push_str(
         r#"} | LC_ALL=C sort > "$expected_files"
 find "$dir" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort > "$actual_files"
+if find "$dir" -mindepth 1 -maxdepth 1 ! -type f -print -quit | grep -q .; then
+  echo "::error::verified package directory contains a non-file entry" >&2
+  exit 1
+fi
 if ! cmp -s "$expected_files" "$actual_files"; then
   echo "::error::verified package directory contains an undeclared or missing file" >&2
   diff -u "$expected_files" "$actual_files" >&2 || true
@@ -726,6 +735,7 @@ updater_token_secret = "TAP_TOKEN"
         assert!(script.contains(".manifest == $package_manifest[0]"));
         assert!(script.contains("cmp -s \"$expected_files\" \"$actual_files\""));
         assert!(script.contains("sha256sum \"$dir/$name\""));
+        assert!(script.contains("contains a non-file entry"));
     }
 
     #[test]
