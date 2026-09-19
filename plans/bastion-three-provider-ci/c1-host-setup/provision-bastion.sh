@@ -609,10 +609,12 @@ step_docker_packages() { # C3 pinned + drain gate
 set -euo pipefail
 specs=("$@")
 held=()
+transaction_started=0
 restore_package_holds() {
   rc=$?
   trap - EXIT
   set +e
+  if [[ "$transaction_started" != 1 ]]; then exit "$rc"; fi
   for spec in "${specs[@]}"; do
     pkg="${spec%%=*}"
     status="$(dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null)"
@@ -628,13 +630,19 @@ restore_package_holds() {
   exit "$rc"
 }
 trap restore_package_holds EXIT
+holds="$(apt-mark showhold)" || {
+  printf 'cannot read APT holds; refusing Docker package transaction\n' >&2
+  exit 2
+}
 for spec in "${specs[@]}"; do
   pkg="${spec%%=*}"
-  if apt-mark showhold | grep -qx "$pkg"; then
+  if printf '%s\n' "$holds" | grep -qx "$pkg"; then
     held+=("$pkg")
+    transaction_started=1
     apt-mark unhold "$pkg"
   fi
 done
+transaction_started=1
 apt-get install -y "${specs[@]}"
 for spec in "${specs[@]}"; do apt-mark hold "${spec%%=*}"; done
 trap - EXIT
@@ -653,7 +661,9 @@ step_holds() { # drain+holds semantics: nothing may float after this
   log "step: apt holds (docker set + velnor-runner if present)"
   local pkgs=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
   if pkg_installed velnor-runner; then pkgs+=(velnor-runner); fi
-  local held; held="$(apt-mark showhold 2>/dev/null || true)"
+  local held
+  held="$(apt-mark showhold 2>/dev/null)" \
+    || die "cannot read APT holds; refusing to change package holds"
   local todo=() p
   for p in "${pkgs[@]}"; do
     printf '%s\n' "$held" | grep -qx "$p" || todo+=("$p")
@@ -783,7 +793,9 @@ post_checks() {
       fail=1
     fi
   done
-  local held; held="$(apt-mark showhold 2>/dev/null || true)"
+  local held
+  held="$(apt-mark showhold 2>/dev/null)" \
+    || die "cannot verify APT package holds"
   for pkg in docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; do
     if printf '%s\n' "$held" | grep -qx "$pkg"; then
       log "hold OK: $pkg"

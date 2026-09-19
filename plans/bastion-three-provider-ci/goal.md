@@ -68,10 +68,10 @@
    metadata/version/arch/hash/source/origin (attestation as a distinct check). Finish idempotent
    host setup from the spec §6.1 `ansible-configs` paths re-resolved against live
    `ChainArgos/java-monorepo` `main` (SSH preserved, second NVMe untouched, no libvirt). Drain,
-   preserve config/secrets, then with `VERSION` = the B4-verified candidate:
-   `install -d -m 0750 /run/velnor && apt-get update && apt-cache policy velnor-runner &&
-   /usr/bin/flock --exclusive --nonblock --no-fork /run/velnor/package-transaction.lock apt-get
-   install "velnor-runner=${VERSION}" && dpkg-query -W velnor-runner`. Then binary/record/
+   preserve config/secrets, then with VERSION set to the B4-verified candidate run the
+   hold-aware exact-version transaction from spec §7, which unholds and re-holds under one
+   exclusive package lock. First run `install -d -m 0750 /run/velnor`, `apt-get update`,
+   and `apt-cache policy velnor-runner`; finish with `dpkg-query -W velnor-runner`. Then binary/record/
    manifest identity, `release verify-installed` BEFORE start, package-derived activation/drain/
    health (never invent verbs). Enable unbounded + native-backed global N BEFORE the first job;
    prove quota-free (`docker inspect` HostConfig, cgroup `cpu.max`/`memory.max`/`memory.high`/

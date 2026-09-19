@@ -100,8 +100,10 @@ never overwritten or deleted.
 
 ## Locked Velnor package transaction
 
-The setup holds `velnor-runner` when installed. To upgrade it, perform the
-unhold, APT install, and re-hold under one exclusive lock. The lock-owning Bash
+The setup holds `velnor-runner` when installed. The repository has package
+publication and verification workflows, but no unattended bastion package
+updater; the hold intentionally blocks ordinary `apt upgrade`. Operators must
+use this manual exact-candidate transaction to update it. The lock-owning Bash
 process stays an ancestor of apt, dpkg, and maintainer scripts, which is what
 the package lock check verifies.
 
@@ -111,10 +113,10 @@ export VERSION
 /usr/bin/flock --exclusive --nonblock --no-fork \
   /run/velnor/package-transaction.lock \
   /bin/bash -euo pipefail -c '
+    holds=$(apt-mark showhold)
     was_held=0
-    if apt-mark showhold | grep -qx velnor-runner; then
+    if printf "%s\n" "$holds" | grep -qx velnor-runner; then
       was_held=1
-      apt-mark unhold velnor-runner
     fi
     rehold_runner() {
       rc=$?
@@ -127,6 +129,9 @@ export VERSION
       exit "$rc"
     }
     trap rehold_runner EXIT
+    if [ "$was_held" = 1 ]; then
+      apt-mark unhold velnor-runner
+    fi
     apt-get install "velnor-runner=${VERSION}"
     apt-mark hold velnor-runner
     trap - EXIT
