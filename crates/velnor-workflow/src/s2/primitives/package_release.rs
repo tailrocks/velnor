@@ -193,6 +193,7 @@ fn validate_workflow_file(file: Option<&str>) -> Result<String, GeneratorError> 
         .filter(|file| !file.is_empty())
         .ok_or_else(|| GeneratorError::usage("package-release needs a declared workflow file"))?;
     let path = Path::new(file);
+    let workflow_extension = path.extension().and_then(|extension| extension.to_str());
     let valid_segment = |segment: &str| {
         !segment.is_empty()
             && segment != "."
@@ -204,9 +205,7 @@ fn validate_workflow_file(file: Option<&str>) -> Result<String, GeneratorError> 
     if path.is_absolute()
         || file.contains(['\\', ':', '\n', '\r'])
         || file.split('/').any(|segment| !valid_segment(segment))
-        || !path.extension().is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("yml") || extension.eq_ignore_ascii_case("yaml")
-        })
+        || !matches!(workflow_extension, Some("yml" | "yaml"))
     {
         return Err(GeneratorError::usage(
             "package-release file must be a safe relative .yml/.yaml workflow path",
