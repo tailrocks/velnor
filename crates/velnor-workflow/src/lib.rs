@@ -29,6 +29,7 @@ pub(crate) mod platform;
 mod policy;
 mod primitives;
 mod promote;
+mod renovate_renderer;
 mod reuse;
 mod runners;
 pub(crate) mod runtime;
@@ -5688,7 +5689,8 @@ pub(crate) fn rendered_cache_values(cache: &CacheSpec) -> (String, String) {
 /// generated files are replaced atomically.
 pub fn run_from_env() -> Result<(), GeneratorError> {
     // R2 bridge: schema-2 invocations render through the provider pipeline;
-    // everything else falls through to the schema-1 path below, unchanged.
+    // everything else falls through to the schema-1 path below. Both paths
+    // adapt their runner contract into the canonical Renovate renderer.
     if let Some(result) = s2::dispatch::run_if_s2() {
         return result;
     }
@@ -19437,7 +19439,7 @@ channel = "stable"
     }
 
     #[test]
-    fn declared_renovate_contract_generates_pinned_workflows() {
+    fn schema1_fallback_renovate_contract_generates_pinned_workflows() {
         let root = renovate_repository("renovate-enabled", Some(RENOVATE_GENERATION_CONFIG));
         let scanned = must(
             scan_target(&root, RunnerMode::Velnor, "main"),
@@ -19461,6 +19463,16 @@ channel = "stable"
         assert!(renovate.contains("velnor-renovate-"));
         assert!(renovate.contains("44.93.6"));
         assert!(!renovate.contains("pull_request"));
+        for (line_number, line) in renovate.lines().enumerate() {
+            assert_eq!(
+                line.trim_end(),
+                line,
+                "schema-1 fallback Renovate line {line_number} has trailing whitespace"
+            );
+        }
+        assert!(renovate
+            .contains("restore-keys: |\n            velnor-renovate-${{ github.repository }}-"));
+        assert!(!renovate.contains("velnor-renovate-${{ github.repository }}- \n"));
         assert!(validate.contains("renovate-config-validator"));
         assert!(validate.contains("ghcr.io/renovatebot/renovate:44.93.6"));
         assert!(!validate.contains("GH_RENOVATE_TOKEN"));
