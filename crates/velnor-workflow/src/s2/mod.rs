@@ -4578,7 +4578,7 @@ fn audited_pin_script() -> &'static str {
 "#
 }
 
-/// Owner policy step acquiring the PR run's candidate generator product.
+/// Trusted acquire steps for the PR run's candidate generator product.
 /// When the audited pin shares the base validator's closure AND the tree
 /// matches the pin's render the step exits immediately (the Stage-0
 /// validator renders). A same-closure tree that differs from the pin's
