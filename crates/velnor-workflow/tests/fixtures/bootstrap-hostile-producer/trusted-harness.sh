@@ -405,23 +405,30 @@ jq -e '
     "h2_fixed_command_paths_present", "h2_fixed_command_paths_guarded",
     "h3_endpoint_present", "h3_token_name_present", "h3_upload_status",
     "h3_sent_without_auth", "h3_sent_with_synthetic_auth", "h4_input_write",
-    "h4_candidate_write", "h4_docker_socket", "h4_docker_socket_run",
+    "h4_candidate_write", "h4_workspace_write", "h4_runner_workspace_write",
+    "h4_docker_socket", "h4_docker_socket_run",
     "h5_dns", "h5_loopback_v4", "h5_loopback_v6", "h5_metadata", "h5_proxy",
+    "h5_unix_socket",
     "h6_symlink", "h6_hardlink", "h7_sparse_80m", "h7_files_created",
-    "h7_file_error", "h7_traversal", "h7_fake_contract", "h8_pid_is_one",
+    "h7_file_error", "h7_traversal", "h7_fake_contract", "h7_fake_manifest", "h8_pid_is_one",
     "h8_uid_nonzero", "h8_capabilities_zero", "h8_no_new_privileges",
     "h8_seccomp_two", "h8_children_spawned", "h8_child_error", "h9_source_write",
-    "h9_cache_paths_wrote", "h9_contract_minting"
+    "h9_source_rewrite", "h9_source_delete", "h9_cache_paths_wrote", "h9_contract_minting"
   ] | all(has)) and
   .h3_sent_without_auth == false and
   .h3_sent_with_synthetic_auth == false and
+  .h1_proc_scan_status == "read" and
   .h2_fixed_command_paths_present == 0 and
   .h2_fixed_command_paths_guarded == 0 and
   .h4_input_write != "wrote" and .h4_candidate_write != "wrote" and
+  .h4_workspace_write != "wrote" and .h4_runner_workspace_write != "wrote" and
   .h4_docker_socket != "connected" and .h4_docker_socket_run != "connected" and
   .h5_dns != "connected" and .h5_loopback_v4 != "connected" and
   .h5_loopback_v6 != "connected" and .h5_metadata != "connected" and
-  .h9_source_write != "wrote" and .h9_cache_paths_wrote == 0 and
+  .h5_unix_socket != "connected" and
+  .h7_fake_manifest != "wrote" and
+  .h9_source_write != "wrote" and .h9_source_rewrite != "wrote" and
+  .h9_source_delete != "deleted" and .h9_cache_paths_wrote == 0 and
   .h8_pid_is_one == true and .h8_uid_nonzero == true and
   .h8_capabilities_zero == true and .h8_no_new_privileges == true and
   .h8_seccomp_two == true
