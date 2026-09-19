@@ -64,6 +64,21 @@ pub(crate) fn discover(root: &Path) -> Result<Option<RepoGenerationConfig>, Gene
             {
                 return Err(GeneratorError::usage(error));
             }
+            for declaration in config.declare() {
+                if declaration.primitive() != "release"
+                    || declaration.args().get("kind").and_then(toml::Value::as_str) != Some("apt")
+                {
+                    continue;
+                }
+                if let Some(script) = declaration
+                    .args()
+                    .get("discovery_script")
+                    .and_then(toml::Value::as_str)
+                    && let Err(error) = crate::apt::validate_discovery_script(root, script)
+                {
+                    return Err(GeneratorError::usage(error));
+                }
+            }
             Ok(Some(config))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -4768,6 +4783,32 @@ mod tests {
             "write missing-script APT config",
         );
         let error = must_fail(discover(&root), "missing APT discovery script must fail");
+        assert!(
+            error.to_string().contains("required file missing"),
+            "{error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn declared_apt_discovery_script_must_exist() {
+        let root = scanned_root("declared-apt-discovery-script-missing");
+        let path = root.join(GENERATION_CONFIG_PATH);
+        must(
+            fs::create_dir_all(path.parent().unwrap_or(&root)),
+            "create declared-script config directory",
+        );
+        must(
+            fs::write(
+                &path,
+                "schema = 2\n\n[[declare]]\nprimitive = \"release\"\nfile = \"release.yml\"\n[declare.args]\nkind = \"apt\"\ndiscovery_script = \"scripts/release-discovery.sh\"\n",
+            ),
+            "write declared-script APT config",
+        );
+        let error = must_fail(
+            discover(&root),
+            "missing declared APT discovery script must fail",
+        );
         assert!(
             error.to_string().contains("required file missing"),
             "{error}"
