@@ -4273,7 +4273,7 @@ fn render_apt_discovery_feed(config: &ProjectConfig, contract: &crate::apt::AptC
     output.push_str("  admit-provider:\n    name: Admit hosted APT provider\n    runs-on: ");
     output.push_str(&runner);
     output.push_str(
-        "\n    timeout-minutes: 5\n    steps:\n      - name: Reject non-hosted feed mutation\n        if: ${{ github.event_name == 'workflow_dispatch' && inputs.providers != '' && !contains(format(',{0},', inputs.providers), ',github-hosted,') }}\n        run: |\n          echo 'APT feed mutation publishes from GitHub-hosted only' >&2\n          exit 1\n",
+        "\n    timeout-minutes: 5\n    steps:\n      - name: Validate hosted provider scope\n        env:\n          PROVIDERS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.providers || '' }}\n        run: |\n          set -euo pipefail\n          case \"$PROVIDERS\" in\n            ''|github-hosted) ;;\n            *) echo 'APT feed mutation accepts exactly the github-hosted provider' >&2; exit 1 ;;\n          esac\n",
     );
     output.push_str("  verify:\n    name: Discover and verify APT feed\n    needs: [admit-provider]\n    runs-on: ");
     output.push_str(&runner);
@@ -4332,7 +4332,7 @@ fn render_apt_discovery_feed(config: &ProjectConfig, contract: &crate::apt::AptC
     );
     output.push_str(branch);
     output.push_str(
-        "' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.event.inputs.providers == '' || contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) }}\n    runs-on: ",
+        "' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.event.inputs.providers == '' || github.event.inputs.providers == 'github-hosted') }}\n    runs-on: ",
     );
     output.push_str(&runner);
     output.push_str(
@@ -4432,7 +4432,7 @@ fn render_apt_discovery_feed(config: &ProjectConfig, contract: &crate::apt::AptC
     );
     output.push_str(branch);
     output.push_str(
-        "' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.event.inputs.providers == '' || contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) }}\n    runs-on: ",
+        "' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (github.event.inputs.providers == '' || github.event.inputs.providers == 'github-hosted') }}\n    runs-on: ",
     );
     output.push_str(&runner);
     output.push_str(
@@ -8059,6 +8059,24 @@ mod tests {
             ("apt-feed-acme", "widget", "acme/widget", "acme/apt"),
         ] {
             let root = scanned_root(name);
+            let discovery_script = root.join("scripts/release-discovery.sh");
+            must(
+                fs::create_dir_all(discovery_script.parent().unwrap_or(&root)),
+                "create APT discovery script directory",
+            );
+            must(
+                fs::write(&discovery_script, "#!/bin/sh\n"),
+                "write APT discovery script",
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+
+                must(
+                    fs::set_permissions(&discovery_script, fs::Permissions::from_mode(0o755)),
+                    "make APT discovery script executable",
+                );
+            }
             let surface = generate(
                 &root,
                 &config(&[], None),
@@ -8110,6 +8128,15 @@ mod tests {
             assert!(release.contains(consumer), "{release}");
             assert!(release.contains(source), "{release}");
             assert!(release.contains("default: github"), "{release}");
+            assert!(
+                release.contains("PROVIDERS: ${{ github.event_name == 'workflow_dispatch'"),
+                "{release}"
+            );
+            assert!(release.contains("''|github-hosted)"), "{release}");
+            assert!(
+                !release.contains("contains(format(',{0},', github.event.inputs.providers)"),
+                "provider scope must reject extras instead of substring-matching: {release}"
+            );
             let _ = fs::remove_dir_all(root);
         }
     }

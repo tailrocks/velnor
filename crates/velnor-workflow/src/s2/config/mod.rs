@@ -56,7 +56,16 @@ pub(crate) fn discover(root: &Path) -> Result<Option<RepoGenerationConfig>, Gene
             "generation config is a directory: {}",
             path.display()
         ))),
-        Ok(_) => load(&path).map(Some),
+        Ok(_) => {
+            let config = load(&path)?;
+            if config.release.kind.as_deref() == Some("apt")
+                && let Some(script) = config.release.discovery_script.as_deref()
+                && let Err(error) = crate::apt::validate_discovery_script(root, script)
+            {
+                return Err(GeneratorError::usage(error));
+            }
+            Ok(Some(config))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(GeneratorError::io(
             "inspect generation config",
@@ -4670,6 +4679,99 @@ mod tests {
         );
         let discovered = must(discover(&root), "discover present config");
         assert!(discovered.is_some());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apt_discovery_script_must_be_present_regular_and_executable() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = scanned_root("apt-discovery-script");
+        let path = root.join(GENERATION_CONFIG_PATH);
+        must(
+            fs::create_dir_all(path.parent().unwrap_or(&root)),
+            "create APT config directory",
+        );
+        must(
+            fs::write(
+                &path,
+                "schema = 2\n\n[release]\nkind = \"apt\"\ndiscovery_script = \"scripts/release-discovery.sh\"\n",
+            ),
+            "write APT config",
+        );
+        let script = root.join("scripts/release-discovery.sh");
+        must(
+            fs::create_dir_all(script.parent().unwrap_or(&root)),
+            "create APT script directory",
+        );
+        must(fs::write(&script, b"#!/bin/sh\n"), "write APT script");
+        let mut mode = must(fs::metadata(&script), "stat APT script")
+            .permissions()
+            .mode();
+        mode &= !0o111;
+        must(
+            fs::set_permissions(&script, fs::Permissions::from_mode(mode)),
+            "remove APT script execute mode",
+        );
+        let error = must_fail(
+            discover(&root),
+            "non-executable APT discovery script must fail",
+        );
+        assert!(error.to_string().contains("not executable"), "{error}");
+
+        must(
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)),
+            "make APT script executable",
+        );
+        must(discover(&root), "executable APT discovery script must pass");
+
+        must(fs::remove_file(&script), "remove APT script");
+        must(fs::create_dir(&script), "replace APT script with directory");
+        let error = must_fail(discover(&root), "directory APT discovery script must fail");
+        assert!(
+            error.to_string().contains("not a regular file")
+                || error.to_string().contains("is a directory"),
+            "{error}"
+        );
+
+        must(fs::remove_dir(&script), "remove APT script directory");
+        let outside = root.with_extension("apt-discovery-outside");
+        must(
+            fs::write(&outside, b"#!/bin/sh\n"),
+            "write outside APT script",
+        );
+        must(
+            fs::set_permissions(&outside, fs::Permissions::from_mode(0o755)),
+            "make outside APT script executable",
+        );
+        symlink(&outside, &script).expect("symlink outside APT script");
+        let error = must_fail(discover(&root), "symlinked APT discovery script must fail");
+        assert!(error.to_string().contains("symlink"), "{error}");
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_file(outside);
+    }
+
+    #[test]
+    fn apt_discovery_script_must_exist() {
+        let root = scanned_root("apt-discovery-script-missing");
+        let path = root.join(GENERATION_CONFIG_PATH);
+        must(
+            fs::create_dir_all(path.parent().unwrap_or(&root)),
+            "create missing-script config directory",
+        );
+        must(
+            fs::write(
+                &path,
+                "schema = 2\n\n[release]\nkind = \"apt\"\ndiscovery_script = \"scripts/release-discovery.sh\"\n",
+            ),
+            "write missing-script APT config",
+        );
+        let error = must_fail(discover(&root), "missing APT discovery script must fail");
+        assert!(
+            error.to_string().contains("required file missing"),
+            "{error}"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
