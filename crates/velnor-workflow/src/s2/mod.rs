@@ -6739,6 +6739,10 @@ fn plan_generated_write_with_options(
     plan_generated_write_with_baseline(root, files, inputs, adopt, None)
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "write-plan assembly has to inspect every recorded output class"
+)]
 fn plan_generated_write_with_baseline(
     root: &Path,
     files: &BTreeMap<PathBuf, String>,
@@ -6766,8 +6770,18 @@ fn plan_generated_write_with_baseline(
         OwnershipStateFile::Present(state) => Some(state),
         OwnershipStateFile::Absent | OwnershipStateFile::ForeignSchema { .. } => None,
     };
-    let ownership_needs_refresh = verify_generated_ownership(files, baseline, &preimages)?
-        || !ownership_preimage.has_bytes(ownership_state_content(files, inputs).as_bytes());
+    let ownership_projection_current =
+        ownership_preimage.has_bytes(ownership_state_content(files, inputs).as_bytes());
+    if baseline.is_none()
+        && !ownership_projection_current
+        && !matches!(&state_file, OwnershipStateFile::Absent)
+    {
+        return Err(GeneratorError::usage(
+            "cannot refresh an existing ownership projection without an immutable baseline: supply --baseline-revision or reconcile it manually",
+        ));
+    }
+    let ownership_needs_refresh =
+        verify_generated_ownership(files, baseline, &preimages)? || !ownership_projection_current;
     let stale_files = stale_owned_files(root, files, baseline)?;
     let stale = stale_files
         .iter()
@@ -20060,6 +20074,53 @@ lockfile = true
             wanted[&current_path]
         );
         assert!(!root.join(&stale_path).exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn local_no_baseline_cannot_refresh_an_existing_projection() {
+        let root = temporary_repository("local-no-baseline-projection");
+        let files = BTreeMap::from([(
+            PathBuf::from(".github/workflows/ci-pr.yml"),
+            format!("{GENERATED_HEADER}name: current\n"),
+        )]);
+        must(
+            write_generated_with_options(
+                &root,
+                &files,
+                &GenerationInputs::parts(0, 0),
+                false,
+                false,
+                false,
+                false,
+            ),
+            "write initial projection",
+        );
+        let before = must(
+            fs::read_to_string(root.join(OWNERSHIP_STATE)),
+            "read initial projection",
+        );
+        let error = must_some(
+            write_generated_with_options(
+                &root,
+                &files,
+                &GenerationInputs::parts(1, 0),
+                false,
+                false,
+                true,
+                false,
+            )
+            .err(),
+            "reject no-baseline projection refresh",
+        );
+        assert!(error.to_string().contains("existing ownership projection"));
+        assert_eq!(
+            must(
+                fs::read_to_string(root.join(OWNERSHIP_STATE)),
+                "read preserved projection",
+            ),
+            before
+        );
         let _ = fs::remove_dir_all(root);
     }
 
