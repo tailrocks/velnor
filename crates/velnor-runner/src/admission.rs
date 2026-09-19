@@ -420,7 +420,7 @@ impl ActionMetadataSource for ContentsApiMetadataSource {
     ) -> Result<ActionMetadata> {
         self.reads.fetch_add(1, Ordering::Relaxed);
         let directory = normalize_subpath(subpath);
-        let mut last_status = None;
+        let mut saw_ambiguous_404 = false;
         for file in ["action.yml", "action.yaml"] {
             let metadata_path = if directory.is_empty() {
                 file.to_string()
@@ -453,23 +453,30 @@ impl ActionMetadataSource for ContentsApiMetadataSource {
                 &self.token,
                 MAX_ACTION_METADATA_BYTES,
             )?;
-            last_status = Some(response.status);
             if (200..300).contains(&response.status) {
                 let contents = response.body;
                 return crate::action::parse_action_metadata(&contents)
                     .map_err(|error| anyhow::anyhow!("parse {repository}@{git_ref}: {error:#}"));
             }
-            if response.status != reqwest::StatusCode::NOT_FOUND.as_u16() {
+            if response.status == reqwest::StatusCode::NOT_FOUND.as_u16() {
+                // GitHub masks inaccessible private resources with 404. Try
+                // the alternate manifest filename, but do not report proven
+                // absence if neither lookup succeeds.
+                saw_ambiguous_404 = true;
+                continue;
+            } else {
                 anyhow::bail!(
                     "GitHub Contents request failed with status {}",
                     response.status
                 );
             }
         }
-        anyhow::bail!(
-            "action metadata not found for {repository}@{git_ref} (last status {})",
-            last_status.map_or_else(|| "none".to_string(), |status| status.to_string())
-        )
+        if saw_ambiguous_404 {
+            anyhow::bail!(
+                "GitHub Contents returned HTTP 404 for both action.yml and action.yaml at {repository}@{git_ref}; metadata may be absent or inaccessible because GitHub masks private-resource access as 404"
+            );
+        }
+        anyhow::bail!("GitHub Contents did not return action metadata for {repository}@{git_ref}")
     }
 }
 
@@ -1703,6 +1710,40 @@ mod tests {
             read_bounded_metadata_body([].as_slice(), Some(MAX_ACTION_METADATA_BYTES as u64 + 1))
                 .unwrap_err();
         assert!(error.to_string().contains("exceeds"));
+    }
+
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn contents_404_does_not_prove_private_metadata_is_absent() {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+
+        let transport_guard = crate::test_support::github_http_transport_env().await;
+        transport_guard.set_native();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404).set_body_string(r#"{"message":"Not Found"}"#))
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let api_url = format!("{}/api/v3", server.uri());
+        let error = tokio::task::spawn_blocking(move || {
+            let source = ContentsApiMetadataSource::new_for_test("test-token", api_url).unwrap();
+            source.fetch_action_metadata("acme/private", "main", None)
+        })
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(error.to_string().contains("HTTP 404"), "{error:#}");
+        assert!(
+            error.to_string().contains("absent or inaccessible"),
+            "{error:#}"
+        );
+        assert!(
+            error.to_string().contains("masks private-resource access"),
+            "{error:#}"
+        );
+        server.verify().await;
     }
 
     #[test]

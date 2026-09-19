@@ -20,9 +20,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     fmt,
-    io::{Read, Seek, Write},
-    process::{Command, Stdio},
+    io::{self, Read, Seek, Write},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::{Arc, OnceLock},
+    thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use url::Url;
@@ -42,6 +43,7 @@ const GITHUB_CONNECT_TIMEOUT_SECS: u64 = 2;
 const GITHUB_MAX_TIME_SECS: u64 = 5;
 const GITHUB_CONTENTS_MAX_TIME_SECS: u64 = 30;
 const GITHUB_CURL_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const GITHUB_CURL_MAX_HEADER_BYTES: usize = 64 * 1024;
 const OAUTH_MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const RUN_SERVICE_ACQUIRE_MAX_ATTEMPTS: u32 = 5;
 const RUN_SERVICE_ACQUIRE_RETRY_MIN_SECS: u64 = 5;
@@ -141,7 +143,7 @@ pub(crate) struct RunnerBusyConflict(pub(crate) String);
 /// Outcome of a runner DELETE that the supervisor can act on without another HTTP round-trip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RunnerDeleteOutcome {
-    /// 204 or 404: registration is gone or never existed.
+    /// 204: GitHub confirmed the registration was deleted.
     Gone,
     /// 422: GitHub still believes a job is running on this runner.
     BusyConflict,
@@ -199,7 +201,7 @@ fn runner_delete_messages(body: &str) -> Vec<String> {
 
 pub(crate) fn classify_runner_delete(status: u16, body: &str) -> Option<RunnerDeleteOutcome> {
     match status {
-        204 | 404 => Some(RunnerDeleteOutcome::Gone),
+        204 => Some(RunnerDeleteOutcome::Gone),
         _ if runner_delete_is_busy_conflict(status, body) => {
             Some(RunnerDeleteOutcome::BusyConflict)
         }
@@ -757,9 +759,10 @@ pub(crate) fn repository_from_actions_run_url(run_url: &str) -> Option<String> {
     Some(format!("{owner}/{repo}"))
 }
 
-/// 202 accepted; 409/404 already terminal.
+/// 202 accepted; 409 means the run is already terminal. A GitHub REST 404
+/// remains an error because private-resource access can be masked as 404.
 pub(crate) fn classify_workflow_cancel(status: u16) -> bool {
-    matches!(status, 202 | 409 | 404)
+    matches!(status, 202 | 409)
 }
 
 fn is_hosted_github(host: &str) -> bool {
@@ -1085,7 +1088,7 @@ impl OAuthClient {
             .append_pair("client_assertion", &assertion)
             .finish();
         let url = credentials.authorization_url.clone();
-        let (status, text) = match transport {
+        let (status, response_body) = match transport {
             "native" => {
                 let response = native_http_client()?
                     .post(&url)
@@ -1098,37 +1101,53 @@ impl OAuthClient {
                     .await
                     .context("send OAuth token request")?;
                 let status = response.status().as_u16();
-                let text = response
-                    .text()
-                    .await
-                    .context("read OAuth token response body")?;
-                (status, text)
+                let body =
+                    capture_async_http_response_body(response, OAUTH_MAX_RESPONSE_BYTES).await;
+                (status, body)
             }
             "curl" => {
                 let response = curl_oauth_form_request(&url, &body, GITHUB_MAX_TIME_SECS)
                     .await
                     .context("send OAuth token request")?;
-                (response.status, response.body)
+                (
+                    response.status,
+                    CapturedHttpBody {
+                        text: response.body,
+                        issue: response.body_issue,
+                    },
+                )
             }
             other => bail!("OAuth HTTP transport selector returned an unknown value: {other}"),
         };
 
-        parse_oauth_token_response(status, &text)
+        parse_oauth_token_response(status, &response_body.text, response_body.issue.as_ref())
     }
 }
 
-fn parse_oauth_token_response(status: u16, body: &str) -> Result<OAuthAccessToken> {
+fn parse_oauth_token_response(
+    status: u16,
+    body: &str,
+    body_issue: Option<&HttpResponseBodyIssue>,
+) -> Result<OAuthAccessToken> {
     if body.len() > OAUTH_MAX_RESPONSE_BYTES {
-        bail!("OAuth token response exceeded {OAUTH_MAX_RESPONSE_BYTES} bytes");
+        bail!(
+            "OAuth token request failed: HTTP status {status}; response body exceeded {OAUTH_MAX_RESPONSE_BYTES} bytes"
+        );
     }
     if !(200..300).contains(&status) && status != StatusCode::BAD_REQUEST.as_u16() {
         // Do not attach the response body: an unexpected body could contain a
         // token and would then be copied into daemon error logs.
         bail!("OAuth token request failed: HTTP status {status}");
     }
+    if let Some(issue) = body_issue {
+        bail!("OAuth token request failed: HTTP status {status}; {issue}");
+    }
 
-    let token_response: OAuthTokenResponse =
-        serde_json::from_str(body.trim()).context("parse OAuth token response")?;
+    let token_response: OAuthTokenResponse = serde_json::from_str(body.trim()).map_err(|_| {
+        anyhow::anyhow!(
+            "OAuth token request failed: HTTP status {status}; response body is not valid OAuth JSON"
+        )
+    })?;
 
     if let Some(error) = token_response.error {
         let description = token_response.error_description.unwrap_or_default();
@@ -1207,10 +1226,101 @@ impl RunnerKeyPair {
 #[derive(Clone)]
 pub struct RegistrationClient;
 
+#[derive(Debug)]
 pub(crate) struct GithubHttpResponse {
     pub(crate) status: u16,
     pub(crate) body: String,
     pub(crate) headers: HeaderMap,
+    body_issue: Option<HttpResponseBodyIssue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HttpResponseBodyIssue {
+    TooLarge { max_bytes: usize },
+    InvalidUtf8,
+    ReadFailed,
+    CurlExited { status: String },
+}
+
+impl fmt::Display for HttpResponseBodyIssue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TooLarge { max_bytes } => {
+                write!(formatter, "response body exceeded {max_bytes} bytes")
+            }
+            Self::InvalidUtf8 => formatter.write_str("response body is not valid UTF-8"),
+            Self::ReadFailed => formatter.write_str("response body could not be read completely"),
+            Self::CurlExited { status } => {
+                write!(
+                    formatter,
+                    "curl exited before the response body completed ({status})"
+                )
+            }
+        }
+    }
+}
+
+struct CapturedHttpBody {
+    text: String,
+    issue: Option<HttpResponseBodyIssue>,
+}
+
+impl CapturedHttpBody {
+    fn from_bytes(mut bytes: Vec<u8>, max_body_bytes: usize, truncated: bool) -> Self {
+        let too_large = truncated || bytes.len() > max_body_bytes;
+        if bytes.len() > max_body_bytes {
+            bytes.truncate(max_body_bytes);
+        }
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let issue = if too_large {
+            Some(HttpResponseBodyIssue::TooLarge {
+                max_bytes: max_body_bytes,
+            })
+        } else if std::str::from_utf8(&bytes).is_err() {
+            Some(HttpResponseBodyIssue::InvalidUtf8)
+        } else {
+            None
+        };
+        Self { text, issue }
+    }
+
+    fn with_issue(mut self, issue: HttpResponseBodyIssue) -> Self {
+        if self.issue.is_none() {
+            self.issue = Some(issue);
+        }
+        self
+    }
+}
+
+impl GithubHttpResponse {
+    fn from_body(status: u16, headers: HeaderMap, body: CapturedHttpBody) -> Self {
+        Self {
+            status,
+            body: body.text,
+            headers,
+            body_issue: body.issue,
+        }
+    }
+
+    fn error_body(&self) -> String {
+        match &self.body_issue {
+            Some(issue) if self.body.is_empty() => format!("response body unavailable: {issue}"),
+            Some(issue) => format!("{} [incomplete response body: {issue}]", self.body),
+            None => self.body.clone(),
+        }
+    }
+
+    fn require_complete_body(&self, action: &str) -> Result<&str> {
+        if self.body_issue.is_some() {
+            return Err(github_api_error_with_retry(
+                action,
+                self.status,
+                self.error_body(),
+                github_retry_hint_from_header_map(&self.headers, unix_epoch_now()),
+            ));
+        }
+        Ok(&self.body)
+    }
 }
 
 /// Read an authenticated raw GitHub Contents response through the selected
@@ -1242,12 +1352,12 @@ pub(crate) fn github_contents_request(
             let status = response.status().as_u16();
             let headers = response.headers().clone();
             let content_length = response.content_length();
-            let body = read_bounded_http_body(response, content_length, max_body_bytes)?;
-            Ok(GithubHttpResponse {
-                status,
-                body,
-                headers,
-            })
+            let body = capture_http_response_body(response, content_length, max_body_bytes);
+            let response = GithubHttpResponse::from_body(status, headers, body);
+            if (200..300).contains(&status) {
+                response.require_complete_body("read GitHub Contents response body")?;
+            }
+            Ok(response)
         }
         "curl" => {
             let redacted_url = redacted_authenticated_url(url);
@@ -1261,10 +1371,10 @@ pub(crate) fn github_contents_request(
                 Some("2026-03-10"),
             )
             .with_context(|| format!("build curl GitHub Contents request {redacted_url}"))?;
-            let response = run_curl_command(spec)
+            let response = run_curl_command(spec, max_body_bytes)
                 .with_context(|| format!("send curl GitHub Contents request {redacted_url}"))?;
-            if response.body.len() > max_body_bytes {
-                anyhow::bail!("GitHub Contents response exceeds {max_body_bytes} bytes");
+            if (200..300).contains(&response.status) {
+                response.require_complete_body("read GitHub Contents response body")?;
             }
             Ok(response)
         }
@@ -1277,28 +1387,110 @@ pub(crate) fn read_bounded_http_body<R: Read>(
     content_length: Option<u64>,
     max_body_bytes: usize,
 ) -> Result<String> {
-    let max_body_bytes = u64::try_from(max_body_bytes).context("metadata body limit overflows")?;
-    if content_length.is_some_and(|length| length > max_body_bytes) {
-        anyhow::bail!("GitHub response body exceeds {max_body_bytes} bytes");
+    let body = capture_http_response_body(reader, content_length, max_body_bytes);
+    match body.issue {
+        Some(HttpResponseBodyIssue::TooLarge { max_bytes }) => {
+            bail!("GitHub response body exceeds {max_bytes} bytes")
+        }
+        Some(HttpResponseBodyIssue::InvalidUtf8) => {
+            bail!("decode GitHub response body as UTF-8")
+        }
+        Some(HttpResponseBodyIssue::ReadFailed) => bail!("read GitHub response body"),
+        Some(HttpResponseBodyIssue::CurlExited { status }) => {
+            bail!("curl HTTP response body incomplete ({status})")
+        }
+        None => Ok(body.text),
     }
-    let mut body =
-        Vec::with_capacity(content_length.unwrap_or_default().min(max_body_bytes) as usize);
-    reader
-        .take(max_body_bytes.saturating_add(1))
-        .read_to_end(&mut body)?;
-    if body.len() > max_body_bytes as usize {
-        anyhow::bail!("GitHub response body exceeds {max_body_bytes} bytes");
+}
+
+fn capture_http_response_body<R: Read>(
+    reader: R,
+    content_length: Option<u64>,
+    max_body_bytes: usize,
+) -> CapturedHttpBody {
+    let max_body_bytes_u64 = u64::try_from(max_body_bytes).unwrap_or(u64::MAX);
+    if content_length.is_some_and(|length| length > max_body_bytes_u64) {
+        return CapturedHttpBody {
+            text: String::new(),
+            issue: Some(HttpResponseBodyIssue::TooLarge {
+                max_bytes: max_body_bytes,
+            }),
+        };
     }
-    String::from_utf8(body).context("decode GitHub response body as UTF-8")
+    let capacity = content_length
+        .unwrap_or_default()
+        .min(max_body_bytes_u64)
+        .try_into()
+        .unwrap_or(0);
+    let mut bytes = Vec::with_capacity(capacity);
+    let read_limit = max_body_bytes_u64.saturating_add(1);
+    let read_result = reader.take(read_limit).read_to_end(&mut bytes);
+    let body = CapturedHttpBody::from_bytes(bytes, max_body_bytes, false);
+    if read_result.is_err() {
+        body.with_issue(HttpResponseBodyIssue::ReadFailed)
+    } else {
+        body
+    }
+}
+
+async fn capture_async_http_response_body(
+    mut response: reqwest::Response,
+    max_body_bytes: usize,
+) -> CapturedHttpBody {
+    let max_body_bytes_u64 = u64::try_from(max_body_bytes).unwrap_or(u64::MAX);
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_body_bytes_u64)
+    {
+        return CapturedHttpBody {
+            text: String::new(),
+            issue: Some(HttpResponseBodyIssue::TooLarge {
+                max_bytes: max_body_bytes,
+            }),
+        };
+    }
+
+    let mut bytes = Vec::new();
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                let remaining = max_body_bytes.saturating_sub(bytes.len());
+                if chunk.len() > remaining {
+                    bytes.extend_from_slice(&chunk[..remaining]);
+                    return CapturedHttpBody::from_bytes(bytes, max_body_bytes, true);
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(None) => return CapturedHttpBody::from_bytes(bytes, max_body_bytes, false),
+            Err(_) => {
+                return CapturedHttpBody::from_bytes(bytes, max_body_bytes, false)
+                    .with_issue(HttpResponseBodyIssue::ReadFailed);
+            }
+        }
+    }
 }
 
 fn github_error_from_response(action: &str, response: GithubHttpResponse) -> anyhow::Error {
+    let body = response.error_body();
+    let body = if response.status == 404 {
+        ambiguous_github_404_body(&body)
+    } else {
+        body
+    };
     github_api_error_with_retry(
         action,
         response.status,
-        response.body,
+        body,
         github_retry_hint_from_header_map(&response.headers, unix_epoch_now()),
     )
+}
+
+fn ambiguous_github_404_body(body: &str) -> String {
+    if body.is_empty() {
+        "HTTP 404 is ambiguous: the resource may be absent or inaccessible".to_string()
+    } else {
+        format!("HTTP 404 is ambiguous: the resource may be absent or inaccessible; {body}")
+    }
 }
 
 fn github_transport_error(action: &str, error: impl fmt::Display) -> anyhow::Error {
@@ -1312,11 +1504,12 @@ where
     if !(200..300).contains(&response.status) {
         return Err(github_error_from_response(action, response));
     }
-    serde_json::from_str(&response.body).map_err(|error| {
+    let body = response.require_complete_body(action)?;
+    serde_json::from_str(body).map_err(|error| {
         github_api_error_with_retry(
             action,
             response.status,
-            format!("{}; parse error: {error}", response.body),
+            format!("{body}; parse error: {error}"),
             github_retry_hint_from_header_map(&response.headers, unix_epoch_now()),
         )
     })
@@ -1372,20 +1565,8 @@ async fn github_http_request(
     })?;
     let status = response.status().as_u16();
     let headers = response.headers().clone();
-    let body = response.text().await.map_err(|error| {
-        github_transport_error(
-            &format!(
-                "read native GitHub response body {method_name} {}",
-                redacted_authenticated_url(url)
-            ),
-            error,
-        )
-    })?;
-    Ok(GithubHttpResponse {
-        status,
-        body,
-        headers,
-    })
+    let body = capture_async_http_response_body(response, GITHUB_CURL_MAX_RESPONSE_BYTES).await;
+    Ok(GithubHttpResponse::from_body(status, headers, body))
 }
 
 struct CurlCommandSpec {
@@ -1491,7 +1672,7 @@ async fn curl_http_request(
             error,
         )
     })?;
-    tokio::task::spawn_blocking(move || run_curl_command(spec))
+    tokio::task::spawn_blocking(move || run_curl_command(spec, GITHUB_CURL_MAX_RESPONSE_BYTES))
         .await
         .context("join curl GitHub request")?
         .map_err(|error| {
@@ -1558,7 +1739,7 @@ fn run_curl_oauth_form_command(args: Vec<OsString>, body: Vec<u8>) -> Result<Git
         .env_remove("GH_TOKEN")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
         .context("spawn curl OAuth token request")?;
 
@@ -1573,23 +1754,31 @@ fn run_curl_oauth_form_command(args: Vec<OsString>, body: Vec<u8>) -> Result<Git
     }
     drop(body_stdin);
 
-    let output = child
-        .wait_with_output()
-        .context("wait for curl OAuth token request")?;
-    if !output.status.success() {
-        let exit = output
-            .status
-            .code()
-            .map_or_else(|| "signal".to_owned(), |code| code.to_string());
-        bail!("curl OAuth token request exited with status {exit}");
+    let max_output_bytes = OAUTH_MAX_RESPONSE_BYTES
+        .checked_add(GITHUB_CURL_MAX_HEADER_BYTES)
+        .context("OAuth response capture limit overflows")?;
+    let (exit_status, output) = wait_for_child_with_bounded_stdout(
+        &mut child,
+        max_output_bytes,
+        "curl OAuth token request",
+    )?;
+    let mut response = parse_curl_response_with_body_limit(
+        &output.bytes,
+        OAUTH_MAX_RESPONSE_BYTES,
+        output.exceeded_limit,
+    )
+    .with_context(|| curl_exit_context("curl OAuth token request", &exit_status))?;
+    if !exit_status.success() {
+        response
+            .body_issue
+            .get_or_insert(HttpResponseBodyIssue::CurlExited {
+                status: curl_exit_status(&exit_status),
+            });
     }
-    if output.stdout.len() > OAUTH_MAX_RESPONSE_BYTES {
-        bail!("curl OAuth token response exceeded {OAUTH_MAX_RESPONSE_BYTES} bytes");
-    }
-    parse_curl_response(&output.stdout)
+    Ok(response)
 }
 
-fn run_curl_command(spec: CurlCommandSpec) -> Result<GithubHttpResponse> {
+fn run_curl_command(spec: CurlCommandSpec, max_body_bytes: usize) -> Result<GithubHttpResponse> {
     let mut child = Command::new("curl")
         .args(spec.args)
         // The curl child does not need the operator token in its environment;
@@ -1598,49 +1787,69 @@ fn run_curl_command(spec: CurlCommandSpec) -> Result<GithubHttpResponse> {
         .env_remove("GH_TOKEN")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
-        .context("spawn curl GitHub request")?;
+        .context("spawn curl HTTP request")?;
 
     let mut header_stdin = child
         .stdin
         .take()
-        .context("open curl GitHub request header pipe")?;
+        .context("open curl HTTP request header pipe")?;
     if let Err(error) = header_stdin.write_all(&spec.header_stdin) {
         let _ = child.kill();
         let _ = child.wait();
-        return Err(error).context("write curl GitHub request headers");
+        return Err(error).context("write curl HTTP request headers");
     }
     drop(header_stdin);
 
-    let output = child
-        .wait_with_output()
-        .context("wait for curl GitHub request")?;
-    if !output.status.success() {
-        let exit = output
-            .status
-            .code()
-            .map_or_else(|| "signal".to_owned(), |code| code.to_string());
-        bail!("curl GitHub request exited with status {exit}");
+    let max_output_bytes = max_body_bytes
+        .checked_add(GITHUB_CURL_MAX_HEADER_BYTES)
+        .context("HTTP response capture limit overflows")?;
+    let (exit_status, output) =
+        wait_for_child_with_bounded_stdout(&mut child, max_output_bytes, "curl HTTP request")?;
+    let mut response =
+        parse_curl_response_with_body_limit(&output.bytes, max_body_bytes, output.exceeded_limit)
+            .with_context(|| curl_exit_context("curl HTTP request", &exit_status))?;
+    if !exit_status.success() {
+        response
+            .body_issue
+            .get_or_insert(HttpResponseBodyIssue::CurlExited {
+                status: curl_exit_status(&exit_status),
+            });
     }
-    parse_curl_response(&output.stdout)
+    Ok(response)
 }
 
 fn parse_curl_response(output: &[u8]) -> Result<GithubHttpResponse> {
-    if output.len() > GITHUB_CURL_MAX_RESPONSE_BYTES {
-        bail!("curl GitHub response exceeded {GITHUB_CURL_MAX_RESPONSE_BYTES} bytes");
+    parse_curl_response_with_body_limit(output, GITHUB_CURL_MAX_RESPONSE_BYTES, false)
+}
+
+fn parse_curl_response_with_body_limit(
+    output: &[u8],
+    max_body_bytes: usize,
+    output_truncated: bool,
+) -> Result<GithubHttpResponse> {
+    if output.len() > max_body_bytes.saturating_add(GITHUB_CURL_MAX_HEADER_BYTES) {
+        bail!("HTTP response exceeded its bounded capture size");
     }
 
     let mut offset = 0;
     let (status, headers) = loop {
         let remaining = output
             .get(offset..)
-            .context("curl GitHub response ended before headers")?;
+            .context("HTTP response ended before headers")?;
         if !remaining.starts_with(b"HTTP/") {
-            bail!("curl GitHub response is missing an HTTP status line");
+            bail!("HTTP response is missing a status line");
         }
         let (header_end, separator_len) = curl_header_terminator(remaining)
-            .context("curl GitHub response headers are not terminated")?;
+            .context("HTTP response headers are not terminated")?;
+        if offset
+            .saturating_add(header_end)
+            .saturating_add(separator_len)
+            > GITHUB_CURL_MAX_HEADER_BYTES
+        {
+            bail!("HTTP response headers exceeded {GITHUB_CURL_MAX_HEADER_BYTES} bytes");
+        }
         let (status, headers) = parse_curl_header_block(&remaining[..header_end])?;
         offset = offset
             .saturating_add(header_end)
@@ -1651,18 +1860,87 @@ fn parse_curl_response(output: &[u8]) -> Result<GithubHttpResponse> {
         break (status, headers);
     };
 
-    let body = String::from_utf8(
-        output
-            .get(offset..)
-            .context("curl GitHub response body offset is invalid")?
-            .to_vec(),
-    )
-    .context("decode curl GitHub response body as UTF-8")?;
-    Ok(GithubHttpResponse {
-        status,
-        body,
-        headers,
+    let captured_body = output
+        .get(offset..)
+        .context("HTTP response body offset is invalid")?;
+    let body_truncated = output_truncated || captured_body.len() > max_body_bytes;
+    let body_bytes = captured_body[..captured_body.len().min(max_body_bytes)].to_vec();
+    let body = CapturedHttpBody::from_bytes(body_bytes, max_body_bytes, body_truncated);
+    Ok(GithubHttpResponse::from_body(status, headers, body))
+}
+
+struct BoundedStdout {
+    bytes: Vec<u8>,
+    exceeded_limit: bool,
+}
+
+fn read_bounded_stdout(mut reader: impl Read, max_bytes: usize) -> io::Result<BoundedStdout> {
+    let mut bytes = Vec::with_capacity(max_bytes.min(64 * 1024));
+    let mut exceeded_limit = false;
+    let mut chunk = [0_u8; 16 * 1024];
+    loop {
+        let read = reader.read(&mut chunk)?;
+        if read == 0 {
+            break;
+        }
+        let remaining = max_bytes.saturating_sub(bytes.len());
+        let retained = read.min(remaining);
+        bytes.extend_from_slice(&chunk[..retained]);
+        exceeded_limit |= retained < read;
+    }
+    Ok(BoundedStdout {
+        bytes,
+        exceeded_limit,
     })
+}
+
+fn wait_for_child_with_bounded_stdout(
+    child: &mut Child,
+    max_output_bytes: usize,
+    operation: &'static str,
+) -> Result<(ExitStatus, BoundedStdout)> {
+    let stdout = child
+        .stdout
+        .take()
+        .with_context(|| format!("open {operation} response pipe"))?;
+    let reader = match thread::Builder::new()
+        .name("velnor-curl-response".to_string())
+        .spawn(move || read_bounded_stdout(stdout, max_output_bytes))
+    {
+        Ok(reader) => reader,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error).with_context(|| format!("start {operation} output reader"));
+        }
+    };
+
+    let exit_status = match child.wait() {
+        Ok(status) => status,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error).with_context(|| format!("wait for {operation}"));
+        }
+    };
+    let output = reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("{operation} output reader panicked"))?
+        .with_context(|| format!("read {operation} response pipe"))?;
+    Ok((exit_status, output))
+}
+
+fn curl_exit_status(status: &ExitStatus) -> String {
+    status
+        .code()
+        .map_or_else(|| "signal".to_string(), |code| code.to_string())
+}
+
+fn curl_exit_context(operation: &str, status: &ExitStatus) -> String {
+    format!(
+        "{operation} exited with status {} before HTTP headers completed",
+        curl_exit_status(status)
+    )
 }
 
 fn curl_header_terminator(bytes: &[u8]) -> Option<(usize, usize)> {
@@ -2016,9 +2294,10 @@ impl RegistrationClient {
         Err(github_error_from_response("cancel workflow run", response))
     }
 
-    /// Look up one runner registration by id. `Ok(None)` means GitHub no
-    /// longer knows the runner (404). The transport is selected by
-    /// `VELNOR_GITHUB_HTTP_TRANSPORT`; the native path uses pooled requests.
+    /// Look up one runner registration by id. A GitHub REST 404 is returned
+    /// as an error because inaccessible private resources can also be masked
+    /// as 404. The transport is selected by `VELNOR_GITHUB_HTTP_TRANSPORT`;
+    /// the native path uses pooled requests.
     pub async fn get_runner(
         &self,
         scope: &GitHubScope,
@@ -2040,7 +2319,12 @@ impl RegistrationClient {
     ) -> Result<()> {
         let url = scope.runner_url(runner_id)?;
         let response = github_http_request("DELETE", url.as_str(), pat, None, 30).await?;
-        match classify_runner_delete(response.status, &response.body) {
+        let outcome = if response.body_issue.is_none() {
+            classify_runner_delete(response.status, &response.body)
+        } else {
+            None
+        };
+        match outcome {
             Some(RunnerDeleteOutcome::Gone) => Ok(()),
             Some(RunnerDeleteOutcome::BusyConflict) => {
                 Err(RunnerBusyConflict("GitHub reported the runner is busy".into()).into())
@@ -2565,11 +2849,15 @@ pub fn renew_failure_is_job_gone(error: &anyhow::Error) -> bool {
 }
 
 /// Decode a GET /actions/runners/{id} response: `Ok(None)` only on a definite
-/// 404 (registration gone); other failures are errors so transient API trouble
-/// is never mistaken for a deleted runner.
+/// absence. GitHub REST 404 is ambiguous for private or permission-masked
+/// resources, so it remains an API error instead of proving deletion.
 pub fn parse_runner_lookup(status: u16, body: &str) -> Result<Option<ListedRunner>> {
     if status == 404 {
-        return Ok(None);
+        return Err(github_api_error(
+            "runner lookup",
+            status,
+            ambiguous_github_404_body(body.trim()),
+        ));
     }
     if !(200..300).contains(&status) {
         return Err(github_api_error("runner lookup", status, body.trim()));
@@ -2584,13 +2872,14 @@ fn parse_runner_lookup_response(
     expected_id: i64,
 ) -> Result<Option<ListedRunner>> {
     if response.status == 404 {
-        return Ok(None);
+        return Err(github_error_from_response("runner lookup", response));
     }
     if !(200..300).contains(&response.status) {
         return Err(github_error_from_response("runner lookup", response));
     }
+    let body = response.require_complete_body("runner lookup")?;
     let runner: ListedRunner =
-        serde_json::from_str(response.body.trim()).context("parse runner lookup response")?;
+        serde_json::from_str(body.trim()).context("parse runner lookup response")?;
     if runner.id != Some(expected_id) {
         bail!(
             "runner lookup identity mismatch: requested id {expected_id}, returned {:?}",
@@ -7478,6 +7767,74 @@ mod tests {
         );
     }
 
+    #[test]
+    fn curl_response_keeps_http_status_when_body_is_malformed_or_oversized() {
+        let malformed = parse_curl_response_with_body_limit(
+            b"HTTP/1.1 503 Service Unavailable\r\n\r\n\xff",
+            16,
+            false,
+        )
+        .unwrap();
+        assert_eq!(malformed.status, 503);
+        assert_eq!(
+            malformed.body_issue,
+            Some(HttpResponseBodyIssue::InvalidUtf8)
+        );
+        let error = github_error_from_response("test request", malformed);
+        assert_eq!(
+            error
+                .downcast_ref::<GitHubApiError>()
+                .map(|error| error.status),
+            Some(503)
+        );
+
+        let oversized = parse_curl_response_with_body_limit(
+            b"HTTP/1.1 502 Bad Gateway\r\n\r\nbody-too-large",
+            4,
+            false,
+        )
+        .unwrap();
+        assert_eq!(oversized.status, 502);
+        assert_eq!(
+            oversized.body_issue,
+            Some(HttpResponseBodyIssue::TooLarge { max_bytes: 4 })
+        );
+        let error = github_error_from_response("test request", oversized);
+        assert_eq!(
+            error
+                .downcast_ref::<GitHubApiError>()
+                .map(|error| error.status),
+            Some(502)
+        );
+    }
+
+    #[test]
+    fn native_http_body_capture_keeps_status_on_content_length_overflow() {
+        let body = capture_http_response_body(&b"ignored"[..], Some(1024), 8);
+        let response = GithubHttpResponse::from_body(503, HeaderMap::new(), body);
+        let error = github_error_from_response("test request", response);
+        let api_error = error.downcast_ref::<GitHubApiError>().unwrap();
+        assert_eq!(api_error.status, 503);
+        assert!(api_error.body.contains("exceeded 8 bytes"));
+    }
+
+    #[test]
+    fn bounded_stdout_retains_only_the_configured_capture_limit() {
+        let input = vec![b'x'; 1024 * 1024];
+        let captured = read_bounded_stdout(input.as_slice(), 32).unwrap();
+        assert_eq!(captured.bytes.len(), 32);
+        assert!(captured.exceeded_limit);
+    }
+
+    #[test]
+    fn generic_curl_response_errors_do_not_name_contents_api() {
+        let error = parse_curl_response_with_body_limit(b"invalid response", 8, false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("HTTP response"));
+        assert!(!error.contains("Contents"));
+    }
+
     #[tokio::test]
     async fn public_github_requests_validate_transport_before_io() {
         let _transport_guard = crate::test_support::github_http_transport_env().await;
@@ -7649,14 +8006,14 @@ mod tests {
     }
 
     #[test]
-    fn runner_delete_204_and_404_are_gone() {
+    fn runner_delete_only_confirms_gone_after_204() {
         assert_eq!(
             classify_runner_delete(204, ""),
             Some(RunnerDeleteOutcome::Gone)
         );
         assert_eq!(
             classify_runner_delete(404, r#"{"message":"Not Found"}"#),
-            Some(RunnerDeleteOutcome::Gone)
+            None
         );
         assert!(!runner_delete_is_busy_conflict(204, ""));
         assert!(!runner_delete_is_busy_conflict(
@@ -7721,7 +8078,7 @@ mod tests {
         );
         assert!(classify_workflow_cancel(202));
         assert!(classify_workflow_cancel(409));
-        assert!(classify_workflow_cancel(404));
+        assert!(!classify_workflow_cancel(404));
         assert!(!classify_workflow_cancel(500));
         let scope = GitHubScope::parse("https://github.com/jackin-project").unwrap();
         assert_eq!(
@@ -9379,10 +9736,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_runner_lookup_missing_runner_is_none() {
-        assert!(parse_runner_lookup(404, "{\"message\":\"Not Found\"}")
-            .expect("404 is a definite answer")
-            .is_none());
+    fn parse_runner_lookup_404_is_ambiguous() {
+        let error = parse_runner_lookup(404, "{\"message\":\"Not Found\"}").unwrap_err();
+        let api_error = error.downcast_ref::<GitHubApiError>().unwrap();
+        assert_eq!(api_error.status, 404);
+        assert!(api_error.body.contains("absent or inaccessible"));
     }
 
     #[test]
