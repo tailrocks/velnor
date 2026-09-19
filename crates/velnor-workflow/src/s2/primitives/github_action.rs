@@ -352,6 +352,9 @@ mod tests {
             "downstream" => {
                 "printf 'downstream\\n' >> \"$ACTION_MARKER\"\nif [ \"$ACTION_MODE\" = downstream-failure ]; then exit 23; fi\n"
             }
+            "external" => {
+                "printf 'external\\n' >> \"$ACTION_MARKER\"\nif [ \"$ACTION_MODE\" = external-failure ]; then exit 29; fi\n"
+            }
             other => panic!("unknown nested consumer action: {other}"),
         };
         let output = if name == "downloader" {
@@ -388,6 +391,21 @@ mod tests {
                 "write nested consumer action metadata",
             );
         }
+    }
+
+    fn write_pinned_external_action(root: &Path) {
+        let directory = root.join("_actions/octo_example/0123456789abcdef0123456789abcdef01234567");
+        must(
+            fs::create_dir_all(&directory),
+            "create pinned repository action fixture",
+        );
+        must(
+            fs::write(
+                directory.join("action.yml"),
+                nested_action_metadata("external"),
+            ),
+            "write pinned repository action metadata",
+        );
     }
 
     fn expanded_invocations(
@@ -430,41 +448,102 @@ mod tests {
     fn condition_runs(condition: Option<&str>) -> bool {
         match condition {
             None => true,
-            Some(condition) if condition.contains("'true' != 'true'") => false,
-            Some(condition) if condition.contains("'false' != 'true'") => true,
-            Some(condition) => panic!("unexpected runner condition: {condition}"),
+            Some(condition) => {
+                let condition = condition
+                    .trim()
+                    .strip_prefix("${{")
+                    .and_then(|condition| condition.strip_suffix("}}"))
+                    .unwrap_or(condition)
+                    .trim();
+                if condition.eq_ignore_ascii_case("always()") {
+                    return true;
+                }
+                for (operator, expected) in [("==", true), ("!=", false)] {
+                    if let Some((left, right)) = condition.split_once(operator) {
+                        let left = left.trim().trim_matches(['\'', '"']);
+                        let right = right.trim().trim_matches(['\'', '"']);
+                        return (left == right) == expected;
+                    }
+                }
+                panic!("unexpected runner condition: {condition}")
+            }
         }
     }
 
-    fn execute_local_action_scripts(
+    fn execute_action_invocations(
         root: &Path,
         invocations: &[velnor_runner::action_contract::CompositeActionInvocation],
         marker: &Path,
         downstream: &Path,
         output_file: &Path,
     ) -> std::process::Output {
-        use velnor_runner::action_contract::CompositeActionInvocation;
+        use velnor_runner::action_contract::{
+            parse_action_metadata, CompositeActionInvocation, ResolvedAction,
+        };
 
         for invocation in invocations {
-            let CompositeActionInvocation::Script(step) = invocation else {
-                continue;
-            };
-            if !condition_runs(step.condition.as_deref()) {
-                continue;
-            }
-            let mut command = Command::new("bash");
-            command
-                .args(["-euo", "pipefail", "-c", step.script.as_str()])
-                .current_dir(root)
-                .env("ACTION_MARKER", marker)
-                .env("DOWNSTREAM_MARKER", downstream)
-                .env("GITHUB_OUTPUT", output_file);
-            for (name, value) in &step.env {
-                command.env(name, value);
-            }
-            let output = must(command.output(), "execute expanded action script");
-            if !output.status.success() {
-                return output;
+            match invocation {
+                CompositeActionInvocation::Script(step) => {
+                    if !condition_runs(step.condition.as_deref()) {
+                        continue;
+                    }
+                    let mut command = Command::new("bash");
+                    command
+                        .args(["-euo", "pipefail", "-c", step.script.as_str()])
+                        .current_dir(root)
+                        .env("ACTION_MARKER", marker)
+                        .env("DOWNSTREAM_MARKER", downstream)
+                        .env("GITHUB_OUTPUT", output_file);
+                    for (name, value) in &step.env {
+                        command.env(name, value);
+                    }
+                    let output = must(command.output(), "execute runner script step");
+                    if !output.status.success() {
+                        return output;
+                    }
+                }
+                CompositeActionInvocation::Repository(plan) => {
+                    if !condition_runs(plan.condition.as_deref()) {
+                        continue;
+                    }
+                    let metadata_path = ["action.yml", "action.yaml"]
+                        .iter()
+                        .map(|name| plan.action_dir.join(name))
+                        .find(|path| path.is_file())
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "runner repository action metadata missing: {}",
+                                plan.action_dir.display()
+                            )
+                        });
+                    let metadata = must(
+                        fs::read_to_string(&metadata_path)
+                            .map_err(|error| format!("{}: {error}", metadata_path.display()))
+                            .and_then(|contents| {
+                                parse_action_metadata(&contents).map_err(|error| {
+                                    format!("{}: {error}", metadata_path.display())
+                                })
+                            }),
+                        "parse runner repository action metadata",
+                    );
+                    let runtime = must(metadata.runtime(), "classify runner repository action");
+                    let resolved = ResolvedAction {
+                        plan: plan.clone(),
+                        metadata_path,
+                        metadata,
+                        runtime,
+                    };
+                    let nested = must(
+                        resolved.composite_invocations("/__w", root),
+                        "expand runner repository action",
+                    );
+                    let output =
+                        execute_action_invocations(root, &nested, marker, downstream, output_file);
+                    if !output.status.success() {
+                        return output;
+                    }
+                }
+                CompositeActionInvocation::Outputs(_) => {}
             }
         }
         std::process::Output {
@@ -493,6 +572,7 @@ mod tests {
             "write scanned consumer action metadata",
         );
         write_nested_consumer_actions(&root);
+        write_pinned_external_action(&root);
 
         let success_marker = root.join("success.log");
         let success_downstream = root.join("success.downstream");
@@ -526,7 +606,7 @@ mod tests {
             outputs.outputs.get("result").map(String::as_str),
             Some("${{ steps.consumer-downloader-run.outputs.result }}")
         );
-        let success_result = execute_local_action_scripts(
+        let success_result = execute_action_invocations(
             &root,
             &success,
             &success_marker,
@@ -552,6 +632,41 @@ mod tests {
                 .contains("result=downloaded")
         );
 
+        let external_marker = root.join("external.log");
+        let external_output = root.join("external.output");
+        let external = expanded_invocations(&root, "external", false, &external_marker);
+        let external_plan = external
+            .iter()
+            .find_map(|invocation| match invocation {
+                velnor_runner::action_contract::CompositeActionInvocation::Repository(plan)
+                    if plan.repository == "octo/example" =>
+                {
+                    Some(plan)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("external runner repository plan missing"));
+        assert_eq!(
+            external_plan.condition.as_deref(),
+            Some("${{ 'external' == 'external' }}")
+        );
+        let external_result = execute_action_invocations(
+            &root,
+            &external,
+            &external_marker,
+            &root.join("external.downstream"),
+            &external_output,
+        );
+        assert!(external_result.status.success());
+        let external_log = must(
+            fs::read_to_string(root.join("action-consumer.log")),
+            "read external repository action marker",
+        );
+        assert!(
+            external_log.contains("external"),
+            "external repository action did not execute: {external_log}"
+        );
+
         for (mode, completed_stage) in [
             ("download-failure", "downloader"),
             ("validate-failure", "validator"),
@@ -563,13 +678,8 @@ mod tests {
             let downstream = root.join(format!("{mode}.downstream"));
             let output_file = root.join(format!("{mode}.output"));
             let invocations = expanded_invocations(&root, mode, false, &marker);
-            let result = execute_local_action_scripts(
-                &root,
-                &invocations,
-                &marker,
-                &downstream,
-                &output_file,
-            );
+            let result =
+                execute_action_invocations(&root, &invocations, &marker, &downstream, &output_file);
             assert!(!result.status.success(), "{mode} failure must propagate");
             let log = must(fs::read_to_string(&marker), "read failure marker");
             assert!(
@@ -601,13 +711,8 @@ mod tests {
             .find(|step| step.id.ends_with("-buildx"))
             .unwrap_or_else(|| panic!("runner graph lost conditional Buildx step"));
         assert!(!condition_runs(skip_build.condition.as_deref()));
-        let skip_result = execute_local_action_scripts(
-            &root,
-            &skip,
-            &skip_marker,
-            &skip_downstream,
-            &skip_output,
-        );
+        let skip_result =
+            execute_action_invocations(&root, &skip, &skip_marker, &skip_downstream, &skip_output);
         assert!(skip_result.status.success());
         let skip_log = must(fs::read_to_string(&skip_marker), "read skip marker");
         assert!(skip_log.contains("downloader"));

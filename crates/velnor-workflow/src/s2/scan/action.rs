@@ -90,7 +90,7 @@ pub(crate) fn detect(
     context: &ScanContext<'_>,
     shape: &mut RepositoryShape,
 ) -> Result<(), crate::s2::GeneratorError> {
-    for source in discover_action_sources(context.files) {
+    for source in discover_action_sources(context.root, context.files)? {
         let (metadata, references) = inspect_action_source(&source, context.root, context.files)?;
         let mut commands = vec![format!(
             "velnor-workflow verify-action --path {}",
@@ -142,7 +142,7 @@ pub(crate) fn verify_action(
         )));
     }
     let files = super::file_walk::repository_files(root, &[])?;
-    let Some(canonical) = discover_action_sources(&files)
+    let Some(canonical) = discover_action_sources(root, &files)?
         .into_iter()
         .find(|candidate| candidate.path == source_path)
     else {
@@ -158,7 +158,48 @@ pub(crate) fn verify_action(
 /// fallback only when neither metadata file exists.  Keeping this decision in
 /// one function prevents generation and runtime verification from auditing
 /// different files.
-fn discover_action_sources(files: &[String]) -> Vec<ActionSource> {
+fn discover_action_sources(
+    root: &Path,
+    files: &[String],
+) -> Result<Vec<ActionSource>, crate::s2::GeneratorError> {
+    let candidates = discover_action_source_candidates(files);
+    let mut referenced_roots = candidates
+        .keys()
+        .filter(|root| is_explicit_action_root(root))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    referenced_roots.extend(workflow_action_roots(root)?);
+    for source in candidates.values() {
+        if source.kind != ActionSourceKind::Metadata {
+            continue;
+        }
+        let metadata = parse_metadata(root, &source.path)?;
+        for step in &metadata.runs.steps {
+            let Some(uses) = step.uses.as_deref() else {
+                continue;
+            };
+            let Some(directory) = discovered_local_action_root(&source.root, uses) else {
+                continue;
+            };
+            if candidates.contains_key(&directory) {
+                referenced_roots.insert(directory);
+            }
+        }
+    }
+    Ok(candidates
+        .into_iter()
+        .filter_map(|(root, source)| match source.kind {
+            ActionSourceKind::Metadata => Some(source),
+            ActionSourceKind::Dockerfile if referenced_roots.contains(&root) => Some(source),
+            ActionSourceKind::Dockerfile => None,
+        })
+        .collect())
+}
+
+/// Find every runner entrypoint candidate before role classification. Metadata
+/// is authoritative wherever present; a Dockerfile is only a fallback after
+/// a caller proves that its directory is an action root.
+fn discover_action_source_candidates(files: &[String]) -> BTreeMap<String, ActionSource> {
     let mut preferred_metadata = BTreeMap::new();
     let mut alternate_metadata = BTreeMap::new();
     let mut dockerfiles = BTreeMap::new();
@@ -193,58 +234,116 @@ fn discover_action_sources(files: &[String]) -> Vec<ActionSource> {
                 .get(&root)
                 .or_else(|| alternate_metadata.get(&root))
             {
-                return Some(ActionSource {
-                    root,
-                    path: path.clone(),
-                    kind: ActionSourceKind::Metadata,
-                });
+                return Some((
+                    root.clone(),
+                    ActionSource {
+                        root,
+                        path: path.clone(),
+                        kind: ActionSourceKind::Metadata,
+                    },
+                ));
             }
-            if !is_bare_dockerfile_action_candidate(&root, files) {
-                return None;
-            }
-            dockerfiles.get(&root).map(|path| ActionSource {
-                root,
-                path: path.clone(),
-                kind: ActionSourceKind::Dockerfile,
+            dockerfiles.get(&root).map(|path| {
+                (
+                    root.clone(),
+                    ActionSource {
+                        root,
+                        path: path.clone(),
+                        kind: ActionSourceKind::Dockerfile,
+                    },
+                )
             })
         })
         .collect()
 }
 
-/// A repository-level Dockerfile is also the normal project container input.
-/// Runner fallback applies when that tree is consumed as an action, but a
-/// project scanner has no caller context with which to distinguish the two.
-/// Keep the fallback for Dockerfile-only action trees while avoiding a second
-/// GitHub Action unit for a manifest-backed project (the Docker detector owns
-/// that project already).
-fn is_bare_dockerfile_action_candidate(root: &str, files: &[String]) -> bool {
-    files
-        .iter()
-        .filter(|file| parent_path(file) == root)
-        .all(|file| {
-            let name = file.rsplit('/').next().unwrap_or(file);
-            !is_project_manifest_name(name)
-        })
+fn is_explicit_action_root(root: &str) -> bool {
+    root == ".github/actions" || root.starts_with(".github/actions/")
 }
 
-fn is_project_manifest_name(name: &str) -> bool {
-    matches!(
-        name,
-        "Cargo.toml"
-            | "Package.swift"
-            | "Gemfile"
-            | "Makefile"
-            | "go.mod"
-            | "mix.exs"
-            | "package.json"
-            | "composer.json"
-            | "pom.xml"
-            | "pyproject.toml"
-            | "setup.py"
-            | "build.gradle"
-            | "build.gradle.kts"
-    ) || name.ends_with(".csproj")
-        || name.ends_with(".sln")
+fn discovered_local_action_root(action_root: &str, reference: &str) -> Option<String> {
+    let reference = reference.trim();
+    if !reference.starts_with('.')
+        || reference.contains('$')
+        || reference.contains("${{")
+        || reference.contains("{{")
+    {
+        return None;
+    }
+    let relative = reference.strip_prefix("./").unwrap_or(reference);
+    if relative == "." || relative.is_empty() {
+        return Some(action_root.to_owned());
+    }
+    let path = Path::new(relative);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    let normalized = path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    Some(super::file_walk::join_repo_path(action_root, &normalized))
+}
+
+fn workflow_action_roots(root: &Path) -> Result<BTreeSet<String>, crate::s2::GeneratorError> {
+    let mut roots = BTreeSet::new();
+    for path in super::file_walk::workflow_source_files(root)? {
+        let workflow_path = root.join(&path);
+        let contents = std::fs::read_to_string(&workflow_path).map_err(|error| {
+            crate::s2::GeneratorError::io("read workflow action references", &workflow_path, &error)
+        })?;
+        let document: serde_yaml::Value = serde_yaml::from_str(&contents).map_err(|error| {
+            crate::s2::GeneratorError::usage(format!(
+                "parse workflow action references {}: {error}",
+                workflow_path.display()
+            ))
+        })?;
+        collect_workflow_action_roots(&document, &mut roots);
+    }
+    Ok(roots)
+}
+
+fn collect_workflow_action_roots(value: &serde_yaml::Value, roots: &mut BTreeSet<String>) {
+    match value {
+        serde_yaml::Value::Mapping(mapping) => {
+            for (key, value) in mapping {
+                if key.as_str() == "uses"
+                    && let Some(reference) = value.as_str()
+                    && let Some(root) = discovered_local_action_root(".", reference)
+                {
+                    let is_reusable_workflow = Path::new(reference.trim_end())
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .is_some_and(|extension| {
+                            extension.eq_ignore_ascii_case("yml")
+                                || extension.eq_ignore_ascii_case("yaml")
+                        });
+                    if !is_reusable_workflow {
+                        roots.insert(root);
+                    }
+                }
+                collect_workflow_action_roots(value, roots);
+            }
+        }
+        serde_yaml::Value::Sequence(sequence) => {
+            for value in sequence {
+                collect_workflow_action_roots(value, roots);
+            }
+        }
+        serde_yaml::Value::Tagged(tagged) => collect_workflow_action_roots(tagged.value(), roots),
+        serde_yaml::Value::Null
+        | serde_yaml::Value::Bool(_)
+        | serde_yaml::Value::Number(_)
+        | serde_yaml::Value::String(_) => {}
+    }
 }
 
 fn inspect_action_source(
@@ -400,7 +499,10 @@ fn is_full_sha_action_reference(value: &str) -> bool {
 /// a host-side build source.
 fn is_dockerfile_reference(value: &str) -> bool {
     let value = value.trim();
-    if value.starts_with("docker://") {
+    if value
+        .get(.."docker://".len())
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("docker://"))
+    {
         return false;
     }
     let basename = value.rsplit('/').next().unwrap_or(value);
@@ -544,8 +646,8 @@ fn add_local_action_reference(
         .collect::<Vec<_>>()
         .join("/");
     let directory = super::file_walk::join_repo_path(action_root, &normalized);
-    if let Some(source) = discover_action_sources(files)
-        .into_iter()
+    if let Some(source) = discover_action_source_candidates(files)
+        .into_values()
         .find(|source| source.root == directory)
     {
         references.insert(source.path);
@@ -585,11 +687,17 @@ fn shell_references(command: &str) -> Vec<String> {
             .and_then(|previous| tokens.get(previous))
             .is_some_and(|previous| matches!(previous.as_str(), "&&" | "||" | ";"));
         let command_position = index == 0 || previous_is_boundary;
+        let plain_path_token = token
+            .chars()
+            .all(|character| !character.is_whitespace() && !"(){}[]$><|;&=\"`".contains(character));
         let looks_like_path = token.starts_with("./")
             || token.starts_with("../")
             || token.contains('/') && has_script_suffix(token)
             || has_script_suffix(token)
-            || command_position && token.contains('/') && !token.starts_with('-');
+            || command_position
+                && plain_path_token
+                && token.contains('/')
+                && !token.starts_with('-');
         if (index == 0
             || previous_is_interpreter
             || previous_is_boundary
@@ -731,6 +839,12 @@ mod tests {
     }
 
     #[test]
+    fn shell_references_ignore_command_substitution_internals() {
+        let command = r#"report_json=\"$(jq -nc --argjson value \"$(printf '%s' \"$value\" | jq -Rsc 'split(\"\\n\")' || true)\" '{value: $value}' 2>/dev/null || true)\""#;
+        assert!(shell_references(command).is_empty());
+    }
+
+    #[test]
     fn shell_tokens_keep_quoted_script_paths_together() {
         assert_eq!(
             shell_tokens("node './dist/main.js' --flag"),
@@ -862,12 +976,16 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "runner precedence fixture keeps the competing action roots in one audit"
+    )]
     fn action_entrypoint_precedence_and_bare_dockerfile_match_runner() {
         let root = fixture("entrypoints");
         must(
             fs::write(
                 root.join("action.yml"),
-                "runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo selected\n",
+                "runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo selected\n    - uses: ./actions/bare\n",
             ),
             "write preferred action metadata",
         );
@@ -887,6 +1005,61 @@ mod tests {
             "write lowercase Dockerfile fallback",
         );
         must(
+            fs::write(
+                root.join("actions/bare/Cargo.toml"),
+                "[package]\nname = \"bare-action\"\nversion = \"0.0.0\"\n",
+            ),
+            "write project manifest beside referenced Dockerfile action",
+        );
+        must(
+            fs::write(root.join("actions/bare/package.json"), "{}\n"),
+            "write second project manifest beside referenced Dockerfile action",
+        );
+        must(
+            fs::write(
+                root.join("rust-toolchain.toml"),
+                "[toolchain]\nchannel = \"stable\"\n",
+            ),
+            "pin fixture Rust toolchain",
+        );
+        must(
+            fs::create_dir_all(root.join("actions/ordinary")),
+            "create ordinary Docker project",
+        );
+        must(
+            fs::write(root.join("actions/ordinary/Dockerfile"), "FROM scratch\n"),
+            "write unreferenced Dockerfile",
+        );
+        must(
+            fs::write(
+                root.join("actions/ordinary/Cargo.toml"),
+                "[package]\nname = \"ordinary\"\nversion = \"0.0.0\"\n",
+            ),
+            "write ordinary project manifest",
+        );
+        must(
+            fs::create_dir_all(root.join(".github/actions/explicit")),
+            "create explicit GitHub action namespace",
+        );
+        must(
+            fs::write(
+                root.join(".github/actions/explicit/dockerfile"),
+                "FROM scratch\n",
+            ),
+            "write explicit Dockerfile action",
+        );
+        must(
+            fs::create_dir_all(root.join(".github/workflows")),
+            "create generated workflow namespace",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/ignored-action.yml"),
+                "runs:\n  using: unsupported\n",
+            ),
+            "write workflow output outside action namespace",
+        );
+        must(
             fs::create_dir_all(root.join("actions/shadowed")),
             "create Docker metadata action",
         );
@@ -902,6 +1075,16 @@ mod tests {
             "write shadowed Dockerfile",
         );
         let providers = providers();
+        let files = must(
+            super::super::file_walk::repository_files(&root, &[]),
+            "walk action entrypoints",
+        );
+        assert!(files
+            .iter()
+            .any(|file| file == ".github/actions/explicit/dockerfile"));
+        assert!(!files
+            .iter()
+            .any(|file| file == ".github/workflows/ignored-action.yml"));
         let shape = must(
             super::super::scan_shape(&root, &providers, "main", &[]),
             "scan action entrypoints",
@@ -934,6 +1117,15 @@ mod tests {
             .iter()
             .any(|command| command
                 == "velnor-workflow verify-action --path 'actions/bare/dockerfile'"));
+        assert!(!shape.units.iter().any(|unit| {
+            unit.kind == crate::s2::UnitKind::GithubAction && unit.root == "actions/ordinary"
+        }));
+        let explicit = shape
+            .units
+            .iter()
+            .find(|unit| unit.root == ".github/actions/explicit")
+            .unwrap_or_else(|| panic!("explicit .github/actions Dockerfile action missing"));
+        assert_eq!(explicit.kind, crate::s2::UnitKind::GithubAction);
         let error = super::verify_action(&root, "action.yaml")
             .err()
             .unwrap_or_else(|| panic!("shadowed action.yaml must not be canonical"));
@@ -1019,6 +1211,59 @@ mod tests {
     }
 
     #[test]
+    fn workflow_local_uses_proves_bare_dockerfile_action_without_manifest_guessing() {
+        let root = fixture("workflow-bare-docker");
+        must(
+            fs::write(root.join("Dockerfile"), "FROM scratch\n"),
+            "write workflow-referenced Dockerfile",
+        );
+        must(
+            fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"workflow-bare\"\nversion = \"0.0.0\"\n",
+            ),
+            "write Rust manifest beside action Dockerfile",
+        );
+        must(
+            fs::write(root.join("package.json"), "{}\n"),
+            "write package manifest beside action Dockerfile",
+        );
+        must(
+            fs::write(
+                root.join("rust-toolchain.toml"),
+                "[toolchain]\nchannel = \"stable\"\n",
+            ),
+            "pin workflow fixture Rust toolchain",
+        );
+        must(
+            fs::create_dir_all(root.join(".github/workflows")),
+            "create workflow source directory",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/consumer.yml"),
+                "name: consumer\njobs:\n  consume:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: ./\n",
+            ),
+            "write local action consumer workflow",
+        );
+        let shape = must(
+            super::super::scan_shape(&root, &providers(), "main", &[]),
+            "scan workflow-referenced Docker action",
+        );
+        let action = shape
+            .units
+            .iter()
+            .find(|unit| unit.kind == crate::s2::UnitKind::GithubAction)
+            .unwrap_or_else(|| panic!("workflow-referenced bare Dockerfile action missing"));
+        assert_eq!(action.root, ".");
+        assert!(action
+            .pr_commands
+            .iter()
+            .any(|command| command == "velnor-workflow verify-action --path 'Dockerfile'"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     #[expect(
         clippy::too_many_lines,
         reason = "runner compatibility matrix keeps all action fixtures in one auditable test"
@@ -1072,6 +1317,10 @@ mod tests {
             "create remote Docker action",
         );
         must(
+            fs::create_dir_all(images.join("uppercase")),
+            "create uppercase Docker scheme action",
+        );
+        must(
             fs::write(
                 images.join("local/action.yml"),
                 "runs:\n  using: docker\n  image: ./Dockerfile\n",
@@ -1088,6 +1337,13 @@ mod tests {
                 "runs:\n  using: docker\n  image: docker://ubuntu:24.04\n  entrypoint: /inside-image.sh\n",
             ),
             "write remote Docker metadata",
+        );
+        must(
+            fs::write(
+                images.join("uppercase/action.yml"),
+                "runs:\n  using: docker\n  image: DOCKER://Dockerfile\n  entrypoint: /inside-image.sh\n",
+            ),
+            "write uppercase Docker scheme metadata",
         );
         let shape = must(
             super::super::scan_shape(&images, &providers(), "main", &[]),
@@ -1112,6 +1368,12 @@ mod tests {
             .find(|unit| unit.root == "remote" && unit.kind == crate::s2::UnitKind::GithubAction)
             .unwrap_or_else(|| panic!("remote Docker action missing"));
         assert_eq!(remote.pr_commands.len(), 1);
+        let uppercase = shape
+            .units
+            .iter()
+            .find(|unit| unit.root == "uppercase")
+            .unwrap_or_else(|| panic!("uppercase Docker scheme action missing"));
+        assert_eq!(uppercase.pr_commands.len(), 1);
         let _ = fs::remove_dir_all(images);
 
         let missing_shell = fixture("missing-shell");

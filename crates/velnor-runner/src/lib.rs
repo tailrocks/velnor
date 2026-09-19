@@ -27,7 +27,7 @@ pub mod action_contract {
     pub use crate::action::{
         composite_action_invocations, parse_action_metadata, ActionInput, ActionMetadata,
         ActionOutput, ActionRuns, ActionRuntime, CompositeActionInvocation, CompositeActionOutputs,
-        CompositeActionStep, LocalActionPlan, RepositoryActionPlan,
+        CompositeActionStep, LocalActionPlan, RepositoryActionPlan, ResolvedAction,
     };
     pub use crate::script_step::ScriptStep;
 }

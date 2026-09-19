@@ -46,6 +46,106 @@ pub(crate) fn repository_files(
     Ok(files)
 }
 
+/// Read only checked-in workflow source files for detectors that need a
+/// caller reference (for example a local `uses: ./action` Dockerfile
+/// fallback). Workflows remain excluded from [`repository_files`] because
+/// generated workflow output is not project source; this narrow view does not
+/// broaden the ordinary detector input.
+pub(crate) fn workflow_source_files(root: &Path) -> Result<Vec<String>, GeneratorError> {
+    if !root.is_dir() {
+        return Err(GeneratorError::usage(format!(
+            "not a repository directory: {}",
+            root.display()
+        )));
+    }
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(["ls-files", "-z", "--", ".github/workflows"])
+        .output();
+    if let Ok(output) = output {
+        if output.status.success() {
+            return output
+                .stdout
+                .split(|byte| *byte == 0)
+                .filter(|raw| !raw.is_empty())
+                .map(|raw| {
+                    let relative = std::str::from_utf8(raw).map_err(|error| {
+                        GeneratorError::usage(format!("workflow path is not utf-8: {error}"))
+                    })?;
+                    let path = root.join(relative);
+                    let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                        GeneratorError::io("read workflow source", &path, &error)
+                    })?;
+                    if metadata.is_dir() || metadata.file_type().is_symlink() {
+                        return Err(GeneratorError::usage(format!(
+                            "workflow source is not a regular file: {relative}"
+                        )));
+                    }
+                    normalize_relative_path(Path::new(relative))
+                })
+                .collect();
+        }
+        if inside_git_work_tree(root) {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            return Err(GeneratorError::usage(format!(
+                "git ls-files failed inside a git work tree; workflow references are unavailable: {stderr}"
+            )));
+        }
+    } else if inside_git_work_tree(root) {
+        return Err(GeneratorError::usage(
+            "git ls-files could not run inside a git work tree; workflow references are unavailable",
+        ));
+    }
+
+    let directory = root.join(".github/workflows");
+    let mut files = Vec::new();
+    collect_workflow_files(root, &directory, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn collect_workflow_files(
+    root: &Path,
+    directory: &Path,
+    files: &mut Vec<String>,
+) -> Result<(), GeneratorError> {
+    if !directory.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(directory)
+        .map_err(|error| GeneratorError::io("read workflow directory", directory, &error))?
+    {
+        let entry = entry.map_err(|error| {
+            GeneratorError::io("read workflow directory entry", directory, &error)
+        })?;
+        let path = entry.path();
+        let kind = entry
+            .file_type()
+            .map_err(|error| GeneratorError::io("read workflow file type", &path, &error))?;
+        if kind.is_symlink() {
+            continue;
+        }
+        if kind.is_dir() {
+            collect_workflow_files(root, &path, files)?;
+            continue;
+        }
+        if kind.is_file()
+            && path
+                .extension()
+                .is_some_and(|extension| matches!(extension.to_str(), Some("yml" | "yaml")))
+        {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|error| {
+                    GeneratorError::usage(format!("make workflow path relative: {error}"))
+                })
+                .and_then(normalize_relative_path)?;
+            files.push(relative);
+        }
+    }
+    Ok(())
+}
+
 fn exclude_set(patterns: &[String]) -> Result<GlobSet, GeneratorError> {
     let mut builder = GlobSetBuilder::new();
     for pattern in patterns {
@@ -191,6 +291,7 @@ fn collect_files(
                 })
                 .and_then(normalize_relative_path)?;
             if is_excluded_directory(name.as_ref())
+                && !is_github_actions_namespace(&relative)
                 && !(name == "dist" && path_is_inside_action(&relative, action_roots))
             {
                 continue;
@@ -234,7 +335,16 @@ fn discover_action_roots(
             // `.github` is intentionally never scanned as project input, but
             // `dist` must be traversed here so a local action there can opt in
             // its own metadata and entrypoints.
-            if is_excluded_directory(&name.to_string_lossy()) && name != "dist" {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|error| {
+                    GeneratorError::usage(format!("make action path relative: {error}"))
+                })
+                .and_then(normalize_relative_path)?;
+            if is_excluded_directory(&name.to_string_lossy())
+                && !is_github_actions_namespace(&relative)
+                && name != "dist"
+            {
                 continue;
             }
             discover_action_roots(root, &path, action_roots)?;
@@ -266,11 +376,27 @@ fn path_is_inside_action(path: &str, action_roots: &BTreeSet<String>) -> bool {
     })
 }
 
+/// `.github` is generated workflow output and stays outside the repository
+/// source walk. The checked-in `.github/actions` namespace is different: its
+/// action metadata and entrypoints are repository-owned source. Keep the
+/// exception to the namespace directories themselves so `.github/workflows`,
+/// generated policy output, and package output cannot enter by accident.
+fn is_github_actions_namespace(path: &str) -> bool {
+    matches!(path, ".github" | ".github/actions")
+}
+
+fn is_github_action_path(path: &str) -> bool {
+    path.starts_with(".github/actions/")
+}
+
 fn is_excluded_path(path: &str, action_roots: &BTreeSet<String>) -> bool {
     let components = path.split('/').collect::<Vec<_>>();
     for (index, component) in components.iter().enumerate() {
         if index + 1 == components.len() {
             break;
+        }
+        if *component == ".github" && is_github_action_path(path) {
+            continue;
         }
         if is_excluded_directory(component)
             && !(component == &"dist" && path_is_inside_action(path, action_roots))
@@ -406,7 +532,9 @@ pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
 
 #[cfg(test)]
 mod tests {
-    use super::repository_files;
+    use std::collections::BTreeSet;
+
+    use super::{is_excluded_path, repository_files};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -583,5 +711,28 @@ mod tests {
         assert!(files.contains(&"actions/example/dist/index.js".to_owned()));
         assert!(!files.contains(&"dist/generated.js".to_owned()));
         assert!(!files.iter().any(|file| file.starts_with(".github-gen/")));
+    }
+
+    #[test]
+    fn action_namespace_keeps_sources_but_prunes_package_outputs() {
+        let action_roots = BTreeSet::from([".github/actions/example".to_owned()]);
+        assert!(!is_excluded_path(
+            ".github/actions/example/action.yml",
+            &action_roots
+        ));
+        assert!(!is_excluded_path(
+            ".github/actions/example/dist/index.js",
+            &action_roots
+        ));
+        for path in [
+            ".github/actions/example/node_modules/package/index.js",
+            ".github/actions/example/target/debug/action",
+            ".github/actions/example/.build/cache",
+        ] {
+            assert!(
+                is_excluded_path(path, &action_roots),
+                "action output escaped the source boundary: {path}"
+            );
+        }
     }
 }

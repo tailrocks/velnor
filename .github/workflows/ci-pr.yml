@@ -50,6 +50,7 @@ jobs:
       bun_matrix: ${{ steps.plan.outputs.bun_matrix }}
       docker_matrix: ${{ steps.plan.outputs.docker_matrix }}
       docs_matrix: ${{ steps.plan.outputs.docs_matrix }}
+      github-action_matrix: ${{ steps.plan.outputs.github-action_matrix }}
       opentofu_matrix: ${{ steps.plan.outputs.opentofu_matrix }}
       rust_matrix: ${{ steps.plan.outputs.rust_matrix }}
     steps:
@@ -232,6 +233,78 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       host_warm_layers: cargo
+      unit_platform: linux-x64
+      unit_trust: untrusted-ok
+      unit_admission: velnor-trust-gated
+  github-hosted-github-action-github-actions-report-velnor-ci-outcomes:
+    name: "GitHub Action · GitHub Action (.github/actions/report-velnor-ci-outcomes) · github-hosted — github-action-github-actions-report-velnor-ci-outcomes"
+    if: ${{ always() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"github-action-github-actions-report-velnor-ci-outcomes"') && ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) }}
+    needs: [plan]
+    uses: ./.github/workflows/ci-unit-github-action.yml
+    with:
+      unit: github-action-github-actions-report-velnor-ci-outcomes
+      provider: github-hosted
+      selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
+      scope: ${{ needs.plan.outputs.scope }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      plan_digest: ${{ needs.plan.outputs.plan_digest }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
+      unit_platform: linux-x64
+      unit_trust: untrusted-ok
+      unit_admission: github-hosted
+  velnor-github-action-github-actions-report-velnor-ci-outcomes:
+    name: "GitHub Action · GitHub Action (.github/actions/report-velnor-ci-outcomes) · velnor — github-action-github-actions-report-velnor-ci-outcomes"
+    if: ${{ always() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"github-action-github-actions-report-velnor-ci-outcomes"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    needs: [plan]
+    uses: ./.github/workflows/ci-unit-github-action.yml
+    with:
+      unit: github-action-github-actions-report-velnor-ci-outcomes
+      provider: velnor
+      selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
+      scope: ${{ needs.plan.outputs.scope }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      plan_digest: ${{ needs.plan.outputs.plan_digest }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
+      unit_platform: linux-x64
+      unit_trust: untrusted-ok
+      unit_admission: velnor-trust-gated
+  github-hosted-github-action-github-actions-setup-velnor-workflow:
+    name: "GitHub Action · GitHub Action (.github/actions/setup-velnor-workflow) · github-hosted — github-action-github-actions-setup-velnor-workflow"
+    if: ${{ always() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"github-action-github-actions-setup-velnor-workflow"') && ((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) }}
+    needs: [plan]
+    uses: ./.github/workflows/ci-unit-github-action.yml
+    with:
+      unit: github-action-github-actions-setup-velnor-workflow
+      provider: github-hosted
+      selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
+      scope: ${{ needs.plan.outputs.scope }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      plan_digest: ${{ needs.plan.outputs.plan_digest }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
+      unit_platform: linux-x64
+      unit_trust: untrusted-ok
+      unit_admission: github-hosted
+  velnor-github-action-github-actions-setup-velnor-workflow:
+    name: "GitHub Action · GitHub Action (.github/actions/setup-velnor-workflow) · velnor — github-action-github-actions-setup-velnor-workflow"
+    if: ${{ always() && needs.plan.result == 'success' && contains(needs.plan.outputs.units, '"unit_id":"github-action-github-actions-setup-velnor-workflow"') && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    needs: [plan]
+    uses: ./.github/workflows/ci-unit-github-action.yml
+    with:
+      unit: github-action-github-actions-setup-velnor-workflow
+      provider: velnor
+      selected_units: ${{ needs.plan.outputs.units }}
+      selected_unit_ids: ${{ needs.plan.outputs.unit_ids }}
+      scope: ${{ needs.plan.outputs.scope }}
+      full_units: ${{ needs.plan.outputs.full_units }}
+      plan_digest: ${{ needs.plan.outputs.plan_digest }}
+      base_sha: ${{ needs.plan.outputs.base_sha }}
+      head_sha: ${{ needs.plan.outputs.head_sha }}
       unit_platform: linux-x64
       unit_trust: untrusted-ok
       unit_admission: velnor-trust-gated
@@ -1395,7 +1468,7 @@ jobs:
   ci-required:
     name: ci-required
     if: ${{ always() }}
-    needs: [plan, github-hosted-bun-velnor, velnor-bun-velnor, github-hosted-docker, velnor-docker, github-hosted-docs, velnor-docs, github-hosted-opentofu, velnor-opentofu, prepare-cargo, github-hosted-rust-policy, velnor-rust-policy, github-hosted-rust-unit-collector, velnor-rust-unit-collector, github-hosted-rust-velnor-bench, velnor-rust-velnor-bench, github-hosted-rust-velnor-client, velnor-rust-velnor-client, github-hosted-rust-velnor-control, velnor-rust-velnor-control, github-hosted-rust-velnor-model, velnor-rust-velnor-model, github-hosted-rust-velnor-render, velnor-rust-velnor-render, github-hosted-rust-velnor-runner, velnor-rust-velnor-runner, github-hosted-rust-velnor-tools, velnor-rust-velnor-tools, github-hosted-rust-velnor-workflow, velnor-rust-velnor-workflow, github-hosted-rust-velnor-workflow-contract, velnor-rust-velnor-workflow-contract, github-hosted-rust-velnorctl, velnor-rust-velnorctl, github-hosted-rust-production-topology, velnor-rust-production-topology]
+    needs: [plan, github-hosted-bun-velnor, velnor-bun-velnor, github-hosted-docker, velnor-docker, github-hosted-docs, velnor-docs, github-hosted-github-action-github-actions-report-velnor-ci-outcomes, velnor-github-action-github-actions-report-velnor-ci-outcomes, github-hosted-github-action-github-actions-setup-velnor-workflow, velnor-github-action-github-actions-setup-velnor-workflow, github-hosted-opentofu, velnor-opentofu, prepare-cargo, github-hosted-rust-policy, velnor-rust-policy, github-hosted-rust-unit-collector, velnor-rust-unit-collector, github-hosted-rust-velnor-bench, velnor-rust-velnor-bench, github-hosted-rust-velnor-client, velnor-rust-velnor-client, github-hosted-rust-velnor-control, velnor-rust-velnor-control, github-hosted-rust-velnor-model, velnor-rust-velnor-model, github-hosted-rust-velnor-render, velnor-rust-velnor-render, github-hosted-rust-velnor-runner, velnor-rust-velnor-runner, github-hosted-rust-velnor-tools, velnor-rust-velnor-tools, github-hosted-rust-velnor-workflow, velnor-rust-velnor-workflow, github-hosted-rust-velnor-workflow-contract, velnor-rust-velnor-workflow-contract, github-hosted-rust-velnorctl, velnor-rust-velnorctl, github-hosted-rust-production-topology, velnor-rust-production-topology]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -1567,6 +1640,98 @@ jobs:
               skipped) ;;
               success) echo "unexpected CI job velnor-docs succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;
               *) echo "unexpected CI job velnor-docs ran outside the expected set: $result" >&2; exit 1 ;;
+            esac
+          fi
+          if plan_expects "github-action-github-actions-report-velnor-ci-outcomes" "github-hosted"; then
+            result="$(result_for_job github-hosted-github-action-github-actions-report-velnor-ci-outcomes)"
+            if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then
+              case "$result" in
+                success) ;;
+                skipped) echo "expected CI job github-hosted-github-action-github-actions-report-velnor-ci-outcomes was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;
+                cancelled) echo "expected CI job github-hosted-github-action-github-actions-report-velnor-ci-outcomes was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;
+                *) echo "expected CI job github-hosted-github-action-github-actions-report-velnor-ci-outcomes did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-hosted-github-action-github-actions-report-velnor-ci-outcomes ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;
+              esac
+            fi
+          else
+            result="$(result_for_job github-hosted-github-action-github-actions-report-velnor-ci-outcomes)"
+            case "$result" in
+              skipped) ;;
+              success) echo "unexpected CI job github-hosted-github-action-github-actions-report-velnor-ci-outcomes succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;
+              *) echo "unexpected CI job github-hosted-github-action-github-actions-report-velnor-ci-outcomes ran outside the expected set: $result" >&2; exit 1 ;;
+            esac
+          fi
+          if plan_expects "github-action-github-actions-report-velnor-ci-outcomes" "velnor"; then
+            result="$(result_for_job velnor-github-action-github-actions-report-velnor-ci-outcomes)"
+            if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then
+              case "$result" in
+                success) ;;
+                skipped) echo "expected CI job velnor-github-action-github-actions-report-velnor-ci-outcomes was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;
+                cancelled) echo "expected CI job velnor-github-action-github-actions-report-velnor-ci-outcomes was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;
+                *) echo "expected CI job velnor-github-action-github-actions-report-velnor-ci-outcomes did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job velnor-github-action-github-actions-report-velnor-ci-outcomes ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;
+              esac
+            fi
+          else
+            result="$(result_for_job velnor-github-action-github-actions-report-velnor-ci-outcomes)"
+            case "$result" in
+              skipped) ;;
+              success) echo "unexpected CI job velnor-github-action-github-actions-report-velnor-ci-outcomes succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;
+              *) echo "unexpected CI job velnor-github-action-github-actions-report-velnor-ci-outcomes ran outside the expected set: $result" >&2; exit 1 ;;
+            esac
+          fi
+          if plan_expects "github-action-github-actions-setup-velnor-workflow" "github-hosted"; then
+            result="$(result_for_job github-hosted-github-action-github-actions-setup-velnor-workflow)"
+            if [[ "$PROVIDER_ADMITTED_GITHUB_HOSTED" == true ]]; then
+              case "$result" in
+                success) ;;
+                skipped) echo "expected CI job github-hosted-github-action-github-actions-setup-velnor-workflow was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;
+                cancelled) echo "expected CI job github-hosted-github-action-github-actions-setup-velnor-workflow was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;
+                *) echo "expected CI job github-hosted-github-action-github-actions-setup-velnor-workflow did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job github-hosted-github-action-github-actions-setup-velnor-workflow ran outside its provider admission (PROVIDER_ADMITTED_GITHUB_HOSTED=$PROVIDER_ADMITTED_GITHUB_HOSTED): $result" >&2; exit 1 ;;
+              esac
+            fi
+          else
+            result="$(result_for_job github-hosted-github-action-github-actions-setup-velnor-workflow)"
+            case "$result" in
+              skipped) ;;
+              success) echo "unexpected CI job github-hosted-github-action-github-actions-setup-velnor-workflow succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;
+              *) echo "unexpected CI job github-hosted-github-action-github-actions-setup-velnor-workflow ran outside the expected set: $result" >&2; exit 1 ;;
+            esac
+          fi
+          if plan_expects "github-action-github-actions-setup-velnor-workflow" "velnor"; then
+            result="$(result_for_job velnor-github-action-github-actions-setup-velnor-workflow)"
+            if [[ "$PROVIDER_ADMITTED_VELNOR_TRUSTED" == true ]]; then
+              case "$result" in
+                success) ;;
+                skipped) echo "expected CI job velnor-github-action-github-actions-setup-velnor-workflow was skipped: a skipped expected result cannot pass" >&2; exit 1 ;;
+                cancelled) echo "expected CI job velnor-github-action-github-actions-setup-velnor-workflow was cancelled: a cancelled expected result cannot pass" >&2; exit 1 ;;
+                *) echo "expected CI job velnor-github-action-github-actions-setup-velnor-workflow did not pass: $result" >&2; exit 1 ;;
+              esac
+            else
+              case "$result" in
+                skipped) ;;
+                *) echo "selected CI job velnor-github-action-github-actions-setup-velnor-workflow ran outside its provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=$PROVIDER_ADMITTED_VELNOR_TRUSTED): $result" >&2; exit 1 ;;
+              esac
+            fi
+          else
+            result="$(result_for_job velnor-github-action-github-actions-setup-velnor-workflow)"
+            case "$result" in
+              skipped) ;;
+              success) echo "unexpected CI job velnor-github-action-github-actions-setup-velnor-workflow succeeded outside the expected set: the plan did not declare it" >&2; exit 1 ;;
+              *) echo "unexpected CI job velnor-github-action-github-actions-setup-velnor-workflow ran outside the expected set: $result" >&2; exit 1 ;;
             esac
           fi
           if plan_expects "opentofu" "github-hosted"; then
