@@ -774,6 +774,7 @@ fn ungated_trusted_velnor_job_fails_the_trusted_runners_rule() {
         ruleset_contexts: Some(vec!["ci-required".to_owned(), "DCO".to_owned()]),
         build_pin: false,
         candidate_manifest: None,
+        candidate_render: None,
     };
     let report = must(evaluate(&options), "evaluate ungated tree");
     let runners = must_some(report.rule("trusted-runners"), "trusted-runners rule");

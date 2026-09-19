@@ -900,10 +900,6 @@ mod tests {
         }
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one consumer contract pinned clause by clause"
-    )]
     #[test]
     fn candidate_steps_match_the_policy_consumer_contract() {
         let owner = workflow_setup_action_repository().to_owned();
