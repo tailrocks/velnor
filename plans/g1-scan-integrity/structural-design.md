@@ -18,6 +18,9 @@ reviewed independently before it is considered further.
 - Conditional review being addressed: `G1/scan-integrity/structural-design-review.md`,
   SHA-256
   `2c148b245fe71489b71e51f53d40036048f7af2dc4f94ae4179376f69a9cb067`.
+- Bound review being addressed: `G1/scan-integrity/structural-design-review-bound.md`,
+  SHA-256
+  `f8c8c0ee27d23ac1dbd4c616b33907d1e8d0c14c90e9f4012f3f5476a61042bd`.
 
 The candidate's `verified_recorded_output_paths` and
 `verify_generated_ownership` still accept repository-writable sidecar digest
@@ -68,9 +71,11 @@ ProtectedPolicyContract {
     validator_workflow_path, validator_workflow_blob,
     validator_revision, validator_closure,
     caller_app_id, caller_installation_id,
-    required_checks: {(context, app_id)},
+    branch_required_checks: {(context, app_id)},
+    ruleset_required_checks: {(context, integration_id)},
     protected_ruleset_ids, required_enforcement,
     accepted_bypass_actors,
+    ruleset_bypass_read_authority,
     generator_repository_id, generator_repository_full_name,
 }
 ```
@@ -78,10 +83,12 @@ ProtectedPolicyContract {
 The caller proves its own App/installation identity against fixed values in
 the launcher (including the API `/app` and `/app/installations/{id}` identity
 records or their equivalent trusted runtime attestation), and binds this
-contract to the target repository/base ref. The implementation compares all
-returned repository, protection, ruleset, check `context`/`app_id`, validator,
-and bypass-actor fields to this contract. It must reject missing, duplicated,
-or ambiguous identity; a check title without the expected App ID is not proof.
+contract to the target repository/base ref. The implementation compares
+branch-protection check `context`/`app_id` pairs and ruleset check
+`context`/`integration_id` pairs separately; it never equates the two fields.
+`integration_id` is required and non-null for every ruleset check used by the
+contract. It must reject missing, duplicated, null, or ambiguous identity; a
+check title without the expected App ID/integration ID is not proof.
 No target config, branch name, PR check title, or current renderer may choose
 the App, installation, validator revision/closure, accepted check set, or
 bypass actors. The contract must require the base policy workflow itself to
@@ -108,9 +115,29 @@ or the worktree. The acquisition contract is:
    `GET /repos/{owner}/{repo}/rulesets/{ruleset_id}`. Retain every raw page,
    cursor, terminal page, viewer identity, and response hash. Prove that the
    contract's validator workflow path/blob is the required protected producer;
-   verify branch-protection required checks and ruleset required checks as
-   exact `(context, app_id)` pairs, active enforcement, and exact bypass actor
-   set. A branch name, title-only check, or config assertion is not enough.
+   verify branch-protection required checks as exact `(context, app_id)` pairs
+   and ruleset required checks as exact `(context, integration_id)` pairs,
+   active enforcement, and exact bypass actor set. A branch name, title-only
+   check, or config assertion is not enough. A null/missing ruleset
+   `integration_id`, wrong integration ID, or field omitted because the caller
+   lacks ruleset visibility is `baseline_policy_unproven`, not an empty or
+   generic check identity.
+4a. The exact bypass set requires a caller with the narrowly trusted
+   `ruleset_bypass_read_authority` named in the contract, or an equivalent
+   out-of-band attestation from that authority. The current read-only PR
+   workflow token is not sufficient merely because it can read repository
+   contents. If the API omits `bypass_actors`, returns 403/404, or the trusted
+   authority/attestation is absent, fail `baseline_policy_unproven`; never
+   interpret omission as `[]`. No generator step grants PR code write access
+   to obtain this field.
+
+The checked-in policy workflow's `contents: read` token is therefore not an
+authorized bypass reader by itself. Until the upstream policy launcher passes
+the contract plus a narrowly scoped App/attestation with ruleset-field
+visibility, protected mode is truthfully blocked with
+`baseline_policy_unproven` and no mutation. Local explicit operator modes
+remain usable; this design does not weaken the PR workflow or silently turn a
+missing field into an empty bypass set.
 5. Require the target base config to contain a full `[generator].revision`.
    Missing revision is `baseline_generator_unproven`; do not fall back to the
    protected entrypoint pin or environment variable. Require its repository
@@ -309,7 +336,7 @@ file is never safe merely because its path is typed.
 5. Classify every existing candidate using the table above, then perform the
    mandatory bounded three-pass detector protocol and require its exact stable
    fingerprint. Any
-   `ModifiedGenerated`, `ForeignOrUnknown`, invalid path, symlink, baseline
+   `ModifiedGenerated`, `CurrentOnlyUnbound`, `ForeignOrUnknown`, invalid path, symlink, baseline
    mismatch, or missing required baseline produces a conflict/no-write result.
    Diagnostics must name the path, class, and proof/preimage reason.
 6. Build one plan. Current exact/prior-exact typed outputs may be created or
@@ -339,9 +366,10 @@ digest from shaping the scan or authorizing a write.
   `delete GeneratedStaleExact <path>` only with `--force`, a valid baseline,
   and an exact old baseline preimage. The stale path is never deleted merely
   because the sidecar lists it.
-- `ModifiedGenerated` and `ForeignOrUnknown` always stop the plan. Plain
-  `--force` cannot adopt, overwrite, hide, or delete either class. There is no
-  compatibility mode for the old broad unowned-workflow replacement behavior.
+- `ModifiedGenerated`, `CurrentOnlyUnbound`, and `ForeignOrUnknown` always
+  stop the plan. Plain `--force` cannot adopt, overwrite, hide, or delete any
+  of these classes. There is no compatibility mode for the old broad
+  unowned-workflow replacement behavior.
 
 Every result prints `baseline_source` (`protected-base-api`,
 `operator-commit`, or `none`), the full baseline revision/tree when present,
@@ -435,18 +463,24 @@ obsolete `rust-crate` fixture). Each fixture runs through the integrated
 - **SI-B1 — protected API proof**: fixture the trusted policy caller with the
   exact protected caller contract: repository/base identity, validator
   workflow blob, validator revision/closure, caller App/installation IDs,
-  required `(context, app_id)` checks, active protection/ruleset enforcement,
-  and exact bypass actor set. Assert API `/app`/installation identity and all
-  raw response IDs/viewer/page records. Include a wrong-App response with the
-  right check title and reject it. Acquire target and external generator
+  source-specific branch `(context, app_id)` checks and ruleset
+  `(context, integration_id)` checks, active protection/ruleset enforcement,
+  exact bypass actor set, and narrow ruleset-bypass read authority. Assert API
+  `/app`/installation identity and all raw response IDs/viewer/page records.
+  Include a wrong-App response with the right check title, a missing/null
+  ruleset integration ID, and a wrong integration ID; reject all three.
+  Acquire target and external generator
   repository commit/tree/blob objects, verify source closure and byte identity,
   then post-acquisition base-ref equality. Exercise each
   `baseline_unavailable` state: ref movement, missing/incomplete page,
   404/401/403, transport failure, missing required App/ruleset, blob mismatch,
-  external generator mismatch/missing object, missing generator pin, and
-  render mismatch. Every protected failure is terminal before rendering and
-  produces no output or sidecar mutation; none may select current `HEAD`, PR
-  config, sidecar, or a fallback baseline.
+  external generator mismatch/missing object, missing generator pin,
+  read-only caller with omitted `bypass_actors`, missing bypass-read
+  attestation, and render mismatch. Every protected failure is terminal before
+  rendering and produces no output or sidecar mutation; none may select
+  current `HEAD`, PR config, sidecar, or a fallback baseline. A positive case
+  must use the separately authorized narrow caller/attestation; the generator
+  never upgrades the PR workflow token.
 - **SI-B2 — operator lifecycle**: explicit `--local-no-baseline` first run
   creates missing current outputs and permits repeated current-exact runs;
   existing foreign/differing bytes conflict. Pass the full SHA from `git
