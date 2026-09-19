@@ -1045,11 +1045,17 @@ fn candidate_manifest_for(
             &manifest,
             serde_json::json!({
                 "profile": "debug",
+                "features": "tui",
                 "platform": "Linux-X64",
                 "repository": crate::s2::workflow_setup_action_repository(),
+                "repository_id": "123",
+                "head_repository": crate::s2::workflow_setup_action_repository(),
+                "head_repository_id": "123",
                 "run_id": "123",
+                "job_id": "candidate-bootstrap",
                 "revision": revision,
                 "closure": closure,
+                "build_revision": revision,
                 "binary_sha256": digest,
             })
             .to_string(),
@@ -1168,6 +1174,39 @@ fn candidate_manifest_for_another_tree_is_rejected() {
     assert!(error.contains("names closure"), "{error}");
     assert!(error.contains(CLOSURE_A), "{error}");
     assert!(error.contains(&wanted), "{error}");
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(scratch);
+}
+
+#[cfg(unix)]
+#[test]
+fn candidate_manifest_for_another_revision_is_rejected() {
+    let (root, head) = closure_fixture("candidate-other-revision");
+    let wanted = must(
+        crate::s2::closure::candidate_closure_of_tree(&root, &head),
+        "candidate closure of the fixture",
+    );
+    let scratch = temporary_directory("candidate-other-revision-scratch");
+    let binary = fake_candidate_renderer(&root, &wanted);
+    let manifest =
+        candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, &head);
+    let mut body: serde_json::Value = must(
+        serde_json::from_slice(&must(fs::read(&manifest), "read candidate manifest")),
+        "parse candidate manifest",
+    );
+    body["revision"] = serde_json::Value::String("f".repeat(40));
+    must(
+        fs::write(&manifest, body.to_string()),
+        "write mismatched candidate revision",
+    );
+    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
+    let excludes = std::collections::BTreeSet::new();
+    let error = must_fail(
+        render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
+        "manifest for another revision",
+    )
+    .to_string();
+    assert!(error.contains("audited head"), "{error}");
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_dir_all(scratch);
 }

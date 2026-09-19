@@ -30,10 +30,10 @@
 //! the pin from the audited tree.
 //!
 //! The candidate exception binds the env-slot candidate binary by manifest
-//! before executing it: the manifest's closure must equal the audited tree's
-//! candidate closure (computed locally from git history) and the binary's
-//! digest must match the manifest first, because a `--closure` echo is an
-//! assertion by untrusted bytes, not proof. The manifest arrives via
+//! before executing it: the manifest's source/run identity and closure must
+//! match the audited tree and selected producer, and the binary's digest must
+//! match the manifest first, because a `--closure` echo is an assertion by
+//! untrusted bytes, not proof. The manifest arrives via
 //! `--candidate-manifest` or `VELNOR_WORKFLOW_CANDIDATE_MANIFEST`; without
 //! either, env-slot binaries are skipped, never executed.
 
@@ -1193,33 +1193,81 @@ pub(crate) fn resolve_pinned_binary(
     build_pinned_binary(revision, expected, source, install_root, &installed)
 }
 
-/// The candidate manifest the publisher wrote beside the candidate binary
-/// (`profile`, `platform`, `repository`, `run_id`, `revision`, `closure`,
-/// `binary_sha256`, plus `build_revision`). The consume-side binding uses
-/// only the closure and the digest: `revision` names the PR head the
-/// publisher built for, which a legit older pin may still equal on closure
-/// paths, so closure equality is the content binding.
+/// The candidate manifest the publisher wrote beside the candidate binary.
+/// Every source/run identity field is required: the artifact name is only a
+/// locator, so acceptance must bind the selected run's bytes to this exact
+/// head, repository, job, platform, feature set, and closure before execution.
 #[derive(serde::Deserialize)]
 struct CandidateManifest {
+    profile: String,
+    features: String,
+    platform: String,
+    repository: String,
+    repository_id: String,
+    head_repository: String,
+    head_repository_id: String,
+    run_id: String,
+    job_id: String,
     revision: String,
     closure: String,
+    build_revision: String,
     binary_sha256: String,
 }
 
-/// Read and shape-validate the manifest at `path`: valid JSON whose
-/// revision, closure, and digest fields are full hex digests of the right
-/// length. Anything else fails closed — a manifest the validator cannot
-/// parse proves nothing.
+/// Read and shape-validate the manifest at `path`: valid JSON whose source,
+/// run, closure, and digest fields have the required identity shapes.
+/// Anything else fails closed — a manifest the validator cannot parse proves
+/// nothing.
 fn load_candidate_manifest(path: &Path) -> Result<CandidateManifest, String> {
     let bytes =
         fs::read(path).map_err(|error| format!("{}: cannot read: {error}", path.display()))?;
     let manifest: CandidateManifest = serde_json::from_slice(&bytes)
         .map_err(|error| format!("{}: not a candidate manifest: {error}", path.display()))?;
+    if manifest.profile != closure_identity::PROFILE_DEBUG {
+        return Err(format!(
+            "{}: profile {:?} is not debug",
+            path.display(),
+            manifest.profile
+        ));
+    }
+    if manifest.features != closure_identity::DEV_FEATURES {
+        return Err(format!(
+            "{}: features {:?} are not the candidate feature set",
+            path.display(),
+            manifest.features
+        ));
+    }
+    if manifest.platform.is_empty()
+        || manifest.repository.is_empty()
+        || manifest.repository_id.is_empty()
+        || manifest.head_repository.is_empty()
+        || manifest.head_repository_id.is_empty()
+        || manifest.job_id != "candidate-bootstrap"
+    {
+        return Err(format!(
+            "{}: candidate source or job identity is incomplete",
+            path.display()
+        ));
+    }
+    if manifest.run_id.is_empty() || !manifest.run_id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(format!(
+            "{}: run_id {:?} is not numeric",
+            path.display(),
+            manifest.run_id
+        ));
+    }
     if !super::is_full_revision(&manifest.revision) {
         return Err(format!(
             "{}: revision {:?} is not a full commit SHA",
             path.display(),
             manifest.revision
+        ));
+    }
+    if !super::is_full_revision(&manifest.build_revision) {
+        return Err(format!(
+            "{}: build_revision {:?} is not a full commit SHA",
+            path.display(),
+            manifest.build_revision
         ));
     }
     if !closure_identity::is_full_closure(&manifest.closure) {
@@ -1466,6 +1514,10 @@ pub(crate) fn regenerate_and_compare(
 /// `--closure` self-report stay as a final tripwire. A `--closure` echo is an
 /// assertion by untrusted bytes, not proof. Returns the proving closure, or
 /// `None` when no bound candidate reproduces the tree.
+#[expect(
+    clippy::too_many_lines,
+    reason = "candidate acceptance keeps every identity and pre-execution gate together"
+)]
 fn render_with_candidate(
     checkout: &Path,
     tree: &Path,
@@ -1490,6 +1542,68 @@ fn render_with_candidate(
         None => None,
         Some(path) => {
             let manifest = load_candidate_manifest(path).map_err(GeneratorError::usage)?;
+            if manifest.revision != head || manifest.build_revision != head {
+                return Err(GeneratorError::usage(format!(
+                    "candidate manifest {} names revision {} / build {} but the audited head is {head}",
+                    path.display(),
+                    manifest.revision,
+                    manifest.build_revision
+                )));
+            }
+            if let Ok(repository) = env::var("GITHUB_REPOSITORY")
+                && manifest.repository != repository
+            {
+                return Err(GeneratorError::usage(format!(
+                    "candidate manifest {} names repository {}, expected {repository}",
+                    path.display(),
+                    manifest.repository
+                )));
+            }
+            if let Ok(repository_id) = env::var("GITHUB_REPOSITORY_ID")
+                && manifest.repository_id != repository_id
+            {
+                return Err(GeneratorError::usage(format!(
+                    "candidate manifest {} names repository id {}, expected {repository_id}",
+                    path.display(),
+                    manifest.repository_id
+                )));
+            }
+            if let Ok(head_repository) = env::var("HEAD_REPOSITORY")
+                && manifest.head_repository != head_repository
+            {
+                return Err(GeneratorError::usage(format!(
+                    "candidate manifest {} names head repository {}, expected {head_repository}",
+                    path.display(),
+                    manifest.head_repository
+                )));
+            }
+            if let Ok(head_repository_id) = env::var("HEAD_REPOSITORY_ID")
+                && manifest.head_repository_id != head_repository_id
+            {
+                return Err(GeneratorError::usage(format!(
+                    "candidate manifest {} names head repository id {}, expected {head_repository_id}",
+                    path.display(),
+                    manifest.head_repository_id
+                )));
+            }
+            if let Ok(run_id) = env::var("VELNOR_WORKFLOW_CANDIDATE_RUN_ID")
+                && manifest.run_id != run_id
+            {
+                return Err(GeneratorError::usage(format!(
+                    "candidate manifest {} names run {}, expected {run_id}",
+                    path.display(),
+                    manifest.run_id
+                )));
+            }
+            if let Ok(job_id) = env::var("VELNOR_WORKFLOW_CANDIDATE_JOB_ID")
+                && manifest.job_id != job_id
+            {
+                return Err(GeneratorError::usage(format!(
+                    "candidate manifest {} names job {}, expected {job_id}",
+                    path.display(),
+                    manifest.job_id
+                )));
+            }
             if manifest.closure != wanted {
                 return Err(GeneratorError::usage(format!(
                     "candidate manifest {} names closure {}, but the audited tree's candidate closure is {wanted}",

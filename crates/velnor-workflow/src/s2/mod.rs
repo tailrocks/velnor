@@ -4531,6 +4531,10 @@ fn audited_pin_script() -> &'static str {
 /// The artifact check pipes the listing through real jq for the same
 /// class of reason: gh api has no `-e` flag, so gh-side evaluation can
 /// never report the match.
+#[expect(
+    clippy::too_many_lines,
+    reason = "candidate acquisition keeps source, run, and artifact binding together"
+)]
 fn policy_candidate_step(revision: &str) -> String {
     format!(
         r#"      - name: Acquire candidate generator product
@@ -4539,6 +4543,8 @@ fn policy_candidate_step(revision: &str) -> String {
           GH_TOKEN: ${{{{ github.token }}}}
           HEAD_SHA: ${{{{ github.event.pull_request.head.sha || github.sha }}}}
           HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name || github.repository }}}}
+          HEAD_REPOSITORY_ID: ${{{{ github.event.pull_request.head.repo.id || github.repository_id }}}}
+          REPOSITORY_ID: ${{{{ github.repository_id }}}}
           BASE_PIN: {revision}
         run: |
           set -euo pipefail
@@ -4559,7 +4565,7 @@ fn policy_candidate_step(revision: &str) -> String {
             fi
             echo "pin $pin shares the base closure but the tree differs from its render; falling through to the candidate path"
           fi
-          [[ "$HEAD_REPOSITORY" == "$GITHUB_REPOSITORY" ]] || {{ echo "::error::generator changes from forks cannot be verified here; open the generator change from a branch of $GITHUB_REPOSITORY" >&2; exit 1; }}
+          [[ "$HEAD_REPOSITORY" == "$GITHUB_REPOSITORY" && "$HEAD_REPOSITORY_ID" == "$REPOSITORY_ID" ]] || {{ echo "::error::generator changes from forks cannot be verified here; open the generator change from a branch of $GITHUB_REPOSITORY" >&2; exit 1; }}
           if ! git cat-file -e "$HEAD_SHA^{{commit}}" 2>/dev/null; then
             git fetch --no-tags "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$HEAD_SHA"
           fi
@@ -4579,8 +4585,28 @@ fn policy_candidate_step(revision: &str) -> String {
               # $name in the filter is a jq variable, not a shell expansion.
               # shellcheck disable=SC2016
               if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts?per_page=100" | jq -e --arg name "$name" '[.artifacts[] | select(.name == $name and .expired == false)] | length > 0' >/dev/null; then
-                run_id="$id"
-                break 2
+                # An artifact can become visible before the producer job's
+                # post steps finish. Bind the selected run to the exact same
+                # repository/head and wait for the named bootstrap job to
+                # complete successfully; the rest of the workflow may stay
+                # queued on Velnor and must not gate this independent product.
+                if ! run_metadata="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id")"; then
+                  waiting=true
+                  continue
+                fi
+                if ! jq -e --arg head "$HEAD_SHA" --arg repo "$GITHUB_REPOSITORY" --arg repo_id "$REPOSITORY_ID" '(.head_sha == $head) and (.event == "pull_request") and (.repository.full_name == $repo) and ((.repository.id | tostring) == $repo_id) and (.head_repository.full_name == $repo) and ((.head_repository.id | tostring) == $repo_id)' <<<"$run_metadata" >/dev/null; then
+                  waiting=true
+                  continue
+                fi
+                if ! jobs="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?per_page=100")"; then
+                  waiting=true
+                  continue
+                fi
+                if jq -e --arg head "$HEAD_SHA" '[.jobs[] | select(.name == "Control / Candidate bootstrap" and .head_sha == $head and .status == "completed" and .conclusion == "success")] | length == 1' <<<"$jobs" >/dev/null; then
+                  run_id="$id"
+                  break 2
+                fi
+                waiting=true
               fi
               [[ "$status" == "completed" ]] || waiting=true
             done <<<"$(jq -c '.[]' <<<"$runs")"
@@ -4590,12 +4616,12 @@ fn policy_candidate_step(revision: &str) -> String {
             [[ "$waiting" == "true" ]] || {{ echo "::error::no same-repository PR run published candidate $name" >&2; exit 1; }}
             sleep 15
           done
-          [[ -n "$run_id" ]] || {{ echo "::error::no candidate product $name was published within 15 minutes" >&2; exit 1; }}
+          [[ -n "$run_id" ]] || {{ echo "::error::no successful candidate-bootstrap product $name was published within 15 minutes" >&2; exit 1; }}
           candidate="$RUNNER_TEMP/velnor-workflow-candidate"
           rm -rf "$candidate"
           mkdir -p "$candidate"
           gh run download "$run_id" --name "$name" --dir "$candidate" --repo "$GITHUB_REPOSITORY"
-          jq -e --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repo "$GITHUB_REPOSITORY" --arg run "$run_id" '.profile == "debug" and .platform == $platform and .repository == $repo and .run_id == $run and (.revision | test("^[0-9a-f]{{40}}$")) and (.closure | test("^[0-9a-f]{{64}}$")) and (.binary_sha256 | test("^[0-9a-f]{{64}}$"))' "$candidate/candidate-manifest.json" >/dev/null
+          jq -e --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repo "$GITHUB_REPOSITORY" --arg repo_id "$REPOSITORY_ID" --arg head_repo "$HEAD_REPOSITORY" --arg head_repo_id "$HEAD_REPOSITORY_ID" --arg head "$HEAD_SHA" --arg run "$run_id" --arg job "candidate-bootstrap" '.profile == "debug" and .features == "tui" and .platform == $platform and .repository == $repo and .repository_id == $repo_id and .head_repository == $head_repo and .head_repository_id == $head_repo_id and .run_id == $run and .job_id == $job and .revision == $head and .build_revision == $head and (.revision | test("^[0-9a-f]{{40}}$")) and (.closure | test("^[0-9a-f]{{64}}$")) and (.binary_sha256 | test("^[0-9a-f]{{64}}$"))' "$candidate/candidate-manifest.json" >/dev/null
           if command -v sha256sum >/dev/null 2>&1; then
             actual="$(sha256sum "$candidate/velnor-workflow" | awk '{{print $1}}')"
           else
@@ -4608,6 +4634,10 @@ fn policy_candidate_step(revision: &str) -> String {
           [[ "$manifest_closure" == "$head_candidate" ]] || {{ echo "::error::candidate manifest closure $manifest_closure is not the head's candidate $head_candidate" >&2; exit 1; }}
           reported="$(GH_TOKEN="" GITHUB_TOKEN="" "$candidate/velnor-workflow" --closure)"
           [[ "$reported" == "$manifest_closure" ]] || {{ echo "::error::candidate reports closure $reported, manifest claims $manifest_closure" >&2; exit 1; }}
+          reported_revision="$(GH_TOKEN="" GITHUB_TOKEN="" "$candidate/velnor-workflow" --revision)"
+          [[ "$reported_revision" == "$HEAD_SHA" ]] || {{ echo "::error::candidate reports revision $reported_revision, expected head $HEAD_SHA" >&2; exit 1; }}
+          echo "VELNOR_WORKFLOW_CANDIDATE_RUN_ID=$run_id" >> "$GITHUB_ENV"
+          echo "VELNOR_WORKFLOW_CANDIDATE_JOB_ID=candidate-bootstrap" >> "$GITHUB_ENV"
           echo "{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$candidate/velnor-workflow" >> "$GITHUB_ENV"
           echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=$candidate/candidate-manifest.json" >> "$GITHUB_ENV"
 "#,
@@ -8174,7 +8204,7 @@ mod tests {
             "owner Planning must not resolve the runtime at an event SHA: {home_plan}"
         );
         assert!(workflow.contains("name: Publish Velnor workflow runtime"));
-        assert!(!workflow.contains("candidate_publish: true"));
+        assert!(!workflow.contains("candidate-bootstrap"));
         let kind = must_some(
             must(
                 WorkflowIr::from_config(&config).render_kind_unit_workflow(UnitKind::Rust, None),
@@ -15729,10 +15759,21 @@ lockfile = true
             owner.contains("\"$reported\" == \"$manifest_closure\""),
             "the self-report gate requires the binary to report the manifest closure: {owner}"
         );
+        assert!(
+            owner.contains("\"$reported_revision\" == \"$HEAD_SHA\""),
+            "the self-report gate requires the binary to report the audited head: {owner}"
+        );
         for clause in [
+            ".features == \"tui\"",
             ".platform == $platform",
             ".repository == $repo",
+            ".repository_id == $repo_id",
+            ".head_repository == $head_repo",
+            ".head_repository_id == $head_repo_id",
             ".run_id == $run",
+            ".job_id == $job",
+            ".revision == $head",
+            ".build_revision == $head",
         ] {
             assert!(
                 owner.contains(clause),
@@ -15810,13 +15851,26 @@ lockfile = true
             "the same-repository select compares the embedded objects: {owner}"
         );
         assert!(
-            !owner.contains(".head_repository_id"),
-            "the list endpoint has no head_repository_id scalar: {owner}"
+            owner.contains("[.workflow_runs[] | select(.head_repository.id == .repository.id)]"),
+            "the list endpoint filters by the embedded repository id object: {owner}"
         );
         assert!(
             owner.contains("[[ \"$seen\" == \"true\" ]] || waiting=true"),
             "an unindexed sibling run keeps polling until the deadline: {owner}"
         );
+        for clause in [
+            "actions/runs/$id/jobs?per_page=100",
+            ".name == \"Control / Candidate bootstrap\"",
+            ".head_sha == $head",
+            ".status == \"completed\"",
+            ".conclusion == \"success\"",
+            "(.head_repository.id | tostring) == $repo_id",
+        ] {
+            assert!(
+                owner.contains(clause),
+                "candidate acquisition binds the successful producer job/run through {clause}: {owner}"
+            );
+        }
         assert!(
             owner.contains(
                 "| jq -e --arg name \"$name\" '[.artifacts[] | select(.name == $name and .expired == false)] | length > 0'"
