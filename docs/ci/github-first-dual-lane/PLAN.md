@@ -128,18 +128,49 @@ The external fleet evidence has 32 populated `main` branch/SHA rows at
 generated at `2026-09-19T17:03:32Z`; neither is asserted fresh beyond its
 timestamp. The committed scope inventory still has 32/32 null workload,
 required-check/App, platform/architecture, and provider-eligibility fields,
-31/32 access rows unknown, and no structured graph. These are explicit G0
-blockers, not reasons to invent values.
+31/32 access rows unknown. The external
+`G0/fleet/dependencies-and-access.json` artifact was observed at
+`2026-09-19T19:21:38Z` (SHA-256
+`f58da9d4ea2bc32ba8867cbb4897997bc48c6e4228a14ed4ec0710c056f67f60`): its
+32/32 scope and 22 workflow-bearing rows are present, with 15 source-bound
+edges, but graph coverage is explicitly partial and gapped. Source coverage
+is 26/32 exact local checkouts, 1/32 Velnor checkout at the wrong pin, 4/32
+report-only, and 1/32 inventory-only. This is incomplete inventory evidence,
+not a validated full graph or reason to invent values.
+
+The `17:03:32Z`–`17:05:57Z` refresh set is external under the logical evidence
+root: `G0/fleet/{requirements.json,main-verification.json,pr-checks.tsv,
+context-pages.json,handoff.json,main-revisions.tsv}`. It reconciles the 78-row
+baseline to 77 later PR heads, records `jackin-project/homebrew-tap#494` as
+merged and `tailrocks/velnor#953` as head-changed, and rechecked head
+stability at `2026-09-19T17:02:04Z`. Its PR/check/workflow coverage is for 12
+PR-bearing repositories, not all 32 repositories; these files are not a
+fleet-wide required-check or workflow proof.
+
+A later all-32 read-only collector is external at
+`G0/fleet/check-contexts-full.json`, spanning
+`2026-09-19T19:15:10.439Z`–`2026-09-19T19:28:02.940Z` and serialized at
+`2026-09-19T19:29:58.430Z`. It reports 32 repositories and 76 open-PR rows,
+with 1,268 observed main check runs and 1,742 observed PR check runs. It is a
+timestamped input pending independent review, source binding, required
+context/App semantics, workload/dependency graph, and complete run/child
+verification; it does not make the earlier 78/77 snapshots current forever or
+close G0. The historical Velnor check contract is not reused when its `abe9`
+source revision differs from the collector's live default revision.
 
 `G0/check-contract/check-contract.json` is Velnor-only (current main plus
 PR948/952/953/954); the 78-row `open-prs.tsv` identity list has no per-PR
 check/App/run rows for the other 31 repositories. Do not treat that contract as
 fleet-wide coverage. Collection outputs are assigned externally:
-`check-contexts-full.json` (all 32 checks/Apps/current PR/main) to
+`check-contexts-full.json` (all 32 repository rows with observed PR/main
+records; required-context/App semantics remain pending) to
 `/root/g3_distribution_consumers`, `dependencies-and-access.json` to
 `/root/g0_runtime`, and `workloads-full.json` to `/root/g0_inventory`.
-`/root/g0_records` imports only validated source-SHA/UTC/explicit-unknown
-outputs; each path and exact producer invocation remains pending.
+The check-context artifact now exists as the later timestamped snapshot above;
+independent review, source binding, and semantic required-context/App proof
+remain pending. `/root/g0_records` imports only validated
+source-SHA/UTC/explicit-unknown outputs; each path and exact producer
+invocation remains pending.
 
 `fleet.json` remains a flat nullable scope inventory. Its static count/uniqueness
 check is not a G0 result, and `gate_status: "pending"` is not success. The

@@ -22,6 +22,19 @@ timestamp. Baseline records remain under external
 This is inventory evidence only. It does not prove workload completeness,
 required-check success, migration, or a gate exit.
 
+A later read-only collector snapshot is external at
+`G0/fleet/check-contexts-full.json`: it started at
+`2026-09-19T19:15:10.439Z`, reconciled at `2026-09-19T19:28:02.940Z`, and
+was serialized at `2026-09-19T19:29:58.430Z` (SHA-256
+`1a51f8a276c912c6f03f3bcb749d1f5845b52c0551cdff6254c8e90c0c78901e`). It
+contains 32 unique repositories, 76 stable open-PR rows (3 drafts, 0 bots,
+0 forks), 1,268 observed main check runs, and 1,742 observed PR check runs.
+These are timestamped observations pending independent review, source binding,
+and required-context/App, workload, dependency, and run-identity enforcement;
+they do not replace the historical 78-to-77 reconciliation or claim a
+current-forever state. The historical Velnor check contract at `abe9ad82` is
+not reusable against the later live default revision.
+
 ## Completed
 
 - Read the full authoritative goal and applicable root rules.
@@ -94,9 +107,10 @@ package delivery, fleet migration, Mac operation, or any gate exit.
 | Final ledger | Immutable artifact/evidence ref outside source | Pending |
 | External fleet branch snapshot | 32 `main` rows with nonempty SHAs at `2026-09-19T16:34:19Z`; `main-revisions.tsv` repeats 32 rows at `2026-09-19T17:05:57Z` | External read-only observations; not a fresh current-state or G0 pass |
 | External PR snapshot | 78 baseline identities at `2026-09-19T16:34:19Z`; 77 current rows in `requirements.json` generated `2026-09-19T17:03:32Z`; heads rechecked `2026-09-19T17:02:04Z` | Historical/current snapshot distinction preserved; no fresh claim |
+| Later all-32 check-context snapshot | `G0/fleet/check-contexts-full.json`, `2026-09-19T19:15:10Z`–`19:28:02Z`; 32 repositories, 76 PR rows, 1,268 main and 1,742 PR observed check runs | Timestamped collector evidence; source binding, independent review, required-context/App semantics, workloads, dependencies, and child/run proof remain pending |
 | Committed fleet semantic fields | 32/32 expected workloads null; 32/32 required check/App fields null; 32/32 platform/architecture null; 32/32 provider eligibility null; 31/32 access rows unknown | Explicit G0 incompleteness; do not fill nulls or treat static branch rows as enriched evidence |
-| Check-contract scope | `G0/check-contract/check-contract.json` covers only Velnor current main and PR948/952/953/954; `open-prs.tsv` has 78 identities without per-PR check/App/run rows for the other 31 | Velnor-only contract cannot be reused fleet-wide; all-32 collector pending |
-| Collection handoff | `/root/g3_distribution_consumers` → `G0/fleet/check-contexts-full.json`; `/root/g0_runtime` → `G0/fleet/dependencies-and-access.json`; `/root/g0_inventory` → `G0/fleet/workloads-full.json` | `/root/g0_records` ingests only validated source-SHA/UTC/explicit-unknown outputs; files pending |
+| Check-contract scope | `G0/check-contract/check-contract.json` covers only Velnor current main and PR948/952/953/954; historical `open-prs.tsv` has 78 identities and the later collector has 76 PR rows | Neither scope proves all-32 required check/App/run coverage; Velnor contract is not reusable at a mismatched live SHA |
+| Collection handoff | `/root/g3_distribution_consumers` → `G0/fleet/check-contexts-full.json`; `/root/g0_runtime` → `G0/fleet/dependencies-and-access.json`; `/root/g0_inventory` → `G0/fleet/workloads-full.json` | Check-context and dependency/access artifacts exist as timestamped external snapshots; graph coverage is partial/gapped, workload binding and checker envelope remain pending; records agent ingests only validated source-SHA/UTC/explicit-unknown outputs |
 | PR952 source/integration chronology | Exact PR head `a5c1c0bd5c92c4c52d58ccb21042b1b2c0b08637` had 1858 tests before regeneration; integrated source `12cc87b629802c294da9840325cb21087c020df` has 1736 tests, fmt, and clippy pass; generated snapshot failure remains until regeneration | Separate observations; not a gate pass |
 | PR954 current head | `f16592ea165ced141bf0bb1c43466a95d7df8b2e` | Observed; current run still pending/partial |
 | PR953 cache result | Run `35453601367` failed cache contract | Observed; cache diagnosis reopened |
@@ -108,6 +122,7 @@ package delivery, fleet migration, Mac operation, or any gate exit.
 | Early category audits | Skills, action/roles, Rust consumers, distribution consumers, and independent distribution review reports | Read-only evidence written; scanner/publication/native proof gaps remain |
 | G1 runtime-product audit | Old pin/release, current-main distinction, and candidate closure/promotion sequence | External evidence written; no candidate publication or pin adoption |
 | G0 workload matrix | 32 unique rows aligned to current main revisions; observed duties, native/unsupported/trust obligations, and missing execution retained | External `G0/workload-matrix.json`; inventory projection only |
+| G0 dependency/access artifact | `G0/fleet/dependencies-and-access.json` observed `2026-09-19T19:21:38Z`; 32/32 scope, 22 workflow-bearing rows, 15 source-bound edges; source coverage 26 exact local, 1 wrong-pin Velnor, 4 report-only, 1 inventory-only | SHA-256 `f58da9d4ea2bc32ba8867cbb4897997bc48c6e4228a14ed4ec0710c056f67f60`; graph coverage partial/explicitly gapped; not full validation |
 | G0 checker review | Initial b3b6 unit hygiene passed, but semantic and G2 hostile reviews rejected false-green paths | v2 architecture required; no checker completion or gate proof |
 | G0 acceptance matrix | Exact 32/no-extras scope, live default/PR/workflow/run/provider/workload/dependency/source/digest/child evidence, and fail-closed stale/missing/manual-only rules | Canonical [`SPEC.md` matrix](./SPEC.md#exact-g0-acceptance-matrix), external `session.json`, checker and independent-review reports; unknown/incomplete |
 | G0 dependency graph schema | Typed workload→child, required-check, release, and package edges with relation/stage/applicability/provenance/status; G0 inventories, G2+ proves applicable execution | SPEC neutral example and external checker handoff; checker schema migration unimplemented/unknown |

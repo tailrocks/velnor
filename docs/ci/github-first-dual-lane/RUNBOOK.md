@@ -16,6 +16,40 @@ that its operation succeeded.
 - Before any destructive/release action, resolve exact repository, revision,
   channel, and destination. A stale or moving source invalidates evidence.
 
+## External snapshot timeline and coverage
+
+Paths in this timeline are logical paths relative to the external evidence root;
+they are not source-tree files. `Observed` means the artifact exists and its
+recorded shape/timestamps were read. It does not mean that the checker accepted
+the artifact or that a gate passed.
+
+- **[Observed] Baseline:** `G0/fleet/inventory.md` at
+  `2026-09-19T16:34:19Z` recorded 32 `main` rows and 78 open-PR identities
+  (75 ready, 3 drafts) across 12 PR-bearing repositories.
+- **[Observed] Reconciliation set:**
+  `G0/fleet/{requirements.json,main-verification.json,pr-checks.tsv,context-pages.json,handoff.json,main-revisions.tsv}`
+  spans approximately `2026-09-19T17:03:32Z`–`17:05:57Z`; it reconciles
+  78 baseline PR identities to 77 later heads, records tap PR #494 merged and
+  Velnor PR #953 head-changed, and rechecks head stability at `17:02:04Z`.
+  Its PR/check/workflow coverage is 12 repositories, not all 32.
+- **[Observed] Later collector:** `G0/fleet/check-contexts-full.json` spans
+  `2026-09-19T19:15:10.439Z`–`2026-09-19T19:28:02.940Z` and was serialized at
+  `2026-09-19T19:29:58.430Z`; it contains 32 repositories, 76 open-PR rows,
+  1,268 main and 1,742 PR observed check runs. This is timestamped evidence,
+  not a current-forever claim. Its required-context/App, source-binding,
+  workload, dependency, run, and child evidence still require review/enforcement.
+- **[Observed, incomplete] Graph/access artifact:**
+  `G0/fleet/dependencies-and-access.json` was observed at
+  `2026-09-19T19:21:38Z` (SHA-256
+  `f58da9d4ea2bc32ba8867cbb4897997bc48c6e4228a14ed4ec0710c056f67f60`). It
+  covers the exact 32-row scope, 22 workflow-bearing rows, and 15 source-bound
+  edges, while explicitly reporting partial/gapped graph coverage and mixed
+  source checkout status. It is inventory evidence, not full graph validation.
+- **[Pending] Authoritative use:** bind manifest, snapshot, and records
+  artifacts by schema, digest, source revision, observation UTC, collector,
+  pagination, and coverage before invoking the checker. A manual or available
+  artifact is not proof until the checker consumes and validates those bindings.
+
 ## Regular checkpoint and push procedure
 
 Take a coherent checkpoint at each safe handoff, review disposition, or
