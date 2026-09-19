@@ -169,12 +169,12 @@ jobs:
       - name: Download Velnor workflow runtime
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: velnor-workflow-runtime-fdeed261bd2247a38db6922a7726cd45d3d6f31e-${{ runner.os }}-${{ runner.arch }}
+          name: velnor-workflow-runtime-0dc79895ff1c5e88be7c3822c437e1c5b5282e12-${{ runner.os }}-${{ runner.arch }}
           path: .velnor-workflow-runtime
       - name: Verify Velnor workflow runtime
         shell: bash
         env:
-          EXPECTED_REVISION: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+          EXPECTED_REVISION: 0dc79895ff1c5e88be7c3822c437e1c5b5282e12
         run: |
           set -euo pipefail
           manifest=.velnor-workflow-runtime/manifest.json
@@ -188,7 +188,7 @@ jobs:
       - name: Add Velnor workflow runtime to PATH
         shell: bash
         env:
-          EXPECTED_REVISION: fdeed261bd2247a38db6922a7726cd45d3d6f31e
+          EXPECTED_REVISION: 0dc79895ff1c5e88be7c3822c437e1c5b5282e12
         run: |
           set -euo pipefail
           home="$RUNNER_TEMP/velnor-workflow-runtime-artifact"
@@ -396,7 +396,7 @@ jobs:
 
   verify-velnor-trusted:
     name: "velnor · trusted"
-    if: ${{ inputs.provider == 'velnor' && contains(inputs.selected_units, format('"unit_id":"{0}"', inputs.unit)) && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    if: ${{ inputs.provider == 'velnor' && contains(inputs.selected_units, format('"unit_id":"{0}"', inputs.unit)) && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 45
     steps:
