@@ -8,7 +8,9 @@
 
 use crate::g0_contract::*;
 use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use clap::Args;
+use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -39,6 +41,16 @@ const EXPECTED_ORCHESTRATOR_MODEL: &str = "gpt-6-astra";
 const EXPECTED_ORCHESTRATOR_EFFORT: &str = "low";
 const EXPECTED_AGENT_MODEL: &str = "gpt-5.6-luna";
 const EXPECTED_AGENT_EFFORT: &str = "max";
+const G0_ALLOWED_SCOPES: [&str; 8] = [
+    "actions:read",
+    "administration:read",
+    "checks:read",
+    "contents:read",
+    "metadata:read",
+    "pull_requests:read",
+    "statuses:read",
+    "workflows:read",
+];
 
 /// The fixed scope belongs to this task-specific checker.  It is not part of
 /// the generic workflow generator and cannot be replaced with an arbitrary
@@ -940,8 +952,118 @@ fn read_release_manifest(
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path, label: &str) -> Result<T> {
     let bytes = fs::read(path).with_context(|| format!("read {label} {}", path.display()))?;
+    reject_duplicate_json_keys(&bytes).map_err(|error| {
+        anyhow::anyhow!("reject duplicate keys in strict {label} JSON: {error}")
+    })?;
     serde_json::from_slice(&bytes)
         .with_context(|| format!("parse strict {label} JSON {}", path.display()))
+}
+
+fn reject_duplicate_json_keys(bytes: &[u8]) -> Result<(), String> {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    DuplicateKeyGuard::deserialize(&mut deserializer).map_err(|error| error.to_string())?;
+    deserializer.end().map_err(|error| error.to_string())
+}
+
+struct DuplicateKeyGuard;
+
+impl<'de> Deserialize<'de> for DuplicateKeyGuard {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(DuplicateKeyVisitor)
+    }
+}
+
+struct DuplicateKeyVisitor;
+
+impl<'de> Visitor<'de> for DuplicateKeyVisitor {
+    type Value = DuplicateKeyGuard;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("JSON value without duplicate object keys")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut keys = BTreeSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if !keys.insert(key.clone()) {
+                return Err(serde::de::Error::custom(format!(
+                    "duplicate JSON object key {key}"
+                )));
+            }
+            map.next_value::<DuplicateKeyGuard>()?;
+        }
+        Ok(DuplicateKeyGuard)
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        while sequence.next_element::<DuplicateKeyGuard>()?.is_some() {}
+        Ok(DuplicateKeyGuard)
+    }
+
+    fn visit_bool<E>(self, _: bool) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(DuplicateKeyGuard)
+    }
+
+    fn visit_i64<E>(self, _: i64) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(DuplicateKeyGuard)
+    }
+
+    fn visit_u64<E>(self, _: u64) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(DuplicateKeyGuard)
+    }
+
+    fn visit_f64<E>(self, _: f64) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(DuplicateKeyGuard)
+    }
+
+    fn visit_str<E>(self, _: &str) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(DuplicateKeyGuard)
+    }
+
+    fn visit_string<E>(self, _: String) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(DuplicateKeyGuard)
+    }
+
+    fn visit_none<E>(self) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(DuplicateKeyGuard)
+    }
+
+    fn visit_unit<E>(self) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(DuplicateKeyGuard)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1681,9 +1803,30 @@ fn check_g0_inventory(
             "typed collector snapshot must bind schema, manifest, snapshot, phase, and UTC timestamps",
         );
     }
-    let expected_digest = serde_json::to_value(collector)
-        .map(|value| digest_canonical_json(&value))
+    let expected_value = serde_json::to_value(collector).unwrap_or(Value::Null);
+    let expected_bytes = canonical_json(&expected_value).into_bytes();
+    let decoded_snapshot = BASE64.decode(&inventory.collector_snapshot_bytes_base64);
+    let expected_digest = decoded_snapshot
+        .as_ref()
+        .map(|bytes| digest_bytes(bytes))
         .unwrap_or_default();
+    let snapshot_bytes_valid = decoded_snapshot.as_ref().is_ok_and(|bytes| {
+        reject_duplicate_json_keys(bytes).is_ok()
+            && bytes == &expected_bytes
+            && serde_json::from_slice::<G0CollectorSnapshot>(bytes)
+                .ok()
+                .and_then(|parsed| serde_json::to_value(parsed).ok())
+                .is_some_and(|parsed| canonical_json(&parsed) == canonical_json(&expected_value))
+    });
+    if !snapshot_bytes_valid {
+        finding(
+            findings,
+            "g0-snapshot-bytes",
+            "",
+            "evidence.g0_inventory.collector_snapshot_bytes_base64",
+            "collector snapshot bytes must be canonical JSON for the typed snapshot and parse back to the same object",
+        );
+    }
     if !digest_equal(&inventory.collector_snapshot_sha256, &expected_digest) {
         finding(
             findings,
@@ -1704,10 +1847,11 @@ fn check_g0_inventory(
         "evidence.g0_inventory.collector_snapshot.workload_artifact",
         &collector.workload_artifact,
         &raw_ids,
+        &collector.raw_objects,
         findings,
     );
     check_g0_repositories(manifest, snapshot, collector, &raw_ids, findings);
-    check_g0_reconciliation(collector, &raw_ids, findings);
+    check_g0_reconciliation(manifest, snapshot, collector, &raw_ids, findings);
     check_g0_dependency_graph(manifest, collector, &raw_ids, findings);
     check_g0_model_session(collector, &raw_ids, findings);
     check_g0_access(collector, &raw_ids, findings);
@@ -1747,6 +1891,11 @@ fn check_g0_collector_identity(collector: &G0CollectorSnapshot, findings: &mut V
         || collector.auth.viewer_id.trim().is_empty()
         || collector.auth.viewer_login.trim().is_empty()
         || collector.auth.safe_scopes.is_empty()
+        || collector
+            .auth
+            .safe_scopes
+            .iter()
+            .any(|scope| !G0_ALLOWED_SCOPES.contains(&scope.as_str()))
         || !collector.auth.secret_excluded
     {
         finding(
@@ -1800,9 +1949,19 @@ fn check_g0_request_provenance(collector: &G0CollectorSnapshot, findings: &mut V
         );
     }
     for request in &collector.requests {
+        let query = BASE64.decode(&request.query_base64);
+        let variables = BASE64.decode(&request.variables_base64);
         if request.request_id.trim().is_empty()
             || request.method.trim().is_empty()
             || request.endpoint_or_operation.trim().is_empty()
+            || query.is_err()
+            || variables.is_err()
+            || query
+                .as_ref()
+                .is_ok_and(|bytes| digest_bytes(bytes) != request.query_sha256)
+            || variables
+                .as_ref()
+                .is_ok_and(|bytes| digest_bytes(bytes) != request.variables_sha256)
             || !valid_digest(&request.query_sha256)
             || !valid_digest(&request.variables_sha256)
             || request.auth_identity_ref != "collector.auth"
@@ -1827,6 +1986,19 @@ fn check_g0_request_provenance(collector: &G0CollectorSnapshot, findings: &mut V
             || (request.page.has_next_page
                 && request.page.link_next.is_none()
                 && request.page.cursor_out.is_none())
+            || (request.page.has_next_page
+                && request
+                    .page
+                    .link_next
+                    .as_ref()
+                    .is_some_and(|link| !link.starts_with("https://api.github.com/")))
+            || (!request.page.has_next_page
+                && (request.page.link_next.is_some() || request.page.cursor_out.is_some()))
+            || !g0_request_semantics(
+                request,
+                query.as_ref().ok().map(Vec::as_slice),
+                variables.as_ref().ok().map(Vec::as_slice),
+            )
         {
             finding(
                 findings,
@@ -1861,6 +2033,15 @@ fn check_g0_request_provenance(collector: &G0CollectorSnapshot, findings: &mut V
         }
     }
     for page_set in pages.values() {
+        if !page_set.contains_key(&1) {
+            finding(
+                findings,
+                "g0-pagination",
+                "",
+                "evidence.g0_inventory.collector_snapshot.requests.page.number",
+                "a paginated request stream must capture its first page",
+            );
+        }
         for (number, has_next_page) in page_set {
             if *has_next_page && !page_set.contains_key(&number.saturating_add(1)) {
                 finding(
@@ -1883,12 +2064,21 @@ fn check_g0_request_provenance(collector: &G0CollectorSnapshot, findings: &mut V
         }
     }
     for raw in &collector.raw_objects {
+        let decoded = BASE64.decode(&raw.bytes_base64);
         if !raw_ids.insert(raw.raw_id.clone())
             || !request_ids.contains(&raw.request_id)
             || raw.object_kind.trim().is_empty()
             || raw.canonicalization.trim().is_empty()
             || !valid_digest(&raw.sha256)
             || raw.byte_length == 0
+            || decoded.is_err()
+            || decoded
+                .as_ref()
+                .is_ok_and(|bytes| bytes.len() as u64 != raw.byte_length)
+            || decoded
+                .as_ref()
+                .is_ok_and(|bytes| digest_bytes(bytes) != raw.sha256)
+            || !g0_storage_ref(&raw.storage_ref)
             || raw.media_type.trim().is_empty()
             || raw.storage_ref.trim().is_empty()
         {
@@ -1899,6 +2089,25 @@ fn check_g0_request_provenance(collector: &G0CollectorSnapshot, findings: &mut V
                 "evidence.g0_inventory.collector_snapshot.raw_objects",
                 "raw object references must be unique, request-bound, hashed, and non-empty",
             );
+        }
+    }
+    for request in &collector.requests {
+        for raw_id in std::iter::once(&request.response_raw_ref).chain(request.error_raw_ref.iter())
+        {
+            if let Some(raw) = collector
+                .raw_objects
+                .iter()
+                .find(|raw| &raw.raw_id == raw_id)
+                && raw.request_id != request.request_id
+            {
+                finding(
+                    findings,
+                    "g0-raw-request-binding",
+                    "",
+                    "evidence.g0_inventory.collector_snapshot.requests.raw_refs",
+                    "raw response/error object must belong to the request that produced it",
+                );
+            }
         }
     }
     for request in &collector.requests {
@@ -1988,12 +2197,15 @@ fn check_g0_artifact_reference(
     field: &str,
     artifact: &G0ArtifactReference,
     raw_ids: &BTreeSet<String>,
+    raw_objects: &[G0RawObjectRef],
     findings: &mut Vec<Finding>,
 ) {
     if artifact.name.trim().is_empty()
         || artifact.schema.trim().is_empty()
         || !nonempty_url(&artifact.source_url)
         || !valid_digest(&artifact.sha256)
+        || !valid_sha(&artifact.source_revision)
+        || !valid_digest(&artifact.source_digest)
         || !valid_timestamp(&artifact.observed_at_utc)
     {
         finding(
@@ -2010,6 +2222,19 @@ fn check_g0_artifact_reference(
         raw_ids,
         findings,
     );
+    if !artifact.raw_object_refs.iter().any(|raw_id| {
+        raw_objects
+            .iter()
+            .any(|raw| raw.raw_id == *raw_id && raw.sha256 == artifact.sha256)
+    }) {
+        finding(
+            findings,
+            "g0-artifact-digest",
+            "",
+            field,
+            "artifact digest must match bytes from one of its referenced raw objects",
+        );
+    }
 }
 
 fn g0_valid_applicability(value: &str) -> bool {
@@ -2024,6 +2249,109 @@ fn g0_valid_event(value: &str) -> bool {
         value,
         "push" | "pull_request" | "merge_group" | "workflow_dispatch" | "workflow_run"
     )
+}
+
+fn g0_valid_app_id(value: &str) -> bool {
+    value.parse::<u64>().is_ok_and(|id| id > 0)
+}
+
+fn g0_request_semantics(
+    request: &G0RequestRecord,
+    query: Option<&[u8]>,
+    variables: Option<&[u8]>,
+) -> bool {
+    let endpoint = request.endpoint_or_operation.as_str();
+    let Some(query) = query else {
+        return false;
+    };
+    let Some(variables) = variables else {
+        return false;
+    };
+    if endpoint.contains("://") || endpoint.contains("..") || endpoint.contains('?') {
+        return false;
+    }
+    match request.api {
+        G0ApiKind::Rest => {
+            if request.method != "GET"
+                || !(endpoint == "/user"
+                    || endpoint == "/rate_limit"
+                    || endpoint.starts_with("/repos/")
+                    || endpoint.starts_with("/orgs/"))
+            {
+                return false;
+            }
+            if let Some(repository_path) = endpoint.strip_prefix("/repos/") {
+                let parts = repository_path.split('/').collect::<Vec<_>>();
+                if parts.len() < 2
+                    || parts[0].trim().is_empty()
+                    || parts[1].trim().is_empty()
+                    || !canonical_scope().contains(&format!("{}/{}", parts[0], parts[1]).as_str())
+                {
+                    return false;
+                }
+            } else if let Some(organization_path) = endpoint.strip_prefix("/orgs/") {
+                let parts = organization_path.split('/').collect::<Vec<_>>();
+                let known_owner = canonical_scope().iter().any(|repository| {
+                    repository.split('/').next() == Some(parts.first().copied().unwrap_or_default())
+                });
+                if parts.len() < 2 || parts[0].trim().is_empty() || !known_owner {
+                    return false;
+                }
+            }
+            let query_text = String::from_utf8_lossy(query);
+            if query_text
+                .split('&')
+                .filter(|part| !part.is_empty())
+                .map(|part| part.split('=').next().unwrap_or_default())
+                .any(|key| {
+                    !matches!(
+                        key,
+                        "after"
+                            | "branch"
+                            | "event"
+                            | "filter"
+                            | "first"
+                            | "page"
+                            | "per_page"
+                            | "state"
+                            | "status"
+                    )
+                })
+            {
+                return false;
+            }
+            variables == b"{}" || variables.is_empty()
+        }
+        G0ApiKind::Graphql => {
+            if request.method != "POST"
+                || !matches!(endpoint, "/graphql" | "graphql")
+                || variables.is_empty()
+                || serde_json::from_slice::<Value>(variables)
+                    .ok()
+                    .is_none_or(|value| !value.is_object())
+            {
+                return false;
+            }
+            let query_text = String::from_utf8_lossy(query);
+            let lower = query_text.to_ascii_lowercase();
+            !lower.contains("mutation")
+                && !lower.contains("subscription")
+                && (lower.contains("query") || query_text.trim_start().starts_with('{'))
+        }
+    }
+}
+
+fn g0_storage_ref(value: &str) -> bool {
+    value.starts_with("artifact://") || value.starts_with("memory://")
+}
+
+fn digest_bytes(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("sha256:{hex}")
 }
 
 fn g0_repo_source_url(repository: &str, value: &str) -> bool {
@@ -2127,17 +2455,66 @@ fn check_g0_repositories(
             .iter()
             .find(|candidate| candidate.repository == repo.repository)
         {
-            if repo.default_branch != snapshot_repo.default_branch
+            if repo.repository_id != snapshot_repo.repository_id
+                || repo.default_branch != snapshot_repo.default_branch
                 || repo.default_branch_sha != snapshot_repo.default_branch_sha
             {
                 finding(
                     findings,
                     "g0-snapshot-mismatch",
                     &repo.repository,
-                    "repositories.default_branch/default_branch_sha",
+                    "repositories.repository_id/default_branch/default_branch_sha",
                     "typed collector default branch facts differ from the independently captured snapshot",
                 );
             }
+            if g0_policy_pairs(&repo.rulesets)
+                != g0_context_pairs(&snapshot_repo.ruleset.required_checks)
+            {
+                finding(
+                    findings,
+                    "g0-ruleset-snapshot-mismatch",
+                    &repo.repository,
+                    "repositories.rulesets.required_checks",
+                    "collector ruleset contexts/apps differ from the independent snapshot",
+                );
+            }
+            let collector_workflows = repo
+                .workflows
+                .iter()
+                .map(|workflow| {
+                    (
+                        workflow.path.clone(),
+                        workflow.revision.clone(),
+                        workflow.source_sha.clone(),
+                    )
+                })
+                .collect::<BTreeSet<_>>();
+            let snapshot_workflows = snapshot_repo
+                .workflows
+                .iter()
+                .map(|workflow| {
+                    (
+                        workflow.path.clone(),
+                        workflow.revision.clone(),
+                        workflow.source_sha.clone(),
+                    )
+                })
+                .collect::<BTreeSet<_>>();
+            if collector_workflows != snapshot_workflows {
+                finding(
+                    findings,
+                    "g0-workflow-snapshot-mismatch",
+                    &repo.repository,
+                    "repositories.workflows",
+                    "collector workflow/source inventory differs from the independent snapshot",
+                );
+            }
+            check_g0_main_checks_against_snapshot(
+                &repo.repository,
+                &repo.main_checks,
+                snapshot_repo,
+                findings,
+            );
         } else {
             finding(
                 findings,
@@ -2163,11 +2540,14 @@ fn check_g0_repositories(
                 "complete ruleset inventory is required",
             );
         }
+        let mut ruleset_ids = BTreeSet::new();
+        let mut required_policy_ids = BTreeSet::new();
         for ruleset in &repo.rulesets {
             if ruleset.ruleset_id == 0
                 || ruleset.name.trim().is_empty()
                 || !ruleset.complete
                 || !g0_repo_source_url(&repo.repository, &ruleset.source_url)
+                || !ruleset_ids.insert(ruleset.ruleset_id)
             {
                 finding(
                     findings,
@@ -2187,6 +2567,9 @@ fn check_g0_repositories(
                 if required.context.trim().is_empty()
                     || required.app_id.trim().is_empty()
                     || required.ruleset_id != ruleset.ruleset_id
+                    || !g0_valid_app_id(&required.app_id)
+                    || !required_policy_ids
+                        .insert((required.context.clone(), required.app_id.clone()))
                 {
                     finding(
                         findings,
@@ -2213,12 +2596,18 @@ fn check_g0_repositories(
                 "complete workflow, reusable-action, scanner, and generated-state inventory is required",
             );
         }
+        let mut workflow_ids = BTreeSet::new();
         for workflow in &repo.workflows {
             if workflow.path.trim().is_empty()
                 || !valid_sha(&workflow.revision)
                 || !valid_sha(&workflow.source_sha)
                 || workflow.source_sha != repo.default_branch_sha
                 || workflow.events.is_empty()
+                || !workflow_ids.insert((
+                    workflow.path.clone(),
+                    workflow.revision.clone(),
+                    workflow.source_sha.clone(),
+                ))
             {
                 finding(
                     findings,
@@ -2241,6 +2630,7 @@ fn check_g0_repositories(
                 "evidence.g0_inventory.collector_snapshot.workflow.generated_state",
                 &workflow.generated_state,
                 raw_ids,
+                &collector.raw_objects,
                 findings,
             );
             check_g0_raw_refs(
@@ -2326,10 +2716,13 @@ fn check_g0_repositories(
         check_g0_check_producers(
             &repo.repository,
             &repo.main_checks,
-            &manifest_contexts,
-            &repo.default_branch_sha,
-            "push",
-            raw_ids,
+            G0CheckExpectation {
+                contexts: &manifest_contexts,
+                source_sha: &repo.default_branch_sha,
+                checkout_sha: &repo.default_branch_sha,
+                event: "push",
+                raw_ids,
+            },
             findings,
         );
 
@@ -2372,19 +2765,29 @@ fn check_g0_repositories(
     }
 }
 
+struct G0CheckExpectation<'a> {
+    contexts: &'a BTreeSet<(String, String)>,
+    source_sha: &'a str,
+    checkout_sha: &'a str,
+    event: &'a str,
+    raw_ids: &'a BTreeSet<String>,
+}
+
 fn check_g0_check_producers(
     repository: &str,
     checks: &[G0CheckProducer],
-    expected_contexts: &BTreeSet<(String, String)>,
-    source_sha: &str,
-    expected_event: &str,
-    raw_ids: &BTreeSet<String>,
+    expectation: G0CheckExpectation<'_>,
     findings: &mut Vec<Finding>,
 ) {
     let mut seen = BTreeSet::new();
+    let mut check_run_ids = BTreeSet::new();
+    let mut producer_jobs = BTreeSet::new();
     for check in checks {
         let key = (check.context.clone(), check.app_id.clone());
-        if !seen.insert(key.clone()) {
+        if !seen.insert(key.clone())
+            || !check_run_ids.insert(check.check_run_id)
+            || !producer_jobs.insert((check.workflow_run_id, check.run_attempt, check.job_id))
+        {
             finding(
                 findings,
                 "g0-check-duplicate",
@@ -2395,14 +2798,17 @@ fn check_g0_check_producers(
         }
         if check.context.trim().is_empty()
             || check.app_id.trim().is_empty()
+            || !g0_valid_app_id(&check.app_id)
             || check.check_suite_id == 0
             || check.check_run_id == 0
             || check.workflow_run_id == 0
             || check.run_attempt == 0
             || check.job_id == 0
             || !valid_sha(&check.source_sha)
-            || check.source_sha != source_sha
-            || check.event != expected_event
+            || check.source_sha != expectation.source_sha
+            || !valid_sha(&check.actual_checkout_sha)
+            || check.actual_checkout_sha != expectation.checkout_sha
+            || check.event != expectation.event
             || check.status != "completed"
             || check.conclusion != "success"
             || !g0_repo_source_url(repository, &check.source_url)
@@ -2415,7 +2821,7 @@ fn check_g0_check_producers(
                 "check producer must bind positive API identities, current source SHA, event, successful status/conclusion, and repository URL",
             );
         }
-        if !expected_contexts.contains(&key) {
+        if !expectation.contexts.contains(&key) {
             finding(
                 findings,
                 "g0-check-policy",
@@ -2427,11 +2833,11 @@ fn check_g0_check_producers(
         check_g0_raw_refs(
             "evidence.g0_inventory.collector_snapshot.check_producer.raw_object_refs",
             &check.raw_object_refs,
-            raw_ids,
+            expectation.raw_ids,
             findings,
         );
     }
-    for required in expected_contexts {
+    for required in expectation.contexts {
         if !checks
             .iter()
             .any(|check| check.context == required.0 && check.app_id == required.1)
@@ -2445,6 +2851,42 @@ fn check_g0_check_producers(
                     "missing required check producer {}/{}",
                     required.0, required.1
                 ),
+            );
+        }
+    }
+}
+
+fn check_g0_main_checks_against_snapshot(
+    repository: &str,
+    checks: &[G0CheckProducer],
+    snapshot: &SnapshotRepository,
+    findings: &mut Vec<Finding>,
+) {
+    for check in checks {
+        let matched = snapshot.main_executions.iter().any(|execution| {
+            execution.run_id == check.workflow_run_id
+                && execution.run_attempt == check.run_attempt
+                && execution.trigger_source_sha == check.source_sha
+                && execution.actual_checkout_sha == check.actual_checkout_sha
+                && execution.event == check.event
+                && execution.required_checks.iter().any(|observed| {
+                    observed.context == check.context
+                        && observed.app_id == check.app_id
+                        && observed.run_id == check.workflow_run_id
+                        && observed.job_id == check.job_id.to_string()
+                        && observed.event == check.event
+                        && observed.status == check.status
+                        && observed.conclusion == check.conclusion
+                        && observed.source_url == check.source_url
+                })
+        });
+        if !matched {
+            finding(
+                findings,
+                "g0-check-snapshot-mismatch",
+                repository,
+                "repositories.main_checks",
+                "collector check producer does not match an independently observed main check/run/job tuple",
             );
         }
     }
@@ -2467,6 +2909,7 @@ fn check_g0_pull_request(
         || !valid_sha(&pr.head_sha)
         || !valid_sha(&pr.base_sha)
         || !valid_sha(&pr.tested_merge_sha)
+        || !g0_repo_source_url(repository, &pr.source_url)
     {
         finding(
             findings,
@@ -2508,14 +2951,6 @@ fn check_g0_pull_request(
         raw_ids,
         findings,
     );
-    let mut allowed_source_shas = BTreeSet::from([
-        pr.head_sha.clone(),
-        pr.base_sha.clone(),
-        pr.tested_merge_sha.clone(),
-    ]);
-    if let Some(merge_group) = &pr.merge_group_sha {
-        allowed_source_shas.insert(merge_group.clone());
-    }
     let mut binding_run_ids = BTreeSet::new();
     if pr.workflow_bindings.is_empty() {
         finding(
@@ -2529,9 +2964,11 @@ fn check_g0_pull_request(
     for binding in &pr.workflow_bindings {
         if binding.workflow_path.trim().is_empty()
             || !valid_sha(&binding.workflow_revision)
-            || !g0_valid_event(&binding.event)
+            || binding.event != "pull_request"
             || !valid_sha(&binding.source_sha)
-            || !allowed_source_shas.contains(&binding.source_sha)
+            || binding.source_sha != pr.head_sha
+            || !valid_sha(&binding.actual_checkout_sha)
+            || binding.actual_checkout_sha != pr.tested_merge_sha
             || binding.run_ids.is_empty()
         {
             finding(
@@ -2570,9 +3007,15 @@ fn check_g0_pull_request(
         );
     }
     let mut seen_checks = BTreeSet::new();
+    let mut check_run_ids = BTreeSet::new();
+    let mut producer_jobs = BTreeSet::new();
     for check in &pr.required_check_producers {
         let key = (check.context.clone(), check.app_id.clone());
-        if !seen_checks.insert(key.clone()) || !expected_contexts.contains(&key) {
+        if !seen_checks.insert(key.clone())
+            || !check_run_ids.insert(check.check_run_id)
+            || !producer_jobs.insert((check.workflow_run_id, check.run_attempt, check.job_id))
+            || !expected_contexts.contains(&key)
+        {
             finding(
                 findings,
                 "g0-pr-check-policy",
@@ -2586,9 +3029,12 @@ fn check_g0_pull_request(
             || check.workflow_run_id == 0
             || check.run_attempt == 0
             || check.job_id == 0
+            || !g0_valid_app_id(&check.app_id)
             || !valid_sha(&check.source_sha)
-            || !allowed_source_shas.contains(&check.source_sha)
-            || !g0_valid_event(&check.event)
+            || check.source_sha != pr.head_sha
+            || !valid_sha(&check.actual_checkout_sha)
+            || check.actual_checkout_sha != pr.tested_merge_sha
+            || check.event != "pull_request"
             || check.status != "completed"
             || check.conclusion != "success"
             || !g0_repo_source_url(repository, &check.source_url)
@@ -2639,23 +3085,96 @@ fn check_g0_pull_request(
             .open_prs
             .iter()
             .find(|candidate| candidate.number == pr.number)
-            && (snapshot_pr.head_sha != pr.head_sha
+        {
+            let snapshot_run_ids = snapshot_pr
+                .executions
+                .iter()
+                .map(|execution| execution.run_id)
+                .collect::<BTreeSet<_>>();
+            if snapshot_run_ids != binding_run_ids {
+                finding(
+                    findings,
+                    "g0-pr-workflow-binding",
+                    repository,
+                    "open_prs.workflow_bindings.run_ids",
+                    "PR workflow bindings must cover the complete independently observed execution set",
+                );
+            }
+            for binding in &pr.workflow_bindings {
+                for run_id in &binding.run_ids {
+                    let matched = snapshot_pr.executions.iter().any(|execution| {
+                        execution.run_id == *run_id
+                            && execution.workflow_path == binding.workflow_path
+                            && execution.workflow_revision == binding.workflow_revision
+                            && execution.event == binding.event
+                            && execution.trigger_source_sha == binding.source_sha
+                            && execution.actual_checkout_sha == binding.actual_checkout_sha
+                    });
+                    if !matched {
+                        finding(
+                            findings,
+                            "g0-pr-workflow-snapshot-mismatch",
+                            repository,
+                            "open_prs.workflow_bindings",
+                            "PR workflow binding does not match an independently observed execution identity",
+                        );
+                    }
+                }
+            }
+            if snapshot_pr.state != pr.state
+                || snapshot_pr.draft != pr.draft
+                || snapshot_pr.author != pr.author
+                || snapshot_pr.author_association != pr.author_association
+                || snapshot_pr.head_repository != pr.head_repository
+                || snapshot_pr.source_url != pr.source_url
+                || snapshot_pr.head_sha != pr.head_sha
                 || snapshot_pr.base_sha != pr.base_sha
                 || snapshot_pr.merge_sha.as_deref() != Some(pr.tested_merge_sha.as_str())
-                || snapshot_pr.merge_group_sha != pr.merge_group_sha)
-        {
-            finding(
-                findings,
-                "g0-pr-snapshot-mismatch",
-                repository,
-                "open_prs.head_sha/base_sha/tested_merge_sha",
-                "typed PR identity differs from the independently captured snapshot",
-            );
+                || snapshot_pr.merge_group_sha != pr.merge_group_sha
+            {
+                finding(
+                    findings,
+                    "g0-pr-snapshot-mismatch",
+                    repository,
+                    "open_prs.identity",
+                    "typed PR identity differs from the independently captured snapshot",
+                );
+            }
+            for check in &pr.required_check_producers {
+                let matched = snapshot_pr.executions.iter().any(|execution| {
+                    execution.run_id == check.workflow_run_id
+                        && execution.run_attempt == check.run_attempt
+                        && execution.event == check.event
+                        && execution.trigger_source_sha == check.source_sha
+                        && execution.actual_checkout_sha == check.actual_checkout_sha
+                        && execution.required_checks.iter().any(|observed| {
+                            observed.context == check.context
+                                && observed.app_id == check.app_id
+                                && observed.job_id == check.job_id.to_string()
+                                && observed.run_id == check.workflow_run_id
+                                && observed.status == check.status
+                                && observed.conclusion == check.conclusion
+                                && observed.source_url == check.source_url
+                                && observed.event == check.event
+                        })
+                });
+                if !matched {
+                    finding(
+                        findings,
+                        "g0-pr-check-snapshot-mismatch",
+                        repository,
+                        "open_prs.required_check_producers",
+                        "PR check producer does not match an independently observed run/check/job tuple",
+                    );
+                }
+            }
         }
     }
 }
 
 fn check_g0_reconciliation(
+    manifest: &ManifestDocument,
+    snapshot: &SnapshotDocument,
     collector: &G0CollectorSnapshot,
     raw_ids: &BTreeSet<String>,
     findings: &mut Vec<Finding>,
@@ -2697,15 +3216,78 @@ fn check_g0_reconciliation(
             "reconciliation must cover the fixed canonical 32 repositories exactly",
         );
     }
-    if before != after {
+    let current = g0_current_revision_map(manifest, snapshot, collector, findings);
+    if before != after || before != current {
         finding(
             findings,
             "g0-reconciliation",
             "",
             "collector_snapshot.reconciliation.pre_state/post_state",
-            "pre/post revision and PR identities must match exactly",
+            "reconciliation must match the current collector repository/PR identities and independent snapshot",
         );
     }
+}
+
+fn g0_current_revision_map(
+    manifest: &ManifestDocument,
+    snapshot: &SnapshotDocument,
+    collector: &G0CollectorSnapshot,
+    findings: &mut Vec<Finding>,
+) -> BTreeMap<String, String> {
+    let mut result = BTreeMap::new();
+    for repo in &collector.repositories {
+        let prs = repo
+            .open_prs
+            .iter()
+            .map(|pr| {
+                (
+                    pr.number,
+                    (
+                        pr.head_sha.clone(),
+                        pr.base_sha.clone(),
+                        pr.tested_merge_sha.clone(),
+                        pr.merge_group_sha.clone(),
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let value =
+            serde_json::to_string(&(repo.default_branch_sha.clone(), prs)).unwrap_or_default();
+        result.insert(repo.repository.clone(), value);
+    }
+    for manifest_repo in &manifest.repositories {
+        if let Some(repo) = collector
+            .repositories
+            .iter()
+            .find(|repo| repo.repository == manifest_repo.repository)
+            && repo.default_branch != manifest_repo.default_branch
+        {
+            finding(
+                findings,
+                "g0-reconciliation",
+                &manifest_repo.repository,
+                "collector_snapshot.repositories.default_branch",
+                "reconciliation branch identity differs from the reviewed manifest",
+            );
+        }
+    }
+    for snapshot_repo in &snapshot.repositories {
+        if let Some(repo) = collector
+            .repositories
+            .iter()
+            .find(|repo| repo.repository == snapshot_repo.repository)
+            && repo.default_branch_sha != snapshot_repo.default_branch_sha
+        {
+            finding(
+                findings,
+                "g0-reconciliation",
+                &snapshot_repo.repository,
+                "collector_snapshot.repositories.default_branch_sha",
+                "reconciliation branch SHA differs from the independent snapshot",
+            );
+        }
+    }
+    result
 }
 
 fn g0_revision_map(
@@ -2824,19 +3406,36 @@ fn check_g0_dependency_graph(
     let mut node_ids = BTreeSet::new();
     let mut adjacency = BTreeMap::<String, Vec<String>>::new();
     let mut node_edges = BTreeSet::new();
+    let mut edge_ids = BTreeSet::new();
+    let allowed_node_kinds = BTreeSet::from([
+        "artifact", "check", "child", "package", "release", "source", "workload", "workflow",
+    ]);
+    let allowed_edge_kinds = BTreeSet::from([
+        "consumes",
+        "dependency",
+        "produces",
+        "requires",
+        "workload-to-check",
+        "workload-to-child",
+        "workload-to-package",
+        "workload-to-release",
+    ]);
     for node in &graph.nodes {
         if node.id.trim().is_empty()
             || !node_ids.insert(node.id.clone())
             || node.kind.trim().is_empty()
+            || !allowed_node_kinds.contains(node.kind.as_str())
             || node.workload_id.trim().is_empty()
             || !g0_valid_applicability(&node.applicability)
+            || !valid_sha(&node.source_sha)
+            || node.source_ref.trim().is_empty()
         {
             finding(
                 findings,
                 "g0-dependency-node",
                 "",
                 "collector_snapshot.dependency_graph.nodes",
-                "graph nodes require unique source-bound identity, repository, workload, and applicability",
+            "graph nodes require unique typed identity, source revision/ref, repository, workload, and applicability",
             );
         }
         validate_repository_name(
@@ -2851,13 +3450,28 @@ fn check_g0_dependency_graph(
             findings,
         );
     }
+    let node_by_id = graph
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect::<BTreeMap<_, _>>();
     for repo in &manifest.repositories {
         for workload in &repo.expected_workload_ids {
-            if !graph
-                .nodes
+            let required = repo
+                .expected_jobs
                 .iter()
-                .any(|node| node.repository == repo.repository && node.workload_id == *workload)
-            {
+                .any(|job| job.workload_id == *workload && job.required);
+            if !graph.nodes.iter().any(|node| {
+                node.repository == repo.repository
+                    && node.workload_id == *workload
+                    && node.kind == "workload"
+                    && (!required || node.applicability == "required")
+                    && (g0_graph_source_matches_manifest(node.source_sha.as_str(), repo)
+                        || collector.repositories.iter().any(|observed| {
+                            observed.repository == repo.repository
+                                && observed.default_branch_sha == node.source_sha
+                        }))
+            }) {
                 finding(
                     findings,
                     "g0-dependency-node",
@@ -2869,19 +3483,32 @@ fn check_g0_dependency_graph(
         }
     }
     for edge in &graph.edges {
+        let edge_id = (
+            edge.from.clone(),
+            edge.to.clone(),
+            edge.kind.clone(),
+            edge.required,
+        );
         if edge.from.trim().is_empty()
             || edge.to.trim().is_empty()
             || edge.from == edge.to
             || edge.kind.trim().is_empty()
+            || !allowed_edge_kinds.contains(edge.kind.as_str())
             || !node_ids.contains(&edge.from)
             || !node_ids.contains(&edge.to)
+            || !valid_sha(&edge.source_sha)
+            || edge.source_ref.trim().is_empty()
+            || !edge_ids.insert(edge_id)
+            || node_by_id
+                .get(edge.from.as_str())
+                .is_some_and(|node| node.source_sha != edge.source_sha)
         {
             finding(
                 findings,
                 "g0-dependency-edge",
                 "",
                 "collector_snapshot.dependency_graph.edges",
-                "graph edges require distinct existing nodes and a typed edge kind",
+                "graph edges require unique distinct existing nodes, typed relation, and source revision/ref",
             );
         }
         adjacency
@@ -2906,6 +3533,80 @@ fn check_g0_dependency_graph(
                 "dependency_graph.edges",
                 format!("workload node {} has no dependency edge", node.id),
             );
+        }
+    }
+    for repo in &manifest.repositories {
+        for job in repo.expected_jobs.iter().filter(|job| job.required) {
+            let Some(workload) = graph.nodes.iter().find(|node| {
+                node.repository == repo.repository
+                    && node.workload_id == job.workload_id
+                    && node.kind == "workload"
+            }) else {
+                continue;
+            };
+            let outgoing = graph
+                .edges
+                .iter()
+                .filter(|edge| edge.from == workload.id && edge.required)
+                .collect::<Vec<_>>();
+            if !outgoing.iter().any(|edge| {
+                edge.kind == "workload-to-check"
+                    && node_by_id
+                        .get(edge.to.as_str())
+                        .is_some_and(|node| node.kind == "check")
+            }) {
+                finding(
+                    findings,
+                    "g0-dependency-obligation",
+                    &repo.repository,
+                    "dependency_graph.edges",
+                    format!(
+                        "required workload {} lacks a required-check edge",
+                        job.workload_id
+                    ),
+                );
+            }
+            if job.child_workflow.is_some()
+                && !outgoing.iter().any(|edge| {
+                    edge.kind == "workload-to-child"
+                        && node_by_id
+                            .get(edge.to.as_str())
+                            .is_some_and(|node| node.kind == "child")
+                })
+            {
+                finding(
+                    findings,
+                    "g0-dependency-obligation",
+                    &repo.repository,
+                    "dependency_graph.edges",
+                    format!("workload {} lacks its required child edge", job.workload_id),
+                );
+            }
+            if matches!(
+                repo.release_applicability,
+                Applicability::Required | Applicability::Applicable
+            ) && (!outgoing.iter().any(|edge| {
+                edge.kind == "workload-to-release"
+                    && node_by_id
+                        .get(edge.to.as_str())
+                        .is_some_and(|node| node.kind == "release")
+            }) || !outgoing.iter().any(|edge| {
+                edge.kind == "workload-to-package"
+                    && node_by_id
+                        .get(edge.to.as_str())
+                        .is_some_and(|node| node.kind == "package")
+            })) {
+                finding(
+                    findings,
+                    "g0-dependency-obligation",
+                    &repo.repository,
+                    "dependency_graph.edges",
+                    format!(
+                        "workload {} lacks release/package inventory edges",
+                        job.workload_id
+                    ),
+                );
+            }
         }
     }
     if g0_graph_has_cycle(&node_ids, &adjacency) {
@@ -2948,6 +3649,15 @@ fn g0_graph_has_cycle(nodes: &BTreeSet<String>, adjacency: &BTreeMap<String, Vec
     nodes
         .iter()
         .any(|node| visit(node, adjacency, &mut visiting, &mut visited))
+}
+
+fn g0_graph_source_matches_manifest(source_sha: &str, repo: &ManifestRepository) -> bool {
+    [
+        repo.generator_revision.as_str(),
+        repo.workflow_revision.as_str(),
+        repo.runtime_source_sha.as_str(),
+    ]
+    .contains(&source_sha)
 }
 
 fn check_g0_model_session(
@@ -5849,11 +6559,600 @@ mod tests {
                 schema: "velnor.workload-matrix.v1".to_owned(),
                 source_url: "https://github.com/tailrocks/velnor/blob/reviewed/matrix.json"
                     .to_owned(),
-                sha256: digest('b'),
+                sha256: digest_bytes(b"{}"),
+                source_revision: sha('a'),
+                source_digest: digest('c'),
                 observed_at_utc: "2026-09-20T00:00:00Z".to_owned(),
                 raw_object_refs: Vec::new(),
             },
         }
+    }
+
+    fn typed_inventory(collector: G0CollectorSnapshot) -> G0InventoryEvidence {
+        let value = serde_json::to_value(&collector).unwrap();
+        let bytes = canonical_json(&value).into_bytes();
+        G0InventoryEvidence {
+            collector_snapshot: collector,
+            collector_snapshot_bytes_base64: BASE64.encode(&bytes),
+            collector_snapshot_sha256: digest_bytes(&bytes),
+        }
+    }
+
+    /// Complete typed collector fixture.  It is intentionally generated from
+    /// the checker-owned canonical scope, with every repository, current PR,
+    /// workflow, required check, raw object, reconciliation row, graph edge,
+    /// model observation, and access observation populated.  It is a positive
+    /// contract fixture, not a claim about the live fleet.
+    fn complete_g0_fixture() -> (ManifestDocument, SnapshotDocument, G0InventoryEvidence) {
+        let raw = G0RawObjectRef {
+            raw_id: "raw-1".to_owned(),
+            request_id: "request-1".to_owned(),
+            object_kind: "github-response".to_owned(),
+            canonicalization: "jcs".to_owned(),
+            sha256: digest_bytes(b"{}"),
+            byte_length: 2,
+            bytes_base64: BASE64.encode(b"{}"),
+            media_type: "application/json".to_owned(),
+            storage_ref: "artifact://g0-fixture/raw-1".to_owned(),
+        };
+        let mut manifest_repositories = Vec::with_capacity(REQUIRED_REPOSITORIES);
+        let mut snapshot_repositories = Vec::with_capacity(REQUIRED_REPOSITORIES);
+        let mut collector_repositories = Vec::with_capacity(REQUIRED_REPOSITORIES);
+        let mut pre_state = Vec::with_capacity(REQUIRED_REPOSITORIES);
+        let mut post_state = Vec::with_capacity(REQUIRED_REPOSITORIES);
+        let mut access = Vec::with_capacity(REQUIRED_REPOSITORIES);
+        let source_sha = sha('a');
+        let head_sha = sha('b');
+        let merge_sha = sha('c');
+        let workflow_path = ".github/workflows/ci.yml";
+        let workflow_url_suffix = "blob/main/.github/workflows/ci.yml";
+
+        for (index, repository) in CANONICAL_REPOSITORIES.iter().enumerate() {
+            let repository = (*repository).to_owned();
+            let repository_id = index as u64 + 1;
+            let main_run_id = 10_000 + repository_id;
+            let main_check_suite_id = 20_000 + repository_id;
+            let main_check_run_id = 30_000 + repository_id;
+            let main_job_id = 40_000 + repository_id;
+            let pr_run_id = 50_000 + repository_id;
+            let pr_check_suite_id = 60_000 + repository_id;
+            let pr_check_run_id = 70_000 + repository_id;
+            let pr_job_id = 80_000 + repository_id;
+            let run_url = format!("https://github.com/{repository}/actions/runs/{main_run_id}");
+            let pr_run_url = format!("https://github.com/{repository}/actions/runs/{pr_run_id}");
+            let repository_url = format!("https://github.com/{repository}");
+            let rules_url = format!("{repository_url}/settings/rules");
+            let workflow_url = format!("{repository_url}/{workflow_url_suffix}");
+            let main_check_url = format!("{repository_url}/runs/{main_check_run_id}");
+            let pr_check_url = format!("{repository_url}/runs/{pr_check_run_id}");
+            let main_job_id_string = main_job_id.to_string();
+            let pr_job_id_string = pr_job_id.to_string();
+            let required_context = RequiredContext {
+                context: "ci".to_owned(),
+                app_id: "123".to_owned(),
+            };
+            let workload_platform = WorkloadPlatform {
+                workload_id: "scan".to_owned(),
+                platform: "linux".to_owned(),
+                architecture: "amd64".to_owned(),
+            };
+            manifest_repositories.push(ManifestRepository {
+                repository: repository.clone(),
+                repository_role: "library".to_owned(),
+                default_branch: "main".to_owned(),
+                expected_workload_ids: vec!["scan".to_owned()],
+                required_check_contexts_and_apps: vec![required_context.clone()],
+                workload_platform_architecture: vec![workload_platform],
+                expected_jobs: vec![ExpectedJobSpec {
+                    job_id: "scan".to_owned(),
+                    workload_id: "scan".to_owned(),
+                    provider: "github".to_owned(),
+                    platform: "linux".to_owned(),
+                    architecture: "amd64".to_owned(),
+                    required: true,
+                    child_workflow: None,
+                }],
+                generated_plan_digest: digest('a'),
+                workflow_path: workflow_path.to_owned(),
+                workflow_revision: source_sha.clone(),
+                provider_eligibility: BTreeMap::from([
+                    ("github".to_owned(), Eligibility::Eligible),
+                    ("velnor".to_owned(), Eligibility::NotApplicable),
+                ]),
+                host_contracts: BTreeMap::new(),
+                release_applicability: Applicability::NotApplicable,
+                generator_revision: source_sha.clone(),
+                runtime_product_id: "velnor".to_owned(),
+                generator_artifact_digest: digest('a'),
+                configuration_digest: digest('a'),
+                generated_tree_digest: digest('a'),
+                scan_state_digest: digest('a'),
+                runtime_release_version: "1.0.0".to_owned(),
+                runtime_source_sha: source_sha.clone(),
+                job_image_digest: digest('a'),
+            });
+
+            let main_job = JobObservation {
+                job_id: main_job_id_string.clone(),
+                job_name: "scan".to_owned(),
+                workload_id: "scan".to_owned(),
+                provider: "github".to_owned(),
+                platform: "linux".to_owned(),
+                architecture: "amd64".to_owned(),
+                status: "completed".to_owned(),
+                conclusion: "success".to_owned(),
+                event: "push".to_owned(),
+                runner_name: "GitHub Actions 1".to_owned(),
+                host_id: format!("github-runner-{repository_id}"),
+                runner_kind: "github-hosted".to_owned(),
+                runner_labels: vec!["ubuntu-24.04".to_owned()],
+                source_url: run_url.clone(),
+            };
+            let main_check = CheckObservation {
+                context: "ci".to_owned(),
+                app_id: "123".to_owned(),
+                status: "completed".to_owned(),
+                conclusion: "success".to_owned(),
+                run_id: main_run_id,
+                job_id: main_job_id_string.clone(),
+                source_url: main_check_url.clone(),
+                event: "push".to_owned(),
+            };
+            let main_execution = ExecutionObservation {
+                run_id: main_run_id,
+                run_attempt: 1,
+                run_url: run_url.clone(),
+                workflow_path: workflow_path.to_owned(),
+                workflow_revision: source_sha.clone(),
+                event: "push".to_owned(),
+                trigger_source_sha: source_sha.clone(),
+                actual_checkout_sha: source_sha.clone(),
+                status: "completed".to_owned(),
+                conclusion: "success".to_owned(),
+                provider: "github".to_owned(),
+                runner_name: "GitHub Actions 1".to_owned(),
+                host_id: format!("github-runner-{repository_id}"),
+                runner_kind: "github-hosted".to_owned(),
+                runner_labels: vec!["ubuntu-24.04".to_owned()],
+                jobs: vec![main_job],
+                required_checks: vec![main_check],
+                child_runs: Vec::new(),
+            };
+            let pr_job = JobObservation {
+                job_id: pr_job_id_string.clone(),
+                job_name: "scan".to_owned(),
+                workload_id: "scan".to_owned(),
+                provider: "github".to_owned(),
+                platform: "linux".to_owned(),
+                architecture: "amd64".to_owned(),
+                status: "completed".to_owned(),
+                conclusion: "success".to_owned(),
+                event: "pull_request".to_owned(),
+                runner_name: "GitHub Actions 1".to_owned(),
+                host_id: format!("github-pr-runner-{repository_id}"),
+                runner_kind: "github-hosted".to_owned(),
+                runner_labels: vec!["ubuntu-24.04".to_owned()],
+                source_url: pr_run_url.clone(),
+            };
+            let pr_check = CheckObservation {
+                context: "ci".to_owned(),
+                app_id: "123".to_owned(),
+                status: "completed".to_owned(),
+                conclusion: "success".to_owned(),
+                run_id: pr_run_id,
+                job_id: pr_job_id_string.clone(),
+                source_url: pr_check_url.clone(),
+                event: "pull_request".to_owned(),
+            };
+            let pr_execution = ExecutionObservation {
+                run_id: pr_run_id,
+                run_attempt: 1,
+                run_url: pr_run_url.clone(),
+                workflow_path: workflow_path.to_owned(),
+                workflow_revision: source_sha.clone(),
+                event: "pull_request".to_owned(),
+                trigger_source_sha: head_sha.clone(),
+                actual_checkout_sha: merge_sha.clone(),
+                status: "completed".to_owned(),
+                conclusion: "success".to_owned(),
+                provider: "github".to_owned(),
+                runner_name: "GitHub Actions 1".to_owned(),
+                host_id: format!("github-pr-runner-{repository_id}"),
+                runner_kind: "github-hosted".to_owned(),
+                runner_labels: vec!["ubuntu-24.04".to_owned()],
+                jobs: vec![pr_job],
+                required_checks: vec![pr_check],
+                child_runs: Vec::new(),
+            };
+            let pull_request = SnapshotPullRequest {
+                number: 1,
+                state: "open".to_owned(),
+                draft: false,
+                author: "author".to_owned(),
+                author_association: "CONTRIBUTOR".to_owned(),
+                head_repository: repository.clone(),
+                head_sha: head_sha.clone(),
+                base_sha: source_sha.clone(),
+                merge_sha: Some(merge_sha.clone()),
+                merge_group_sha: None,
+                source_url: format!("{repository_url}/pull/1"),
+                executions: vec![pr_execution],
+            };
+            snapshot_repositories.push(SnapshotRepository {
+                repository: repository.clone(),
+                repository_id,
+                default_branch: "main".to_owned(),
+                default_branch_sha: source_sha.clone(),
+                ruleset: RulesetObservation {
+                    required_checks: vec![required_context.clone()],
+                    source_url: rules_url,
+                    pages_complete: true,
+                },
+                workflows: vec![WorkflowObservation {
+                    path: workflow_path.to_owned(),
+                    revision: source_sha.clone(),
+                    source_sha: source_sha.clone(),
+                    event: "push".to_owned(),
+                    source_url: workflow_url.clone(),
+                }],
+                main_executions: vec![main_execution],
+                open_prs: vec![pull_request],
+            });
+
+            let generated_state = G0ArtifactReference {
+                name: format!("generated-state-{repository_id}"),
+                schema: "velnor.generated-state.v1".to_owned(),
+                source_url: workflow_url,
+                sha256: digest_bytes(b"{}"),
+                source_revision: source_sha.clone(),
+                source_digest: digest('c'),
+                observed_at_utc: "2026-09-20T00:00:00Z".to_owned(),
+                raw_object_refs: vec!["raw-1".to_owned()],
+            };
+            let main_check_producer = G0CheckProducer {
+                context: "ci".to_owned(),
+                app_id: "123".to_owned(),
+                check_suite_id: main_check_suite_id,
+                check_run_id: main_check_run_id,
+                workflow_run_id: main_run_id,
+                run_attempt: 1,
+                job_id: main_job_id,
+                source_sha: source_sha.clone(),
+                actual_checkout_sha: source_sha.clone(),
+                event: "push".to_owned(),
+                status: "completed".to_owned(),
+                conclusion: "success".to_owned(),
+                source_url: main_check_url,
+                raw_object_refs: vec!["raw-1".to_owned()],
+            };
+            let pr_check_producer = G0CheckProducer {
+                context: "ci".to_owned(),
+                app_id: "123".to_owned(),
+                check_suite_id: pr_check_suite_id,
+                check_run_id: pr_check_run_id,
+                workflow_run_id: pr_run_id,
+                run_attempt: 1,
+                job_id: pr_job_id,
+                source_sha: head_sha.clone(),
+                actual_checkout_sha: merge_sha.clone(),
+                event: "pull_request".to_owned(),
+                status: "completed".to_owned(),
+                conclusion: "success".to_owned(),
+                source_url: pr_check_url,
+                raw_object_refs: vec!["raw-1".to_owned()],
+            };
+            collector_repositories.push(G0RepositoryInventory {
+                repository: repository.clone(),
+                repository_id,
+                default_branch: "main".to_owned(),
+                default_branch_sha: source_sha.clone(),
+                rulesets: vec![G0RulesetInventory {
+                    ruleset_id: repository_id,
+                    name: "required-ci".to_owned(),
+                    source_url: format!("https://github.com/{repository}/settings/rules"),
+                    complete: true,
+                    required_checks: vec![G0RequiredCheckPolicy {
+                        context: "ci".to_owned(),
+                        app_id: "123".to_owned(),
+                        ruleset_id: repository_id,
+                        raw_object_refs: vec!["raw-1".to_owned()],
+                    }],
+                    raw_object_refs: vec!["raw-1".to_owned()],
+                }],
+                workflows: vec![G0WorkflowInventory {
+                    path: workflow_path.to_owned(),
+                    revision: source_sha.clone(),
+                    source_sha: source_sha.clone(),
+                    events: vec!["push".to_owned(), "pull_request".to_owned()],
+                    reusable_workflows: Vec::new(),
+                    actions: Vec::new(),
+                    scanners: Vec::new(),
+                    generated_state,
+                    raw_object_refs: vec!["raw-1".to_owned()],
+                }],
+                open_prs: vec![G0PullRequestInventory {
+                    number: 1,
+                    state: "open".to_owned(),
+                    draft: false,
+                    author: "author".to_owned(),
+                    author_association: "CONTRIBUTOR".to_owned(),
+                    head_repository: repository.clone(),
+                    head_sha: head_sha.clone(),
+                    base_sha: source_sha.clone(),
+                    tested_merge_sha: merge_sha.clone(),
+                    merge_group_sha: None,
+                    trust: G0TrustObservation {
+                        state: "trusted".to_owned(),
+                        reason: "fixture trust observation".to_owned(),
+                        raw_object_refs: vec!["raw-1".to_owned()],
+                    },
+                    applicability: "required".to_owned(),
+                    source_url: format!("https://github.com/{repository}/pull/1"),
+                    workflow_bindings: vec![G0WorkflowBinding {
+                        workflow_path: workflow_path.to_owned(),
+                        workflow_revision: source_sha.clone(),
+                        event: "pull_request".to_owned(),
+                        source_sha: head_sha.clone(),
+                        actual_checkout_sha: merge_sha.clone(),
+                        run_ids: vec![pr_run_id],
+                        raw_object_refs: vec!["raw-1".to_owned()],
+                    }],
+                    required_check_producers: vec![pr_check_producer],
+                    raw_object_refs: vec!["raw-1".to_owned()],
+                }],
+                main_checks: vec![main_check_producer],
+                raw_object_refs: vec!["raw-1".to_owned()],
+            });
+            let revision = G0PullRequestRevision {
+                number: 1,
+                head_sha: head_sha.clone(),
+                base_sha: source_sha.clone(),
+                tested_merge_sha: merge_sha.clone(),
+                merge_group_sha: None,
+                raw_object_refs: vec!["raw-1".to_owned()],
+            };
+            pre_state.push(G0RepositoryRevision {
+                repository: repository.clone(),
+                default_branch_sha: source_sha.clone(),
+                prs: vec![revision.clone()],
+                raw_object_refs: vec!["raw-1".to_owned()],
+            });
+            post_state.push(G0RepositoryRevision {
+                repository,
+                default_branch_sha: source_sha.clone(),
+                prs: vec![revision],
+                raw_object_refs: vec!["raw-1".to_owned()],
+            });
+            access.push(G0AccessObservation {
+                repository: (*CANONICAL_REPOSITORIES.get(index).unwrap()).to_owned(),
+                state: "complete".to_owned(),
+                scopes: vec!["metadata:read".to_owned()],
+                gaps: Vec::new(),
+                raw_object_refs: vec!["raw-1".to_owned()],
+            });
+        }
+        let nodes = CANONICAL_REPOSITORIES
+            .iter()
+            .flat_map(|repository| {
+                [
+                    G0GraphNode {
+                        id: format!("workload:{repository}:scan"),
+                        kind: "workload".to_owned(),
+                        repository: (*repository).to_owned(),
+                        workload_id: "scan".to_owned(),
+                        applicability: "required".to_owned(),
+                        source_sha: source_sha.clone(),
+                        source_ref: "refs/heads/main".to_owned(),
+                        raw_object_refs: vec!["raw-1".to_owned()],
+                    },
+                    G0GraphNode {
+                        id: format!("check:{repository}:ci"),
+                        kind: "check".to_owned(),
+                        repository: (*repository).to_owned(),
+                        workload_id: "scan".to_owned(),
+                        applicability: "required".to_owned(),
+                        source_sha: source_sha.clone(),
+                        source_ref: "refs/heads/main".to_owned(),
+                        raw_object_refs: vec!["raw-1".to_owned()],
+                    },
+                ]
+            })
+            .collect::<Vec<_>>();
+        let edges = CANONICAL_REPOSITORIES
+            .iter()
+            .map(|repository| G0GraphEdge {
+                from: format!("workload:{repository}:scan"),
+                to: format!("check:{repository}:ci"),
+                kind: "workload-to-check".to_owned(),
+                required: true,
+                source_sha: source_sha.clone(),
+                source_ref: "refs/heads/main".to_owned(),
+                raw_object_refs: vec!["raw-1".to_owned()],
+            })
+            .collect::<Vec<_>>();
+        let collector = G0CollectorSnapshot {
+            schema_version: EVIDENCE_SCHEMA_VERSION,
+            snapshot_id: "snapshot".to_owned(),
+            manifest_id: REVIEWED_MANIFEST_ID.to_owned(),
+            phase: "G0".to_owned(),
+            observed_at_utc: "2026-09-20T00:00:00Z".to_owned(),
+            completed_at_utc: "2026-09-20T00:00:01Z".to_owned(),
+            collector: G0CollectorIdentity {
+                name: "fixture-collector".to_owned(),
+                revision: source_sha.clone(),
+                mode: "read_only".to_owned(),
+                api_base: "https://api.github.com".to_owned(),
+                api_versions: vec!["2022-11-28".to_owned()],
+            },
+            auth: G0AuthIdentity {
+                provider: "github".to_owned(),
+                viewer_id: "viewer-id".to_owned(),
+                viewer_login: "viewer".to_owned(),
+                safe_scopes: G0_ALLOWED_SCOPES
+                    .iter()
+                    .map(|scope| (*scope).to_owned())
+                    .collect(),
+                secret_excluded: true,
+            },
+            rate_limit: G0RateLimitObservation {
+                api: "core".to_owned(),
+                limit: 5_000,
+                remaining: 4_999,
+                used: 1,
+                reset_at_utc: "2026-09-20T01:00:00Z".to_owned(),
+                observed_at_utc: "2026-09-20T00:00:01Z".to_owned(),
+            },
+            requests: vec![G0RequestRecord {
+                request_id: "request-1".to_owned(),
+                api: G0ApiKind::Rest,
+                method: "GET".to_owned(),
+                endpoint_or_operation: "/repos/tailrocks/velnor".to_owned(),
+                query_base64: BASE64.encode(b"page=1"),
+                variables_base64: BASE64.encode(b"{}"),
+                query_sha256: digest_bytes(b"page=1"),
+                variables_sha256: digest_bytes(b"{}"),
+                auth_identity_ref: "collector.auth".to_owned(),
+                started_at_utc: "2026-09-20T00:00:00Z".to_owned(),
+                completed_at_utc: "2026-09-20T00:00:01Z".to_owned(),
+                http_status: 200,
+                api_request_id: "request-id".to_owned(),
+                rate_limit_ref: "collector.rate_limit".to_owned(),
+                page: G0Page {
+                    number: 1,
+                    per_page: 100,
+                    link_next: None,
+                    cursor_in: None,
+                    cursor_out: None,
+                    has_next_page: false,
+                    items_returned: 1,
+                },
+                response_raw_ref: "raw-1".to_owned(),
+                error_raw_ref: None,
+                state: G0RequestState::Complete,
+                complete: true,
+                truncation_reason: None,
+            }],
+            raw_objects: vec![raw],
+            repositories: collector_repositories,
+            reconciliation: G0RevisionReconciliation {
+                pre_state,
+                post_state,
+                changed_refs: Vec::new(),
+                invalidated: Vec::new(),
+            },
+            dependency_graph: G0DependencyGraph {
+                nodes,
+                edges,
+                raw_object_refs: vec!["raw-1".to_owned()],
+            },
+            model_session: G0ModelSession {
+                session_id: "session".to_owned(),
+                effective: true,
+                orchestrator_model: EXPECTED_ORCHESTRATOR_MODEL.to_owned(),
+                orchestrator_effort: EXPECTED_ORCHESTRATOR_EFFORT.to_owned(),
+                agents: vec![G0AgentModel {
+                    agent_id: "agent".to_owned(),
+                    model: EXPECTED_AGENT_MODEL.to_owned(),
+                    effort: EXPECTED_AGENT_EFFORT.to_owned(),
+                    effective: true,
+                    raw_object_refs: vec!["raw-1".to_owned()],
+                }],
+                raw_object_refs: vec!["raw-1".to_owned()],
+            },
+            access,
+            workload_artifact: G0ArtifactReference {
+                name: "workload-matrix".to_owned(),
+                schema: "velnor.workload-matrix.v1".to_owned(),
+                source_url: "https://github.com/tailrocks/velnor/blob/reviewed/matrix.json"
+                    .to_owned(),
+                sha256: digest_bytes(b"{}"),
+                source_revision: source_sha,
+                source_digest: digest('c'),
+                observed_at_utc: "2026-09-20T00:00:00Z".to_owned(),
+                raw_object_refs: vec!["raw-1".to_owned()],
+            },
+        };
+        let manifest = ManifestDocument {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            manifest_id: REVIEWED_MANIFEST_ID.to_owned(),
+            source: SourceIdentity {
+                repository: REVIEWED_SOURCE_REPOSITORY.to_owned(),
+                revision: REVIEWED_SOURCE_REVISION.to_owned(),
+                digest: REVIEWED_SOURCE_DIGEST.to_owned(),
+                reviewed_by: "reviewer".to_owned(),
+            },
+            repositories: manifest_repositories,
+        };
+        let snapshot = SnapshotDocument {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            snapshot_id: "snapshot".to_owned(),
+            manifest_id: REVIEWED_MANIFEST_ID.to_owned(),
+            observed_at_utc: "2026-09-20T00:00:00Z".to_owned(),
+            source: SnapshotSource {
+                collector: "fixture".to_owned(),
+                collector_revision: sha('a'),
+                api_base: "https://api.github.com".to_owned(),
+                captured_at_utc: "2026-09-20T00:00:00Z".to_owned(),
+                read_only: true,
+                page_count: 1,
+                permission_scopes: vec!["metadata:read".to_owned()],
+            },
+            repositories: snapshot_repositories,
+        };
+        (manifest, snapshot, typed_inventory(collector))
+    }
+
+    fn g0_codes(findings: &[Finding]) -> BTreeSet<String> {
+        findings
+            .iter()
+            .map(|finding| finding.code.clone())
+            .collect()
+    }
+
+    #[test]
+    fn complete_g0_collector_fixture_is_positive_and_mutations_fail() {
+        let (manifest, snapshot, inventory) = complete_g0_fixture();
+        let mut findings = Vec::new();
+        check_g0_inventory(&manifest, &snapshot, Some(&inventory), &mut findings);
+        let unexpected = findings
+            .iter()
+            .filter(|finding| finding.code != "g0-authoritative-proof-missing")
+            .collect::<Vec<_>>();
+        assert!(unexpected.is_empty(), "unexpected findings: {unexpected:?}");
+
+        let mut raw_tampered = inventory.clone();
+        raw_tampered.collector_snapshot.raw_objects[0].bytes_base64 = BASE64.encode(b"tampered");
+        findings.clear();
+        check_g0_inventory(&manifest, &snapshot, Some(&raw_tampered), &mut findings);
+        assert!(g0_codes(&findings).contains("g0-raw-object"));
+
+        let mut pr_event_tampered = inventory.clone();
+        pr_event_tampered.collector_snapshot.repositories[0].open_prs[0].workflow_bindings[0]
+            .event = "workflow_dispatch".to_owned();
+        findings.clear();
+        check_g0_inventory(
+            &manifest,
+            &snapshot,
+            Some(&pr_event_tampered),
+            &mut findings,
+        );
+        assert!(g0_codes(&findings).contains("g0-pr-workflow-binding"));
+
+        let mut graph_tampered = inventory.clone();
+        graph_tampered
+            .collector_snapshot
+            .dependency_graph
+            .edges
+            .clear();
+        findings.clear();
+        check_g0_inventory(&manifest, &snapshot, Some(&graph_tampered), &mut findings);
+        assert!(g0_codes(&findings).contains("g0-dependency-graph"));
+
+        let mut scope_tampered = inventory;
+        scope_tampered.collector_snapshot.repositories.pop();
+        findings.clear();
+        check_g0_inventory(&manifest, &snapshot, Some(&scope_tampered), &mut findings);
+        assert!(g0_codes(&findings).contains("g0-scope"));
     }
 
     fn minimal_execution() -> ExecutionObservation {
@@ -6267,14 +7566,22 @@ mod tests {
     }
 
     #[test]
+    fn strict_json_rejects_duplicate_object_keys() {
+        assert!(reject_duplicate_json_keys(br#"{"a":1,"a":2}"#).is_err());
+        assert!(reject_duplicate_json_keys(br#"{"a":{"b":1},"c":[{"d":2}]}"#).is_ok());
+    }
+
+    #[test]
     fn g0_request_contract_rejects_unknown_provenance_field() {
         let mut request = json!({
             "request_id": "request-1",
             "api": "rest",
             "method": "GET",
             "endpoint_or_operation": "/repos/tailrocks/velnor",
-            "query_sha256": digest('a'),
-            "variables_sha256": digest('b'),
+            "query_base64": BASE64.encode(b"page=1"),
+            "variables_base64": BASE64.encode(b"{}"),
+            "query_sha256": digest_bytes(b"page=1"),
+            "variables_sha256": digest_bytes(b"{}"),
             "auth_identity_ref": "collector.auth",
             "started_at_utc": "2026-09-20T00:00:00Z",
             "completed_at_utc": "2026-09-20T00:00:01Z",
@@ -6302,6 +7609,50 @@ mod tests {
     }
 
     #[test]
+    fn g0_snapshot_bytes_are_content_bound() {
+        let mut inventory = typed_inventory(minimal_g0_collector());
+        inventory.collector_snapshot.snapshot_id = "rewritten".to_owned();
+        let snapshot = SnapshotDocument {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            snapshot_id: "snapshot".to_owned(),
+            manifest_id: REVIEWED_MANIFEST_ID.to_owned(),
+            observed_at_utc: "2026-09-20T00:00:00Z".to_owned(),
+            source: SnapshotSource {
+                collector: "fixture".to_owned(),
+                collector_revision: sha('a'),
+                api_base: "https://api.github.com".to_owned(),
+                captured_at_utc: "2026-09-20T00:00:00Z".to_owned(),
+                read_only: true,
+                page_count: 1,
+                permission_scopes: vec!["metadata:read".to_owned()],
+            },
+            repositories: Vec::new(),
+        };
+        let manifest = ManifestDocument {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            manifest_id: REVIEWED_MANIFEST_ID.to_owned(),
+            source: SourceIdentity {
+                repository: REVIEWED_SOURCE_REPOSITORY.to_owned(),
+                revision: REVIEWED_SOURCE_REVISION.to_owned(),
+                digest: REVIEWED_SOURCE_DIGEST.to_owned(),
+                reviewed_by: "reviewer".to_owned(),
+            },
+            repositories: Vec::new(),
+        };
+        let mut findings = Vec::new();
+        check_g0_inventory(&manifest, &snapshot, Some(&inventory), &mut findings);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "g0-snapshot-bytes"));
+        inventory.collector_snapshot_bytes_base64 = BASE64.encode(b"{}");
+        findings.clear();
+        check_g0_inventory(&manifest, &snapshot, Some(&inventory), &mut findings);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "g0-collector-digest"));
+    }
+
+    #[test]
     fn g0_pagination_missing_next_page_fails_closed() {
         let mut collector = minimal_g0_collector();
         collector.requests.push(G0RequestRecord {
@@ -6309,8 +7660,10 @@ mod tests {
             api: G0ApiKind::Rest,
             method: "GET".to_owned(),
             endpoint_or_operation: "/repos/tailrocks/velnor".to_owned(),
-            query_sha256: digest('a'),
-            variables_sha256: digest('b'),
+            query_base64: BASE64.encode(b"page=1"),
+            variables_base64: BASE64.encode(b"{}"),
+            query_sha256: digest_bytes(b"page=1"),
+            variables_sha256: digest_bytes(b"{}"),
             auth_identity_ref: "collector.auth".to_owned(),
             started_at_utc: "2026-09-20T00:00:00Z".to_owned(),
             completed_at_utc: "2026-09-20T00:00:01Z".to_owned(),
@@ -6337,8 +7690,9 @@ mod tests {
             request_id: "request-1".to_owned(),
             object_kind: "repository".to_owned(),
             canonicalization: "jcs".to_owned(),
-            sha256: digest('c'),
-            byte_length: 1,
+            sha256: digest_bytes(b"{}"),
+            byte_length: 2,
+            bytes_base64: BASE64.encode(b"{}"),
             media_type: "application/json".to_owned(),
             storage_ref: "artifact://raw-1".to_owned(),
         });
@@ -6347,6 +7701,19 @@ mod tests {
         assert!(findings
             .iter()
             .any(|finding| finding.code == "g0-pagination"));
+        collector.raw_objects[0].bytes_base64 = BASE64.encode(b"tampered");
+        findings.clear();
+        check_g0_request_provenance(&collector, &mut findings);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "g0-raw-object"));
+        collector.raw_objects[0].bytes_base64 = BASE64.encode(b"{}");
+        collector.requests[0].method = "DELETE".to_owned();
+        findings.clear();
+        check_g0_request_provenance(&collector, &mut findings);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "g0-request-incomplete"));
     }
 
     #[test]
@@ -6358,6 +7725,8 @@ mod tests {
             repository: "owner/repo".to_owned(),
             workload_id: "scan".to_owned(),
             applicability: "required".to_owned(),
+            source_sha: sha('a'),
+            source_ref: "refs/heads/main".to_owned(),
             raw_object_refs: vec!["raw-graph".to_owned()],
         });
         collector.dependency_graph.edges.push(G0GraphEdge {
@@ -6365,6 +7734,8 @@ mod tests {
             to: "missing:child".to_owned(),
             kind: "child".to_owned(),
             required: true,
+            source_sha: sha('a'),
+            source_ref: "refs/heads/main".to_owned(),
             raw_object_refs: vec!["raw-graph".to_owned()],
         });
         collector.dependency_graph.raw_object_refs = vec!["raw-graph".to_owned()];

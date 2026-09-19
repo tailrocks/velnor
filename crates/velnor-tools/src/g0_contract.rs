@@ -12,6 +12,10 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 pub(crate) struct G0InventoryEvidence {
     pub collector_snapshot: G0CollectorSnapshot,
+    /// Canonical JSON bytes produced by the collector.  The checker decodes
+    /// and parses these bytes instead of trusting a digest over the parsed
+    /// caller object.
+    pub collector_snapshot_bytes_base64: String,
     /// External digest of canonical `collector_snapshot` bytes.  It is kept
     /// outside the object to avoid a self-referential hash cycle.
     pub collector_snapshot_sha256: String,
@@ -77,6 +81,11 @@ pub(crate) struct G0RequestRecord {
     pub api: G0ApiKind,
     pub method: String,
     pub endpoint_or_operation: String,
+    /// Canonical read-only query text (REST query or GraphQL document),
+    /// encoded so its digest can be recomputed without storing secrets.
+    pub query_base64: String,
+    /// Canonical, redacted query variables; credentials are forbidden.
+    pub variables_base64: String,
     pub query_sha256: String,
     pub variables_sha256: String,
     pub auth_identity_ref: String,
@@ -135,6 +144,9 @@ pub(crate) struct G0RawObjectRef {
     pub canonicalization: String,
     pub sha256: String,
     pub byte_length: u64,
+    /// Immutable response bytes supplied by the collector/store.  The
+    /// checker recomputes `sha256` and `byte_length` from this value.
+    pub bytes_base64: String,
     pub media_type: String,
     pub storage_ref: String,
 }
@@ -146,6 +158,8 @@ pub(crate) struct G0ArtifactReference {
     pub schema: String,
     pub source_url: String,
     pub sha256: String,
+    pub source_revision: String,
+    pub source_digest: String,
     pub observed_at_utc: String,
     pub raw_object_refs: Vec<String>,
 }
@@ -223,6 +237,7 @@ pub(crate) struct G0PullRequestInventory {
     pub merge_group_sha: Option<String>,
     pub trust: G0TrustObservation,
     pub applicability: String,
+    pub source_url: String,
     pub workflow_bindings: Vec<G0WorkflowBinding>,
     pub required_check_producers: Vec<G0CheckProducer>,
     pub raw_object_refs: Vec<String>,
@@ -243,6 +258,7 @@ pub(crate) struct G0WorkflowBinding {
     pub workflow_revision: String,
     pub event: String,
     pub source_sha: String,
+    pub actual_checkout_sha: String,
     pub run_ids: Vec<u64>,
     pub raw_object_refs: Vec<String>,
 }
@@ -258,6 +274,7 @@ pub(crate) struct G0CheckProducer {
     pub run_attempt: u32,
     pub job_id: u64,
     pub source_sha: String,
+    pub actual_checkout_sha: String,
     pub event: String,
     pub status: String,
     pub conclusion: String,
@@ -310,6 +327,8 @@ pub(crate) struct G0GraphNode {
     pub repository: String,
     pub workload_id: String,
     pub applicability: String,
+    pub source_sha: String,
+    pub source_ref: String,
     pub raw_object_refs: Vec<String>,
 }
 
@@ -320,6 +339,8 @@ pub(crate) struct G0GraphEdge {
     pub to: String,
     pub kind: String,
     pub required: bool,
+    pub source_sha: String,
+    pub source_ref: String,
     pub raw_object_refs: Vec<String>,
 }
 

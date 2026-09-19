@@ -185,9 +185,11 @@ execution stages; this schema is not a claim that live collection is complete.
 `crates/velnor-tools/src/g0_contract.rs`. This is a collector handoff, not a
 result-record summary. Every contract type denies unknown fields; legacy
 scalar inventory fields, aliases, and opaque success booleans are rejected.
-The outer `collector_snapshot_sha256` is the SHA-256 of canonical JSON for
-`collector_snapshot` (sorted object keys; the digest stays outside the object
-to avoid a hash cycle).
+`collector_snapshot_bytes_base64` must decode to the canonical JSON bytes of
+`collector_snapshot` (sorted object keys), and
+`collector_snapshot_sha256` is recomputed from those supplied bytes. The
+digest stays outside the object to avoid a hash cycle; a digest over a parsed
+caller object, without the supplied bytes, is not accepted.
 
 The snapshot carries collector revision, read-only GitHub API identity, safe
 viewer scopes, rate-limit observation, complete request/page state, and
@@ -201,18 +203,31 @@ workload/child/release/package/check dependency graph, effective Astra/low and
 Luna/max model-session settings, complete gap-free repository access
 observations, and a hashed workload artifact reference.
 
-Each request must be a successful complete page with query/variables digests,
-API request identity, the canonical `collector.auth` and
-`collector.rate_limit` references, page metadata, and a raw response object.
-`has_next_page` requires the next captured page; forbidden,
-rate-limited, malformed, truncated, unknown, or missing pages fail closed.
-Every nested reference must resolve to a raw object from the same snapshot.
+Each request must be a successful complete page with the read-only HTTP
+method, repository-bound endpoint or GraphQL operation, base64-encoded
+canonical query/variables, recomputable query/variables digests, API request
+identity, the canonical `collector.auth` and `collector.rate_limit`
+references, page metadata, and a raw response object. Raw object bytes are
+supplied in base64 and their byte length and digest are recomputed; a storage
+URI or self-attested digest is insufficient. `has_next_page` requires the
+next captured page; forbidden, rate-limited, malformed, truncated, unknown,
+or missing pages fail closed. Every nested reference must resolve to a raw
+object from the same snapshot.
 PR check producers bind positive check-suite/check-run/workflow-run/job IDs,
-attempt, source SHA, event, completed-success status/conclusion, and a
+attempt, source SHA, actual checkout SHA, exact `pull_request` event,
+completed-success status/conclusion, required check app identity, and a
 repository-bound GitHub URL. The checker independently compares collector
-default branches and PR heads/bases/tested merges with the regular snapshot
-and reviewed manifest, and compares required context/app identities with the
-manifest rather than trusting collector claims.
+default branches, all current PR heads/bases/tested merges, workflow/run
+identities, and required check tuples with the regular snapshot and reviewed
+manifest; collector claims cannot create an expected job or check.
+
+The dependency graph is also typed source evidence, not a summary digest.
+Every node and edge has an immutable source SHA/ref, raw-object references,
+known node/relation kinds, and no dangling or duplicate identities. Required
+workloads must have required check edges; reviewed child/release/package
+obligations require their corresponding edges. Graph source rows must match
+the reviewed workload revisions or the observed default-branch SHA. Missing
+edges, illegal cycles, or a source/relation mismatch fail closed.
 
 The live API collector is not yet wired to this contract. The checker retains
 `g0-authoritative-proof-missing` for structurally valid typed fixtures;
