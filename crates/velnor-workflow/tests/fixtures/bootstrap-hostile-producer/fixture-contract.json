@@ -1,0 +1,38 @@
+{
+  "schema": "velnor.bootstrap-hostile-probe.v1",
+  "fixture": "bootstrap-hostile-producer",
+  "execution": "future-hosted-canary-only",
+  "sandbox_base_image": "ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b",
+  "sandbox_image_ref_policy": "final-platform-manifest-digest-only",
+  "binary_source": "probe.rs",
+  "probe_entrypoint": [
+    "--canary",
+    "--output",
+    "/output"
+  ],
+  "required_isolation": [
+    "github-hosted-ubuntu",
+    "image-final-platform-digest",
+    "network-none",
+    "private-pid-namespace",
+    "numeric-non-root",
+    "read-only-root-input-candidate",
+    "cap-drop-all",
+    "no-new-privileges",
+    "default-seccomp",
+    "bounded-output-tmp",
+    "bounded-timeout"
+  ],
+  "hostile_surfaces": [
+    "H1-env-proc",
+    "H2-github-command-files",
+    "H3-artifact-service-upload",
+    "H4-workspace-writes",
+    "H5-network",
+    "H6-symlink-hardlink",
+    "H7-output-abuse",
+    "H8-pid-and-process-limits",
+    "H9-source-mutation-contract-minting"
+  ],
+  "authority": "diagnostic-only; trusted wrapper and verifier decide"
+}
