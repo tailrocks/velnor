@@ -2908,19 +2908,19 @@ fn parse_mise_task_names(root: &Path) -> Result<Vec<String>, GeneratorError> {
     }
     let contents = fs::read_to_string(&path)
         .map_err(|error| GeneratorError::io("read mise.toml", &path, &error))?;
-    let mut names = Vec::new();
-    for line in contents.lines() {
-        let trimmed = line.trim();
-        if let Some(header) = trimmed.strip_prefix("[tasks.") {
-            let name = header
-                .strip_suffix(']')
-                .unwrap_or(header)
-                .trim()
-                .trim_matches('"')
-                .to_owned();
-            names.push(name);
-        }
-    }
+    let document = toml::from_str::<toml::Value>(&contents).map_err(|error| {
+        GeneratorError::usage(format!("parse mise.toml {}: {error}", path.display()))
+    })?;
+    let Some(tasks) = document.get("tasks") else {
+        return Ok(Vec::new());
+    };
+    let tasks = tasks.as_table().ok_or_else(|| {
+        GeneratorError::usage(format!(
+            "parse mise.toml {}: `tasks` must be a table",
+            path.display()
+        ))
+    })?;
+    let mut names = tasks.keys().cloned().collect::<Vec<_>>();
     names.sort();
     names.dedup();
     Ok(names)

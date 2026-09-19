@@ -2121,10 +2121,13 @@ concurrency_group = "package-release-preview"
         std::fs::create_dir_all(&root).expect("create mise fixture");
         std::fs::write(
             root.join("mise.toml"),
-            "[tasks.verify-preview-package]\nrun = \"echo verify\"\n",
+            "[tasks]\nverify-preview-package = \"echo verify\"\n\n[tasks.header-task]\nrun = \"echo header\"\n",
         )
         .expect("write mise fixture");
-        let tasks = vec!["verify-preview-package".to_owned()];
+        let tasks = vec![
+            "verify-preview-package".to_owned(),
+            "header-task".to_owned(),
+        ];
         validate_mise_tasks(&root, "verify_tasks", &tasks).expect("declared task validates");
         let missing = vec!["missing-task".to_owned()];
         let error = validate_mise_tasks(&root, "verify_tasks", &missing)
