@@ -6,7 +6,8 @@
 //! presented as authoritative G0 evidence.
 
 use super::live_collector::{collect_live, collect_live_sample};
-use super::live_transport::{GithubHttpTransport, RawObjectFileStore};
+use super::live_transport::GithubHttpTransport;
+use super::raw_store::RawObjectFileStore;
 use super::AuthIdentity;
 use crate::evidence_check::ManifestDocument;
 use anyhow::{bail, Context, Result};
