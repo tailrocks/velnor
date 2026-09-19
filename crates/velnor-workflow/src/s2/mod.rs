@@ -21112,6 +21112,10 @@ lockfile = true
         let _ = fs::remove_dir_all(root);
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the provenance fixture walks forged and handwritten workflow lifecycles"
+    )]
     #[test]
     fn generated_output_churn_is_not_scan_provenance_but_handwritten_github_is() {
         let root = configured_repository("github-scan-provenance", None);
