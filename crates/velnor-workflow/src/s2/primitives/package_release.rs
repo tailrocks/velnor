@@ -1706,7 +1706,7 @@ fn render_publish_job(
     );
     output = output.replace(
         "          git diff --check\n          if git diff --quiet; then",
-        "          untracked_files=\"$(git ls-files --others --exclude-standard)\"\n          if [ -n \"$untracked_files\" ]; then\n            echo \"::notice::consumer updater produced untracked files; staging them\"\n            printf '%s\\n' \"$untracked_files\"\n          fi\n          git diff --check\n          if [ -n \"$(git status --porcelain --untracked-files=all)\" ]; then",
+        "          untracked_files=\"$(git ls-files --others --exclude-standard)\"\n          if [ -n \"$untracked_files\" ]; then\n            echo \"::notice::consumer updater produced untracked files; staging them\"\n            printf '%s\\n' \"$untracked_files\"\n          fi\n          git diff --check\n          if [ -z \"$(git status --porcelain --untracked-files=all)\" ]; then",
     );
     output = output.replace(
         "            if [ -n \"$remote_branch_sha\" ]; then\n              git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" push --force-with-lease=refs/heads/$automation_branch:$remote_branch_sha origin \"HEAD:refs/heads/$automation_branch\"\n            else\n              git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" push origin \"HEAD:refs/heads/$automation_branch\"\n            fi",
@@ -2205,6 +2205,19 @@ concurrency_group = "package-release-preview"
         assert!(workflow.contains("git ls-files --others --exclude-standard"));
         assert!(workflow.contains("git status --porcelain --untracked-files=all"));
         assert!(workflow.contains("consumer updater produced untracked files; staging them"));
+        let unchanged_gate = workflow
+            .find("if [ -z \"$(git status --porcelain --untracked-files=all)\" ]; then")
+            .expect("clean consumer tree skips commit");
+        let unchanged_message = workflow
+            .find("echo \"consumer already references the verified release\"")
+            .expect("clean consumer tree reports no update");
+        let consumer_commit = workflow
+            .find("git commit -s -m \"$UPDATE_COMMIT_MESSAGE\"")
+            .expect("changed consumer tree commits");
+        assert!(unchanged_gate < unchanged_message);
+        assert!(unchanged_message < consumer_commit);
+        assert!(!workflow
+            .contains("if [ -n \"$(git status --porcelain --untracked-files=all)\" ]; then"));
         assert!(workflow.contains("bash -c \"$UPDATER\""));
         let workflow_lower = workflow.to_ascii_lowercase();
         assert!(!workflow_lower.contains("formula"));
