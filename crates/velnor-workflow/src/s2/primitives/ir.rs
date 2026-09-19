@@ -839,6 +839,13 @@ mod tests {
             "{producer}"
         );
         assert!(producer.contains("CARGO_NET_OFFLINE=true"), "{producer}");
+        assert!(producer.contains("CARGO_TARGET_DIR=/target"), "{producer}");
+        assert!(producer.contains("uid=65532; gid=65532"), "{producer}");
+        assert!(
+            producer.contains("docker_cmd cp \"$cid:/output/.\""),
+            "{producer}"
+        );
+        assert!(producer.contains("mindepth 1 -maxdepth 1"), "{producer}");
         assert!(producer.contains("profile: $profile"), "{producer}");
         assert!(
             producer.contains("Remove candidate build workspace"),
@@ -3175,7 +3182,7 @@ impl WorkflowIr {
           docker_cmd pull --quiet --platform linux/amd64 "$builder_platform_image"
           docker_cmd image inspect "$builder_platform_image" --format '{{{{json .}}}}' > "$RUNNER_TEMP/candidate-builder-local.json"
           jq -e --arg ref "$builder_platform_image" '.[0].RepoDigests | index($ref) != null' "$RUNNER_TEMP/candidate-builder-local.json" >/dev/null
-          jq -e '.[0].Os == "linux" and .[0].Architecture == "amd64" and ((.[0].Config.Env // []) | all(test("^(GITHUB_|ACTIONS_|RUNNER_|GH_TOKEN|AWS_|AZURE_|GOOGLE_|CARGO_REGISTRIES_).*" ) | not))' "$RUNNER_TEMP/candidate-builder-local.json" >/dev/null
+          jq -e '.[0].Os == "linux" and .[0].Architecture == "amd64" and ((.[0].Config.Env // []) | all(test("^(GITHUB_|ACTIONS_|RUNNER_|GH_TOKEN|AWS_|AZURE_|GOOGLE_|CARGO_REGISTRIES_).*" ) | not)) and .[0].Config.Volumes == null' "$RUNNER_TEMP/candidate-builder-local.json" >/dev/null
           stage="$RUNNER_TEMP/velnor-workflow-candidate"
           rm -rf "$stage"
           mkdir -m 0700 "$stage"
@@ -3183,8 +3190,8 @@ impl WorkflowIr {
           test -d "$source"
           test -z "$(find -P "$source" -type l -print -quit)"
           test -z "$(find -P "$source" ! -type f ! -type d ! -type l -print -quit)"
-          uid="$(id -u)"; gid="$(id -g)"; test "$uid" -ne 0; test "$gid" -ge 0
-          cid="$(docker_cmd create --name "velnor-candidate-build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --platform linux/amd64 --pull=never --network=none --read-only --pid=private --cap-drop=ALL --security-opt no-new-privileges=true --pids-limit=256 --memory=4096m --memory-swap=4096m --cpus=2 --ulimit fsize=268435456:268435456 --ulimit nofile=2048:2048 --ulimit core=0 --shm-size=64m --stop-timeout=10 --log-driver=none --user "$uid:$gid" --workdir /src --tmpfs /tmp:rw,noexec,nosuid,nodev,size=256m,nr_inodes=8192,mode=700,uid=$uid,gid=$gid --tmpfs /target:rw,nosuid,nodev,size=2048m,nr_inodes=200000,mode=700,uid=$uid,gid=$gid --tmpfs /output:rw,noexec,nosuid,nodev,size=64m,nr_inodes=4096,mode=700,uid=$uid,gid=$gid --mount "type=bind,src=$source,dst=/src,readonly,bind-propagation=rprivate" --env CANDIDATE_HEAD_SHA="$CANDIDATE_HEAD_SHA" --env CARGO_HOME=/tmp/cargo --env CARGO_NET_OFFLINE=true --env CARGO_TERM_COLOR=never --env HOME=/tmp/home --env PATH=/usr/local/cargo/bin:/usr/local/rustup/toolchain/stable-x86_64-unknown-linux-gnu/bin:/usr/bin:/bin --entrypoint /bin/sh "$builder_platform_image" -ceu 'cargo build --locked --offline -p velnor-workflow && install -m 0555 target/debug/velnor-workflow /output/velnor-workflow')"
+          uid=65532; gid=65532
+          cid="$(docker_cmd create --name "velnor-candidate-build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --platform linux/amd64 --pull=never --network=none --read-only --pid=private --cap-drop=ALL --security-opt no-new-privileges=true --pids-limit=256 --memory=4096m --memory-swap=4096m --cpus=2 --ulimit fsize=268435456:268435456 --ulimit nofile=2048:2048 --ulimit core=0 --shm-size=64m --stop-timeout=10 --log-driver=none --user "$uid:$gid" --workdir /src --tmpfs /tmp:rw,noexec,nosuid,nodev,size=256m,nr_inodes=8192,mode=700,uid=$uid,gid=$gid --tmpfs /target:rw,nosuid,nodev,size=2048m,nr_inodes=200000,mode=700,uid=$uid,gid=$gid --tmpfs /output:rw,noexec,nosuid,nodev,size=64m,nr_inodes=4096,mode=700,uid=$uid,gid=$gid --mount "type=bind,src=$source,dst=/src,readonly,bind-propagation=rprivate" --env CANDIDATE_HEAD_SHA="$CANDIDATE_HEAD_SHA" --env CARGO_HOME=/tmp/cargo --env CARGO_NET_OFFLINE=true --env CARGO_TARGET_DIR=/target --env CARGO_TERM_COLOR=never --env HOME=/tmp/home --env PATH=/usr/local/cargo/bin:/usr/local/rustup/toolchain/stable-x86_64-unknown-linux-gnu/bin:/usr/bin:/bin --entrypoint /bin/sh "$builder_platform_image" -ceu 'cargo build --locked --offline -p velnor-workflow && install -m 0555 target/debug/velnor-workflow /output/velnor-workflow')"
           cleanup() {{
             status=$?
             if [[ -n "${{cid:-}}" ]]; then docker_cmd rm -f "$cid" >/dev/null 2>&1 || status=1; fi
@@ -3201,7 +3208,7 @@ impl WorkflowIr {
             ((.[0].HostConfig.SecurityOpt // []) | all(. != "seccomp=unconfined")) and .[0].HostConfig.PidsLimit == 256 and
             .[0].HostConfig.Memory == 4294967296 and .[0].HostConfig.MemorySwap == 4294967296 and .[0].HostConfig.NanoCpus == 2000000000 and
             .[0].HostConfig.LogConfig.Type == "none" and .[0].Config.User == $user and .[0].Config.WorkingDir == "/src" and
-            .[0].Config.Entrypoint == ["/bin/sh"] and ((.[0].Config.Env | map(split("=")[0]) | sort) == ["CANDIDATE_HEAD_SHA","CARGO_HOME","CARGO_NET_OFFLINE","CARGO_TERM_COLOR","HOME","PATH"]) and
+            .[0].Config.Entrypoint == ["/bin/sh"] and ((.[0].Config.Env | map(split("=")[0]) | sort) == ["CANDIDATE_HEAD_SHA","CARGO_HOME","CARGO_NET_OFFLINE","CARGO_TARGET_DIR","CARGO_TERM_COLOR","HOME","PATH"]) and
             ((.[0].HostConfig.Binds // []) | length == 0) and ((.[0].HostConfig.Devices // []) | length == 0) and
             ([.[0].Mounts[] | select(.Type == "bind" and .Destination == "/src" and .Source == $source and .RW == false and .Propagation == "rprivate")] | length == 1) and
             ([.[0].Mounts[] | select(.Type == "bind")] | length == 1) and
@@ -3214,9 +3221,15 @@ impl WorkflowIr {
           fi
           docker_cmd inspect "$cid" > "$stage/after.json"
           jq -e '.[0].State.Status == "exited" and .[0].State.ExitCode == 0 and .[0].State.OOMKilled == false and .[0].State.Error == ""' "$stage/after.json" >/dev/null
-          docker_cmd cp "$cid:/output/velnor-workflow" "$stage/velnor-workflow"
-          test -f "$stage/velnor-workflow"
-          test ! -L "$stage/velnor-workflow"
+          output="$stage/output"
+          mkdir -m 0700 "$output"
+          docker_cmd cp "$cid:/output/." "$output/"
+          test "$(find -P "$output" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = 1
+          test -f "$output/velnor-workflow"
+          test ! -L "$output/velnor-workflow"
+          test -z "$(find -P "$output" -type l -print -quit)"
+          test -z "$(find -P "$output" ! -type f ! -type d ! -type l -print -quit)"
+          install -m 0555 "$output/velnor-workflow" "$stage/velnor-workflow"
           chmod 0555 "$stage/velnor-workflow"
           binary_sha256="$(sha256sum "$stage/velnor-workflow" | awk '{{print $1}}')"
           jq -n \
