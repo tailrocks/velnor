@@ -338,13 +338,77 @@ mod tests {
     }
 
     fn action_metadata() -> &'static str {
-        "name: consumer\ninputs:\n  mode:\n    default: success\n  skip-build:\n    default: 'false'\n  marker:\n    default: action-consumer.log\noutputs:\n  result:\n    value: ${{ steps.downloader.outputs.result }}\nruns:\n  using: composite\n  steps:\n    - id: downloader\n      uses: ./downloader\n      with:\n        mode: ${{ inputs.mode }}\n        marker: ${{ inputs.marker }}\n    - id: validator\n      uses: ./validator\n      with:\n        mode: ${{ inputs.mode }}\n        marker: ${{ inputs.marker }}\n    - id: external\n      if: ${{ inputs.mode == 'external' }}\n      uses: octo/example@0123456789abcdef0123456789abcdef01234567\n      with:\n        mode: ${{ inputs.mode }}\n      env:\n        ACTION_MODE: ${{ inputs.mode }}\n    - id: hadolint\n      if: ${{ inputs.skip-build != 'true' }}\n      shell: bash\n      env:\n        CONSUMER_MODE: ${{ inputs.mode }}\n        CONSUMER_MARKER: ${{ inputs.marker }}\n      run: |\n        printf 'hadolint\\n' >> \"$CONSUMER_MARKER\"\n        if [ \"$CONSUMER_MODE\" = hadolint-failure ]; then exit 17; fi\n    - id: buildx\n      if: ${{ inputs.skip-build != 'true' }}\n      shell: bash\n      env:\n        CONSUMER_MODE: ${{ inputs.mode }}\n        CONSUMER_MARKER: ${{ inputs.marker }}\n      run: |\n        printf 'buildx\\n' >> \"$CONSUMER_MARKER\"\n        if [ \"$CONSUMER_MODE\" = buildx-failure ]; then exit 19; fi\n    - id: downstream\n      uses: ./downstream\n      with:\n        mode: ${{ inputs.mode }}\n        marker: ${{ inputs.marker }}\n"
+        r#"name: consumer
+inputs:
+  mode:
+    default: success
+  skip-build:
+    default: 'false'
+  marker:
+    default: action-consumer.log
+outputs:
+  result:
+    value: ${{ steps.downloader.outputs.result }}
+  nested-result:
+    value: ${{ steps.external.outputs.result }}
+runs:
+  using: composite
+  steps:
+    - id: downloader
+      uses: ./downloader
+      with:
+        mode: ${{ inputs.mode }}
+        marker: ${{ inputs.marker }}
+    - id: validator
+      uses: ./validator
+      with:
+        mode: ${{ inputs.mode }}
+        marker: ${{ inputs.marker }}
+    - id: external
+      if: ${{ inputs.mode == 'external' }}
+      uses: octo/example@0123456789abcdef0123456789abcdef01234567
+      with:
+        mode: ${{ inputs.mode }}
+      env:
+        ACTION_MODE: ${{ inputs.mode }}
+    - id: nested-output-visible
+      if: ${{ steps.external.outputs.result == 'external-value' }}
+      shell: bash
+      run: printf 'nested-output-visible\n' >> "$ACTION_MARKER"
+    - id: nested-output-leak
+      if: ${{ steps.consumer-external-run.outputs.result == 'external-value' }}
+      shell: bash
+      run: printf 'nested-output-leaked\n' >> "$ACTION_MARKER"
+    - id: hadolint
+      if: ${{ inputs.skip-build != 'true' }}
+      shell: bash
+      env:
+        CONSUMER_MODE: ${{ inputs.mode }}
+        CONSUMER_MARKER: ${{ inputs.marker }}
+      run: |
+        printf 'hadolint\n' >> "$CONSUMER_MARKER"
+        if [ "$CONSUMER_MODE" = hadolint-failure ]; then exit 17; fi
+    - id: buildx
+      if: ${{ inputs.skip-build != 'true' }}
+      shell: bash
+      env:
+        CONSUMER_MODE: ${{ inputs.mode }}
+        CONSUMER_MARKER: ${{ inputs.marker }}
+      run: |
+        printf 'buildx\n' >> "$CONSUMER_MARKER"
+        if [ "$CONSUMER_MODE" = buildx-failure ]; then exit 19; fi
+    - id: downstream
+      uses: ./downstream
+      with:
+        mode: ${{ inputs.mode }}
+        marker: ${{ inputs.marker }}
+"#
     }
 
     fn nested_action_metadata(name: &str) -> String {
         let body = match name {
             "downloader" => {
-                "printf 'downloader\\n' >> \"$ACTION_MARKER\"\nif [ \"$ACTION_MODE\" = download-failure ]; then exit 11; fi\nprintf 'result=downloaded\\n' >> \"$GITHUB_OUTPUT\"\n"
+                "printf 'downloader\\n' >> \"$ACTION_MARKER\"\nprintf 'result=downloaded\\n' >> \"$GITHUB_OUTPUT\"\nif [ \"$ACTION_MODE\" = download-failure ]; then exit 11; fi\n"
             }
             "validator" => {
                 "printf 'validator\\n' >> \"$ACTION_MARKER\"\nif [ \"$ACTION_MODE\" = validate-failure ]; then exit 13; fi\n"
@@ -353,11 +417,11 @@ mod tests {
                 "printf 'downstream\\n' >> \"$ACTION_MARKER\"\nif [ \"$ACTION_MODE\" = downstream-failure ]; then exit 23; fi\n"
             }
             "external" => {
-                "printf 'external\\n' >> \"$ACTION_MARKER\"\nif [ \"$ACTION_MODE\" = external-failure ]; then exit 29; fi\n"
+                "printf 'external\\n' >> \"$ACTION_MARKER\"\nprintf 'result=external-value\\n' >> \"$GITHUB_OUTPUT\"\nif [ \"$ACTION_MODE\" = external-failure ]; then exit 29; fi\n"
             }
             other => panic!("unknown nested consumer action: {other}"),
         };
-        let output = if name == "downloader" {
+        let output = if matches!(name, "downloader" | "external") {
             "outputs:\n  result:\n    value: ${{ steps.run.outputs.result }}\n"
         } else {
             ""
@@ -445,14 +509,96 @@ mod tests {
         )
     }
 
-    type ActionStepOutputs = BTreeMap<String, BTreeMap<String, String>>;
+    fn expanded_action(
+        root: &Path,
+        step_id: &str,
+        metadata_contents: &str,
+    ) -> Vec<velnor_runner::action_contract::CompositeActionInvocation> {
+        use velnor_runner::action_contract::{
+            composite_action_invocations, parse_action_metadata, LocalActionPlan,
+        };
 
-    fn condition_runs(condition: Option<&str>, step_outputs: &ActionStepOutputs) -> bool {
+        let action_dir = root.join(".github/actions").join(step_id);
+        must(
+            fs::create_dir_all(&action_dir),
+            "create custom runner action directory",
+        );
+        must(
+            fs::write(action_dir.join("action.yml"), metadata_contents),
+            "write custom runner action metadata",
+        );
+        let metadata = must(
+            parse_action_metadata(metadata_contents),
+            "parse custom runner action metadata",
+        );
+        must(
+            composite_action_invocations(
+                &LocalActionPlan {
+                    step_id: step_id.to_owned(),
+                    action_dir,
+                    inputs: BTreeMap::new(),
+                },
+                &metadata,
+                &root.to_string_lossy(),
+                root,
+            ),
+            "expand custom runner composite action",
+        )
+    }
+
+    type ActionStepOutputs = BTreeMap<String, BTreeMap<String, String>>;
+    type ActionStepStatuses = BTreeMap<String, velnor_runner::action_contract::ActionStepStatus>;
+    #[derive(Clone, Default)]
+    struct LocalCompositeScope {
+        condition: Option<String>,
+        continue_on_error: bool,
+    }
+
+    type LocalCompositeScopes = BTreeMap<String, LocalCompositeScope>;
+
+    #[derive(Default)]
+    struct ActionExecutionScope {
+        step_outputs: ActionStepOutputs,
+        step_statuses: ActionStepStatuses,
+    }
+
+    struct CompositeExecutionResult {
+        output: std::process::Output,
+        outputs: Option<BTreeMap<String, String>>,
+        failed: bool,
+    }
+
+    impl CompositeExecutionResult {
+        fn succeeded(&self) -> bool {
+            !self.failed
+        }
+
+        fn exit_code(&self) -> i32 {
+            self.output
+                .status
+                .code()
+                .filter(|code| *code != 0 || !self.failed)
+                .unwrap_or(i32::from(self.failed))
+        }
+    }
+
+    fn condition_runs(condition: Option<&str>, scope: &ActionExecutionScope) -> bool {
         let Some(condition) = condition else {
-            return true;
+            return must(
+                velnor_runner::action_contract::evaluate_action_condition(
+                    None,
+                    &scope.step_outputs,
+                    &scope.step_statuses,
+                ),
+                "evaluate default runner action condition",
+            );
         };
         must(
-            velnor_runner::action_contract::evaluate_action_condition(condition, step_outputs),
+            velnor_runner::action_contract::evaluate_action_condition(
+                Some(condition),
+                &scope.step_outputs,
+                &scope.step_statuses,
+            ),
             "evaluate runner action condition",
         )
     }
@@ -466,76 +612,414 @@ mod tests {
 
     fn record_step_outputs(
         output_file: &Path,
-        output_cursor: &mut usize,
         step_id: &str,
-        step_outputs: &mut ActionStepOutputs,
-    ) {
-        let contents = fs::read_to_string(output_file).unwrap_or_default();
-        if *output_cursor > contents.len() {
-            *output_cursor = 0;
-        }
-        let new_content = &contents[*output_cursor..];
-        *output_cursor = contents.len();
-        let outputs = new_content
-            .lines()
-            .filter_map(|line| line.split_once('='))
-            .map(|(name, value)| (name.to_owned(), value.to_owned()))
-            .collect::<BTreeMap<_, _>>();
+        scope: &mut ActionExecutionScope,
+    ) -> Result<(), String> {
+        let contents = match fs::read_to_string(output_file) {
+            Ok(contents) => contents,
+            // Runner's EnvFileKeyValuePairs skips a missing command file.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => {
+                return Err(format!(
+                    "read action output file {}: {error}",
+                    output_file.display()
+                ));
+            }
+        };
+        let outputs = velnor_runner::action_contract::parse_action_output_file_contents(&contents)?;
         if !outputs.is_empty() {
-            step_outputs.insert(step_id.to_owned(), outputs);
+            scope.step_outputs.insert(step_id.to_owned(), outputs);
         }
+        Ok(())
+    }
+
+    fn mirror_step_outputs(step_file: &Path, action_output_file: &Path) -> Result<(), String> {
+        use std::io::Write;
+
+        let contents = fs::read(step_file).map_err(|error| {
+            format!(
+                "read runner step output file {}: {error}",
+                step_file.display()
+            )
+        })?;
+        if contents.is_empty() {
+            return Ok(());
+        }
+        let mut action_output = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(action_output_file)
+            .map_err(|error| {
+                format!(
+                    "open action output mirror {}: {error}",
+                    action_output_file.display()
+                )
+            })?;
+        action_output.write_all(&contents).map_err(|error| {
+            format!(
+                "write action output mirror {}: {error}",
+                action_output_file.display()
+            )
+        })
+    }
+
+    fn record_step_status(
+        scope: &mut ActionExecutionScope,
+        step_id: &str,
+        exit_code: i32,
+        skipped: bool,
+        continue_on_error: bool,
+    ) {
+        scope.step_statuses.insert(
+            step_id.to_owned(),
+            velnor_runner::action_contract::ActionStepStatus {
+                exit_code,
+                skipped,
+                continue_on_error,
+            },
+        );
+    }
+
+    fn successful_output() -> std::process::Output {
+        std::process::Output {
+            status: std::process::ExitStatus::default(),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }
+    }
+
+    fn action_metadata_path(action_dir: &Path) -> PathBuf {
+        ["action.yml", "action.yaml"]
+            .iter()
+            .map(|name| action_dir.join(name))
+            .find(|path| path.is_file())
+            .unwrap_or_else(|| panic!("runner action metadata missing: {}", action_dir.display()))
+    }
+
+    fn expression_legal_segment(value: &str) -> String {
+        let segment = value
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                    character
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        if segment
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_digit())
+        {
+            format!("_{segment}")
+        } else {
+            segment
+        }
+    }
+
+    fn composite_step_id(prefix: &str, id: Option<&str>, index: usize) -> String {
+        let prefix = expression_legal_segment(prefix);
+        id.map(|id| format!("{prefix}-{}", expression_legal_segment(id)))
+            .filter(|value| !value.ends_with('-'))
+            .unwrap_or_else(|| format!("{prefix}-{}", index + 1))
+    }
+
+    fn collect_local_composite_scopes(
+        workspace: &Path,
+        action_dir: &Path,
+        scope_prefix: &str,
+        scopes: &mut LocalCompositeScopes,
+    ) {
+        use velnor_runner::action_contract::parse_action_metadata;
+
+        let metadata_path = action_metadata_path(action_dir);
+        let metadata = must(
+            fs::read_to_string(&metadata_path)
+                .map_err(|error| format!("{}: {error}", metadata_path.display()))
+                .and_then(|contents| {
+                    parse_action_metadata(&contents)
+                        .map_err(|error| format!("{}: {error}", metadata_path.display()))
+                }),
+            "read local composite scope metadata",
+        );
+
+        for (index, step) in metadata.runs.steps.iter().enumerate() {
+            let Some(uses) = step.uses.as_deref() else {
+                continue;
+            };
+            if !uses.starts_with('.') {
+                continue;
+            }
+            let local_path = uses
+                .strip_prefix("./")
+                .or_else(|| uses.strip_prefix(".\\"))
+                .unwrap_or(uses);
+            if local_path.is_empty() {
+                continue;
+            }
+
+            let local_scope_id = composite_step_id(scope_prefix, step.id.as_deref(), index);
+            scopes.insert(
+                local_scope_id.clone(),
+                LocalCompositeScope {
+                    condition: step.condition.clone(),
+                    continue_on_error: step
+                        .continue_on_error
+                        .as_deref()
+                        .is_some_and(|value| value.trim().eq_ignore_ascii_case("true")),
+                },
+            );
+            let action_dir = workspace.join(local_path.replace('\\', "/"));
+            collect_local_composite_scopes(workspace, &action_dir, &local_scope_id, scopes);
+        }
+    }
+
+    fn local_composite_scopes(
+        workspace: &Path,
+        action_dir: &Path,
+        scope_prefix: &str,
+    ) -> LocalCompositeScopes {
+        let mut scopes = BTreeMap::new();
+        collect_local_composite_scopes(workspace, action_dir, scope_prefix, &mut scopes);
+        scopes
+    }
+
+    fn invocation_step_id(
+        invocation: &velnor_runner::action_contract::CompositeActionInvocation,
+    ) -> &str {
+        use velnor_runner::action_contract::CompositeActionInvocation;
+
+        match invocation {
+            CompositeActionInvocation::Script(step) => &step.id,
+            CompositeActionInvocation::Repository(plan) => &plan.step_id,
+            CompositeActionInvocation::Outputs(outputs) => &outputs.step_id,
+        }
+    }
+
+    fn local_scope_segment_at(
+        invocations: &[velnor_runner::action_contract::CompositeActionInvocation],
+        index: usize,
+        action_step_id: &str,
+        local_scopes: &LocalCompositeScopes,
+    ) -> Option<(String, usize)> {
+        let invocation_id = invocation_step_id(invocations.get(index)?);
+        let scope_id = local_scopes
+            .keys()
+            .filter(|scope_id| scope_id.as_str() != action_step_id)
+            .filter(|scope_id| {
+                invocation_id == scope_id.as_str()
+                    || invocation_id
+                        .strip_prefix(scope_id.as_str())
+                        .is_some_and(|suffix| suffix.starts_with('-'))
+            })
+            .min_by_key(|scope_id| scope_id.len())?
+            .clone();
+
+        let mut end = index;
+        while let Some(invocation) = invocations.get(end) {
+            let invocation_id = invocation_step_id(invocation);
+            if invocation_id == scope_id
+                || invocation_id
+                    .strip_prefix(&scope_id)
+                    .is_some_and(|suffix| suffix.starts_with('-'))
+            {
+                end += 1;
+            } else {
+                break;
+            }
+        }
+        Some((scope_id, end))
+    }
+
+    fn output_file_for_step(
+        output_file: &Path,
+        scope_id: &str,
+        step_id: &str,
+        step_index: usize,
+    ) -> PathBuf {
+        let base_name = output_file.file_name().map_or_else(
+            || "output".to_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let scope_id = scope_id
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                    character
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        let step_id = step_id
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                    character
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        output_file.with_file_name(format!("{base_name}.{scope_id}.{step_index}.{step_id}"))
     }
 
     fn execute_action_invocations(
         root: &Path,
+        action_step_id: &str,
         invocations: &[velnor_runner::action_contract::CompositeActionInvocation],
         marker: &Path,
         downstream: &Path,
         output_file: &Path,
         step_outputs: &mut ActionStepOutputs,
-        output_cursor: &mut usize,
-    ) -> std::process::Output {
+    ) -> CompositeExecutionResult {
+        let action_dir = root.join(".github/actions").join(action_step_id);
+        let local_scopes = local_composite_scopes(root, &action_dir, action_step_id);
+        let mut result = execute_composite_scope(
+            root,
+            action_step_id,
+            invocations,
+            marker,
+            downstream,
+            output_file,
+            &local_scopes,
+        );
+        if let Some(outputs) = result.outputs.take() {
+            step_outputs.insert(action_step_id.to_owned(), outputs);
+        }
+        result
+    }
+
+    fn execute_composite_scope(
+        root: &Path,
+        action_step_id: &str,
+        invocations: &[velnor_runner::action_contract::CompositeActionInvocation],
+        marker: &Path,
+        downstream: &Path,
+        output_file: &Path,
+        local_scopes: &LocalCompositeScopes,
+    ) -> CompositeExecutionResult {
         use velnor_runner::action_contract::{
             parse_action_metadata, CompositeActionInvocation, ResolvedAction,
         };
 
-        for invocation in invocations {
+        let mut scope = ActionExecutionScope::default();
+        let mut failed_output = None;
+        let mut mapped_outputs = None;
+        let mut index = 0;
+        while index < invocations.len() {
+            if let Some((local_scope_id, end)) =
+                local_scope_segment_at(invocations, index, action_step_id, local_scopes)
+            {
+                let local_scope = local_scopes
+                    .get(&local_scope_id)
+                    .cloned()
+                    .unwrap_or_default();
+                if !condition_runs(local_scope.condition.as_deref(), &scope) {
+                    scope
+                        .step_outputs
+                        .insert(local_scope_id.clone(), BTreeMap::new());
+                    record_step_status(
+                        &mut scope,
+                        &local_scope_id,
+                        0,
+                        true,
+                        local_scope.continue_on_error,
+                    );
+                    index = end;
+                    continue;
+                }
+                let nested_result = execute_composite_scope(
+                    root,
+                    &local_scope_id,
+                    &invocations[index..end],
+                    marker,
+                    downstream,
+                    output_file,
+                    local_scopes,
+                );
+                let failed = !nested_result.succeeded();
+                let exit_code = nested_result.exit_code();
+                let continue_on_error = local_scope.continue_on_error;
+                scope.step_outputs.insert(
+                    local_scope_id.clone(),
+                    nested_result.outputs.unwrap_or_default(),
+                );
+                record_step_status(
+                    &mut scope,
+                    &local_scope_id,
+                    exit_code,
+                    false,
+                    continue_on_error,
+                );
+                if failed && !continue_on_error && failed_output.is_none() {
+                    failed_output = Some(nested_result.output);
+                }
+                index = end;
+                continue;
+            }
+
+            let invocation = &invocations[index];
             match invocation {
                 CompositeActionInvocation::Script(step) => {
-                    if !condition_runs(step.condition.as_deref(), step_outputs) {
+                    if !condition_runs(step.condition.as_deref(), &scope) {
+                        record_step_status(&mut scope, &step.id, 0, true, false);
+                        index += 1;
                         continue;
                     }
-                    let script = render_action_value(&step.script, step_outputs);
+                    let script = render_action_value(&step.script, &scope.step_outputs);
+                    let step_output_file =
+                        output_file_for_step(output_file, action_step_id, &step.id, index);
+                    must(
+                        fs::write(&step_output_file, ""),
+                        "initialize runner output file",
+                    );
                     let mut command = Command::new("bash");
                     command
                         .args(["-euo", "pipefail", "-c", script.as_str()])
                         .current_dir(root)
                         .env("ACTION_MARKER", marker)
                         .env("DOWNSTREAM_MARKER", downstream)
-                        .env("GITHUB_OUTPUT", output_file);
+                        .env("GITHUB_OUTPUT", &step_output_file);
                     for (name, value) in &step.env {
-                        command.env(name, render_action_value(value, step_outputs));
+                        command.env(name, render_action_value(value, &scope.step_outputs));
                     }
-                    let output = must(command.output(), "execute runner script step");
-                    record_step_outputs(output_file, output_cursor, &step.id, step_outputs);
-                    if !output.status.success() {
-                        return output;
+                    let mut output = must(command.output(), "execute runner script step");
+                    let output_error =
+                        match record_step_outputs(&step_output_file, &step.id, &mut scope) {
+                            Err(error) => Some(error),
+                            Ok(()) => mirror_step_outputs(&step_output_file, output_file).err(),
+                        };
+                    if let Some(error) = &output_error {
+                        output.stderr.extend_from_slice(
+                            format!("GITHUB_OUTPUT processing failed: {error}").as_bytes(),
+                        );
+                    }
+                    let failed = !output.status.success() || output_error.is_some();
+                    let exit_code = if output.status.success() && output_error.is_some() {
+                        1
+                    } else {
+                        output.status.code().unwrap_or(1)
+                    };
+                    record_step_status(
+                        &mut scope,
+                        &step.id,
+                        exit_code,
+                        false,
+                        step.continue_on_error,
+                    );
+                    if failed && !step.continue_on_error && failed_output.is_none() {
+                        failed_output = Some(output);
                     }
                 }
                 CompositeActionInvocation::Repository(plan) => {
-                    if !condition_runs(plan.condition.as_deref(), step_outputs) {
+                    if !condition_runs(plan.condition.as_deref(), &scope) {
+                        record_step_status(&mut scope, &plan.step_id, 0, true, false);
+                        index += 1;
                         continue;
                     }
-                    let metadata_path = ["action.yml", "action.yaml"]
-                        .iter()
-                        .map(|name| plan.action_dir.join(name))
-                        .find(|path| path.is_file())
-                        .unwrap_or_else(|| {
-                            panic!(
-                                "runner repository action metadata missing: {}",
-                                plan.action_dir.display()
-                            )
-                        });
+                    let metadata_path = action_metadata_path(&plan.action_dir);
                     let metadata = must(
                         fs::read_to_string(&metadata_path)
                             .map_err(|error| format!("{}: {error}", metadata_path.display()))
@@ -557,17 +1041,32 @@ mod tests {
                         resolved.composite_invocations("/__w", root),
                         "expand runner repository action",
                     );
-                    let output = execute_action_invocations(
+                    let nested_local_scopes =
+                        local_composite_scopes(root, &plan.action_dir, &plan.step_id);
+                    let nested_result = execute_composite_scope(
                         root,
+                        &plan.step_id,
                         &nested,
                         marker,
                         downstream,
                         output_file,
-                        step_outputs,
-                        output_cursor,
+                        &nested_local_scopes,
                     );
-                    if !output.status.success() {
-                        return output;
+                    let failed = !nested_result.succeeded();
+                    let exit_code = nested_result.exit_code();
+                    scope.step_outputs.insert(
+                        plan.step_id.clone(),
+                        nested_result.outputs.unwrap_or_default(),
+                    );
+                    record_step_status(
+                        &mut scope,
+                        &plan.step_id,
+                        exit_code,
+                        false,
+                        plan.continue_on_error,
+                    );
+                    if failed && !plan.continue_on_error && failed_output.is_none() {
+                        failed_output = Some(nested_result.output);
                     }
                 }
                 CompositeActionInvocation::Outputs(outputs) => {
@@ -575,18 +1074,377 @@ mod tests {
                         .outputs
                         .iter()
                         .map(|(name, value)| {
-                            (name.clone(), render_action_value(value, step_outputs))
+                            (
+                                name.clone(),
+                                render_action_value(value, &scope.step_outputs),
+                            )
                         })
                         .collect::<BTreeMap<_, _>>();
-                    step_outputs.insert(outputs.step_id.clone(), resolved);
+                    if outputs.step_id == action_step_id {
+                        mapped_outputs = Some(resolved);
+                    } else {
+                        // Preserve a wrapper entry if an empty local action
+                        // contributes an output marker without child steps.
+                        scope.step_outputs.insert(outputs.step_id.clone(), resolved);
+                        record_step_status(&mut scope, &outputs.step_id, 0, false, false);
+                    }
                 }
             }
+            index += 1;
         }
-        std::process::Output {
-            status: std::process::ExitStatus::default(),
-            stdout: Vec::new(),
-            stderr: Vec::new(),
+        let failed = failed_output.is_some();
+        CompositeExecutionResult {
+            output: failed_output.unwrap_or_else(successful_output),
+            outputs: mapped_outputs,
+            failed,
         }
+    }
+
+    #[test]
+    fn step_output_capture_uses_runner_parser_and_reports_read_errors() {
+        let root = scratch("runner-output-parser");
+        let output_file = root.join("output");
+        must(
+            fs::write(
+                &output_file,
+                "result<<END\nfirst=one=two\nsecond=x=y\nEND\n",
+            ),
+            "write multiline output fixture",
+        );
+        let mut scope = ActionExecutionScope::default();
+        must(
+            record_step_outputs(&output_file, "producer", &mut scope),
+            "parse multiline output fixture",
+        );
+        assert_eq!(
+            scope
+                .step_outputs
+                .get("producer")
+                .and_then(|outputs| outputs.get("result"))
+                .map(String::as_str),
+            Some("first=one=two\nsecond=x=y")
+        );
+
+        let invalid_output_path = root.join("output-directory");
+        must(
+            fs::create_dir(&invalid_output_path),
+            "create invalid output-file fixture",
+        );
+        let error = match record_step_outputs(&invalid_output_path, "bad-reader", &mut scope) {
+            Ok(()) => panic!("reading a directory as an output file must fail"),
+            Err(error) => error,
+        };
+        assert!(error.contains("read action output file"));
+
+        let missing_output_path = root.join("missing-output");
+        assert!(record_step_outputs(&missing_output_path, "missing-reader", &mut scope).is_ok());
+        assert!(!scope.step_outputs.contains_key("missing-reader"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_child_runs_runner_cleanup_steps_and_maps_outputs() {
+        let root = scratch("runner-failure-cleanup");
+        let metadata = r#"name: failure-cleanup
+outputs:
+  result:
+    value: ${{ steps.failed.outputs.result }}
+runs:
+  using: composite
+  steps:
+    - id: failed
+      shell: bash
+      run: |
+        printf 'result=written-before-failure\n' >> "$GITHUB_OUTPUT"
+        exit 7
+    - id: always-cleanup
+      if: always()
+      shell: bash
+      run: printf 'always-cleanup\n' >> "$ACTION_MARKER"
+    - id: failure-cleanup
+      if: failure()
+      shell: bash
+      run: printf 'failure-cleanup\n' >> "$ACTION_MARKER"
+    - id: normal-after-failure
+      shell: bash
+      run: printf 'normal-after-failure\n' >> "$ACTION_MARKER"
+"#;
+        let invocations = expanded_action(&root, "cleanup", metadata);
+        let marker = root.join("cleanup.log");
+        let downstream = root.join("cleanup.downstream");
+        let output_file = root.join("cleanup.output");
+        let mut outputs = BTreeMap::new();
+        let result = execute_action_invocations(
+            &root,
+            "cleanup",
+            &invocations,
+            &marker,
+            &downstream,
+            &output_file,
+            &mut outputs,
+        );
+
+        assert!(!result.succeeded());
+        let log = must(fs::read_to_string(&marker), "read failure cleanup marker");
+        assert!(
+            log.contains("always-cleanup"),
+            "always() cleanup skipped: {log}"
+        );
+        assert!(
+            log.contains("failure-cleanup"),
+            "failure() cleanup skipped: {log}"
+        );
+        assert!(!log.contains("normal-after-failure"));
+        assert_eq!(
+            outputs
+                .get("cleanup")
+                .and_then(|action_outputs| action_outputs.get("result"))
+                .map(String::as_str),
+            Some("written-before-failure")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn continue_on_error_keeps_later_steps_successful_and_maps_outputs() {
+        let root = scratch("runner-continue-on-error");
+        let metadata = r#"name: continue-on-error
+outputs:
+  result:
+    value: ${{ steps.tolerated.outputs.result }}
+runs:
+  using: composite
+  steps:
+    - id: tolerated
+      continue-on-error: true
+      shell: bash
+      run: |
+        printf 'result=kept-after-failure\n' >> "$GITHUB_OUTPUT"
+        exit 9
+    - id: after-failure
+      shell: bash
+      run: printf 'continued\n' >> "$ACTION_MARKER"
+    - id: failure-only
+      if: failure()
+      shell: bash
+      run: printf 'unexpected-failure-status\n' >> "$ACTION_MARKER"
+    - id: success-only
+      if: success()
+      shell: bash
+      run: printf 'success-status\n' >> "$ACTION_MARKER"
+"#;
+        let invocations = expanded_action(&root, "tolerated", metadata);
+        let marker = root.join("continue-on-error.log");
+        let downstream = root.join("continue-on-error.downstream");
+        let output_file = root.join("continue-on-error.output");
+        let mut outputs = BTreeMap::new();
+        let result = execute_action_invocations(
+            &root,
+            "tolerated",
+            &invocations,
+            &marker,
+            &downstream,
+            &output_file,
+            &mut outputs,
+        );
+
+        assert!(result.succeeded());
+        let log = must(fs::read_to_string(&marker), "read continue-on-error marker");
+        assert!(
+            log.contains("continued"),
+            "continue-on-error blocked later steps: {log}"
+        );
+        assert!(log.contains("success-status"), "success() was false: {log}");
+        assert!(!log.contains("unexpected-failure-status"));
+        assert_eq!(
+            outputs
+                .get("tolerated")
+                .and_then(|action_outputs| action_outputs.get("result"))
+                .map(String::as_str),
+            Some("kept-after-failure")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn later_step_output_rewrite_uses_a_fresh_runner_command_file() {
+        let root = scratch("runner-output-rewrite");
+        let metadata = r#"name: output-rewrite
+outputs:
+  result:
+    value: ${{ steps.replacement.outputs.result }}
+runs:
+  using: composite
+  steps:
+    - id: initial
+      shell: bash
+      run: printf 'result=x\n' >> "$GITHUB_OUTPUT"
+    - id: replacement
+      shell: bash
+      run: printf 'result=replacement-value\n' > "$GITHUB_OUTPUT"
+    - id: verify
+      if: ${{ steps.replacement.outputs.result == 'replacement-value' }}
+      shell: bash
+      run: printf 'replacement-visible\n' >> "$ACTION_MARKER"
+"#;
+        let invocations = expanded_action(&root, "output-rewrite", metadata);
+        let marker = root.join("output-rewrite.log");
+        let mut outputs = BTreeMap::new();
+        let result = execute_action_invocations(
+            &root,
+            "output-rewrite",
+            &invocations,
+            &marker,
+            &root.join("output-rewrite.downstream"),
+            &root.join("output-rewrite.output"),
+            &mut outputs,
+        );
+
+        assert!(result.succeeded());
+        assert!(
+            must(fs::read_to_string(&marker), "read output rewrite marker")
+                .contains("replacement-visible")
+        );
+        assert_eq!(
+            outputs
+                .get("output-rewrite")
+                .and_then(|action_outputs| action_outputs.get("result"))
+                .map(String::as_str),
+            Some("replacement-value")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn output_parser_failure_marks_child_failed_and_runs_runner_cleanup() {
+        let root = scratch("runner-output-parser-failure");
+        let metadata = r#"name: output-parser-failure
+outputs:
+  result:
+    value: ${{ steps.malformed.outputs.result }}
+runs:
+  using: composite
+  steps:
+    - id: malformed
+      shell: bash
+      run: printf 'not-a-command-file-entry\n' > "$GITHUB_OUTPUT"
+    - id: always-cleanup
+      if: always()
+      shell: bash
+      run: printf 'always-cleanup\n' >> "$ACTION_MARKER"
+    - id: failure-cleanup
+      if: failure()
+      shell: bash
+      run: printf 'failure-cleanup\n' >> "$ACTION_MARKER"
+    - id: normal-after-failure
+      shell: bash
+      run: printf 'normal-after-failure\n' >> "$ACTION_MARKER"
+"#;
+        let invocations = expanded_action(&root, "output-parser-failure", metadata);
+        let marker = root.join("output-parser-failure.log");
+        let mut outputs = BTreeMap::new();
+        let result = execute_action_invocations(
+            &root,
+            "output-parser-failure",
+            &invocations,
+            &marker,
+            &root.join("output-parser-failure.downstream"),
+            &root.join("output-parser-failure.output"),
+            &mut outputs,
+        );
+
+        assert!(!result.succeeded());
+        let log = must(fs::read_to_string(&marker), "read parser failure marker");
+        assert!(log.contains("always-cleanup"), "always() skipped: {log}");
+        assert!(log.contains("failure-cleanup"), "failure() skipped: {log}");
+        assert!(!log.contains("normal-after-failure"));
+        assert_eq!(
+            outputs
+                .get("output-parser-failure")
+                .and_then(|action_outputs| action_outputs.get("result"))
+                .map(String::as_str),
+            Some("")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn nested_local_composite_outputs_stay_in_their_steps_scope() {
+        let root = scratch("runner-nested-local-scope");
+        let nested_action_dir = root.join("nested");
+        must(
+            fs::create_dir_all(&nested_action_dir),
+            "create nested local composite directory",
+        );
+        must(
+            fs::write(
+                nested_action_dir.join("action.yml"),
+                r#"name: nested-local
+outputs:
+  result:
+    value: ${{ steps.hidden.outputs.result }}
+runs:
+  using: composite
+  steps:
+    - id: hidden
+      shell: bash
+      run: printf 'result=nested-value\n' >> "$GITHUB_OUTPUT"
+"#,
+            ),
+            "write nested local composite metadata",
+        );
+        let metadata = r#"name: local-scope
+outputs:
+  result:
+    value: ${{ steps.nested.outputs.result }}
+runs:
+  using: composite
+  steps:
+    - id: nested
+      uses: ./nested
+    - id: child-output-must-stay-private
+      if: ${{ steps.local-scope-nested-hidden.outputs.result == 'nested-value' }}
+      shell: bash
+      run: printf 'child-output-leaked\n' >> "$ACTION_MARKER"
+    - id: wrapper-output-is-visible
+      if: ${{ steps.nested.outputs.result == 'nested-value' }}
+      shell: bash
+      run: printf 'wrapper-output-visible\n' >> "$ACTION_MARKER"
+"#;
+        let invocations = expanded_action(&root, "local-scope", metadata);
+        let marker = root.join("local-scope.log");
+        let mut outputs = BTreeMap::new();
+        let result = execute_action_invocations(
+            &root,
+            "local-scope",
+            &invocations,
+            &marker,
+            &root.join("local-scope.downstream"),
+            &root.join("local-scope.output"),
+            &mut outputs,
+        );
+
+        assert!(result.succeeded());
+        let log = must(
+            fs::read_to_string(&marker),
+            "read nested local scope marker",
+        );
+        assert!(
+            log.contains("wrapper-output-visible"),
+            "nested mapped output did not reach its caller: {log}"
+        );
+        assert!(
+            !log.contains("child-output-leaked"),
+            "nested child output leaked into its caller's steps scope: {log}"
+        );
+        assert_eq!(
+            outputs
+                .get("local-scope")
+                .and_then(|action_outputs| action_outputs.get("result"))
+                .map(String::as_str),
+            Some("nested-value")
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -643,17 +1501,16 @@ mod tests {
             Some("${{ steps.consumer-downloader-run.outputs.result }}")
         );
         let mut success_outputs = BTreeMap::new();
-        let mut success_output_cursor = 0;
         let success_result = execute_action_invocations(
             &root,
+            "consumer",
             &success,
             &success_marker,
             &success_downstream,
             &success_output,
             &mut success_outputs,
-            &mut success_output_cursor,
         );
-        assert!(success_result.status.success());
+        assert!(success_result.succeeded());
         let success_log = must(fs::read_to_string(&success_marker), "read success marker");
         for stage in [
             "downloader",
@@ -731,17 +1588,35 @@ mod tests {
             Some("${{ 'external' == 'external' }}")
         );
         let mut external_outputs = BTreeMap::new();
-        let mut external_output_cursor = 0;
         let external_result = execute_action_invocations(
             &root,
+            "consumer",
             &external,
             &external_marker,
             &root.join("external.downstream"),
             &external_output,
             &mut external_outputs,
-            &mut external_output_cursor,
         );
-        assert!(external_result.status.success());
+        assert!(external_result.succeeded());
+        assert_eq!(
+            external_outputs
+                .get("consumer")
+                .and_then(|outputs| outputs.get("nested-result"))
+                .map(String::as_str),
+            Some("external-value")
+        );
+        let external_scope_log = must(
+            fs::read_to_string(&external_marker),
+            "read nested-scope marker",
+        );
+        assert!(
+            external_scope_log.contains("nested-output-visible"),
+            "nested composite output did not reach the parent scope: {external_scope_log}"
+        );
+        assert!(
+            !external_scope_log.contains("nested-output-leaked"),
+            "nested composite child output leaked into its parent scope: {external_scope_log}"
+        );
         let external_log = must(
             fs::read_to_string(root.join("action-consumer.log")),
             "read external repository action marker",
@@ -763,22 +1638,31 @@ mod tests {
             let output_file = root.join(format!("{mode}.output"));
             let invocations = expanded_invocations(&root, mode, false, &marker);
             let mut outputs = BTreeMap::new();
-            let mut output_cursor = 0;
             let result = execute_action_invocations(
                 &root,
+                "consumer",
                 &invocations,
                 &marker,
                 &downstream,
                 &output_file,
                 &mut outputs,
-                &mut output_cursor,
             );
-            assert!(!result.status.success(), "{mode} failure must propagate");
+            assert!(!result.succeeded(), "{mode} failure must propagate");
             let log = must(fs::read_to_string(&marker), "read failure marker");
             assert!(
                 log.contains(completed_stage),
                 "{mode} did not reach expected stub: {log}"
             );
+            if mode == "download-failure" {
+                assert_eq!(
+                    outputs
+                        .get("consumer")
+                        .and_then(|action_outputs| action_outputs.get("result"))
+                        .map(String::as_str),
+                    Some("downloaded"),
+                    "composite output mapping must run after the failed child"
+                );
+            }
             if mode != "downstream-failure" {
                 assert!(
                     !log.contains("downstream"),
@@ -803,23 +1687,22 @@ mod tests {
             })
             .find(|step| step.id.ends_with("-buildx"))
             .unwrap_or_else(|| panic!("runner graph lost conditional Buildx step"));
-        let skip_outputs = BTreeMap::new();
+        let skip_scope = ActionExecutionScope::default();
         assert!(!condition_runs(
             skip_build.condition.as_deref(),
-            &skip_outputs
+            &skip_scope
         ));
         let mut skip_outputs = BTreeMap::new();
-        let mut skip_output_cursor = 0;
         let skip_result = execute_action_invocations(
             &root,
+            "consumer",
             &skip,
             &skip_marker,
             &skip_downstream,
             &skip_output,
             &mut skip_outputs,
-            &mut skip_output_cursor,
         );
-        assert!(skip_result.status.success());
+        assert!(skip_result.succeeded());
         let skip_log = must(fs::read_to_string(&skip_marker), "read skip marker");
         assert!(skip_log.contains("downloader"));
         assert!(skip_log.contains("validator"));

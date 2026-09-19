@@ -33,6 +33,15 @@ pub mod action_contract {
     };
     pub use crate::script_step::ScriptStep;
 
+    /// Minimal step result needed to evaluate a composite condition with the
+    /// same outcome/conclusion rules as job execution.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ActionStepStatus {
+        pub exit_code: i32,
+        pub skipped: bool,
+        pub continue_on_error: bool,
+    }
+
     /// Evaluate a fixture's action expression against runner-owned step output
     /// state.  Consumer tests use this narrow test-support seam instead of a
     /// string replacement evaluator, so output references exercise the same
@@ -49,23 +58,274 @@ pub mod action_contract {
             .map_err(|error| error.to_string())
     }
 
-    /// Evaluate a composite-step condition with the runner's expression
-    /// parser/evaluator.  Bare conditions are wrapped as a template because
-    /// action expansion may retain either form in the invocation contract.
-    pub fn evaluate_action_condition(
-        condition: &str,
-        step_outputs: &BTreeMap<String, BTreeMap<String, String>>,
-    ) -> Result<bool, String> {
-        let template = if condition.contains("${{") {
-            condition.to_owned()
-        } else {
-            format!("${{{{ {condition} }}}}")
+    /// Parse a `GITHUB_OUTPUT` command-file fragment with Runner-compatible
+    /// file-command semantics. The shared parser handles standard records;
+    /// this adapter covers its name/delimiter differences from FileCommandManager.
+    pub fn parse_action_output_file_contents(
+        contents: &str,
+    ) -> Result<BTreeMap<String, String>, String> {
+        let runner_commands = parse_runner_action_output_file_contents(contents)?;
+        let shared_commands = crate::command_files::parse_command_file_contents(contents)
+            .ok()
+            .map(|commands| {
+                commands
+                    .into_iter()
+                    .map(|command| (command.name, command.value))
+                    .collect::<Vec<_>>()
+            });
+        let commands = shared_commands
+            .filter(|commands| *commands == runner_commands)
+            .unwrap_or(runner_commands);
+        Ok(commands.into_iter().collect())
+    }
+
+    fn parse_runner_action_output_file_contents(
+        contents: &str,
+    ) -> Result<Vec<(String, String)>, String> {
+        let mut commands = Vec::new();
+        let mut index = 0;
+
+        while let Some((line, _newline)) = next_runner_action_output_line(contents, &mut index) {
+            if line.is_empty() {
+                continue;
+            }
+
+            let equals_index = line.find('=');
+            let heredoc_index = line.find("<<");
+            let is_key_value = equals_index.is_some_and(|equals_index| {
+                heredoc_index.is_none_or(|heredoc_index| equals_index < heredoc_index)
+            });
+            if is_key_value {
+                let Some((name, value)) = line.split_once('=') else {
+                    return Err(format!("invalid command-file line: {line}"));
+                };
+                // Runner checks that the full line is nonempty here, rather
+                // than checking the parsed name. Empty and whitespace names
+                // therefore remain valid output keys.
+                commands.push((name.to_owned(), value.to_owned()));
+                continue;
+            }
+
+            let is_heredoc = heredoc_index.is_some_and(|heredoc_index| {
+                equals_index.is_none_or(|equals_index| heredoc_index < equals_index)
+            });
+            if is_heredoc {
+                let Some((name, delimiter)) = line.split_once("<<") else {
+                    return Err(format!("invalid command-file line: {line}"));
+                };
+                if name.is_empty() || delimiter.is_empty() {
+                    return Err(format!("invalid command-file heredoc header: {line}"));
+                }
+
+                let value_start = index;
+                let mut value_end = value_start;
+                let mut found_delimiter = false;
+                while let Some((value_line, newline)) =
+                    next_runner_action_output_line(contents, &mut index)
+                {
+                    if value_line == delimiter {
+                        found_delimiter = true;
+                        break;
+                    }
+                    if newline.is_empty() {
+                        return Err(format!(
+                            "heredoc for command '{name}' ended before its delimiter newline"
+                        ));
+                    }
+                    value_end = index - newline.len();
+                }
+                if !found_delimiter {
+                    return Err(format!(
+                        "missing heredoc delimiter '{delimiter}' for command '{name}'"
+                    ));
+                }
+
+                commands.push((name.to_owned(), contents[value_start..value_end].to_owned()));
+                continue;
+            }
+
+            return Err(format!("invalid command-file line: {line}"));
+        }
+
+        Ok(commands)
+    }
+
+    fn next_runner_action_output_line<'a>(
+        contents: &'a str,
+        index: &mut usize,
+    ) -> Option<(&'a str, &'a str)> {
+        if *index >= contents.len() {
+            return None;
+        }
+
+        let start = *index;
+        let Some(line_feed_offset) = contents[start..].find('\n') else {
+            *index = contents.len();
+            return Some((&contents[start..], ""));
         };
-        let rendered = render_action_expression(&template, step_outputs)?;
-        match rendered.trim().to_ascii_lowercase().as_str() {
-            "true" => Ok(true),
-            "false" | "" => Ok(false),
-            _ => Err("runner condition did not evaluate to a boolean".to_owned()),
+        let line_feed = start + line_feed_offset;
+        *index = line_feed + 1;
+
+        // FileCommandManager.ReadLine recognizes CRLF as one newline only on
+        // Windows. On other platforms the CR remains part of the line. Keep
+        // that platform behavior so delimiter matching and the raw value
+        // substring agree with the Runner implementation.
+        #[cfg(windows)]
+        let newline_start = if line_feed > start && contents.as_bytes()[line_feed - 1] == b'\r' {
+            line_feed - 1
+        } else {
+            line_feed
+        };
+        #[cfg(not(windows))]
+        let newline_start = line_feed;
+
+        Some((
+            &contents[start..newline_start],
+            &contents[newline_start..line_feed + 1],
+        ))
+    }
+
+    /// Evaluate a composite-step condition with the runner's typed condition
+    /// evaluator, including implicit `success()` and status functions.
+    pub fn evaluate_action_condition(
+        condition: Option<&str>,
+        step_outputs: &BTreeMap<String, BTreeMap<String, String>>,
+        step_statuses: &BTreeMap<String, ActionStepStatus>,
+    ) -> Result<bool, String> {
+        let mut state = crate::executor::JobExecutionState::try_new_with_context(&[], &[])
+            .map_err(|error| error.to_string())?;
+        state.outputs = step_outputs.clone();
+        for (step_id, status) in step_statuses {
+            state.apply(
+                step_id,
+                &crate::executor::StepExecutionResult {
+                    exit_code: status.exit_code,
+                    state: crate::script_step::StepCommandState::default(),
+                    skipped: status.skipped,
+                    failure_ignored: status.continue_on_error,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                },
+            );
+        }
+        state
+            .evaluate_condition(condition)
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(test)]
+    #[allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        reason = "test-support regressions use direct assertions"
+    )]
+    mod tests {
+        use std::collections::BTreeMap;
+
+        use super::{
+            evaluate_action_condition, parse_action_output_file_contents, ActionStepStatus,
+        };
+
+        #[test]
+        fn action_conditions_keep_runner_typed_truthiness_and_status_defaults() {
+            let outputs = BTreeMap::from([(
+                "producer".to_owned(),
+                BTreeMap::from([
+                    ("false_string".to_owned(), "false".to_owned()),
+                    ("zero_string".to_owned(), "0".to_owned()),
+                    ("empty_string".to_owned(), String::new()),
+                ]),
+            )]);
+            let statuses = BTreeMap::new();
+
+            for (name, expected) in [
+                ("false_string", true),
+                ("zero_string", true),
+                ("empty_string", false),
+            ] {
+                let condition = format!("${{{{ steps.producer.outputs.{name} }}}}");
+                assert_eq!(
+                    evaluate_action_condition(Some(&condition), &outputs, &statuses).unwrap(),
+                    expected,
+                    "output `{name}` must use expression truthiness"
+                );
+            }
+            assert!(!evaluate_action_condition(Some("false"), &outputs, &statuses).unwrap());
+            assert!(evaluate_action_condition(None, &outputs, &statuses).unwrap());
+            assert!(evaluate_action_condition(Some(""), &outputs, &statuses).unwrap());
+        }
+
+        #[test]
+        fn action_conditions_apply_implicit_success_and_continue_on_error() {
+            let outputs = BTreeMap::new();
+            let failed = BTreeMap::from([(
+                "child".to_owned(),
+                ActionStepStatus {
+                    exit_code: 1,
+                    skipped: false,
+                    continue_on_error: false,
+                },
+            )]);
+            assert!(!evaluate_action_condition(Some("true"), &outputs, &failed).unwrap());
+            assert!(!evaluate_action_condition(Some("success()"), &outputs, &failed).unwrap());
+            assert!(evaluate_action_condition(Some("failure()"), &outputs, &failed).unwrap());
+            assert!(evaluate_action_condition(Some("always()"), &outputs, &failed).unwrap());
+
+            let tolerated = BTreeMap::from([(
+                "child".to_owned(),
+                ActionStepStatus {
+                    exit_code: 1,
+                    skipped: false,
+                    continue_on_error: true,
+                },
+            )]);
+            assert!(evaluate_action_condition(Some("true"), &outputs, &tolerated).unwrap());
+            assert!(!evaluate_action_condition(Some("failure()"), &outputs, &tolerated).unwrap());
+        }
+
+        #[test]
+        fn action_output_parser_preserves_equals_inside_heredoc_values() {
+            assert_eq!(
+                parse_action_output_file_contents("result<<END\nfirst=one\nsecond=two\nEND\n")
+                    .unwrap()
+                    .get("result")
+                    .map(String::as_str),
+                Some("first=one\nsecond=two")
+            );
+            assert!(parse_action_output_file_contents("result<<END\nmissing end\n").is_err());
+        }
+
+        #[test]
+        fn action_output_parser_preserves_heredoc_line_ending_bytes() {
+            let lf = parse_action_output_file_contents("result<<END\nfirst=one\nsecond=two\nEND\n")
+                .unwrap();
+            assert_eq!(
+                lf.get("result").map(String::as_str),
+                Some("first=one\nsecond=two")
+            );
+
+            let crlf = parse_action_output_file_contents(
+                "result<<END\r\nfirst=one\r\nsecond=two\r\nEND\r\n",
+            )
+            .unwrap();
+            let expected = if cfg!(windows) {
+                "first=one\r\nsecond=two"
+            } else {
+                "first=one\r\nsecond=two\r"
+            };
+            assert_eq!(crlf.get("result").map(String::as_str), Some(expected));
+        }
+
+        #[test]
+        fn action_output_parser_matches_runner_name_and_delimiter_rules() {
+            let outputs =
+                parse_action_output_file_contents("=empty-name\n whitespace =spaced-name\n")
+                    .unwrap();
+
+            assert_eq!(outputs.get(""), Some(&"empty-name".to_owned()));
+            assert_eq!(outputs.get(" whitespace "), Some(&"spaced-name".to_owned()));
+            assert!(parse_action_output_file_contents("result<<\n\n").is_err());
         }
     }
 }
