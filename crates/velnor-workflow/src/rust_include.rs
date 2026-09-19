@@ -148,13 +148,11 @@ fn include_invocation(
         "include_bytes" => "include_bytes!",
         _ => return Ok(None),
     };
-    // `foo::include_str!` is a user macro path, not the built-in include
-    // macro. A field value has one preceding colon (`field: include_str!`),
-    // so only an actual token-glued `::` path qualification suppresses the
-    // invocation. A direct include invocation can still have comments/
-    // whitespace between its name, bang, and delimiter because tokens discard
-    // trivia.
-    if is_double_colon_before(tokens, index) {
+    // A path-qualified invocation is normally a user macro and must not be
+    // treated as the built-in include. `std::` and `core::` are the two
+    // standard-library paths that re-export the built-in macro, however, so
+    // keep those calls visible while rejecting arbitrary/user qualification.
+    if is_double_colon_before(tokens, index) && !is_standard_library_qualified(tokens, index) {
         return Ok(None);
     }
     if !tokens
@@ -261,6 +259,21 @@ fn is_double_colon_before(tokens: &[TokenTree], index: usize) -> bool {
         && first.spacing() == Spacing::Joint
         && second.as_char() == ':'
         && second.spacing() == Spacing::Alone
+}
+
+fn is_standard_library_qualified(tokens: &[TokenTree], index: usize) -> bool {
+    let Some(qualifier_index) = index.checked_sub(3) else {
+        return false;
+    };
+    let Some(TokenTree::Ident(qualifier)) = tokens.get(qualifier_index) else {
+        return false;
+    };
+    if !matches!(qualifier.to_string().as_str(), "std" | "core") {
+        return false;
+    }
+    // Reject `other::std::include_str!`; permit either a direct `std::` /
+    // `core::` path or the absolute `::std::` / `::core::` spelling.
+    !is_double_colon_before(tokens, qualifier_index) || qualifier_index == 2
 }
 
 /// Path resolution errors stay structured so both schema scanners can render
@@ -512,6 +525,23 @@ const _: &str = crate::include_str!("user-macro.txt");
                 IncludeString::Relative("data.txt".to_owned()),
                 IncludeString::Relative("raw.txt".to_owned()),
                 IncludeString::Relative("assets/bytes.bin".to_owned()),
+            ])
+        );
+    }
+
+    #[test]
+    fn accepts_standard_library_qualified_includes_but_ignores_user_macros() {
+        let source = r#"
+const _: &str = std::include_str!("std.txt");
+const _: &[u8] = core::include_bytes!("core.bin");
+const _: &str = crate::include_str!("user-macro.txt");
+const _: &str = other::std::include_str!("nested-user-macro.txt");
+"#;
+        assert_eq!(
+            parse_include_paths(source).ok(),
+            Some(vec![
+                IncludeString::Relative("std.txt".to_owned()),
+                IncludeString::Relative("core.bin".to_owned()),
             ])
         );
     }
