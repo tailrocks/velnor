@@ -13,8 +13,8 @@ use std::fmt::Write as _;
 use super::{
     checks_env, docker_build_token_env_for_members, render_cargo_source_preparation,
     render_pinned_toolchain_steps, render_retained_output_cache_note, Args, CacheBackend,
-    Primitive, RenderCtx, Rendered, WorkflowIr, MAINTENANCE, PREVIEW, RELEASE, RELEASE_SIGNER,
-    STATIC_WORKFLOW,
+    Primitive, RenderCtx, Rendered, WorkflowIr, MAINTENANCE, PACKAGE_RELEASE, PREVIEW, RELEASE,
+    RELEASE_SIGNER, STATIC_WORKFLOW,
 };
 use crate::s2::provider::{runs_on_for, ProviderId};
 use crate::s2::{
@@ -46,7 +46,9 @@ pub(crate) fn canonical_release_side_file(primitive: &str) -> Option<&'static st
 
 /// Whether the primitive renders one of the release-side workflow files.
 pub(crate) fn is_release_side(primitive: &str) -> bool {
-    canonical_release_side_file(primitive).is_some() || primitive == STATIC_WORKFLOW
+    canonical_release_side_file(primitive).is_some()
+        || primitive == PACKAGE_RELEASE
+        || primitive == STATIC_WORKFLOW
 }
 
 /// The release-record schema the stable publisher assembles. The record tool
@@ -4826,6 +4828,12 @@ mod tests {
 
     /// The digest of a rendered workflow, as the hex the `sha256sum` output
     /// spells: the pin the legacy-render test compares against.
+    #[test]
+    fn package_release_owns_declared_workflow_file() {
+        assert_eq!(canonical_release_side_file(PACKAGE_RELEASE), None);
+        assert!(is_release_side(PACKAGE_RELEASE));
+    }
+
     fn digest_of(content: &str) -> String {
         Sha256::digest(content.as_bytes()).iter().fold(
             String::with_capacity(64),
