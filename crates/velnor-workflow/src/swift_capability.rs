@@ -141,7 +141,7 @@ pub(crate) fn package_evidence(
 }
 
 fn manifest_native_contract(contents: &str) -> AppleNativeContract {
-    let code = strip_swift_comments(contents);
+    let code = strip_swift_comments_and_strings(contents);
     let family = if code.contains(".iOS(") {
         AppleSdkFamily::IosSimulator
     } else {
@@ -188,9 +188,6 @@ fn project_native_contract(contents: &str) -> Option<AppleNativeContract> {
     }
     if let Some(version) = setting_version(&code, "xcodeVersion") {
         contract.xcode = crate::native_contract::AppleVersionConstraint::exact(version);
-    }
-    if let Some(version) = setting_version(&code, "SWIFT_VERSION") {
-        contract.swift = crate::native_contract::AppleVersionConstraint::exact(version);
     }
     Some(contract)
 }
@@ -671,9 +668,12 @@ fn is_package_source(
 #[cfg(test)]
 mod tests {
     use super::{
-        manifest_declares_apple_platform, manifest_uses_apple_linker, manifest_uses_xcframework,
-        source_imports_apple_module,
+        is_package_source, manifest_declares_apple_platform, manifest_uses_apple_linker,
+        manifest_uses_xcframework, project_native_contract, source_imports_apple_module,
+        xcode_native_contract,
     };
+    use crate::native_contract::{AppleArch, AppleSdkFamily, AppleVersion};
+    use std::collections::BTreeSet;
 
     #[test]
     fn recognizes_real_native_shapes_without_repo_names() {
@@ -741,5 +741,73 @@ mod tests {
         assert!(!source_imports_apple_module(
             "let note = ##\"\"\"\nimport SwiftUI\n\"\"\"##\n"
         ));
+    }
+
+    #[test]
+    fn native_contract_reads_tools_sdk_xcode_and_architecture_facts() {
+        let package = r#"// swift-tools-version: 6.2
+let package = Package(platforms: [.macOS(.v26)])
+"#;
+        let package_contract = super::manifest_native_contract(package);
+        assert_eq!(package_contract.sdk.family, AppleSdkFamily::Macos);
+        assert_eq!(
+            package_contract.sdk.version.minimum,
+            Some(AppleVersion::new(26, 0, 0))
+        );
+        assert_eq!(
+            package_contract.swift.minimum,
+            Some(AppleVersion::new(6, 2, 0))
+        );
+
+        let project = r#"SDKROOT = macosx;
+MACOSX_DEPLOYMENT_TARGET = 26.0;
+ARCHS = arm64 x86_64;
+"#;
+        let project_config = r#"xcodeVersion: "26.6"
+deploymentTarget:
+  macOS: "26.0"
+settings:
+  base:
+    ARCHS: arm64 x86_64
+"#;
+        let xcode = xcode_native_contract(project, Some(project_config)).expect("Xcode facts");
+        assert_eq!(xcode.sdk.family, AppleSdkFamily::Macos);
+        assert_eq!(xcode.xcode.exact, Some(AppleVersion::new(26, 6, 0)));
+        assert_eq!(
+            xcode.build_arches,
+            BTreeSet::from([AppleArch::Arm64, AppleArch::X86_64])
+        );
+    }
+
+    #[test]
+    fn package_source_scope_ignores_unrelated_swift_siblings() {
+        let roots = vec![".".to_owned()];
+        let declared = vec!["Sources".to_owned(), "Tests".to_owned()];
+        assert!(is_package_source(
+            "Sources/Portable.swift",
+            ".",
+            &roots,
+            &declared
+        ));
+        assert!(!is_package_source(
+            "Example/AppleOnly.swift",
+            ".",
+            &roots,
+            &declared
+        ));
+        assert!(!is_package_source(
+            "native/Sources/Nested.swift",
+            ".",
+            &roots,
+            &declared
+        ));
+    }
+
+    #[test]
+    fn conflicting_xcode_sources_are_not_silently_weakened() {
+        let project = "SDKROOT = macosx; MACOSX_DEPLOYMENT_TARGET = 26.0;";
+        let config = "xcodeVersion: \"26.6\"\ndeploymentTarget:\n  iOS: \"26.0\"\n";
+        let contract = xcode_native_contract(project, Some(config)).expect("conflict evidence");
+        assert!(!contract.conflicts.is_empty());
     }
 }

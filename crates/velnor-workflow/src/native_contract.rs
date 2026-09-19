@@ -765,4 +765,80 @@ mod tests {
         assert!(rendered.contains("APPLE_EXECUTION_ARCH: \"arm64\""));
         assert!(rendered.contains("cross-build support does not satisfy execution"));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_preflight_passes_verified_host_and_rejects_wrong_execution_arch() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        let root =
+            std::env::temp_dir().join(format!("velnor-native-preflight-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        assert!(fs::create_dir_all(root.join("bin")).is_ok());
+        assert!(fs::create_dir_all(root.join("Developer")).is_ok());
+        assert!(fs::create_dir_all(root.join("SDK")).is_ok());
+        let write_tool = |name: &str, body: &str| {
+            let path = root.join("bin").join(name);
+            if fs::write(&path, body).is_err() {
+                return false;
+            }
+            let mut permissions = match fs::metadata(&path) {
+                Ok(metadata) => metadata.permissions(),
+                Err(_) => return false,
+            };
+            permissions.set_mode(0o755);
+            fs::set_permissions(path, permissions).is_ok()
+        };
+        assert!(write_tool("uname", "#!/bin/sh\necho arm64\n"));
+        assert!(write_tool(
+            "sw_vers",
+            "#!/bin/sh\n[ \"$1\" = \"-productVersion\" ] && echo 26.6.1\n"
+        ));
+        assert!(write_tool(
+            "xcode-select",
+            "#!/bin/sh\necho $DEVELOPER_DIR\n"
+        ));
+        assert!(write_tool(
+            "xcodebuild",
+            "#!/bin/sh\ncase \"$1\" in -version) echo 'Xcode 26.6';; -showsdks) echo 'macosx26.5';; esac\n"
+        ));
+        assert!(write_tool(
+            "xcrun",
+            "#!/bin/sh\ncase \"$*\" in *--show-sdk-version*) echo 26.5;; *--show-sdk-path*) echo $SDK_PATH;; *) exit 0;; esac\n"
+        ));
+        assert!(write_tool(
+            "swift",
+            "#!/bin/sh\necho 'Apple Swift version 6.2 (swift-6.2-RELEASE)'\n"
+        ));
+        let env_file = root.join("github-env");
+        let path = format!("{}:/usr/bin:/bin", root.join("bin").display());
+        let mut command = || {
+            let mut command = Command::new("bash");
+            command
+                .arg("-c")
+                .arg(super::preflight_script())
+                .env("PATH", &path)
+                .env("DEVELOPER_DIR", root.join("Developer"))
+                .env("SDK_PATH", root.join("SDK"))
+                .env("GITHUB_ENV", &env_file)
+                .env("APPLE_MACOS_MINIMUM", "26.0")
+                .env("APPLE_SDK_FAMILY", "macos")
+                .env("APPLE_SDK_NAME", "macosx")
+                .env("APPLE_SDK_MINIMUM", "26.5")
+                .env("APPLE_SDK_EXACT", "")
+                .env("APPLE_XCODE_MINIMUM", "26.6")
+                .env("APPLE_XCODE_EXACT", "26.6")
+                .env("APPLE_SWIFT_MINIMUM", "6.2")
+                .env("APPLE_SWIFT_EXACT", "")
+                .env("APPLE_EXECUTION_ARCH", "arm64")
+                .env("APPLE_BUILD_ARCHES", "arm64 x86_64")
+                .status()
+        };
+        assert!(command().is_ok_and(|status| status.success()));
+        assert!(fs::write(root.join("bin/uname"), "#!/bin/sh\necho x86_64\n").is_ok());
+        assert!(command().is_ok_and(|status| !status.success()));
+        assert!(fs::remove_dir_all(root).is_ok());
+    }
 }
