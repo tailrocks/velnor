@@ -16,7 +16,7 @@ use super::{
     Primitive, RenderCtx, Rendered, WorkflowIr, MAINTENANCE, PREVIEW, RELEASE, RELEASE_SIGNER,
     STATIC_WORKFLOW,
 };
-use crate::s2::provider::{runs_on_for, ProviderId};
+use crate::s2::provider::{runs_on_for, ProviderId, ProviderSet};
 use crate::s2::{
     github_expression, provider_supports_unit, rendered_cache_values, selector_runs_on_yaml,
     shell_quote, unit_display_label, workflow_runtime_setup,
@@ -305,6 +305,7 @@ fn declared_spec(family: &str, args: &Args<'_>) -> Result<ReleaseSpec, Generator
     )?;
     Ok(ReleaseSpec {
         kind,
+        verification_providers: None,
         package: args.string("package")?.unwrap_or_default(),
         packages: args.strings("packages")?.unwrap_or_default(),
         binary: args.string("binary")?.unwrap_or_default(),
@@ -353,6 +354,7 @@ fn declared_preview_spec(args: &Args<'_>) -> Result<ReleaseSpec, GeneratorError>
     let modes = declared_modes(family, args.strings("modes")?.unwrap_or_default())?;
     Ok(ReleaseSpec {
         kind: "rust-binary".to_owned(),
+        verification_providers: None,
         package: args.string("package")?.unwrap_or_default(),
         packages: Vec::new(),
         binary: args.string("binary")?.unwrap_or_default(),
@@ -2049,13 +2051,24 @@ fn policy_enforcement_step() -> &'static str {
 /// exactly this identity), then the rolling `preview` release is replaced
 /// atomically under its `Preview <version>` title. A monotonicity guard
 /// refuses to move the lane backward when a superseded run re-publishes.
-fn render_preview_publish_job(config: &ProjectConfig, release: &ReleaseSpec, sign: bool) -> String {
+fn render_preview_publish_job(
+    config: &ProjectConfig,
+    release: &ReleaseSpec,
+    sign: bool,
+    verification_job_ids: &[String],
+) -> String {
     let download = ActionPin::DownloadArtifact.reference();
-    let needs = if sign {
-        "identity, debian, sign-deb"
+    let mut needs = if sign {
+        vec![
+            "identity".to_owned(),
+            "debian".to_owned(),
+            "sign-deb".to_owned(),
+        ]
     } else {
-        "identity, debian"
+        vec!["identity".to_owned(), "debian".to_owned()]
     };
+    needs.extend(verification_job_ids.iter().cloned());
+    let needs = needs.join(", ");
     let binary = yaml_scalar(&release.binary);
     let arches = deb_architectures(&release.targets).unwrap_or_default();
     let arch_list = arches
@@ -2135,6 +2148,9 @@ fn inject_preview_triggers(output: &str, config: &ProjectConfig, release: &Relea
 fn render_native_preview(config: &ProjectConfig, release: &ReleaseSpec) -> String {
     let mut jobs = render_preview_identity_job(config, release);
     jobs.push('\n');
+    let (unit_jobs, unit_job_ids) = render_preview_release_unit_jobs(config, release, true);
+    jobs.push_str(&unit_jobs);
+    jobs.push('\n');
     let guest_job = render_guest_payload_job(config, release, true);
     if let Some(guest_job) = &guest_job {
         jobs.push_str(guest_job);
@@ -2158,6 +2174,7 @@ fn render_native_preview(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         config,
         release,
         sign_job.is_some(),
+        &unit_job_ids,
     ));
     let output = format!(
         "{GENERATED_HEADER}name: Preview\nrun-name: Preview · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    branches: [{}]\n    paths:\n{paths}  workflow_dispatch:\n\nconcurrency:\n  group: preview-${{{{ github.repository }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n{jobs}",
@@ -2266,10 +2283,11 @@ fn workflow_runtime_setup_for_config(config: &ProjectConfig) -> String {
 }
 
 /// Release and preview artifact builders are one writer: hosted. Core CI
-/// still fans out over the universe, and release verification jobs run per
-/// provider, while the release-side matrix must not carry a self-hosted
-/// value behind `matrix.runner`: the pinned policy runtime validates that
-/// raw value and cannot prove a matrix entry is the approved runner mapping.
+/// still fans out over the universe, while release verification jobs use the
+/// explicit release provider set (or the historical universe fallback). The
+/// release-side matrix must not carry a self-hosted value behind
+/// `matrix.runner`: the pinned policy runtime validates that raw value and
+/// cannot prove a matrix entry is the approved runner mapping.
 /// The one-writer release-side provider: hosted when the universe contains
 /// it, otherwise the canonical-first local provider, so no hosted `runs-on`
 /// leaks into a local-only surface. Explicit local-only repositories retain
@@ -2285,6 +2303,17 @@ fn release_provider(config: &ProjectConfig) -> ProviderId {
             .copied()
             .unwrap_or(ProviderId::GithubHosted)
     }
+}
+
+/// Release verification is an explicit contract, not an inference from CI
+/// event routing. Configs that have not adopted the field retain the original
+/// provider-universe fanout until they declare their intended lanes.
+fn release_verification_providers(config: &ProjectConfig) -> &ProviderSet {
+    config
+        .release
+        .as_ref()
+        .and_then(|release| release.verification_providers.as_ref())
+        .unwrap_or(&config.providers)
 }
 
 fn release_providers(config: &ProjectConfig, target: &str) -> Vec<(&'static str, String)> {
@@ -2637,6 +2666,27 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
         }
     }
     let matrix_runner = release_matrix_runner(config, &release.targets);
+    let (unit_jobs, unit_job_ids) = render_preview_release_unit_jobs(config, release, false);
+    let mut build_needs = unit_job_ids.clone();
+    if has_producer_binding(release) {
+        build_needs.insert(0, "source".to_owned());
+    }
+    let build_needs = if build_needs.is_empty() {
+        String::new()
+    } else {
+        format!("    needs: [{}]\n", build_needs.join(", "))
+    };
+    let mut publish_needs = vec!["build".to_owned()];
+    publish_needs.extend(unit_job_ids);
+    if has_producer_binding(release) {
+        publish_needs.push("publish-gate".to_owned());
+    }
+    let publish_needs = publish_needs.join(", ");
+    let publish_gate = if has_producer_binding(release) {
+        "needs.publish-gate.outputs.admitted == 'true' && needs.publish-gate.outputs.mode == 'publish'"
+    } else {
+        "true"
+    };
     let mut output = format!(
         r#"{GENERATED_HEADER}name: Preview\nrun-name: Preview · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    branches: [{}]\n    paths:\n{paths}  workflow_dispatch:\n\nconcurrency:\n  group: preview-${{{{ github.repository }}}}\n  cancel-in-progress: true\n\npermissions:\n  contents: read\n\njobs:\n  build:\n    name: Preview / ${{{{ matrix.target }}}}\n    runs-on: {matrix_runner}\n    timeout-minutes: 75\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Build preview binary\n        env:\n          CARGO_INCREMENTAL: "0"\n          RUSTC_WRAPPER: sccache\n        run: cargo build --locked --release --package {} --bin {} --target "${{{{ matrix.target }}}}"\n      - name: Package preview binary\n        run: velnor-workflow release package-binary --target "${{{{ matrix.target }}}}" --version preview --package {} --binary {}\n      - name: Attest preview artifact\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload preview artifact\n        uses: {}\n        with:\n          name: ${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 1\n\n  publish:\n    name: Publish rolling preview\n    needs: build\n    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{}' }}}}\n    runs-on: ubuntu-24.04\n    timeout-minutes: 15\n    permissions:\n      contents: write\n    steps:\n      - name: Download preview artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Replace rolling preview\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          gh release view preview >/dev/null 2>&1 || gh release create preview --prerelease --title "Rolling preview"\n          gh release edit preview --target "${{{{ github.sha }}}}" --prerelease\n          gh release upload preview dist/* --clobber\n"#,
         yaml_scalar(&config.default_branch),
@@ -2719,10 +2769,37 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
         ),
     )
     .replace("run: cargo build ", "run: mbx build ");
+    // Unit verification is part of the preview admission graph. Keep the
+    // provider jobs ahead of the artifact build and make the singular
+    // publisher wait on the same exact IDs.
+    output = output.replacen("jobs:\n  build:", &format!("jobs:\n{unit_jobs}  build:"), 1);
+    output = output.replacen(
+        "  build:\n    name: Preview / ${{ matrix.target }}\n    runs-on:",
+        &format!("  build:\n    name: Preview / ${{ matrix.target }}\n{build_needs}    runs-on:"),
+        1,
+    );
+    output = output.replacen(
+        "  publish:\n    name: Publish rolling preview\n    needs: build\n",
+        &format!("  publish:\n    name: Publish rolling preview\n    needs: [{publish_needs}]\n"),
+        1,
+    );
+    let publish_if = format!(
+        "    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{}' }}}}\n",
+        config.default_branch
+    );
+    output = output.replacen(
+        &publish_if,
+        &format!(
+            "    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{}' && ({publish_gate}) }}}}\n",
+            config.default_branch
+        ),
+        1,
+    );
     // The tarball lane has no identity job, so its guest payload keeps the
     // unbound shape; the native preview lane renders its own guest below.
     if let Some(guest) = render_guest_payload_job(config, release, false) {
-        output = output.replace("jobs:\n  build:", &format!("jobs:\n{guest}\n  build:"));
+        let marker = format!("jobs:\n{unit_jobs}  build:");
+        output = output.replacen(&marker, &format!("jobs:\n{unit_jobs}{guest}\n  build:"), 1);
     }
     inject_tarball_preview_bindings(&output, config, release)
 }
@@ -2740,11 +2817,6 @@ fn inject_tarball_preview_bindings(
     output = inject_binding_jobs(&output, config, release);
     if has_producer_binding(release) {
         output = output.replacen(
-            "  build:\n    name: Preview / ${{ matrix.target }}\n",
-            "  build:\n    name: Preview / ${{ matrix.target }}\n    needs: [source]\n",
-            1,
-        );
-        output = output.replacen(
             "        with:\n          fetch-depth: 0\n          persist-credentials: false\n",
             "        with:\n          ref: ${{ needs.source.outputs.sha }}\n          fetch-depth: 0\n          persist-credentials: false\n",
             1,
@@ -2761,15 +2833,6 @@ fn inject_tarball_preview_bindings(
                 1,
             );
         }
-        let legacy_publish = format!(
-            "    needs: build\n    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{}' }}}}\n",
-            config.default_branch,
-        );
-        output = output.replacen(
-            &legacy_publish,
-            "    needs: [build, publish-gate]\n    if: ${{ needs.publish-gate.outputs.admitted == 'true' && needs.publish-gate.outputs.mode == 'publish' }}\n",
-            1,
-        );
     }
     if has_archive_contract(release) {
         output = output.replacen(
@@ -3112,15 +3175,24 @@ pub(crate) fn render_release(config: &ProjectConfig, release: &ReleaseSpec) -> S
 }
 
 /// One release unit job for `(provider, unit)`; returns its job id.
+#[derive(Clone, Copy)]
+struct ReleaseUnitJobContext<'a> {
+    root_needs: &'a [String],
+    checkout_ref: Option<&'a str>,
+    head_sha: &'a str,
+    gate: Option<&'a str>,
+}
+
 fn render_release_unit_job(
     output: &mut String,
     config: &ProjectConfig,
     workflow: &WorkflowIr,
     provider: ProviderId,
     unit: &Unit,
+    context: ReleaseUnitJobContext<'_>,
 ) -> String {
     let id = format!("release-{}-{}", provider.as_str(), unit.id);
-    let mut needs = vec!["verify".to_owned()];
+    let mut needs = context.root_needs.to_vec();
     needs.extend(unit.depends_on.iter().filter_map(|dependency| {
         config
             .units
@@ -3132,25 +3204,35 @@ fn render_release_unit_job(
     let runner = release_unit_runs_on(workflow, provider, unit);
     let job_name = yaml_scalar(&crate::s2::comparison_job_name(provider, unit));
     let verify_name = yaml_scalar(&unit.label);
-    let dispatch_gate = if provider.is_local() {
-        trusted_release_runner_gate(&config.default_branch)
-    } else {
+    let mut gates = Vec::new();
+    if provider.is_local() {
+        gates.push(trusted_release_runner_gate(&config.default_branch));
+    }
+    if let Some(gate) = context.gate {
+        gates.push(gate.to_owned());
+    }
+    let dispatch_gate = if gates.is_empty() {
         String::new()
+    } else {
+        format!("    if: ${{{{ {} }}}}\n", gates.join(" && "))
     };
-    let dispatch_gate = if dispatch_gate.is_empty() {
+    let needs_line = if needs.is_empty() {
         String::new()
     } else {
-        format!("    if: ${{{{ {dispatch_gate} }}}}\n")
+        format!("    needs: [{}]\n", needs.join(", "))
     };
+    let checkout_ref = context
+        .checkout_ref
+        .map(|checkout_ref| format!("          ref: {checkout_ref}\n"))
+        .unwrap_or_default();
     let _ = writeln!(
         output,
-        "  {id}:\n    name: {job_name}\n{dispatch_gate}    needs: [{}]\n    runs-on: {runner}\n    timeout-minutes: 60\n    steps:",
-        needs.join(", ")
+        "  {id}:\n    name: {job_name}\n{dispatch_gate}{needs_line}    runs-on: {runner}\n    timeout-minutes: 60\n    steps:"
     );
     let _ = writeln!(
         output,
-        "      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false",
-        ActionPin::Checkout.reference()
+        "      - name: Checkout\n        uses: {}\n        with:\n{checkout_ref}          persist-credentials: false",
+        ActionPin::Checkout.reference(),
     );
     workflow.render_workflow_runtime_setup(output, provider);
     // The generator's own unit runs `--plain --check` with the network
@@ -3205,13 +3287,15 @@ fn render_release_unit_job(
     // reading the missing selection file.
     let _ = writeln!(
         output,
-        "      - name: Plan full release selection\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection\n        run: |\n          set -euo pipefail\n          mkdir -p .velnor-ci-selection\n          velnor-workflow plan --config .github/ci/project.toml\n"
+        "      - name: Plan full release selection\n        env:\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: {head_sha}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection\n        run: |\n          set -euo pipefail\n          mkdir -p .velnor-ci-selection\n          velnor-workflow plan --config .github/ci/project.toml\n",
+        head_sha = context.head_sha,
     );
     let _ = writeln!(
         output,
-        "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: ${{{{ github.sha }}}}{cargo_offline}{token_env}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
+        "      - name: Run {verify_name} checks\n        env:\n          CI_SCOPE: full\n          CI_UNIT_ID: {}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          HEAD_SHA: {head_sha}{cargo_offline}{token_env}\n        run: velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit {}\n",
         yaml_scalar(&unit.id),
-        yaml_scalar(&unit.id)
+        yaml_scalar(&unit.id),
+        head_sha = context.head_sha,
     );
     id
 }
@@ -3229,10 +3313,73 @@ fn release_unit_runs_on(workflow: &WorkflowIr, provider: ProviderId, unit: &Unit
 }
 
 fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
+    let root_needs = ["verify".to_owned()];
+    render_release_unit_jobs_with_context(config, &root_needs, None, "${{ github.sha }}", None)
+}
+
+/// Render preview verification lanes against the source admission that owns
+/// the bytes. Native previews resolve identity first; producer-bound previews
+/// wait for the publish gate and check out the source job's exact SHA. A bare
+/// tarball preview has no producer job, so it uses the event SHA under the
+/// same trusted branch/dispatch gate as its build.
+fn render_preview_release_unit_jobs(
+    config: &ProjectConfig,
+    release: &ReleaseSpec,
+    native: bool,
+) -> (String, Vec<String>) {
+    let (root_needs, checkout_ref, head_sha, gate): (
+        Vec<String>,
+        Option<&str>,
+        &str,
+        Option<String>,
+    ) = if has_producer_binding(release) {
+        (
+            vec!["publish-gate".to_owned()],
+            Some("${{ needs.source.outputs.sha }}"),
+            "${{ needs.source.outputs.sha }}",
+            Some("needs.publish-gate.outputs.admitted == 'true'".to_owned()),
+        )
+    } else if native {
+        (
+            vec!["identity".to_owned()],
+            Some("${{ needs.identity.outputs.commit }}"),
+            "${{ needs.identity.outputs.commit }}",
+            None,
+        )
+    } else {
+        (
+            Vec::new(),
+            None,
+            "${{ github.sha }}",
+            Some(trusted_release_runner_gate(&config.default_branch)),
+        )
+    };
+    render_release_unit_jobs_with_context(
+        config,
+        &root_needs,
+        checkout_ref,
+        head_sha,
+        gate.as_deref(),
+    )
+}
+
+fn render_release_unit_jobs_with_context(
+    config: &ProjectConfig,
+    root_needs: &[String],
+    checkout_ref: Option<&str>,
+    head_sha: &str,
+    gate: Option<&str>,
+) -> (String, Vec<String>) {
     let workflow = WorkflowIr::from_config(config);
+    let context = ReleaseUnitJobContext {
+        root_needs,
+        checkout_ref,
+        head_sha,
+        gate,
+    };
     let mut output = String::new();
     let mut job_ids = Vec::new();
-    for provider in &config.providers {
+    for provider in release_verification_providers(config) {
         for unit in config
             .units
             .iter()
@@ -3244,6 +3391,7 @@ fn render_release_unit_jobs(config: &ProjectConfig) -> (String, Vec<String>) {
                 &workflow,
                 *provider,
                 unit,
+                context,
             ));
         }
     }
@@ -4990,6 +5138,7 @@ mod tests {
     fn binary_spec() -> ReleaseSpec {
         ReleaseSpec {
             kind: "rust-binary".to_owned(),
+            verification_providers: None,
             package: "example".to_owned(),
             packages: Vec::new(),
             binary: "example".to_owned(),
@@ -5027,6 +5176,7 @@ mod tests {
     fn native_spec() -> ReleaseSpec {
         ReleaseSpec {
             kind: "native".to_owned(),
+            verification_providers: None,
             package: "example".to_owned(),
             packages: Vec::new(),
             binary: "example".to_owned(),
@@ -5063,6 +5213,7 @@ mod tests {
     fn docker_spec() -> ReleaseSpec {
         ReleaseSpec {
             kind: "docker".to_owned(),
+            verification_providers: None,
             package: String::new(),
             packages: Vec::new(),
             binary: String::new(),
@@ -5214,7 +5365,7 @@ mod tests {
     /// policy provider are not pinned here: they are a repository's declared
     /// static surface, not part of the generic renderer.
     #[test]
-    fn default_rows_render_the_legacy_release_surface() {
+    fn default_rows_render_the_release_surface() {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
@@ -5222,7 +5373,7 @@ mod tests {
             ),
             (
                 "preview.yml",
-                "4c47335678cafe07eeb3dfd7f2aacdc8e57535f80fec2a1a9f8fcea7a1336afc",
+                "7bfe242a1a5d8169a9dfdc1b8577de95ad6f29aae2f0f4271ac17162fffd45d0",
             ),
             (
                 "maintenance.yml",
@@ -5343,7 +5494,7 @@ mod tests {
             ),
             (
                 "preview.yml",
-                "4922e8b7aded3ec357e776fec51fad0ef4d408db8117801c87ec7dfeefb36368",
+                "fca905a5d7239ad2f7ce0cd8185e0215f44f0efd0c51b1e2891afe8d448a06ab",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -5496,6 +5647,161 @@ mod tests {
                 "release verification must fan out to every provider: {release_workflow}"
             );
         }
+    }
+
+    #[test]
+    fn explicit_release_verification_lanes_gate_stable_and_preview() {
+        let mut cfg = config(&["preview.yml", "release.yml"], Some(native_spec()));
+        let mut apple = unit("rust-apple");
+        apple.platform = crate::s2::provider::Platform::MacosArm64;
+        cfg.units.push(apple);
+        let Some(release) = cfg.release.as_mut() else {
+            panic!("native release fixture")
+        };
+        release.verification_providers =
+            Some(std::collections::BTreeSet::from([ProviderId::GithubHosted]));
+        let release = must_some(cfg.release.as_ref(), "native release fixture");
+        let stable = super::render_release(&cfg, release);
+        let preview = super::render_preview(&cfg, Some(release));
+
+        let hosted = yaml_job(&stable, "release-github-hosted-rust-example");
+        assert!(hosted.contains("runs-on: ubuntu-24.04"), "{hosted}");
+        assert!(
+            stable.contains("release-github-hosted-rust-apple"),
+            "hosted native checks must remain release prerequisites: {stable}"
+        );
+        assert!(
+            stable.contains("runs-on: macos-15"),
+            "hosted native checks must retain their native runner: {stable}"
+        );
+        assert!(
+            !stable.contains("release-velnor-rust-example"),
+            "Velnor verification must be absent when not requested: {stable}"
+        );
+        let build = yaml_job(&stable, "build");
+        assert!(
+            build.contains("release-github-hosted-rust-example")
+                && build.contains("release-github-hosted-rust-apple"),
+            "build must wait for every requested hosted/native verification job: {build}"
+        );
+        assert!(
+            !build.contains("release-velnor-"),
+            "build must not depend on an unrequested Velnor lane: {build}"
+        );
+        let publish = yaml_job(&stable, "publish");
+        assert!(
+            publish.contains("needs: [") && publish.contains("build"),
+            "publisher must remain downstream of native checks through build: {publish}"
+        );
+        assert!(
+            preview.contains("provider: github-hosted")
+                && !preview.contains("provider: velnor")
+                && !preview.contains("runs-on: [self-hosted, example-runner]"),
+            "preview publisher must stay hosted while release verification is explicit: {preview}"
+        );
+        let preview_unit = yaml_job(&preview, "release-github-hosted-rust-example");
+        assert!(
+            preview_unit.contains("if: ${{ (github.event_name == 'push'")
+                && preview_unit.contains("HEAD_SHA: ${{ github.sha }}"),
+            "unbound preview verification must use the trusted event SHA gate: {preview_unit}"
+        );
+        let preview_build = yaml_job(&preview, "build");
+        assert!(
+            preview_build.contains("release-github-hosted-rust-example"),
+            "preview build must wait for the requested hosted verification: {preview_build}"
+        );
+        let preview_publish = yaml_job(&preview, "publish");
+        assert!(
+            preview_publish.contains("needs: [build, release-github-hosted-rust-example")
+                && preview_publish.contains("release-github-hosted-rust-apple"),
+            "preview must have one publisher gated by the selected verification lane: {preview_publish}"
+        );
+    }
+
+    #[test]
+    fn producer_bound_preview_verification_uses_admitted_source_sha() {
+        let mut cfg = config(&["preview.yml"], Some(native_spec()));
+        let Some(release) = cfg.release.as_mut() else {
+            panic!("native release fixture")
+        };
+        release.producer_workflow = "Trusted Producer".to_owned();
+        release.verification_providers =
+            Some(std::collections::BTreeSet::from([ProviderId::GithubHosted]));
+        let release = must_some(cfg.release.as_ref(), "native release fixture");
+        let preview = super::render_preview(&cfg, Some(release));
+
+        let verifier = yaml_job(&preview, "release-github-hosted-rust-example");
+        assert!(
+            verifier.contains("needs: [publish-gate]")
+                && verifier.contains("if: ${{ needs.publish-gate.outputs.admitted == 'true' }}")
+                && verifier.contains("ref: ${{ needs.source.outputs.sha }}")
+                && verifier.contains("HEAD_SHA: ${{ needs.source.outputs.sha }}"),
+            "producer-bound verification must use the admitted source SHA: {verifier}"
+        );
+        let build = yaml_job(&preview, "build");
+        assert!(
+            build.contains("needs: [source, release-github-hosted-rust-example]")
+                && build.contains("ref: ${{ needs.source.outputs.sha }}"),
+            "preview build must use the producer source and selected verification gate: {build}"
+        );
+        let publish = yaml_job(&preview, "publish");
+        assert!(
+            publish.contains(
+                "needs: [build, release-github-hosted-rust-example, publish-gate]"
+            ) && publish.contains(
+                "needs.publish-gate.outputs.admitted == 'true' && needs.publish-gate.outputs.mode == 'publish'"
+            ),
+            "the singular preview publisher must require the selected lane and producer admission: {publish}"
+        );
+        assert!(!preview.contains("release-velnor-"), "{preview}");
+    }
+
+    #[test]
+    fn parsed_release_contract_selects_exact_verification_lanes_in_surface() {
+        let root = scanned_root("declared-release-verification");
+        let config_path = root.join(crate::s2::config::GENERATION_CONFIG_PATH);
+        must(
+            fs::create_dir_all(must_some(config_path.parent(), "config parent")),
+            "create declared config directory",
+        );
+        let config_text = |verification: &str| {
+            format!(
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"github-hosted\", \"velnor\"]\nfiles = [\"release.yml\"]\n\n[release]\nenabled = true\nkind = \"rust-binary\"\npackage = \"example\"\nbinary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\n{verification}"
+            )
+        };
+        for (verification, expect_velnor) in [
+            ("verification_providers = [\"github-hosted\"]\n", false),
+            ("", true),
+        ] {
+            must(
+                fs::write(&config_path, config_text(verification)),
+                "write declared release config",
+            );
+            let scanned = must(
+                crate::s2::scan_target(&root, None, "main"),
+                "scan declared release config",
+            );
+            let surface = must(
+                super::super::generate(
+                    &root,
+                    &scanned.shape,
+                    &scanned.config,
+                    scanned.generation.as_ref(),
+                ),
+                "generate declared release surface",
+            );
+            let release = rendered(&surface, "release.yml");
+            assert!(
+                release.contains("release-github-hosted-rust-example"),
+                "hosted verification must always be present: {release}"
+            );
+            assert_eq!(
+                release.contains("release-velnor-rust-example"),
+                expect_velnor,
+                "omission preserves the provider-universe fallback: {release}"
+            );
+        }
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -7125,7 +7431,9 @@ mod tests {
         // moved backward, and its published shape is verified.
         let publish = yaml_job(&preview, "publish");
         assert!(
-            publish.contains("needs: [identity, debian, sign-deb]"),
+            publish.contains(
+                "needs: [identity, debian, sign-deb, release-github-hosted-rust-example, release-github-self-hosted-rust-example, release-velnor-rust-example]"
+            ),
             "{publish}"
         );
         assert!(
@@ -7292,6 +7600,7 @@ mod tests {
             scanned.release_enabled = true;
             scanned.release = Some(ReleaseSpec {
                 kind: "native".to_owned(),
+                verification_providers: None,
                 package: package.to_owned(),
                 packages: Vec::new(),
                 binary: package.to_owned(),
@@ -7469,6 +7778,7 @@ mod tests {
             scanned.release_enabled = true;
             scanned.release = Some(ReleaseSpec {
                 kind: "native".to_owned(),
+                verification_providers: None,
                 package: package.to_owned(),
                 packages: Vec::new(),
                 binary: package.to_owned(),
@@ -7724,6 +8034,7 @@ mod tests {
     fn bound_spec() -> ReleaseSpec {
         ReleaseSpec {
             kind: "rust-binary".to_owned(),
+            verification_providers: None,
             package: "example".to_owned(),
             packages: Vec::new(),
             binary: "example".to_owned(),
@@ -7796,7 +8107,9 @@ mod tests {
         );
         let build = yaml_job(&preview, "build");
         assert!(
-            build.contains("    needs: [source]\n"),
+            build.contains(
+                "    needs: [source, release-github-hosted-rust-example, release-github-self-hosted-rust-example, release-velnor-rust-example]\n"
+            ),
             "the build must wait for the resolved source: {build}"
         );
         assert!(
@@ -7805,9 +8118,11 @@ mod tests {
         );
         let publish = yaml_job(&preview, "publish");
         assert!(
-            publish.contains("    needs: [build, publish-gate]\n")
+            publish.contains(
+                "    needs: [build, release-github-hosted-rust-example, release-github-self-hosted-rust-example, release-velnor-rust-example, publish-gate]\n"
+            )
                 && publish.contains(
-                    "    if: ${{ needs.publish-gate.outputs.admitted == 'true' && needs.publish-gate.outputs.mode == 'publish' }}\n"
+                    "    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && (needs.publish-gate.outputs.admitted == 'true' && needs.publish-gate.outputs.mode == 'publish') }}\n"
                 ),
             "the rolling publish must admit only the gate's publish mode: {publish}"
         );
@@ -8187,6 +8502,7 @@ mod tests {
         let config = config(&[], None);
         let crates = ReleaseSpec {
             kind: "crates".to_owned(),
+            verification_providers: None,
             packages: vec!["example".to_owned()],
             modes: vec!["rehearse".to_owned()],
             ..ReleaseSpec::default()
@@ -8198,6 +8514,7 @@ mod tests {
         );
         let pages = ReleaseSpec {
             kind: "pages".to_owned(),
+            verification_providers: None,
             artifact_path: "dist/site".to_owned(),
             producer_workflow: "CI".to_owned(),
             ..ReleaseSpec::default()

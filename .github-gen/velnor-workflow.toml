@@ -68,6 +68,10 @@ mbx_generation_bound = 6
 enabled = true
 reason = "Release contract is explicitly cataloged; review credentials, environments, and tag protection before cutover."
 kind = "native"
+# Release verification prerequisites are hosted-only during recovery. This is
+# independent from automatic/dispatch CI routing; expand it to both providers
+# only after the Velnor lane is qualified.
+verification_providers = ["github-hosted"]
 package = "velnor-runner"
 packages = []
 binary = "velnor-runner"

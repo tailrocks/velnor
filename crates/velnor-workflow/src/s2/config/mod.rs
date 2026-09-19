@@ -342,6 +342,12 @@ pub(crate) struct ReleaseSection {
     enabled: Option<bool>,
     reason: Option<String>,
     kind: Option<String>,
+    /// Providers whose release verification jobs are prerequisites for
+    /// publication. Absent preserves the historical provider-universe fanout
+    /// for configs that have not adopted this explicit contract; it never
+    /// follows automatic or dispatch routing implicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verification_providers: Option<Vec<String>>,
     package: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     packages: Vec<String>,
@@ -741,6 +747,10 @@ impl ReleaseSection {
 
     pub(crate) fn kind(&self) -> Option<&str> {
         self.kind.as_deref()
+    }
+
+    pub(crate) fn verification_providers(&self) -> Option<&[String]> {
+        self.verification_providers.as_deref()
     }
 
     pub(crate) fn package(&self) -> Option<&str> {
@@ -1525,6 +1535,7 @@ impl RepoGenerationConfig {
         })?;
         validate_repository_slug(repository)?;
         validate_workflow(&self.workflow)?;
+        validate_release_verification_providers(&self.workflow, &self.release)?;
         for row in &self.declare {
             validate_declare_row(row, unit_ids)?;
         }
@@ -1729,6 +1740,34 @@ fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
     if let Some(value) = workflow.concurrency_group.as_deref() {
         crate::s2::validate_config_text(value, "[workflow] concurrency_group")?;
     }
+    Ok(())
+}
+
+/// Validate the release verification lane contract independently from event
+/// routing. A release may intentionally verify on a strict subset of the
+/// workflow provider universe during hosted recovery, then expand to both
+/// providers after the local lane is qualified.
+fn validate_release_verification_providers(
+    workflow: &WorkflowSection,
+    release: &ReleaseSection,
+) -> Result<(), GeneratorError> {
+    let Some(declared) = release.verification_providers.as_deref() else {
+        return Ok(());
+    };
+    let universe = workflow
+        .providers
+        .as_deref()
+        .map(|providers| parse_provider_set(providers, "[workflow] providers"))
+        .transpose()?
+        .unwrap_or_else(|| crate::s2::provider::ProviderId::ALL.into_iter().collect());
+    let verification = parse_provider_set(declared, "[release] verification_providers")?;
+    crate::s2::provider::require_non_empty(&verification, "[release] verification_providers")?;
+    crate::s2::provider::require_subset(
+        &verification,
+        &universe,
+        "[release] verification_providers",
+        "[workflow] providers",
+    )?;
     Ok(())
 }
 
@@ -3834,6 +3873,59 @@ mod tests {
                 "[workflow] default_dispatch_providers names provider `velnor` outside [workflow] providers"
             ),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn release_verification_providers_are_explicit_and_bounded() {
+        let hosted = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"github-hosted\", \"velnor\"]\n\n[release]\nverification_providers = [\"github-hosted\"]\n",
+        );
+        must(
+            hosted.validate(&[], &[], &BTreeSet::new()),
+            "validate hosted release verification subset",
+        );
+        assert_eq!(
+            hosted.release().verification_providers(),
+            Some(&["github-hosted".to_owned()][..])
+        );
+
+        for (declared, expected) in [
+            (
+                "verification_providers = []",
+                "[release] verification_providers must name at least one provider",
+            ),
+            (
+                "verification_providers = [\"velnor\", \"velnor\"]",
+                "[release] verification_providers lists provider `velnor` more than once",
+            ),
+            (
+                "verification_providers = [\"unknown\"]",
+                "[release] verification_providers has unknown provider `unknown`",
+            ),
+        ] {
+            let config = config_for(&format!(
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"github-hosted\", \"velnor\"]\n\n[release]\n{declared}\n"
+            ));
+            let error = must_fail(
+                config.validate(&[], &[], &BTreeSet::new()),
+                "invalid release verification provider set must fail",
+            );
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+
+        let unavailable = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"github-hosted\"]\n\n[release]\nverification_providers = [\"velnor\"]\n",
+        );
+        let error = must_fail(
+            unavailable.validate(&[], &[], &BTreeSet::new()),
+            "release verification provider outside universe must fail",
+        );
+        assert!(
+            error.to_string().contains(
+                "[release] verification_providers names provider `velnor` outside [workflow] providers"
+            ),
+            "{error}"
         );
     }
 
