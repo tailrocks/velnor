@@ -11,6 +11,7 @@ use crate::s2::{
     identifier_suffix, parent_path, shell_change_dir, shell_quote, CachePurpose, CacheSpec, Unit,
     UnitKind,
 };
+use crate::swift_capability::package_evidence;
 
 fn swift_package_unit(package_root: &str) -> Unit {
     let prefix = path_prefix(package_root);
@@ -187,17 +188,13 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
 /// bundle only resolves where the Apple SDK exists, so the unit is
 /// Apple-bound even without an Xcode project. A remote (URL) binary target
 /// without an `.xcframework` reference carries no such need.
-fn package_manifest_needs_xcframework(root: &Path, package_root: &str) -> bool {
-    let manifest = root.join(join_repo_path(package_root, "Package.swift"));
-    let contents = fs::read_to_string(manifest).unwrap_or_default();
-    contents.contains(".binaryTarget") && contents.contains(".xcframework")
-}
-
 pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
-    for package_root in roots_for_manifests(&files_named(context.files, "Package.swift")) {
+    let package_roots = roots_for_manifests(&files_named(context.files, "Package.swift"));
+    for package_root in &package_roots {
         shape.detected.push(format!("swift-package:{package_root}"));
-        let mut unit = swift_package_unit(&package_root);
-        if package_manifest_needs_xcframework(context.root, &package_root) {
+        let mut unit = swift_package_unit(package_root);
+        let evidence = package_evidence(context.root, package_root, context.files, &package_roots);
+        if evidence.apple {
             unit.platform = crate::s2::provider::Platform::MacosArm64;
             unit.capabilities.native_macos_arm64 = true;
         }

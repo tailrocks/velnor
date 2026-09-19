@@ -9175,6 +9175,10 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the scanner fixture covers portable, Apple, linker, and nested package shapes"
+    )]
     #[test]
     fn scanner_extracts_swiftpm_and_shared_xcode_scheme_units() {
         let root = temporary_repository("swift-analysis");
@@ -9190,7 +9194,10 @@ mod tests {
         );
         must(fs::create_dir_all(&schemes), "create shared schemes");
         must(
-            fs::write(root.join("Package.swift"), "// swift-tools-version: 5.9\n"),
+            fs::write(
+                root.join("Package.swift"),
+                "// swift-tools-version: 5.9\nlet package = Package(platforms: [.macOS(.v26)])\n",
+            ),
             "write Package.swift",
         );
         must(
@@ -9231,6 +9238,22 @@ mod tests {
                 .filter(|unit| unit.kind == UnitKind::Swift)
                 .count(),
             2
+        );
+        let swift_package = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.kind == UnitKind::Swift && unit.root == "."),
+            "SwiftPM unit",
+        );
+        assert_eq!(
+            swift_package.platform,
+            provider::Platform::MacosArm64,
+            "macOS SwiftPM declarations are Apple-bound"
+        );
+        assert!(
+            swift_package.capabilities.native_macos_arm64,
+            "Apple SwiftPM units retain native macOS capability evidence"
         );
         let xcode = must_some(
             config
@@ -9340,6 +9363,10 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the scanner fixture covers portable, Apple, linker, and nested package shapes"
+    )]
     #[test]
     fn scanner_marks_xcframework_binary_target_packages_apple_bound() {
         let root = temporary_repository("swift-xcframework");
@@ -9352,8 +9379,23 @@ mod tests {
             "create bridge sources",
         );
         must(
+            fs::create_dir_all(root.join("playground/Sources/Playground")),
+            "create macOS playground sources",
+        );
+        must(
+            fs::create_dir_all(root.join("linkage/Sources/Linkage")),
+            "create linker-settings package sources",
+        );
+        must(
             fs::write(root.join("Package.swift"), "// swift-tools-version: 5.9\n"),
             "write plain Package.swift",
+        );
+        must(
+            fs::write(
+                root.join("Sources/Plain/Portable.swift"),
+                "/* import SwiftUI */\nlet note = \"import SwiftUI\"\n",
+            ),
+            "write portable source fixture",
         );
         must(
             fs::write(
@@ -9361,6 +9403,27 @@ mod tests {
                 "let package = Package(targets: [.binaryTarget(name: \"BridgeFFI\", path: \"../target/xcframework/Bridge.xcframework\")])\n",
             ),
             "write bridge Package.swift",
+        );
+        must(
+            fs::write(
+                root.join("playground/Package.swift"),
+                "// swift-tools-version: 5.9\nlet package = Package(platforms: [.macOS(.v13)])\n",
+            ),
+            "write playground Package.swift",
+        );
+        must(
+            fs::write(
+                root.join("playground/Sources/Playground/Native.swift"),
+                "import Darwin\nimport MetricKit\n",
+            ),
+            "write playground native source",
+        );
+        must(
+            fs::write(
+                root.join("linkage/Package.swift"),
+                "let package = Package(targets: [.target(name: \"Linkage\", linkerSettings: [.linkedFramework(\"Security\")])])\n",
+            ),
+            "write linker-settings Package.swift",
         );
         let config = must(
             scan_repository(
@@ -9400,6 +9463,38 @@ mod tests {
         assert!(
             bridge.platform == provider::Platform::MacosArm64,
             "a binaryTarget package is Apple-bound"
+        );
+        let playground = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.kind == UnitKind::Swift && unit.root == "playground"),
+            "macOS playground package",
+        );
+        assert_eq!(
+            playground.platform,
+            provider::Platform::MacosArm64,
+            "Darwin/MetricKit playground is Apple-bound"
+        );
+        assert!(
+            playground.capabilities.native_macos_arm64,
+            "playground retains native macOS capability evidence"
+        );
+        let linkage = must_some(
+            config
+                .units
+                .iter()
+                .find(|unit| unit.kind == UnitKind::Swift && unit.root == "linkage"),
+            "linker-settings package",
+        );
+        assert_eq!(
+            linkage.platform,
+            provider::Platform::MacosArm64,
+            "Apple framework linker settings are Apple-bound"
+        );
+        assert!(
+            linkage.capabilities.native_macos_arm64,
+            "linker-settings package retains native macOS capability evidence"
         );
         let _ = fs::remove_dir_all(root);
     }
