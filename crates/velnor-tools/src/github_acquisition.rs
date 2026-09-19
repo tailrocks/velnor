@@ -2267,7 +2267,7 @@ fn request_digest(endpoint_or_operation: &str, query_or_document: &str) -> Strin
 
 fn content_addressed_storage_ref(digest: &str) -> String {
     let digest = digest.strip_prefix("sha256:").unwrap_or(digest);
-    format!("artifact://sha256/{digest}")
+    format!("sha256://{digest}")
 }
 
 fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, AcquisitionError> {

@@ -656,8 +656,15 @@ where
     )
     .await?;
     let mut identities = Vec::with_capacity(values.len());
+    let mut seen_numbers = BTreeSet::new();
     for value in values {
         let number = required_u64(&value, &["number"])?;
+        if !seen_numbers.insert(number) {
+            bail!(
+                "{} returned pull request {number} more than once",
+                repository.repository
+            );
+        }
         let (detail, detail_raw_ids) = collect_one(
             transport,
             store,
@@ -673,6 +680,13 @@ where
         let mut raw_ids = list_raw_ids.clone();
         raw_ids.extend(detail_raw_ids);
         let identity = parse_pull_request_identity(&detail, raw_ids)?;
+        if identity.number != number {
+            bail!(
+                "pull request detail returned #{} for requested #{}",
+                identity.number,
+                number
+            );
+        }
         validate_pull_request_identity(&identity, &repository.repository)?;
         identities.push(identity);
     }

@@ -383,14 +383,17 @@ fn map_raw_object(raw: &RawObjectRef) -> Result<G0RawObjectRef> {
 }
 
 fn is_sha256_digest(value: &str) -> bool {
-    value
-        .strip_prefix("sha256:")
-        .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 fn canonical_storage_ref(digest: &str) -> String {
     let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
-    format!("artifact://sha256/{hex}")
+    format!("sha256://{hex}")
 }
 
 fn map_supplement(live: &LiveCollection, canonical: &[u8]) -> G0MappingSupplement {
