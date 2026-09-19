@@ -36,6 +36,10 @@ struct PackageReleaseSpec {
     updater_token_secret: String,
     update_commit_message: String,
     concurrency_group: String,
+    legacy_rolling_release_id: Option<String>,
+    legacy_rolling_source_commit: Option<String>,
+    legacy_rolling_version: Option<String>,
+    legacy_rolling_assets: Vec<String>,
 }
 
 pub(crate) struct PackageRelease;
@@ -52,6 +56,10 @@ impl Primitive for PackageRelease {
             "concurrency_group",
             "consumer_branch",
             "consumer_repository",
+            "legacy_rolling_assets",
+            "legacy_rolling_release_id",
+            "legacy_rolling_source_commit",
+            "legacy_rolling_version",
             "manifest_schema",
             "package_dir",
             "payloads",
@@ -321,6 +329,77 @@ fn parse_spec(args: &Args<'_>) -> Result<PackageReleaseSpec, GeneratorError> {
         .unwrap_or_else(|| "package-release-preview".to_owned());
     validate_one_line("concurrency_group", &concurrency_group)?;
 
+    let legacy_rolling_release_id = args
+        .string("legacy_rolling_release_id")?
+        .filter(|value| !value.is_empty());
+    let legacy_rolling_source_commit = args
+        .string("legacy_rolling_source_commit")?
+        .filter(|value| !value.is_empty());
+    let legacy_rolling_version = args
+        .string("legacy_rolling_version")?
+        .filter(|value| !value.is_empty());
+    let legacy_rolling_assets = args.strings("legacy_rolling_assets")?.unwrap_or_default();
+    let legacy_fields_present = legacy_rolling_release_id.is_some()
+        || legacy_rolling_source_commit.is_some()
+        || legacy_rolling_version.is_some()
+        || !legacy_rolling_assets.is_empty();
+    if legacy_fields_present
+        && (legacy_rolling_release_id.is_none()
+            || legacy_rolling_source_commit.is_none()
+            || legacy_rolling_version.is_none()
+            || legacy_rolling_assets.is_empty())
+    {
+        return Err(GeneratorError::usage(
+            "package-release legacy rolling migration needs release id, source commit, version, and assets together",
+        ));
+    }
+    if let Some(release_id) = legacy_rolling_release_id.as_deref() {
+        if !release_id.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(GeneratorError::usage(
+                "package-release legacy_rolling_release_id must be decimal digits",
+            ));
+        }
+    }
+    if let Some(source_commit) = legacy_rolling_source_commit.as_deref()
+        && (source_commit.len() != 40
+            || !source_commit
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')))
+    {
+        return Err(GeneratorError::usage(
+            "package-release legacy_rolling_source_commit must be 40 lowercase hex characters",
+        ));
+    }
+    if let Some(version) = legacy_rolling_version.as_deref() {
+        validate_one_line("legacy_rolling_version", version)?;
+        if !version.contains("-preview.")
+            || version.split_once('+').is_none_or(|(_, suffix)| {
+                suffix.len() != 7
+                    || !suffix
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            })
+        {
+            return Err(GeneratorError::usage(
+                "package-release legacy_rolling_version must be a preview version with a seven-hex source suffix",
+            ));
+        }
+    }
+    let mut legacy_names = BTreeSet::new();
+    for asset in &legacy_rolling_assets {
+        validate_asset_name("legacy_rolling_assets", asset)?;
+        if !legacy_names.insert(asset.clone()) {
+            return Err(GeneratorError::usage(format!(
+                "package-release legacy_rolling_assets contains duplicate {asset}"
+            )));
+        }
+        if !names.contains(asset) {
+            return Err(GeneratorError::usage(format!(
+                "package-release legacy asset {asset} is not part of the new package contract"
+            )));
+        }
+    }
+
     Ok(PackageReleaseSpec {
         build_tasks,
         package_dir,
@@ -338,6 +417,10 @@ fn parse_spec(args: &Args<'_>) -> Result<PackageReleaseSpec, GeneratorError> {
         updater_token_secret,
         update_commit_message,
         concurrency_group,
+        legacy_rolling_release_id,
+        legacy_rolling_source_commit,
+        legacy_rolling_version,
+        legacy_rolling_assets,
     })
 }
 
@@ -666,6 +749,8 @@ fn render_rolling_refresh_script(
     expected_asset_names: &str,
     payload_names: &str,
     publish_verify: &str,
+    legacy_expected_asset_names: &str,
+    legacy_rollback_assets: &str,
 ) -> String {
     let mut script = String::from(
         r#"set -Eeuo pipefail
@@ -679,12 +764,19 @@ expected_assets="$transaction_dir/expected-assets"
 old_assets="$transaction_dir/old-assets"
 staged_assets="$transaction_dir/staged-assets"
 rollback_dir="$transaction_dir/old-package"
+legacy_dir="$transaction_dir/legacy-package"
+legacy_assets_api="$transaction_dir/legacy-assets-api"
+legacy_expected_assets="$transaction_dir/legacy-assets"
 rolling_release_id=""
 old_tag_sha=""
 old_name=""
 old_body=""
 old_draft=""
 old_prerelease=""
+legacy_migration="${LEGACY_ROLLING_MIGRATION:-0}"
+legacy_expected_release_id="${LEGACY_ROLLING_RELEASE_ID:-}"
+legacy_expected_source_commit="${LEGACY_ROLLING_SOURCE_COMMIT:-}"
+legacy_expected_version="${LEGACY_ROLLING_VERSION:-}"
 candidate_version="$(jq -er '.version | strings' "$published_dir/release-manifest.json")"
 had_release=0
 mutated=0
@@ -708,23 +800,37 @@ rollback() {
     if [ "$had_release" = 1 ]; then
       # Keep the rollback release hidden while restoring its complete old set.
       if gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" -F draft=true >/dev/null; then
-        gh release upload "$rolling_tag" --repo "$GITHUB_REPOSITORY" --clobber \
+        if [ "$legacy_migration" = 1 ]; then
+          while IFS=$'\t' read -r asset_id asset_name; do
+            if ! grep -Fqx -- "$asset_name" "$legacy_expected_assets"; then
+              gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" >/dev/null || rollback_status=1
+            fi
+          done < <(gh api --paginate --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id/assets" --jq '.[] | [.id, .name] | @tsv')
+          gh release upload "$rolling_tag" --repo "$GITHUB_REPOSITORY" --clobber \
+"#,
+    );
+    script.push_str(legacy_rollback_assets);
+    script.push_str(
+        r#"
+        else
+          gh release upload "$rolling_tag" --repo "$GITHUB_REPOSITORY" --clobber \
 "#,
     );
     script.push_str(rollback_assets);
     script.push_str(
-        r#"
-        if [ "$?" -eq 0 ]; then
-          rollback_ready=1
-          if [ -n "$old_tag_sha" ] && ! gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" -f "sha=$old_tag_sha" -F force=true >/dev/null; then
-            rollback_ready=0
-          fi
-          if [ "$rollback_ready" = 1 ]; then
-            gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" \
-              -f "name=$old_name" -f "body=$old_body" -F "draft=$old_draft" -F "prerelease=$old_prerelease" -F make_latest=false >/dev/null || rollback_status=1
-          else
-            rollback_status=1
-          fi
+            r#"
+        fi
+        if [ "$legacy_migration" = 1 ]; then
+          jq -r '.assets[].name' <(gh api --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id") | LC_ALL=C sort > "$old_assets"
+          cmp -s "$legacy_expected_assets" "$old_assets" || rollback_status=1
+        fi
+        rollback_ready=1
+        if [ -n "$old_tag_sha" ] && ! gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" -f "sha=$old_tag_sha" -F force=true >/dev/null; then
+          rollback_ready=0
+        fi
+        if [ "$rollback_ready" = 1 ]; then
+          gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" \
+            -f "name=$old_name" -f "body=$old_body" -F "draft=$old_draft" -F "prerelease=$old_prerelease" -F make_latest=false >/dev/null || rollback_status=1
         else
           rollback_status=1
         fi
@@ -786,8 +892,44 @@ case "$rolling_http" in
     old_tag_sha="$(remote_tag_sha "$rolling_tag")"
     [[ "$old_tag_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::rolling release tag is not a commit ref" >&2; exit 1; }
     jq -r '.assets[].name' "$rolling_body" | LC_ALL=C sort > "$old_assets"
-    cmp -s "$expected_assets" "$old_assets" || { echo "::error::existing rolling release asset set is not the exact package contract" >&2; exit 1; }
-    mkdir -p "$rollback_dir"
+    if cmp -s "$expected_assets" "$old_assets"; then
+      legacy_migration=0
+    elif [ "$legacy_migration" = 1 ]; then
+      {
+"#,
+    );
+    if legacy_expected_asset_names.is_empty() {
+        script.push_str("      :\n");
+    } else {
+        script.push_str(legacy_expected_asset_names);
+    }
+    script.push_str(
+        r#"
+      } | LC_ALL=C sort > "$legacy_expected_assets"
+      cmp -s "$legacy_expected_assets" "$old_assets" || { echo "::error::legacy rolling release asset set changed" >&2; exit 1; }
+      jq -e --arg id "$legacy_expected_release_id" --arg name "$RELEASE_TITLE_PREFIX $legacy_expected_version" \
+        '(.id | tostring) == $id and .name == $name and .draft == false and .prerelease == true' "$rolling_body" >/dev/null
+      [ "$rolling_release_id" = "$legacy_expected_release_id" ] || { echo "::error::legacy rolling release id changed" >&2; exit 1; }
+      [ "$old_tag_sha" = "$legacy_expected_source_commit" ] || { echo "::error::legacy rolling tag changed" >&2; exit 1; }
+      mkdir -p "$legacy_dir"
+      gh release download "$rolling_tag" --repo "$GITHUB_REPOSITORY" --dir "$legacy_dir" --clobber
+      while IFS= read -r name; do
+        test -s "$legacy_dir/$name" || { echo "::error::legacy rolling asset is missing: $name" >&2; exit 1; }
+      done < "$legacy_expected_assets"
+      jq -r '.assets[] | [.name, (.digest // "")] | @tsv' "$rolling_body" > "$legacy_assets_api"
+      while IFS=$'\t' read -r name digest; do
+        [ "$digest" = "sha256:$(sha256sum "$legacy_dir/$name" | awk '{print $1}')" ] || { echo "::error::legacy rolling asset digest mismatch: $name" >&2; exit 1; }
+      done < "$legacy_assets_api"
+    else
+      echo "::error::existing rolling release asset set is not the exact package contract" >&2
+      exit 1
+    fi
+    if [ "$legacy_migration" = 0 ]; then
+      mkdir -p "$rollback_dir"
+"#,
+    );
+    script.push_str(
+        r#"
     gh release download "$rolling_tag" --repo "$GITHUB_REPOSITORY" --dir "$rollback_dir" --clobber
     for name in \
 "#,
@@ -824,6 +966,15 @@ case "$rolling_http" in
       exit 1
     fi
     jq -e --arg repository "$EXPECTED_SOURCE_REPOSITORY" --arg source_ref "$EXPECTED_SOURCE_REF" --arg commit "$old_source_commit" --slurpfile old_manifest "$rollback_dir/release-manifest.json" 'keys == ["manifest","source_digest","source_ref","source_repository"] and .source_repository == $repository and .source_ref == $source_ref and .source_digest == $commit and .manifest == $old_manifest[0]' "$rollback_dir/identity.json" >/dev/null
+    else
+      old_version="$legacy_expected_version"
+      old_version_order="${old_version%%+*}"
+      candidate_version_order="${candidate_version%%+*}"
+      if [ "$old_version_order" = "$candidate_version_order" ] || [ "$(printf '%s\n' "$old_version_order" "$candidate_version_order" | LC_ALL=C sort -V | tail -n 1)" != "$candidate_version_order" ]; then
+        echo "::error::candidate preview version is not newer than the legacy rolling version" >&2
+        exit 1
+      fi
+    fi
     ;;
   404)
     test -z "$(remote_tag_sha "$rolling_tag")" || { echo "::error::rolling tag exists without a release; refusing to overwrite it" >&2; exit 1; }
@@ -991,6 +1142,24 @@ fn render_publish_job(
         let _ = writeln!(published_assets, "  \"$published_dir/{name}\"{suffix}");
         let _ = writeln!(rollback_assets, "      \"$rollback_dir/{name}\"{suffix}");
     }
+    let mut legacy_expected_asset_names = String::new();
+    let mut legacy_rollback_assets = String::new();
+    for (index, name) in spec.legacy_rolling_assets.iter().enumerate() {
+        let suffix = if index + 1 == spec.legacy_rolling_assets.len() {
+            ""
+        } else {
+            " \\"
+        };
+        let _ = writeln!(
+            legacy_expected_asset_names,
+            "  printf '%s\\n' {}",
+            shell_quote(name)
+        );
+        let _ = writeln!(
+            legacy_rollback_assets,
+            "      \"$legacy_dir/{name}\"{suffix}"
+        );
+    }
     let rolling_refresh = indent_script(
         &render_rolling_refresh_script(
             &published_assets,
@@ -998,6 +1167,8 @@ fn render_publish_job(
             &expected_asset_names,
             &payload_names,
             publish_verify,
+            &legacy_expected_asset_names,
+            &legacy_rollback_assets,
         ),
         10,
     );
@@ -1048,6 +1219,28 @@ fn render_publish_job(
     output.push_str(updater_token_expr);
     output.push_str("\n      UPDATE_COMMIT_MESSAGE: ");
     output.push_str(message_yaml);
+    output.push_str("\n      LEGACY_ROLLING_MIGRATION: ");
+    output.push_str(&crate::s2::yaml_scalar(
+        if spec.legacy_rolling_release_id.is_some() {
+            "1"
+        } else {
+            "0"
+        },
+    ));
+    if let Some(value) = spec.legacy_rolling_release_id.as_deref() {
+        output.push_str("\n      LEGACY_ROLLING_RELEASE_ID: ");
+        output.push_str(&crate::s2::yaml_scalar(value));
+        output.push_str("\n      LEGACY_ROLLING_SOURCE_COMMIT: ");
+        output.push_str(&crate::s2::yaml_scalar(
+            spec.legacy_rolling_source_commit
+                .as_deref()
+                .unwrap_or_default(),
+        ));
+        output.push_str("\n      LEGACY_ROLLING_VERSION: ");
+        output.push_str(&crate::s2::yaml_scalar(
+            spec.legacy_rolling_version.as_deref().unwrap_or_default(),
+        ));
+    }
     output.push_str("\n    concurrency:\n      group: ");
     output.push_str(concurrency_yaml);
     output.push_str("\n      cancel-in-progress: false\n    steps:\n");
@@ -1178,6 +1371,42 @@ concurrency_group = "package-release-preview"
         .expect("fixture args")
     }
 
+    fn legacy_args() -> BTreeMap<String, toml::Value> {
+        let mut values = args();
+        values.insert(
+            "legacy_rolling_release_id".to_owned(),
+            toml::Value::String("12345".to_owned()),
+        );
+        values.insert(
+            "legacy_rolling_source_commit".to_owned(),
+            toml::Value::String("0123456789abcdef0123456789abcdef01234567".to_owned()),
+        );
+        values.insert(
+            "legacy_rolling_version".to_owned(),
+            toml::Value::String("0.1.2-preview.3+0123456".to_owned()),
+        );
+        values.insert(
+            "legacy_rolling_assets".to_owned(),
+            toml::Value::Array(
+                [
+                    "a.tar.gz",
+                    "b.tar.gz",
+                    "c.tar.gz",
+                    "d.tar.gz",
+                    "e.tar.gz",
+                    "f.tar.gz",
+                    "SHA256SUMS",
+                    "a.tar.gz.bundle",
+                    "capsule-manifest.json",
+                ]
+                .into_iter()
+                .map(|name| toml::Value::String(name.to_owned()))
+                .collect(),
+            ),
+        );
+        values
+    }
+
     #[test]
     fn schema2_package_release_declaration_parses_the_complete_contract() {
         let config = crate::s2::config::parse(
@@ -1231,6 +1460,40 @@ concurrency_group = "package-release-preview"
         assert_eq!(spec.release_title_prefix, "Preview");
         assert_eq!(spec.consumer_branch, "main");
         assert_eq!(spec.concurrency_group, "package-release-preview");
+    }
+
+    #[test]
+    fn package_release_legacy_rolling_contract_is_complete_and_bound() {
+        let spec = parse_spec(&Args(&legacy_args())).expect("legacy migration contract");
+        assert_eq!(spec.legacy_rolling_release_id.as_deref(), Some("12345"));
+        assert_eq!(spec.legacy_rolling_assets.len(), 9);
+
+        let workflow = render_workflow(&render_config(), &spec);
+        assert!(
+            workflow.contains("LEGACY_ROLLING_MIGRATION: \"1\""),
+            "{workflow}"
+        );
+        assert!(
+            workflow.contains("LEGACY_ROLLING_RELEASE_ID: \"12345\""),
+            "{workflow}"
+        );
+        assert!(
+            workflow.contains("legacy rolling release asset set changed"),
+            "{workflow}"
+        );
+        assert!(
+            workflow.contains("legacy rolling tag changed"),
+            "{workflow}"
+        );
+        assert!(workflow.contains("legacy rolling version"), "{workflow}");
+    }
+
+    #[test]
+    fn package_release_rejects_partial_legacy_rolling_contract() {
+        let mut values = legacy_args();
+        values.remove("legacy_rolling_version");
+        let error = parse_spec(&Args(&values)).expect_err("partial legacy contract must fail");
+        assert!(error.to_string().contains("needs release id"));
     }
 
     fn render_config() -> ProjectConfig {
