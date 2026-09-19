@@ -1,10 +1,16 @@
 {
   "version": 2,
+  "scope": {
+    "role":"auxiliary-concern-projection",
+    "authority":"velnor-github-first-dual-lane-goal.md",
+    "authority_section":"2. Fixed repository manifest",
+    "expected_repository_count":32
+  },
   "defaults": {
-    "lane-selection": {"classification":"required","evidence":"Every estate repository exposes explicit GitHub, Velnor, and both choices; jackin-project automatic events default to GitHub, tailrocks and ChainArgos automatic events default to Velnor, and public unmerged execution remains GitHub-hosted.","implementations":[{"workflow":"ci.yml","canonical_markers":["type: choice","default: velnor","- github","- both","github.event_name == 'workflow_dispatch' && inputs.lanes","github.repository_owner == 'jackin-project'"]}]},
+    "lane-selection": {"classification":"required","evidence":"Every in-scope repository exposes explicit GitHub, Velnor, and both choices; jackin-project automatic events default to GitHub, tailrocks automatic events default to Velnor, and public unmerged execution remains GitHub-hosted.","implementations":[{"workflow":"ci.yml","canonical_markers":["type: choice","default: velnor","- github","- both","github.event_name == 'workflow_dispatch' && inputs.lanes","github.repository_owner == 'jackin-project'"]}]},
     "checkout": {"classification":"required","evidence":"Every estate code repository consumes checked-out source in CI.","implementations":[{"workflow":"ci.yml","job_ids":["rust"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","persist-credentials=false"]}]},
     "tool-setup": {"classification":"required","evidence":"Estate law requires committed mise configuration and the pinned mise action for CI tools.","implementations":[{"workflow":"ci.yml","job_ids":["rust"],"canonical_markers":["jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518"]}]},
-    "rust-ci": {"classification":"required","evidence":"All 13 repositories contain Rust source or a Rust CI/build helper requiring canonical validation.","implementations":[{"workflow":"ci.yml","job_ids":["rust"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444","mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696","jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"]}]},
+    "rust-ci": {"classification":"required","evidence":"Repositories with Rust source or a Rust CI/build helper require canonical validation.","implementations":[{"workflow":"ci.yml","job_ids":["rust"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444","mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696","jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"]}]},
     "integration-services": {"classification":"non-applicable","evidence":"No independently required service-backed integration concern is present unless overridden by repository product evidence.","implementations":[]},
     "cargo-cache": {"classification":"required","evidence":"Every estate repository compiles Rust code or Rust automation and therefore requires the standard local sccache plus Cargo registry cache contract.","implementations":[{"workflow":"ci.yml","job_ids":["rust"],"canonical_markers":["SCCACHE_GHA_ENABLED=false","mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9","cargo-registry-${{ matrix.config.lane }}-${{ runner.os }}-"]}]},
     "docker-build": {"classification":"non-applicable","evidence":"No image product/build concern is present unless overridden by repository product evidence.","implementations":[]},
@@ -17,33 +23,6 @@
     "workflow-safety": {"classification":"required","evidence":"Every executable estate workflow requires bounded concurrency and job timeout safety; ci.yml is the universal baseline.","implementations":[{"workflow":"ci.yml","canonical_markers":["concurrency:","timeout-minutes:"]}]}
   },
   "repositories": [
-    {
-      "name":"ChainArgos/java-monorepo",
-      "concerns": {
-        "rust-ci":{"classification":"repo-specific","evidence":"The production monorepo uses path-classified per-package Rust jobs and an aggregate required check; package identities are explicit repository parameters under the approved Class-A L2/L3 model.","implementations":[]},
-        "checkout":{"classification":"required","evidence":"Every source-consuming Class-A workload job must use the canonical checkout pin and credential boundary.","implementations":[{"workflow":"ci.yml","job_ids":["changes","check","test-bitcoin-processor","test-eth-processor","test-coingecko-pricing","test-processor-monitor","test-tron-processor","test-blockchain-explorer","test-eth-grpc-server","test-tron-grpc-server","test-legacy-grpc-server"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","persist-credentials=false"]}]},
-        "tool-setup":{"classification":"required","evidence":"Every Class-A Rust workload job installs its declared tools through the canonical mise action.","implementations":[{"workflow":"ci.yml","job_ids":["check","test-bitcoin-processor","test-eth-processor","test-coingecko-pricing","test-processor-monitor","test-tron-processor","test-blockchain-explorer","test-eth-grpc-server","test-tron-grpc-server","test-legacy-grpc-server"],"canonical_markers":["jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518"]}]},
-        "cargo-cache":{"classification":"required","evidence":"Every compiling Class-A workload job uses the same local compiler and Cargo registry cache contract.","implementations":[{"workflow":"ci.yml","job_ids":["check","test-bitcoin-processor","test-eth-processor","test-coingecko-pricing","test-processor-monitor","test-tron-processor","test-blockchain-explorer","test-eth-grpc-server","test-tron-grpc-server","test-legacy-grpc-server"],"canonical_markers":["SCCACHE_GHA_ENABLED=false","mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9","cargo-registry-${{ matrix.config.lane }}-${{ runner.os }}-"]}]},
-        "integration-services":{"classification":"repo-specific","evidence":"Ansible and Kestra workflows exercise product-specific integration surfaces; their commands and services remain explicit repository parameters.","implementations":[]},
-        "docker-build":{"classification":"applicable","evidence":"rust-docker.yml and kestra-build-publish.yml build product images.","implementations":[{"workflow":"rust-docker.yml","canonical_markers":["docker/setup-buildx-action@"]},{"workflow":"kestra-build-publish.yml","canonical_markers":["docker/setup-buildx-action@"]}]},
-        "artifacts":{"classification":"repo-specific","evidence":"Package and image fan-in is tied to the monorepo build graph.","implementations":[]},
-        "release":{"classification":"repo-specific","evidence":"Image publication is coupled to product build workflows rather than a generic tag release.","implementations":[]},
-        "renovate":{"classification":"applicable","evidence":"renovate.yml runs repository-local Renovate.","implementations":[{"workflow":"renovate.yml"}]}
-      }
-    },
-    {
-      "name":"ChainArgos/blockchain-nodes",
-      "concerns": {
-        "rust-ci":{"classification":"repo-specific","evidence":"Rust-script is the Docker factory control plane; build-publish sweep validates it instead of a library test job.","implementations":[]},
-        "checkout":{"classification":"required","evidence":"Every Docker-factory workload consumes repository source through canonical checkout without persisted credentials.","implementations":[{"workflow":"ci.yml","job_ids":["sweep","base","build","packages"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","persist-credentials=false"]}]},
-        "tool-setup":{"classification":"required","evidence":"Every Docker-factory workload installs rust-script through canonical mise setup.","implementations":[{"workflow":"ci.yml","job_ids":["sweep","base","build","packages"],"canonical_markers":["jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518"]}]},
-        "cargo-cache":{"classification":"repo-specific","evidence":"The Rust-script control plane caches compiled scripts by an explicit source hash; product compilation occurs in registry-cached BuildKit layers rather than Cargo CI jobs.","implementations":[]},
-        "docker-build":{"classification":"required","evidence":"The repository product is a multi-architecture blockchain image factory.","implementations":[{"workflow":"ci.yml","canonical_markers":["docker/setup-buildx-action@"]}]},
-        "artifacts":{"classification":"non-applicable","evidence":"Images publish directly to the registry; no Results Service artifact fan-in is used.","implementations":[]},
-        "release":{"classification":"repo-specific","evidence":"Image publication occurs in build-publish.yml with a single-writer lane rather than tag assets.","implementations":[]},
-        "renovate":{"classification":"applicable","evidence":"renovate.yml runs repository-local Renovate.","implementations":[{"workflow":"renovate.yml"}]}
-      }
-    },
     {
       "name":"jackin-project/jackin",
       "concerns": {
@@ -131,6 +110,10 @@
       }
     },
     {
+      "name":"tailrocks/termpane",
+      "concerns": {}
+    },
+    {
       "name":"tailrocks/schemalane",
       "concerns": {
         "rust-ci":{"classification":"required","evidence":"Library validation and PostgreSQL integration both compile Rust through the canonical setup stack.","implementations":[{"workflow":"ci.yml","job_ids":["rust","integration"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444","mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696","jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"]}]},
@@ -150,42 +133,6 @@
       "name":"tailrocks/tracing-request-level",
       "concerns": {
         "release":{"classification":"applicable","evidence":"release.yml publishes the library crate.","implementations":[{"workflow":"release.yml","job_ids":["release"]}]}
-      }
-    },
-    {
-      "name":"ChainArgos/jackin-agent-brown",
-      "concerns": {
-        "lane-selection":{"classification":"required","evidence":"Validation, history scanning, image publication, pre-commit, and Renovate are executable Linux workflows and must use the canonical Velnor-default lane contract.","implementations":[{"workflow":"ci.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]},{"workflow":"gitleaks-history.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]},{"workflow":"precommit.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]},{"workflow":"publish-image.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.writer"]},{"workflow":"renovate.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]}]},
-        "checkout":{"classification":"required","evidence":"All local validation and publication jobs consume repository source.","implementations":[{"workflow":"ci.yml","job_ids":["validate"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","persist-credentials=false"]},{"workflow":"gitleaks-history.yml","job_ids":["scan"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"]},{"workflow":"precommit.yml","job_ids":["prek"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"]},{"workflow":"renovate.yml","job_ids":["renovate"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"]}]},
-        "tool-setup":{"classification":"required","evidence":"Gitleaks and pre-commit tooling must be declared through mise instead of curl or a second setup action.","implementations":[{"workflow":"gitleaks-history.yml","job_ids":["scan"],"canonical_markers":["jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518"]},{"workflow":"precommit.yml","job_ids":["prek"],"canonical_markers":["jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518"]}]},
-        "rust-ci":{"classification":"non-applicable","evidence":"This role repository builds a container through the shared role action and contains no Rust workspace.","implementations":[]},
-        "cargo-cache":{"classification":"non-applicable","evidence":"No Rust compilation occurs in this repository.","implementations":[]},
-        "docker-build":{"classification":"required","evidence":"The repository validates and publishes the jackin-agent-brown image through jackin-role-action.","implementations":[{"workflow":"ci.yml","job_ids":["validate"],"canonical_markers":["jackin-project/jackin-role-action@","registry-cache-image"]},{"workflow":"publish-image.yml","job_ids":["publish"],"canonical_markers":["jackin-project/jackin-role-action/.github/workflows/publish.yml@"]}]},
-        "artifacts":{"classification":"non-applicable","evidence":"The role workflow publishes OCI images directly and has no Results Service producer/consumer pair.","implementations":[]},
-        "preview":{"classification":"non-applicable","evidence":"No distinct preview artifact surface exists.","implementations":[]},
-        "release":{"classification":"applicable","evidence":"publish-image.yml publishes the role image.","implementations":[{"workflow":"publish-image.yml","job_ids":["publish"]}]},
-        "renovate":{"classification":"applicable","evidence":"renovate.yml runs repository-local Renovate.","implementations":[{"workflow":"renovate.yml","job_ids":["renovate"]}]},
-        "required-aggregator":{"classification":"required","evidence":"Every executable role workflow exposes a stable selected-lane aggregate context.","implementations":[{"workflow":"ci.yml","job_ids":["ci-required"],"canonical_markers":["toJSON(needs)"]},{"workflow":"gitleaks-history.yml","job_ids":["gitleaks-required"],"canonical_markers":["toJSON(needs)"]},{"workflow":"precommit.yml","job_ids":["precommit-required"],"canonical_markers":["toJSON(needs)"]},{"workflow":"publish-image.yml","job_ids":["publish-required"],"canonical_markers":["toJSON(needs)"]},{"workflow":"renovate.yml","job_ids":["renovate-required"],"canonical_markers":["toJSON(needs)"]}]},
-        "workflow-safety":{"classification":"required","evidence":"Every executable role workflow requires canonical concurrency, timeout, permissions, and immutable pins.","implementations":[{"workflow":"ci.yml","canonical_markers":["concurrency:","timeout-minutes:"]},{"workflow":"gitleaks-history.yml","canonical_markers":["concurrency:","timeout-minutes:"]},{"workflow":"precommit.yml","canonical_markers":["concurrency:","timeout-minutes:"]},{"workflow":"publish-image.yml","canonical_markers":["concurrency:","timeout-minutes:"]},{"workflow":"renovate.yml","canonical_markers":["concurrency:","timeout-minutes:"]}]}
-      }
-    },
-    {
-      "name":"tailrocks/velnor-actions-fixture",
-      "concerns": {
-        "lane-selection":{"classification":"repo-specific","evidence":"Fixture workflows intentionally exercise canonical inline matrices plus isolated negative and reusable-workflow protocol shapes; their exact content is the Velnor compatibility contract.","implementations":[]},
-        "checkout":{"classification":"applicable","evidence":"Fixture workload jobs consume source using the approved checkout adapter.","implementations":[{"workflow":"compat.yml","job_ids":["changes","compat"],"canonical_markers":["actions/checkout@"]}]},
-        "tool-setup":{"classification":"applicable","evidence":"Rust and action fixtures exercise native mise setup.","implementations":[{"workflow":"compat.yml","canonical_markers":["jdx/mise-action@"]}]},
-        "rust-ci":{"classification":"repo-specific","evidence":"fixture-rust-check.yml is a reusable protocol fixture rather than a product Rust workspace pipeline.","implementations":[]},
-        "integration-services":{"classification":"required","evidence":"compat.yml proves current V2 PostgreSQL service behavior.","implementations":[{"workflow":"compat.yml","job_ids":["services-postgres"]}]},
-        "cargo-cache":{"classification":"required","evidence":"compat.yml proves cache-off and local-sccache behavior without stacking an undeclared backend.","implementations":[{"workflow":"compat.yml","job_ids":["cache-off","cache-sccache"]}]},
-        "docker-build":{"classification":"required","evidence":"docker.yml and multi-arch.yml prove native Docker and manifest behavior.","implementations":[{"workflow":"docker.yml","job_ids":["docker"]},{"workflow":"multi-arch.yml","job_ids":["build","merge-manifests"]}]},
-        "artifacts":{"classification":"required","evidence":"Fixture fan-in proves current Results Service producer/consumer behavior.","implementations":[{"workflow":"compat.yml","canonical_markers":["actions/upload-artifact@","actions/download-artifact@"]}]},
-        "docs-pages":{"classification":"required","evidence":"pages.yml proves configure, single-tar upload, OIDC deploy, and writer behavior.","implementations":[{"workflow":"pages.yml","job_ids":["build","deploy"]}]},
-        "preview":{"classification":"non-applicable","evidence":"Fixture validates primitives directly rather than publishing a product preview.","implementations":[]},
-        "release":{"classification":"non-applicable","evidence":"Fixture has no product release.","implementations":[]},
-        "renovate":{"classification":"applicable","evidence":"renovate.yml is a protocol fixture for the approved Renovate adapter.","implementations":[{"workflow":"renovate.yml","job_ids":["renovate"]}]},
-        "required-aggregator":{"classification":"repo-specific","evidence":"Each independent fixture surface exposes its own required aggregator so failures remain attributable.","implementations":[]},
-        "workflow-safety":{"classification":"required","evidence":"Positive and negative fixture workflows use bounded execution and intentional concurrency without changing the protocol behavior under test.","implementations":[{"workflow":"attestation-negative.yml","canonical_markers":["concurrency:","timeout-minutes:"]},{"workflow":"compat.yml","canonical_markers":["concurrency:","timeout-minutes:"]},{"workflow":"docker.yml","canonical_markers":["concurrency:","timeout-minutes:"]},{"workflow":"fixture-rust-check.yml","canonical_markers":["concurrency:","timeout-minutes:"]},{"workflow":"multi-arch.yml","canonical_markers":["concurrency:","timeout-minutes:"]},{"workflow":"pages.yml","canonical_markers":["concurrency:","timeout-minutes:"]},{"workflow":"renovate.yml","canonical_markers":["concurrency:","timeout-minutes:"]},{"workflow":"reuse-caller.yml","canonical_markers":["concurrency:","timeout-minutes:"]},{"workflow":"schedule.yml","canonical_markers":["concurrency:","timeout-minutes:"]}]}
       }
     },
     {
@@ -276,6 +223,42 @@
       }
     },
     {
+      "name":"tailrocks/homebrew-velnor",
+      "concerns": {}
+    },
+    {
+      "name":"tailrocks/tailrocks-typescript-skills",
+      "concerns": {}
+    },
+    {
+      "name":"tailrocks/tailrocks-skill-authoring-skills",
+      "concerns": {}
+    },
+    {
+      "name":"tailrocks/tailrocks-rust-skills",
+      "concerns": {}
+    },
+    {
+      "name":"tailrocks/tailrocks-roadmap-skills",
+      "concerns": {}
+    },
+    {
+      "name":"tailrocks/tailrocks-pull-request-skills",
+      "concerns": {}
+    },
+    {
+      "name":"tailrocks/tailrocks-open-source-skills",
+      "concerns": {}
+    },
+    {
+      "name":"tailrocks/tailrocks-macos-skills",
+      "concerns": {}
+    },
+    {
+      "name":"tailrocks/tailrocks-code-quality-skills",
+      "concerns": {}
+    },
+    {
       "name":"jackin-project/jackin-the-architect",
       "concerns": {}
     },
@@ -296,15 +279,7 @@
       "concerns": {}
     },
     {
-      "name":"jackin-project/jackin-dev",
-      "concerns": {}
-    },
-    {
       "name":"tailrocks/homebrew-ruxel",
-      "concerns": {}
-    },
-    {
-      "name":"tailrocks/tailrocks-skills",
       "concerns": {}
     }
   ]

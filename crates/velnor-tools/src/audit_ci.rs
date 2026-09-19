@@ -45,6 +45,49 @@ const SHA_LEN: usize = 40;
 const ESTATE_MANIFEST_FILE: &str = "config/estate-repositories.json";
 const LEGACY_RUNNER_GROUP_DOCTOR: &str = "scripts/runner_group_doctor.sh";
 
+// The goal's §2 fixed manifest is the scope authority.  This compiled list is
+// only an exact-name projection for this auxiliary static audit: it prevents a
+// stale or substituted estate concern entry from passing by count alone.  It
+// is not G0 evidence and must stay synchronized with the external goal before
+// changing the fleet scope.
+const GOAL_FLEET_REPOSITORIES: [&str; 32] = [
+    "tailrocks/velnor",
+    "tailrocks/velnor-apt",
+    "tailrocks/parallax",
+    "tailrocks/tracing-request-level",
+    "tailrocks/termrock",
+    "tailrocks/termpane",
+    "tailrocks/tablerock",
+    "tailrocks/schemalane",
+    "tailrocks/ruxel",
+    "tailrocks/pg-bigdecimal",
+    "tailrocks/parallax-telemetry-playground",
+    "tailrocks/homebrew-tablerock",
+    "tailrocks/homebrew-ruxel",
+    "tailrocks/homebrew-parallax",
+    "tailrocks/homebrew-holla",
+    "tailrocks/holla-apt",
+    "tailrocks/holla",
+    "tailrocks/homebrew-velnor",
+    "tailrocks/tailrocks-typescript-skills",
+    "tailrocks/tailrocks-skill-authoring-skills",
+    "tailrocks/tailrocks-rust-skills",
+    "tailrocks/tailrocks-roadmap-skills",
+    "tailrocks/tailrocks-pull-request-skills",
+    "tailrocks/tailrocks-open-source-skills",
+    "tailrocks/tailrocks-macos-skills",
+    "tailrocks/tailrocks-code-quality-skills",
+    "jackin-project/jackin",
+    "jackin-project/jackin-agent-smith",
+    "jackin-project/homebrew-tap",
+    "jackin-project/jackin-the-architect",
+    "jackin-project/jackin-sentinel",
+    "jackin-project/jackin-role-action",
+];
+const ESTATE_SCOPE_ROLE: &str = "auxiliary-concern-projection";
+const ESTATE_SCOPE_AUTHORITY: &str = "velnor-github-first-dual-lane-goal.md";
+const ESTATE_SCOPE_AUTHORITY_SECTION: &str = "2. Fixed repository manifest";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum GeneratedCallerClass {
@@ -172,9 +215,18 @@ impl Finding {
 #[derive(Debug, Deserialize)]
 struct EstateManifest {
     version: u32,
+    scope: EstateScope,
     #[serde(default)]
     defaults: BTreeMap<String, ConcernContract>,
     repositories: Vec<EstateRepository>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EstateScope {
+    role: String,
+    authority: String,
+    authority_section: String,
+    expected_repository_count: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -256,19 +308,11 @@ fn canonical_fleet_map(root: &Path) -> Result<BTreeMap<String, GeneratedCallerCl
         .with_context(|| format!("read estate manifest {}", path.display()))?;
     let manifest: EstateManifest = serde_json::from_str(&text)
         .with_context(|| format!("parse estate manifest {}", path.display()))?;
+    validate_estate_scope_metadata(&manifest.scope)?;
+    validate_fixed_repository_scope("auxiliary estate manifest", &manifest.repositories)?;
     let mut map = BTreeMap::new();
     for repo in manifest.repositories {
-        let class = if repo.name == "tailrocks/velnor-actions-fixture" {
-            GeneratedCallerClass::Fixture
-        } else if repo.name.ends_with("-apt") {
-            GeneratedCallerClass::Apt
-        } else if repo.name.starts_with("jackin-project/homebrew-")
-            || repo.name.starts_with("tailrocks/homebrew-")
-        {
-            GeneratedCallerClass::Tap
-        } else {
-            GeneratedCallerClass::Code
-        };
+        let class = generated_class_for_repository(&repo.name);
         if map.insert(repo.name.clone(), class).is_some() {
             bail!(
                 "estate manifest contains duplicate repository {}",
@@ -277,6 +321,75 @@ fn canonical_fleet_map(root: &Path) -> Result<BTreeMap<String, GeneratedCallerCl
         }
     }
     Ok(map)
+}
+
+fn generated_class_for_repository(repository: &str) -> GeneratedCallerClass {
+    if repository == "tailrocks/velnor-actions-fixture" {
+        GeneratedCallerClass::Fixture
+    } else if repository.ends_with("-apt") {
+        GeneratedCallerClass::Apt
+    } else if repository.starts_with("jackin-project/homebrew-")
+        || repository.starts_with("tailrocks/homebrew-")
+    {
+        GeneratedCallerClass::Tap
+    } else {
+        GeneratedCallerClass::Code
+    }
+}
+
+fn goal_fleet_repository_names() -> BTreeSet<&'static str> {
+    GOAL_FLEET_REPOSITORIES.into_iter().collect()
+}
+
+fn validate_estate_scope_metadata(scope: &EstateScope) -> Result<()> {
+    if scope.role != ESTATE_SCOPE_ROLE {
+        bail!(
+            "estate manifest scope role must be {ESTATE_SCOPE_ROLE}, got {}",
+            scope.role
+        );
+    }
+    if scope.authority != ESTATE_SCOPE_AUTHORITY {
+        bail!(
+            "estate manifest scope authority must be {ESTATE_SCOPE_AUTHORITY}, got {}",
+            scope.authority
+        );
+    }
+    if scope.authority_section != ESTATE_SCOPE_AUTHORITY_SECTION {
+        bail!(
+            "estate manifest scope authority section must be {ESTATE_SCOPE_AUTHORITY_SECTION}, got {}",
+            scope.authority_section
+        );
+    }
+    if scope.expected_repository_count != GOAL_FLEET_REPOSITORIES.len() {
+        bail!(
+            "estate manifest scope declares {} repositories; fixed goal scope requires {}",
+            scope.expected_repository_count,
+            GOAL_FLEET_REPOSITORIES.len()
+        );
+    }
+    Ok(())
+}
+
+fn validate_fixed_repository_scope(context: &str, repositories: &[EstateRepository]) -> Result<()> {
+    let names = repositories
+        .iter()
+        .map(|repository| repository.name.clone())
+        .collect::<Vec<_>>();
+    let observed = names.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    if observed.len() != names.len() {
+        bail!("{context} contains duplicate repository names");
+    }
+    let expected = goal_fleet_repository_names();
+    if observed != expected {
+        let missing = expected.difference(&observed).copied().collect::<Vec<_>>();
+        let extra = observed.difference(&expected).copied().collect::<Vec<_>>();
+        bail!(
+            "{context} scope mismatch: expected exactly {} fixed-goal repositories; observed {}; missing={missing:?}; extra={extra:?}",
+            GOAL_FLEET_REPOSITORIES.len(),
+            names.len()
+        );
+    }
+    Ok(())
 }
 
 fn generated_caller_sample(
@@ -573,25 +686,18 @@ fn validate_estate_scope(
     estate: &EstateManifest,
     canonical_classes: &BTreeMap<String, GeneratedCallerClass>,
 ) -> Result<()> {
-    let observed = estate
-        .repositories
-        .iter()
-        .map(|repo| repo.name.as_str())
-        .collect::<BTreeSet<_>>();
-    if observed.len() != estate.repositories.len() {
-        bail!("estate manifest contains duplicate repository names");
-    }
-    let expected = canonical_classes
+    validate_estate_scope_metadata(&estate.scope)?;
+    validate_fixed_repository_scope("estate manifest", &estate.repositories)?;
+    let canonical_repositories = canonical_classes
         .keys()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
-    if observed != expected {
-        let missing = expected.difference(&observed).copied().collect::<Vec<_>>();
-        let extra = observed.difference(&expected).copied().collect::<Vec<_>>();
-        bail!(
-            "estate scope mismatch: expected exactly 28 repositories; missing={missing:?}; extra={extra:?}"
-        );
-    }
+        .cloned()
+        .map(|name| EstateRepository {
+            name,
+            path: None,
+            concerns: BTreeMap::new(),
+        })
+        .collect::<Vec<_>>();
+    validate_fixed_repository_scope("canonical fleet map", &canonical_repositories)?;
     Ok(())
 }
 
@@ -3257,6 +3363,103 @@ mod tests {
         findings.iter().any(|finding| finding.rule == rule)
     }
 
+    fn auxiliary_scope() -> EstateScope {
+        EstateScope {
+            role: ESTATE_SCOPE_ROLE.to_string(),
+            authority: ESTATE_SCOPE_AUTHORITY.to_string(),
+            authority_section: ESTATE_SCOPE_AUTHORITY_SECTION.to_string(),
+            expected_repository_count: GOAL_FLEET_REPOSITORIES.len(),
+        }
+    }
+
+    fn scope_manifest(names: Vec<String>) -> EstateManifest {
+        EstateManifest {
+            version: 2,
+            scope: auxiliary_scope(),
+            defaults: BTreeMap::new(),
+            repositories: names
+                .into_iter()
+                .map(|name| EstateRepository {
+                    name,
+                    path: None,
+                    concerns: BTreeMap::new(),
+                })
+                .collect(),
+        }
+    }
+
+    fn canonical_goal_classes() -> BTreeMap<String, GeneratedCallerClass> {
+        GOAL_FLEET_REPOSITORIES
+            .into_iter()
+            .map(|name| (name.to_string(), generated_class_for_repository(name)))
+            .collect()
+    }
+
+    #[test]
+    fn fixed_scope_rejects_wrong_repository_substitution() {
+        let mut names = GOAL_FLEET_REPOSITORIES
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        names[0] = "tailrocks/not-in-fixed-goal".to_string();
+
+        let error = validate_estate_scope(&scope_manifest(names), &canonical_goal_classes())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("tailrocks/velnor"), "{error}");
+        assert!(error.contains("tailrocks/not-in-fixed-goal"), "{error}");
+    }
+
+    #[test]
+    fn fixed_scope_rejects_missing_repository() {
+        let names = GOAL_FLEET_REPOSITORIES[..GOAL_FLEET_REPOSITORIES.len() - 1]
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect();
+
+        let error = validate_estate_scope(&scope_manifest(names), &canonical_goal_classes())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("observed 31"), "{error}");
+        assert!(
+            error.contains("jackin-project/jackin-role-action"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn fixed_scope_rejects_duplicate_repository() {
+        let mut names = GOAL_FLEET_REPOSITORIES
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        names.push(names[0].clone());
+
+        let error = validate_estate_scope(&scope_manifest(names), &canonical_goal_classes())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("duplicate repository names"), "{error}");
+    }
+
+    #[test]
+    fn fixed_scope_rejects_extra_repository() {
+        let mut names = GOAL_FLEET_REPOSITORIES
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        names.push("tailrocks/out-of-scope".to_string());
+
+        let error = validate_estate_scope(&scope_manifest(names), &canonical_goal_classes())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("observed 33"), "{error}");
+        assert!(error.contains("tailrocks/out-of-scope"), "{error}");
+    }
+
     #[test]
     fn sparse_checkout_early_error_reaps_child_and_preserves_error() {
         let mut command = Command::new("sh");
@@ -4044,7 +4247,7 @@ jobs:
     #[test]
     fn estate_manifest_parses_classified_repository() {
         let manifest: EstateManifest = serde_json::from_str(
-            r#"{"version":2,"defaults":{},"repositories":[{"name":"one","path":"/one","concerns":{}}]}"#,
+            r#"{"version":2,"scope":{"role":"auxiliary-concern-projection","authority":"velnor-github-first-dual-lane-goal.md","authority_section":"2. Fixed repository manifest","expected_repository_count":32},"defaults":{},"repositories":[{"name":"one","path":"/one","concerns":{}}]}"#,
         )
         .unwrap();
         assert_eq!(manifest.repositories.len(), 1);
