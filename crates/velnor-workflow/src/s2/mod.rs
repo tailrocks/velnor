@@ -1305,6 +1305,9 @@ fn scan_target(
         .as_ref()
         .and_then(config::RepoGenerationConfig::default_branch)
         .unwrap_or(default_branch);
+    // Only independently recorded output ownership is removed from scan
+    // provenance. Configuration-declared paths are validated after scanning;
+    // a static output cannot hide its own workflow/action source.
     let shape = scan::scan_shape(root, &scan_providers, scan_default_branch, exclude)?;
     let mut config = ProjectConfig::from(shape.clone());
     if let Some(generation) = &generation {
@@ -6313,7 +6316,7 @@ fn plan_generated_write_with_options(
         })
         .map(|(relative, _)| relative.clone())
         .collect::<Vec<_>>();
-    let legacy = direct_legacy_workflows(root, files)?;
+    let legacy = direct_legacy_workflows(root, files, ownership.map(|state| &state.outputs))?;
     let conflicts = changed
         .iter()
         .filter(|relative| root.join(relative).exists())
@@ -6923,6 +6926,28 @@ fn parse_ownership_state(
     }))
 }
 
+/// Return output paths whose ownership was recorded by this generator.
+///
+/// A file's content is not an authority claim: an unmanaged workflow can
+/// forge the generated header. The sidecar is parsed independently and its
+/// output list is the only source that lets a later scan omit an output. The
+/// host cache file is known from the contract even before the first sidecar
+/// exists.
+pub(crate) fn generator_owned_output_paths(
+    root: &Path,
+) -> Result<BTreeSet<PathBuf>, GeneratorError> {
+    let state_path = PathBuf::from(OWNERSHIP_STATE);
+    let mut paths = BTreeSet::from([
+        state_path.clone(),
+        PathBuf::from("config/fleet/velnor-host.env"),
+    ]);
+    let preimage = capture_file_preimage(&root.join(&state_path), &state_path)?;
+    if let OwnershipStateFile::Present(state) = parse_ownership_state(root, &preimage)? {
+        paths.extend(state.outputs.into_keys());
+    }
+    Ok(paths)
+}
+
 fn parse_inputs<'a>(
     lines: &mut impl Iterator<Item = &'a str>,
     path: &Path,
@@ -7049,6 +7074,7 @@ fn display_paths<'a>(paths: impl Iterator<Item = &'a PathBuf>) -> String {
 fn direct_legacy_workflows(
     root: &Path,
     generated: &BTreeMap<PathBuf, String>,
+    ownership: Option<&BTreeMap<PathBuf, u64>>,
 ) -> Result<Vec<PathBuf>, GeneratorError> {
     let workflows = root.join(".github/workflows");
     if !workflows.exists() {
@@ -7071,12 +7097,15 @@ fn direct_legacy_workflows(
                 GeneratorError::usage(format!("make workflow path relative: {error}"))
             })?
             .to_path_buf();
-        let generated_by_velnor =
-            fs::read_to_string(&path).is_ok_and(|content| content.starts_with(GENERATED_HEADER));
+        // Current outputs are authoritative from the render plan; stale
+        // outputs are authoritative only from the recorded sidecar. Their
+        // digest is verified before deletion, so a changed stale file still
+        // fails closed instead of being silently adopted.
+        let owned_by_state = ownership.is_some_and(|outputs| outputs.contains_key(&relative));
         if file_type.is_file()
             && matches!(extension, Some("yml" | "yaml"))
             && !generated.contains_key(&relative)
-            && !generated_by_velnor
+            && !owned_by_state
         {
             legacy.push(relative);
         }
@@ -10534,7 +10563,7 @@ path-only = { path = "../path-only" }
     }
 
     #[test]
-    fn scanner_does_not_treat_generated_github_output_as_include_str_input() {
+    fn scanner_treats_forged_generated_github_output_as_include_str_input() {
         let root = temporary_repository("generated-github-include-str");
         must(
             fs::create_dir_all(root.join("src")),
@@ -10563,19 +10592,26 @@ path-only = { path = "../path-only" }
             "write generated GitHub output",
         );
 
-        let error = must_some(
+        let config = must(
             scan_repository(
                 &root,
                 Some(std::collections::BTreeSet::from([
                     crate::s2::provider::ProviderId::GithubHosted,
                 ])),
-            )
-            .err(),
-            "generated GitHub output must not satisfy include_str",
+            ),
+            "forged generated GitHub output is a scan input",
         );
-        assert!(error
-            .to_string()
-            .contains("include_str! target does not exist"));
+        let unit = must_some(
+            config.units.iter().find(|unit| unit.id == "rust-fixture"),
+            "generated fixture unit",
+        );
+        assert!(
+            unit.watch
+                .iter()
+                .any(|path| path == ".github/workflows/ci.yml"),
+            "a header claim must not hide an unmanaged workflow input: {:?}",
+            unit.watch
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -20186,6 +20222,169 @@ lockfile = true
     }
 
     #[test]
+    fn generated_output_churn_is_not_scan_provenance_but_handwritten_github_is() {
+        let root = configured_repository("github-scan-provenance", None);
+        let provider = Some(std::collections::BTreeSet::from([
+            crate::s2::provider::ProviderId::GithubHosted,
+        ]));
+        generate_repository(&root, false);
+        let initial = must(
+            scan_target(&root, provider.clone(), "main"),
+            "scan initial repository",
+        )
+        .inputs
+        .scan;
+        let generated = root.join(".github/workflows/ci-main.yml");
+        assert!(generated.is_file(), "generated workflow fixture is missing");
+        must(fs::remove_file(&generated), "remove generated workflow");
+        let after_generated_removal = must(
+            scan_target(&root, provider.clone(), "main"),
+            "scan after generated workflow removal",
+        )
+        .inputs
+        .scan;
+        assert_eq!(
+            after_generated_removal, initial,
+            "recorded generated output removal changed scan input"
+        );
+        let missing_error = must_some(
+            check_repository(&root).err(),
+            "check must report missing generated output",
+        );
+        assert!(
+            missing_error.to_string().contains("ci-main.yml"),
+            "missing generated output must remain a generation error: {missing_error}"
+        );
+        generate_repository(&root, false);
+
+        let forged = root.join(".github/workflows/forged.yml");
+        must(
+            fs::write(
+                &forged,
+                format!("{GENERATED_HEADER}name: forged\non:\n  workflow_dispatch:\n"),
+            ),
+            "write forged generated-header workflow",
+        );
+        let with_forged = must(
+            scan_target(&root, provider.clone(), "main"),
+            "scan forged generated-header workflow",
+        )
+        .inputs
+        .scan;
+        assert_ne!(with_forged, initial, "forged header hid unmanaged workflow");
+        let forged_error = must_some(
+            check_repository(&root).err(),
+            "check must reject forged generated-header workflow",
+        );
+        assert!(
+            forged_error.to_string().contains("forged.yml"),
+            "forged workflow must be named: {forged_error}"
+        );
+        must(fs::remove_file(&forged), "remove forged workflow");
+
+        let handwritten = root.join(".github/workflows/handwritten.yml");
+        must(
+            fs::write(&handwritten, "name: handwritten\n"),
+            "write handwritten workflow",
+        );
+        let with_handwritten = must(
+            scan_target(&root, provider, "main"),
+            "scan with handwritten workflow",
+        )
+        .inputs
+        .scan;
+        assert_ne!(with_handwritten, initial, "handwritten workflow was hidden");
+        let handwritten_error = must_some(
+            check_repository(&root).err(),
+            "check must reject unmanaged handwritten workflow",
+        );
+        assert!(
+            handwritten_error.to_string().contains("handwritten.yml"),
+            "unmanaged workflow must be named: {handwritten_error}"
+        );
+        must(fs::remove_file(handwritten), "remove handwritten workflow");
+        assert!(
+            matches!(check_repository(&root), Ok(WriteOutcome::Unchanged)),
+            "removing unmanaged workflows must restore the recorded scan"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn declared_static_output_is_excluded_before_and_after_first_generation() {
+        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[static_files]]\nfile = \".github/workflows/owned-static.yml\"\nsource = \".github-gen/sources/owned-static.yml\"\n";
+        let root = configured_repository("static-output-provenance", Some(config));
+        must(
+            fs::create_dir_all(root.join(".github-gen/sources")),
+            "create static source directory",
+        );
+        must(
+            fs::write(
+                root.join(".github-gen/sources/owned-static.yml"),
+                "name: owned static\n",
+            ),
+            "write static source",
+        );
+        let provider = Some(std::collections::BTreeSet::from([
+            crate::s2::provider::ProviderId::GithubHosted,
+        ]));
+        let before = must(
+            scan_target(&root, provider.clone(), "main"),
+            "scan before static generation",
+        )
+        .inputs
+        .scan;
+        generate_repository(&root, false);
+        assert!(root.join(".github/workflows/owned-static.yml").is_file());
+        let after = must(
+            scan_target(&root, provider, "main"),
+            "scan after static generation",
+        )
+        .inputs
+        .scan;
+        assert_eq!(after, before, "static output changed scan provenance");
+        assert!(
+            matches!(check_repository(&root), Ok(WriteOutcome::Unchanged)),
+            "repeat generation must be drift-free"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn static_source_cannot_hide_workflow_inputs_or_self_reference() {
+        let config = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[[static_files]]\nfile = \".github/workflows/self.yml\"\nsource = \".github/workflows/self.yml\"\n";
+        let root = configured_repository("static-self-source", Some(config));
+        must(
+            fs::create_dir_all(root.join(".github/workflows")),
+            "create workflow directory",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/self.yml"),
+                "name: self-source\non:\n  workflow_dispatch:\n",
+            ),
+            "write self-source workflow",
+        );
+        let error = must_some(
+            scan_target(
+                &root,
+                Some(std::collections::BTreeSet::from([
+                    crate::s2::provider::ProviderId::GithubHosted,
+                ])),
+                "main",
+            )
+            .err(),
+            "static workflow source must be rejected",
+        )
+        .to_string();
+        assert!(
+            error.contains("source must stay outside `.github/"),
+            "static workflow source must fail closed: {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn check_fails_when_config_inputs_change_but_output_does_not() {
         let before = configured_repository_config("rust-fixture");
         let root = configured_repository("config-input-drift", Some(&before));
@@ -20247,11 +20446,15 @@ lockfile = true
         generate_repository(&root, false);
         let state = must(fs::read_to_string(&state_path), "reread ownership state");
         assert!(state.contains("schema = 2\n[inputs]"), "{state}");
-        assert_eq!(
-            generated_tree(&root),
-            before,
-            "migration must not move generated bytes"
-        );
+        let mut after = generated_tree(&root);
+        let mut before_outputs = before;
+        // A foreign state file cannot authorize output paths for the first
+        // migration scan. The rewritten state therefore records the fail-
+        // closed scan boundary; rendered outputs themselves must stay byte
+        // identical while that provenance record moves.
+        after.remove(OWNERSHIP_STATE);
+        before_outputs.remove(OWNERSHIP_STATE);
+        assert_eq!(after, before_outputs, "migration moved generated outputs");
         let _ = fs::remove_dir_all(root);
     }
 
