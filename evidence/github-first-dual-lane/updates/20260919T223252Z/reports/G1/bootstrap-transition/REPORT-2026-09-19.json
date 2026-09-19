@@ -1,0 +1,56 @@
+{
+  "observed_at": "2026-09-19T22:20:57Z",
+  "scope": "G1 bootstrap transition latest macOS policy",
+  "mutations": [],
+  "main": "b5a4b4afaa6ca807927cacc03659b570a895dd5c",
+  "pr957": {
+    "base": "b5a4b4afaa6ca807927cacc03659b570a895dd5c",
+    "superseded_head": "4f72ac31b5fb75e8b213bb8c45dc898859f466bb",
+    "current_head": "92387e88c32f933a9061b819256e535662655cb2",
+    "current_generated_pin": "9e06bef6da90d7084853d78a5e1fdea31a1d3a5c",
+    "prior_policy_run": {
+      "id": 35471774816,
+      "conclusion": "failure",
+      "failed_rule": "trusted-runners",
+      "finding": ".github/workflows/ci-runtime-products.yml: job build: runs-on does not match any declared provider selector"
+    },
+    "prior_ci_run": {
+      "id": 35471777152,
+      "conclusion": "success"
+    },
+    "current_policy_run": {
+      "id": 35473052923,
+      "status_at_observation": "in_progress",
+      "step_at_observation": "Acquire candidate generator product"
+    },
+    "current_ci_run": {
+      "id": 35473054871,
+      "status_at_observation": "pending"
+    }
+  },
+  "base_validator": "0dc79895ff1c5e88be7c3822c437e1c5b5282e12",
+  "current_runtime_product": {
+    "tag": "velnor-workflow-runtime-v1-8b96d5108550dfa6",
+    "closure": "8b96d5108550dfa61a57ff65c6c357b4119493c660417bf3beb4af2b03742269",
+    "revision": "0dc79895ff1c5e88be7c3822c437e1c5b5282e12",
+    "assets": ["Linux-X64", "Linux-ARM64", "macOS-ARM64"]
+  },
+  "publisher_contract": {
+    "workflow": ".github/workflows/ci-runtime-products.yml",
+    "allowed_ref": "refs/heads/main",
+    "matrix": ["ubuntu-24.04", "ubuntu-24.04-arm", "macos-15"],
+    "all_assets_required": true,
+    "release_is_immutable": true
+  },
+  "candidate_boundary": {
+    "candidate_may_prove": "generator render comparison",
+    "candidate_may_not_replace": "base semantic policy validator",
+    "forbidden_workarounds": ["ruleset bypass", "candidate semantic substitution", "generated --pin-build", "mutable latest", "manual asset replacement", "stale macOS binary"]
+  },
+  "verdict": "no strict no-macos-15 bootstrap path exists under current publisher/product contract",
+  "authority_options": [
+    "permit one audited bootstrap publisher run with generated macos-15 cell as an explicit temporary product-build exception",
+    "authorize a separately typed protected validator-only product/publisher preserving complete identity and attestation guarantees"
+  ],
+  "evidence_url": "https://github.com/tailrocks/velnor/actions/runs/35471774816"
+}

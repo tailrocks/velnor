@@ -1,0 +1,710 @@
+{
+  "binary": "/private/tmp/velnor-checker-target-ce894/debug/velnor-tools",
+  "cases": {
+    "ancestor-symlink-outside-cas": {
+      "actual_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-storage-ref": 2
+      },
+      "assertion": "pass",
+      "cli_exit": 1,
+      "expected_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-storage-ref": 2
+      },
+      "finding_count": 3,
+      "findings": [
+        {
+          "code": "g0-authoritative-proof-missing",
+          "field": "evidence.g0_inventory",
+          "message": "G0 requires independently collected typed workflow, PR/check, dependency-graph, access, and model evidence; summary counts/digests are insufficient",
+          "repository": null
+        },
+        {
+          "code": "g0-storage-ref",
+          "field": "evidence.g0_inventory.collector_snapshot.raw_objects.storage_ref",
+          "message": "storage reference must resolve to a digest-addressed object below the approved evidence root",
+          "repository": null
+        },
+        {
+          "code": "g0-storage-ref",
+          "field": "evidence.g0_inventory.collector_snapshot_storage_ref",
+          "message": "storage reference must resolve to a digest-addressed object below the approved evidence root",
+          "repository": null
+        }
+      ],
+      "paths": [
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/ancestor-symlink-outside-cas/manifest.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/ancestor-symlink-outside-cas/snapshot.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/ancestor-symlink-outside-cas/evidence.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/ancestor-symlink-outside-cas/store"
+      ],
+      "status": "fail"
+    },
+    "baseline": {
+      "actual_codes": {
+        "g0-authoritative-proof-missing": 1
+      },
+      "assertion": "pass",
+      "cli_exit": 1,
+      "expected_codes": {
+        "g0-authoritative-proof-missing": 1
+      },
+      "finding_count": 1,
+      "findings": [
+        {
+          "code": "g0-authoritative-proof-missing",
+          "field": "evidence.g0_inventory",
+          "message": "G0 requires independently collected typed workflow, PR/check, dependency-graph, access, and model evidence; summary counts/digests are insufficient",
+          "repository": null
+        }
+      ],
+      "paths": [
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/baseline/manifest.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/baseline/snapshot.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/baseline/evidence.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/baseline/store"
+      ],
+      "status": "fail"
+    },
+    "cas-ref-without-store": {
+      "actual_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-storage-ref": 2
+      },
+      "assertion": "pass",
+      "cli_exit": 1,
+      "expected_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-storage-ref": 2
+      },
+      "finding_count": 3,
+      "findings": [
+        {
+          "code": "g0-authoritative-proof-missing",
+          "field": "evidence.g0_inventory",
+          "message": "G0 requires independently collected typed workflow, PR/check, dependency-graph, access, and model evidence; summary counts/digests are insufficient",
+          "repository": null
+        },
+        {
+          "code": "g0-storage-ref",
+          "field": "evidence.g0_inventory.collector_snapshot.raw_objects.storage_ref",
+          "message": "storage reference must resolve to a digest-addressed object below the approved evidence root",
+          "repository": null
+        },
+        {
+          "code": "g0-storage-ref",
+          "field": "evidence.g0_inventory.collector_snapshot_storage_ref",
+          "message": "storage reference must resolve to a digest-addressed object below the approved evidence root",
+          "repository": null
+        }
+      ],
+      "paths": [
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/cas-ref-without-store/manifest.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/cas-ref-without-store/snapshot.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/cas-ref-without-store/evidence.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/cas-ref-without-store/store"
+      ],
+      "status": "fail"
+    },
+    "evil-api-origin": {
+      "actual_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-collector-source": 1
+      },
+      "assertion": "pass",
+      "cli_exit": 1,
+      "expected_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-collector-source": 1
+      },
+      "finding_count": 2,
+      "findings": [
+        {
+          "code": "g0-authoritative-proof-missing",
+          "field": "evidence.g0_inventory",
+          "message": "G0 requires independently collected typed workflow, PR/check, dependency-graph, access, and model evidence; summary counts/digests are insufficient",
+          "repository": null
+        },
+        {
+          "code": "g0-collector-source",
+          "field": "evidence.g0_inventory.collector_snapshot.collector",
+          "message": "collector must identify an immutable read-only GitHub API source",
+          "repository": null
+        }
+      ],
+      "paths": [
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/evil-api-origin/manifest.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/evil-api-origin/snapshot.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/evil-api-origin/evidence.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/evil-api-origin/store"
+      ],
+      "status": "fail"
+    },
+    "graph-wrong-target": {
+      "actual_codes": {
+        "g0-authoritative-proof-missing": 1
+      },
+      "assertion": "FAIL",
+      "cli_exit": 1,
+      "expected_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-dependency-edge": 1
+      },
+      "finding_count": 1,
+      "findings": [
+        {
+          "code": "g0-authoritative-proof-missing",
+          "field": "evidence.g0_inventory",
+          "message": "G0 requires independently collected typed workflow, PR/check, dependency-graph, access, and model evidence; summary counts/digests are insufficient",
+          "repository": null
+        }
+      ],
+      "paths": [
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/graph-wrong-target/manifest.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/graph-wrong-target/snapshot.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/graph-wrong-target/evidence.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/graph-wrong-target/store"
+      ],
+      "status": "fail"
+    },
+    "graph-wrong-target-sha": {
+      "actual_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-dependency-edge": 1
+      },
+      "assertion": "pass",
+      "cli_exit": 1,
+      "expected_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-dependency-edge": 1
+      },
+      "finding_count": 2,
+      "findings": [
+        {
+          "code": "g0-authoritative-proof-missing",
+          "field": "evidence.g0_inventory",
+          "message": "G0 requires independently collected typed workflow, PR/check, dependency-graph, access, and model evidence; summary counts/digests are insufficient",
+          "repository": null
+        },
+        {
+          "code": "g0-dependency-edge",
+          "field": "collector_snapshot.dependency_graph.edges",
+          "message": "graph edges require unique distinct existing nodes with independently bound source and target revisions/refs",
+          "repository": null
+        }
+      ],
+      "paths": [
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/graph-wrong-target-sha/manifest.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/graph-wrong-target-sha/snapshot.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/graph-wrong-target-sha/evidence.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/graph-wrong-target-sha/store"
+      ],
+      "status": "fail"
+    },
+    "hardlink-outside-cas": {
+      "actual_codes": {
+        "g0-authoritative-proof-missing": 1
+      },
+      "assertion": "pass",
+      "cli_exit": 1,
+      "expected_codes": {
+        "g0-authoritative-proof-missing": 1
+      },
+      "finding_count": 1,
+      "findings": [
+        {
+          "code": "g0-authoritative-proof-missing",
+          "field": "evidence.g0_inventory",
+          "message": "G0 requires independently collected typed workflow, PR/check, dependency-graph, access, and model evidence; summary counts/digests are insufficient",
+          "repository": null
+        }
+      ],
+      "paths": [
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/hardlink-outside-cas/manifest.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/hardlink-outside-cas/snapshot.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/hardlink-outside-cas/evidence.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/hardlink-outside-cas/store"
+      ],
+      "status": "fail"
+    },
+    "logical-job-mapping": {
+      "actual_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-workflow-plan": 1
+      },
+      "assertion": "pass",
+      "cli_exit": 1,
+      "expected_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-workflow-plan": 1
+      },
+      "finding_count": 2,
+      "findings": [
+        {
+          "code": "g0-authoritative-proof-missing",
+          "field": "evidence.g0_inventory",
+          "message": "G0 requires independently collected typed workflow, PR/check, dependency-graph, access, and model evidence; summary counts/digests are insufficient",
+          "repository": null
+        },
+        {
+          "code": "g0-workflow-plan",
+          "field": "workflow.source/jobs",
+          "message": "source-derived workflow job identities must exactly equal reviewed expected workloads/jobs",
+          "repository": "tailrocks/velnor"
+        }
+      ],
+      "paths": [
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/logical-job-mapping/manifest.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/logical-job-mapping/snapshot.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/logical-job-mapping/evidence.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/logical-job-mapping/store"
+      ],
+      "status": "fail"
+    },
+    "nested-child-omission": {
+      "actual_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-dependency-obligation": 1,
+        "g0-workflow-child": 2
+      },
+      "assertion": "pass",
+      "cli_exit": 1,
+      "expected_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-dependency-obligation": 1,
+        "g0-workflow-child": 2
+      },
+      "finding_count": 4,
+      "findings": [
+        {
+          "code": "g0-authoritative-proof-missing",
+          "field": "evidence.g0_inventory",
+          "message": "G0 requires independently collected typed workflow, PR/check, dependency-graph, access, and model evidence; summary counts/digests are insufficient",
+          "repository": null
+        },
+        {
+          "code": "g0-dependency-obligation",
+          "field": "dependency_graph.edges",
+          "message": "workload scan lacks its required child edge",
+          "repository": "tailrocks/velnor"
+        },
+        {
+          "code": "g0-workflow-child",
+          "field": "manifest.expected_jobs.child_workflow",
+          "message": "reviewed child obligation for scan does not match source-derived reusable_workflow edge",
+          "repository": "tailrocks/velnor"
+        },
+        {
+          "code": "g0-workflow-child",
+          "field": "workflow.source/child_edges",
+          "message": "source-derived child edge has no reviewed workload inner",
+          "repository": "tailrocks/velnor"
+        }
+      ],
+      "paths": [
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/nested-child-omission/manifest.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/nested-child-omission/snapshot.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/nested-child-omission/evidence.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/nested-child-omission/store"
+      ],
+      "status": "fail"
+    },
+    "page-missing-next": {
+      "actual_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-pagination": 1
+      },
+      "assertion": "pass",
+      "cli_exit": 1,
+      "expected_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-pagination": 1
+      },
+      "finding_count": 2,
+      "findings": [
+        {
+          "code": "g0-authoritative-proof-missing",
+          "field": "evidence.g0_inventory",
+          "message": "G0 requires independently collected typed workflow, PR/check, dependency-graph, access, and model evidence; summary counts/digests are insufficient",
+          "repository": null
+        },
+        {
+          "code": "g0-pagination",
+          "field": "evidence.g0_inventory.collector_snapshot.requests.page",
+          "message": "a page declaring another page must have a captured subsequent page",
+          "repository": null
+        }
+      ],
+      "paths": [
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/page-missing-next/manifest.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/page-missing-next/snapshot.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/page-missing-next/evidence.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/page-missing-next/store"
+      ],
+      "status": "fail"
+    },
+    "page-wrong-next-path": {
+      "actual_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-pagination": 1,
+        "g0-request-incomplete": 1
+      },
+      "assertion": "pass",
+      "cli_exit": 1,
+      "expected_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-pagination": 1,
+        "g0-request-incomplete": 1
+      },
+      "finding_count": 3,
+      "findings": [
+        {
+          "code": "g0-authoritative-proof-missing",
+          "field": "evidence.g0_inventory",
+          "message": "G0 requires independently collected typed workflow, PR/check, dependency-graph, access, and model evidence; summary counts/digests are insufficient",
+          "repository": null
+        },
+        {
+          "code": "g0-pagination",
+          "field": "evidence.g0_inventory.collector_snapshot.requests.page",
+          "message": "a page declaring another page must have a captured subsequent page",
+          "repository": null
+        },
+        {
+          "code": "g0-request-incomplete",
+          "field": "evidence.g0_inventory.collector_snapshot.requests",
+          "message": "every request must be a complete successful page with query, viewer, rate-limit, and raw-response provenance",
+          "repository": null
+        }
+      ],
+      "paths": [
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/page-wrong-next-path/manifest.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/page-wrong-next-path/snapshot.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/page-wrong-next-path/evidence.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/page-wrong-next-path/store"
+      ],
+      "status": "fail"
+    },
+    "reusable-wrong-ref": {
+      "actual_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-workflow-derivation": 1
+      },
+      "assertion": "pass",
+      "cli_exit": 1,
+      "expected_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-workflow-derivation": 1
+      },
+      "finding_count": 2,
+      "findings": [
+        {
+          "code": "g0-authoritative-proof-missing",
+          "field": "evidence.g0_inventory",
+          "message": "G0 requires independently collected typed workflow, PR/check, dependency-graph, access, and model evidence; summary counts/digests are insufficient",
+          "repository": null
+        },
+        {
+          "code": "g0-workflow-derivation",
+          "field": "evidence.g0_inventory.collector_snapshot.workflow.source",
+          "message": "cannot derive source-bound workflow plan for tailrocks/velnor/.github/workflows/ci.yml: resolve immutable action source in workflow step 0",
+          "repository": "tailrocks/velnor"
+        }
+      ],
+      "paths": [
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/reusable-wrong-ref/manifest.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/reusable-wrong-ref/snapshot.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/reusable-wrong-ref/evidence.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/reusable-wrong-ref/store"
+      ],
+      "status": "fail"
+    },
+    "source-bytes-replay": {
+      "actual_codes": {
+        "g0-authoritative-proof-missing": 1
+      },
+      "assertion": "pass",
+      "cli_exit": 1,
+      "expected_codes": {
+        "g0-authoritative-proof-missing": 1
+      },
+      "finding_count": 1,
+      "findings": [
+        {
+          "code": "g0-authoritative-proof-missing",
+          "field": "evidence.g0_inventory",
+          "message": "G0 requires independently collected typed workflow, PR/check, dependency-graph, access, and model evidence; summary counts/digests are insufficient",
+          "repository": null
+        }
+      ],
+      "paths": [
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/source-bytes-replay/manifest.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/source-bytes-replay/snapshot.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/source-bytes-replay/evidence.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/source-bytes-replay/store"
+      ],
+      "status": "fail"
+    },
+    "source-wrong-path-url": {
+      "actual_codes": {
+        "g0-authoritative-proof-missing": 1
+      },
+      "assertion": "FAIL",
+      "cli_exit": 1,
+      "expected_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-workflow-source": 1
+      },
+      "finding_count": 1,
+      "findings": [
+        {
+          "code": "g0-authoritative-proof-missing",
+          "field": "evidence.g0_inventory",
+          "message": "G0 requires independently collected typed workflow, PR/check, dependency-graph, access, and model evidence; summary counts/digests are insufficient",
+          "repository": null
+        }
+      ],
+      "paths": [
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/source-wrong-path-url/manifest.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/source-wrong-path-url/snapshot.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/source-wrong-path-url/evidence.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/source-wrong-path-url/store"
+      ],
+      "status": "fail"
+    },
+    "static-condition-rejected": {
+      "actual_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-workflow-derivation": 1
+      },
+      "assertion": "pass",
+      "cli_exit": 1,
+      "expected_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-workflow-derivation": 1
+      },
+      "finding_count": 2,
+      "findings": [
+        {
+          "code": "g0-authoritative-proof-missing",
+          "field": "evidence.g0_inventory",
+          "message": "G0 requires independently collected typed workflow, PR/check, dependency-graph, access, and model evidence; summary counts/digests are insufficient",
+          "repository": null
+        },
+        {
+          "code": "g0-workflow-derivation",
+          "field": "evidence.g0_inventory.collector_snapshot.workflow.source",
+          "message": "cannot derive source-bound workflow plan for tailrocks/velnor/.github/workflows/ci.yml: workflow job scan has an unmodeled condition",
+          "repository": "tailrocks/velnor"
+        }
+      ],
+      "paths": [
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/static-condition-rejected/manifest.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/static-condition-rejected/snapshot.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/static-condition-rejected/evidence.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/static-condition-rejected/store"
+      ],
+      "status": "fail"
+    },
+    "static-matrix-rejected": {
+      "actual_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-workflow-derivation": 1
+      },
+      "assertion": "pass",
+      "cli_exit": 1,
+      "expected_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-workflow-derivation": 1
+      },
+      "finding_count": 2,
+      "findings": [
+        {
+          "code": "g0-authoritative-proof-missing",
+          "field": "evidence.g0_inventory",
+          "message": "G0 requires independently collected typed workflow, PR/check, dependency-graph, access, and model evidence; summary counts/digests are insufficient",
+          "repository": null
+        },
+        {
+          "code": "g0-workflow-derivation",
+          "field": "evidence.g0_inventory.collector_snapshot.workflow.source",
+          "message": "cannot derive source-bound workflow plan for tailrocks/velnor/.github/workflows/ci.yml: workflow job scan has an unmodeled matrix",
+          "repository": "tailrocks/velnor"
+        }
+      ],
+      "paths": [
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/static-matrix-rejected/manifest.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/static-matrix-rejected/snapshot.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/static-matrix-rejected/evidence.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/static-matrix-rejected/store"
+      ],
+      "status": "fail"
+    },
+    "symlink-inside-cas": {
+      "actual_codes": {
+        "g0-authoritative-proof-missing": 1
+      },
+      "assertion": "pass",
+      "cli_exit": 1,
+      "expected_codes": {
+        "g0-authoritative-proof-missing": 1
+      },
+      "finding_count": 1,
+      "findings": [
+        {
+          "code": "g0-authoritative-proof-missing",
+          "field": "evidence.g0_inventory",
+          "message": "G0 requires independently collected typed workflow, PR/check, dependency-graph, access, and model evidence; summary counts/digests are insufficient",
+          "repository": null
+        }
+      ],
+      "paths": [
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/symlink-inside-cas/manifest.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/symlink-inside-cas/snapshot.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/symlink-inside-cas/evidence.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/symlink-inside-cas/store"
+      ],
+      "status": "fail"
+    },
+    "symlink-outside-cas": {
+      "actual_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-storage-ref": 1
+      },
+      "assertion": "pass",
+      "cli_exit": 1,
+      "expected_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-storage-ref": 1
+      },
+      "finding_count": 2,
+      "findings": [
+        {
+          "code": "g0-authoritative-proof-missing",
+          "field": "evidence.g0_inventory",
+          "message": "G0 requires independently collected typed workflow, PR/check, dependency-graph, access, and model evidence; summary counts/digests are insufficient",
+          "repository": null
+        },
+        {
+          "code": "g0-storage-ref",
+          "field": "evidence.g0_inventory.collector_snapshot.raw_objects.storage_ref",
+          "message": "storage reference must resolve to a digest-addressed object below the approved evidence root",
+          "repository": null
+        }
+      ],
+      "paths": [
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/symlink-outside-cas/manifest.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/symlink-outside-cas/snapshot.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/symlink-outside-cas/evidence.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/symlink-outside-cas/store"
+      ],
+      "status": "fail"
+    },
+    "tampered-raw-replay": {
+      "actual_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-raw-object": 1,
+        "g0-storage-mismatch": 1
+      },
+      "assertion": "pass",
+      "cli_exit": 1,
+      "expected_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-raw-object": 1,
+        "g0-storage-mismatch": 1
+      },
+      "finding_count": 3,
+      "findings": [
+        {
+          "code": "g0-authoritative-proof-missing",
+          "field": "evidence.g0_inventory",
+          "message": "G0 requires independently collected typed workflow, PR/check, dependency-graph, access, and model evidence; summary counts/digests are insufficient",
+          "repository": null
+        },
+        {
+          "code": "g0-raw-object",
+          "field": "evidence.g0_inventory.collector_snapshot.raw_objects",
+          "message": "raw object references must be unique, request-bound, hashed, and non-empty",
+          "repository": null
+        },
+        {
+          "code": "g0-storage-mismatch",
+          "field": "evidence.g0_inventory.collector_snapshot.raw_objects.storage_ref",
+          "message": "reopened immutable storage bytes do not match the captured bytes and digest",
+          "repository": null
+        }
+      ],
+      "paths": [
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/tampered-raw-replay/manifest.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/tampered-raw-replay/snapshot.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/tampered-raw-replay/evidence.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/tampered-raw-replay/store"
+      ],
+      "status": "fail"
+    },
+    "valid-40hex-ref": {
+      "actual_codes": {
+        "g0-authoritative-proof-missing": 1
+      },
+      "assertion": "pass",
+      "cli_exit": 1,
+      "expected_codes": {
+        "g0-authoritative-proof-missing": 1
+      },
+      "finding_count": 1,
+      "findings": [
+        {
+          "code": "g0-authoritative-proof-missing",
+          "field": "evidence.g0_inventory",
+          "message": "G0 requires independently collected typed workflow, PR/check, dependency-graph, access, and model evidence; summary counts/digests are insufficient",
+          "repository": null
+        }
+      ],
+      "paths": [
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/valid-40hex-ref/manifest.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/valid-40hex-ref/snapshot.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/valid-40hex-ref/evidence.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/valid-40hex-ref/store"
+      ],
+      "status": "fail"
+    },
+    "wrong-40hex-ref": {
+      "actual_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-workflow-derivation": 1
+      },
+      "assertion": "pass",
+      "cli_exit": 1,
+      "expected_codes": {
+        "g0-authoritative-proof-missing": 1,
+        "g0-workflow-derivation": 1
+      },
+      "finding_count": 2,
+      "findings": [
+        {
+          "code": "g0-authoritative-proof-missing",
+          "field": "evidence.g0_inventory",
+          "message": "G0 requires independently collected typed workflow, PR/check, dependency-graph, access, and model evidence; summary counts/digests are insufficient",
+          "repository": null
+        },
+        {
+          "code": "g0-workflow-derivation",
+          "field": "evidence.g0_inventory.collector_snapshot.workflow.source",
+          "message": "cannot derive source-bound workflow plan for tailrocks/velnor/.github/workflows/ci.yml: workflow step 0 pins bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, but captured action source actions/checkout/action.yml has revision aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa and commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "repository": "tailrocks/velnor"
+        }
+      ],
+      "paths": [
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/wrong-40hex-ref/manifest.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/wrong-40hex-ref/snapshot.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/wrong-40hex-ref/evidence.json",
+        "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/ce894a81-public-cli-harness/fixtures/wrong-40hex-ref/store"
+      ],
+      "status": "fail"
+    }
+  },
+  "commit": "ce894a81158706439205b7460811a4f680cbf800",
+  "synthetic": true,
+  "worktree": "/private/tmp/velnor-checker-review-ce894"
+}

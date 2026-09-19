@@ -1,0 +1,1612 @@
+{
+  "manifest_id": "github-first-dual-lane-2026-09-19",
+  "repositories": [
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "unit-github",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "unit"
+        }
+      ],
+      "expected_workload_ids": [
+        "unit"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "tailrocks/velnor",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "unit"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "tailrocks/velnor-apt",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "tailrocks/parallax",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "tailrocks/tracing-request-level",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "tailrocks/termrock",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "tailrocks/termpane",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "tailrocks/tablerock",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "tailrocks/schemalane",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "tailrocks/ruxel",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "tailrocks/pg-bigdecimal",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "tailrocks/parallax-telemetry-playground",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "tailrocks/homebrew-tablerock",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "tailrocks/homebrew-ruxel",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "tailrocks/homebrew-parallax",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "tailrocks/homebrew-holla",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "tailrocks/holla-apt",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "tailrocks/holla",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "tailrocks/homebrew-velnor",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "tailrocks/tailrocks-typescript-skills",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "tailrocks/tailrocks-skill-authoring-skills",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "tailrocks/tailrocks-rust-skills",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "tailrocks/tailrocks-roadmap-skills",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "tailrocks/tailrocks-pull-request-skills",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "tailrocks/tailrocks-open-source-skills",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "tailrocks/tailrocks-macos-skills",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "tailrocks/tailrocks-code-quality-skills",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "jackin-project/jackin",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "jackin-project/jackin-agent-smith",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "jackin-project/homebrew-tap",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "jackin-project/jackin-the-architect",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "jackin-project/jackin-sentinel",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    },
+    {
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "default_branch": "main",
+      "expected_jobs": [
+        {
+          "architecture": "amd64",
+          "child_workflow": null,
+          "job_id": "scan",
+          "platform": "linux",
+          "provider": "github",
+          "required": true,
+          "workload_id": "scan"
+        }
+      ],
+      "expected_workload_ids": [
+        "scan"
+      ],
+      "generated_plan_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "host_contracts": {},
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "release_applicability": "not-applicable",
+      "repository": "jackin-project/jackin-role-action",
+      "repository_role": "library",
+      "required_check_contexts_and_apps": [
+        {
+          "app_id": "123",
+          "context": "ci"
+        }
+      ],
+      "runtime_product_id": "velnor",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "workload_platform_architecture": [
+        {
+          "architecture": "amd64",
+          "platform": "linux",
+          "workload_id": "scan"
+        }
+      ]
+    }
+  ],
+  "schema_version": 2,
+  "source": {
+    "digest": "sha256:b39b3bcb5d149db66a03483bd7a19482af2657df6f962872030d820a39f13514",
+    "repository": "tailrocks/velnor",
+    "reviewed_by": "synthetic-cli-harness",
+    "revision": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9"
+  }
+}

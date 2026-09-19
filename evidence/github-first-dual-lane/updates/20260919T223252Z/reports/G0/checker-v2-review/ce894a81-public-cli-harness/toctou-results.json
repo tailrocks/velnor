@@ -1,0 +1,18 @@
+{
+  "accepted_authority_only": 0,
+  "ancestor_swaps": 1470,
+  "finding_code_sets": [
+    [
+      "g0-authoritative-proof-missing",
+      "g0-storage-ref"
+    ],
+    [
+      "g0-authoritative-proof-missing",
+      "g0-storage-ref",
+      "g0-storage-ref"
+    ]
+  ],
+  "interpretation": "accepted reports are not proof of overlap; source still has canonicalize/metadata/read TOCTOU window",
+  "iterations": 80,
+  "synthetic": true
+}
