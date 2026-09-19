@@ -28,6 +28,10 @@ pub(crate) struct DerivedWorkflowJob {
     pub platform: String,
     pub architecture: String,
     pub uses_reusable_workflow: bool,
+    /// One concrete finite matrix assignment.  The logical `job_id` remains
+    /// the source job key; the assignment prevents two matrix instances from
+    /// being silently collapsed while validating their concrete target.
+    pub matrix: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,7 +121,7 @@ fn derive_source(
     }
 
     let mut plan = DerivedWorkflowPlan {
-        jobs: Vec::with_capacity(jobs.len()),
+        jobs: Vec::new(),
         child_edges: Vec::new(),
         events,
     };
@@ -130,18 +134,13 @@ fn derive_source(
         let job = job_value
             .as_mapping()
             .ok_or_else(|| anyhow!("workflow job {job_id} must be a mapping"))?;
-        if mapping_value(job, "if").is_some() {
-            bail!("workflow job {job_id} has an unmodeled condition");
-        }
-        if mapping_value(job, "strategy")
-            .and_then(Value::as_mapping)
-            .and_then(|strategy| mapping_value(strategy, "matrix"))
-            .is_some()
+        if let Some(condition) = mapping_value(job, "if")
+            && !constant_condition(condition)?
         {
-            bail!("workflow job {job_id} has an unmodeled matrix");
+            continue;
         }
         let reusable = mapping_value(job, "uses").and_then(Value::as_str);
-        let (provider, platform, architecture) = if let Some(uses) = reusable {
+        let reusable_target = if let Some(uses) = reusable {
             let (target, pinned_ref) = resolve_source_target(uses, source)?;
             let dependency = sources.get(&target).ok_or_else(|| {
                 anyhow!(
@@ -167,6 +166,17 @@ fn derive_source(
                     target.path
                 )
             })?;
+            if child_plan.jobs.iter().any(|job| {
+                job.provider != child_job.provider
+                    || job.platform != child_job.platform
+                    || job.architecture != child_job.architecture
+            }) {
+                bail!(
+                    "reusable workflow {}/{} has matrix instances with different targets",
+                    target.repository,
+                    target.path
+                );
+            }
             plan.child_edges.extend(child_plan.child_edges);
             plan.child_edges.push(DerivedChildEdge {
                 workload_id: job_id.clone(),
@@ -175,25 +185,36 @@ fn derive_source(
                 event: "workflow_call".to_owned(),
                 relation: "reusable_workflow".to_owned(),
             });
-            (
+            Some((
                 child_job.provider,
                 child_job.platform,
                 child_job.architecture,
-            )
+            ))
         } else {
-            let runs_on = mapping_value(job, "runs-on")
-                .ok_or_else(|| anyhow!("workflow job {job_id} lacks source runs-on target"))?;
-            runner_target(runs_on)
-                .with_context(|| format!("derive runner target for workflow job {job_id}"))?
+            None
         };
-        action_sources(job, source, sources)?;
-        plan.jobs.push(DerivedWorkflowJob {
-            job_id,
-            provider,
-            platform,
-            architecture,
-            uses_reusable_workflow: reusable.is_some(),
-        });
+        let matrix = job_matrix(job)
+            .with_context(|| format!("derive finite matrix for workflow job {job_id}"))?;
+        for assignment in matrix {
+            let (provider, platform, architecture) = if let Some(target) = reusable_target.clone() {
+                target
+            } else {
+                let runs_on = mapping_value(job, "runs-on")
+                    .ok_or_else(|| anyhow!("workflow job {job_id} lacks source runs-on target"))?;
+                let runs_on = resolve_matrix_value(runs_on, &assignment)?;
+                runner_target(&runs_on)
+                    .with_context(|| format!("derive runner target for workflow job {job_id}"))?
+            };
+            action_sources(job, source, sources)?;
+            plan.jobs.push(DerivedWorkflowJob {
+                job_id: job_id.clone(),
+                provider,
+                platform,
+                architecture,
+                uses_reusable_workflow: reusable.is_some(),
+                matrix: assignment,
+            });
+        }
     }
 
     // These triggers are source-derived obligations. They are retained as
@@ -237,8 +258,10 @@ fn action_sources(
         let Some(step) = step.as_mapping() else {
             bail!("workflow step {index} must be a mapping");
         };
-        if mapping_value(step, "if").is_some() {
-            bail!("workflow step {index} has an unmodeled condition");
+        if let Some(condition) = mapping_value(step, "if")
+            && !constant_condition(condition)?
+        {
+            continue;
         }
         let Some(uses) = mapping_value(step, "uses").and_then(Value::as_str) else {
             continue;
@@ -263,6 +286,112 @@ fn action_sources(
         }
     }
     Ok(())
+}
+
+/// Return the finite literal matrix assignments for a job.  GitHub's
+/// `include`, `exclude`, expressions, and object-valued matrix entries require
+/// expression-context evaluation and are intentionally rejected here rather
+/// than approximated from a result ledger.
+fn job_matrix(job: &Mapping) -> Result<Vec<BTreeMap<String, String>>> {
+    let Some(strategy) = mapping_value(job, "strategy") else {
+        return Ok(vec![BTreeMap::new()]);
+    };
+    let strategy = strategy
+        .as_mapping()
+        .ok_or_else(|| anyhow!("workflow strategy must be a mapping"))?;
+    let Some(matrix) = mapping_value(strategy, "matrix") else {
+        return Ok(vec![BTreeMap::new()]);
+    };
+    let matrix = matrix
+        .as_mapping()
+        .ok_or_else(|| anyhow!("workflow matrix must be a mapping"))?;
+    if matrix.contains_key("include") || matrix.contains_key("exclude") {
+        bail!("workflow matrix include/exclude requires expression-aware derivation");
+    }
+    if matrix.is_empty() {
+        bail!("workflow matrix cannot be empty");
+    }
+    let mut assignments = vec![BTreeMap::new()];
+    for (key, values) in matrix {
+        let key = key.as_str();
+        if key.trim().is_empty() {
+            bail!("workflow matrix key must be a non-empty string");
+        }
+        let values = values
+            .as_sequence()
+            .ok_or_else(|| anyhow!("workflow matrix key {key} must contain a literal sequence"))?;
+        if values.is_empty() {
+            bail!("workflow matrix key {key} has no values");
+        }
+        let mut scalar_values = BTreeSet::new();
+        let base_assignments = assignments.clone();
+        let mut expanded = Vec::with_capacity(base_assignments.len() * values.len());
+        for value in values {
+            let value = matrix_scalar(value)
+                .with_context(|| format!("workflow matrix key {key} has a non-literal value"))?;
+            if !scalar_values.insert(value.clone()) {
+                bail!("workflow matrix key {key} repeats value {value}");
+            }
+            for assignment in &base_assignments {
+                let mut assignment = assignment.clone();
+                assignment.insert(key.to_owned(), value.clone());
+                expanded.push(assignment);
+            }
+        }
+        assignments = expanded;
+    }
+    Ok(assignments)
+}
+
+fn matrix_scalar(value: &Value) -> Result<String> {
+    match value {
+        Value::String(value) if !value.trim().is_empty() && !value.contains("${{") => {
+            Ok(value.clone())
+        }
+        Value::Bool(value) => Ok(value.to_string()),
+        Value::Number(value) => Ok(value.to_string()),
+        _ => bail!("matrix values must be non-empty literal strings, booleans, or numbers"),
+    }
+}
+
+fn resolve_matrix_value(value: &Value, assignment: &BTreeMap<String, String>) -> Result<Value> {
+    match value {
+        Value::String(value) if value.contains("${{") => {
+            let expression = value
+                .trim()
+                .strip_prefix("${{")
+                .and_then(|value| value.strip_suffix("}}").map(str::trim))
+                .ok_or_else(|| anyhow!("matrix expression is not a complete expression"))?;
+            let key = expression
+                .strip_prefix("matrix.")
+                .filter(|key| !key.trim().is_empty())
+                .ok_or_else(|| anyhow!("matrix expression is not a direct matrix lookup"))?;
+            let resolved = assignment
+                .get(key)
+                .ok_or_else(|| anyhow!("matrix expression references unknown key {key}"))?;
+            Ok(Value::String(resolved.clone()))
+        }
+        Value::String(_) => Ok(value.clone()),
+        Value::Sequence(values) => Ok(Value::Sequence(
+            values
+                .iter()
+                .map(|value| resolve_matrix_value(value, assignment))
+                .collect::<Result<Vec<_>>>()?,
+        )),
+        _ => Ok(value.clone()),
+    }
+}
+
+fn constant_condition(value: &Value) -> Result<bool> {
+    match value {
+        Value::Bool(value) => Ok(*value),
+        Value::String(value) => match value.trim() {
+            "true" | "${{ true }}" => Ok(true),
+            "false" | "${{ false }}" => Ok(false),
+            _ => bail!("workflow condition requires expression-aware derivation"),
+        },
+        _ => bail!("workflow condition must be a literal boolean"),
+    }
 }
 
 fn resolve_source_target(
@@ -567,14 +696,81 @@ jobs:
     }
 
     #[test]
-    fn unmodeled_condition_and_matrix_are_rejected() {
-        for jobs in [
-            "scan:\n    if: github.ref == 'refs/heads/main'\n    runs-on: ubuntu-24.04\n    steps: []",
-            "scan:\n    strategy:\n      matrix:\n        os: [ubuntu-24.04]\n    runs-on: ${{ matrix.os }}\n    steps: []",
-        ] {
-            let yaml = format!("on: [push]\njobs:\n  {jobs}\n");
-            let root = source("tailrocks/velnor", ".github/workflows/ci.yml", &yaml);
-            assert!(derive_workflow_plan(&root, &[]).is_err());
-        }
+    fn runtime_dependent_condition_is_rejected_but_finite_matrix_is_derived() {
+        let conditional = r#"
+on: [push]
+jobs:
+  scan:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    steps: []
+"#;
+        let root = source("tailrocks/velnor", ".github/workflows/ci.yml", conditional);
+        assert!(derive_workflow_plan(&root, &[]).is_err());
+
+        let matrix = r#"
+on: [push]
+jobs:
+  scan:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, ubuntu-22.04]
+        arch: [amd64, arm64]
+    runs-on: [self-hosted, "${{ matrix.os }}", "${{ matrix.arch }}"]
+    steps: []
+"#;
+        let root = source("tailrocks/velnor", ".github/workflows/ci.yml", matrix);
+        let plan = derive_workflow_plan(&root, &[]).expect("finite matrix");
+        assert_eq!(plan.jobs.len(), 4);
+        assert!(plan.jobs.iter().all(|job| job.provider == "velnor"));
+        assert!(plan.jobs.iter().any(|job| {
+            job.matrix.get("os") == Some(&"ubuntu-24.04".to_owned())
+                && job.matrix.get("arch") == Some(&"arm64".to_owned())
+        }));
+
+        let expression_matrix = r#"
+on: [push]
+jobs:
+  scan:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04]
+    runs-on: ${{ matrix.missing }}
+    steps: []
+"#;
+        let root = source(
+            "tailrocks/velnor",
+            ".github/workflows/ci.yml",
+            expression_matrix,
+        );
+        assert!(derive_workflow_plan(&root, &[]).is_err());
+    }
+
+    #[test]
+    fn literal_conditions_control_source_obligations() {
+        let yaml = r#"
+on: [push]
+jobs:
+  omitted:
+    if: false
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/missing@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  kept:
+    if: true
+    runs-on: ubuntu-24.04
+    steps:
+      - if: false
+        uses: actions/missing@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+"#;
+        let root = source("tailrocks/velnor", ".github/workflows/ci.yml", yaml);
+        let plan = derive_workflow_plan(&root, &[]).expect("literal conditions");
+        assert_eq!(
+            plan.jobs
+                .iter()
+                .map(|job| job.job_id.as_str())
+                .collect::<Vec<_>>(),
+            ["kept"]
+        );
     }
 }

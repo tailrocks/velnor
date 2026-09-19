@@ -2828,13 +2828,19 @@ fn check_g0_derived_plan(
         );
     }
     for expected in &manifest.expected_jobs {
-        let Some(actual) = plan.jobs.iter().find(|job| job.job_id == expected.job_id) else {
+        let actual = plan
+            .jobs
+            .iter()
+            .filter(|job| job.job_id == expected.job_id)
+            .collect::<Vec<_>>();
+        if actual.is_empty() {
             continue;
-        };
-        if actual.provider != expected.provider
-            || actual.platform != expected.platform
-            || actual.architecture != expected.architecture
-        {
+        }
+        if actual.iter().any(|job| {
+            job.provider != expected.provider
+                || job.platform != expected.platform
+                || job.architecture != expected.architecture
+        }) {
             finding(
                 findings,
                 "g0-workflow-job-target",
