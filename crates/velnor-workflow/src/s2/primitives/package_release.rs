@@ -163,18 +163,22 @@ fn validate_asset_name(key: &str, value: &str) -> Result<(), GeneratorError> {
 
 fn validate_relative_directory(value: &str) -> Result<(), GeneratorError> {
     let path = Path::new(value);
+    let valid_segment = |segment: &str| {
+        !segment.is_empty()
+            && segment != "."
+            && segment != ".."
+            && segment
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    };
     if value.is_empty()
         || path.is_absolute()
-        || path.components().any(|component| {
-            matches!(
-                component,
-                std::path::Component::ParentDir | std::path::Component::CurDir
-            )
-        })
-        || value.contains(['\n', '\r'])
+        || value.contains(['\\', ':', '\n', '\r'])
+        || value.chars().any(char::is_whitespace)
+        || value.split('/').any(|segment| !valid_segment(segment))
     {
         return Err(GeneratorError::usage(
-            "package-release package_dir must be a relative directory without traversal",
+            "package-release package_dir must be a portable relative directory with simple path segments",
         ));
     }
     Ok(())
@@ -451,7 +455,7 @@ for name in \
         let suffix = if index + 1 == spec.payloads.len() {
             ""
         } else {
-            " \\"
+            " \\\n"
         };
         let _ = write!(script, "  {}{}", shell_quote(name), suffix);
     }
@@ -512,22 +516,21 @@ fn render_workflow(config: &ProjectConfig, spec: &PackageReleaseSpec) -> String 
     let mise = ActionPin::Mise.reference();
     let attest = ActionPin::Attest.reference();
     let source_commit_expr = github_expression("github.sha");
+    let publish_source_commit_expr = github_expression("needs.build.outputs.source_commit");
     let workspace_expr = github_expression("github.workspace");
     let build_verify = indent_script(&verification_script(spec), 10);
     let publish_verify = indent_script(&verification_script(spec), 10);
     let updater_token_expr = github_expression(&format!("secrets.{}", spec.updater_token_secret));
+    let github_token_expr = github_expression("github.token");
     let build_if = github_expression(&format!(
         "github.ref == 'refs/heads/{}'",
         spec.source_ref
             .strip_prefix("refs/heads/")
             .unwrap_or("main")
     ));
-    let publish_if = github_expression(&format!(
-        "github.event_name == 'push' && github.ref == '{}'",
-        spec.source_ref
-    ));
     let package_dir_yaml = crate::s2::yaml_scalar(&spec.package_dir);
     let package_dir = spec.package_dir.as_str();
+    let package_path_yaml = crate::s2::yaml_scalar(&format!("{workspace_expr}/{package_dir}"));
     let channel_yaml = crate::s2::yaml_scalar(&spec.channel);
     let source_repository_yaml = crate::s2::yaml_scalar(&spec.source_repository);
     let source_ref_yaml = crate::s2::yaml_scalar(&spec.source_ref);
@@ -553,7 +556,7 @@ fn render_workflow(config: &ProjectConfig, spec: &PackageReleaseSpec) -> String 
     for name in &spec.payloads {
         let _ = writeln!(
             attestation_subjects,
-            "          {workspace_expr}/{package_dir}/{name}"
+            "            {workspace_expr}/{package_dir}/{name}"
         );
     }
     let mut publish_attestation_targets = String::new();
@@ -573,6 +576,7 @@ fn render_workflow(config: &ProjectConfig, spec: &PackageReleaseSpec) -> String 
         .map(|name| format!("\"$PACKAGE_DIR/{name}\""))
         .collect::<Vec<_>>()
         .join(" \\\n              ");
+    let attestation_flags = "--repo \"$GITHUB_REPOSITORY\" --signer-workflow \"$GITHUB_REPOSITORY/.github/workflows/preview.yml\" --source-ref \"$EXPECTED_SOURCE_REF\" --source-digest \"$EXPECTED_SOURCE_COMMIT\"";
 
     let mut output = String::new();
     let _ = writeln!(
@@ -602,12 +606,462 @@ fn render_workflow(config: &ProjectConfig, spec: &PackageReleaseSpec) -> String 
         output,
         "    steps:\n      - name: Checkout source\n        uses: {checkout}\n        with:\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false\n      - name: Enforce workflow policy\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Build verified package directory\n        env:\n          VELNOR_SOURCE_COMMIT: {source_commit_expr}\n          VELNOR_SOURCE_REF: {source_shell}\n        run: |\n          set -euo pipefail\n          mkdir -p \"$VELNOR_VERIFIED_PACKAGE_DIR\"\n{tasks}      - name: Verify manifest, identity, checksums, and exact file set\n        id: verify\n        run: |\n{build_verify}      - name: Attest declared payloads\n        uses: {attest}\n        with:\n          subject-path: |\n{attestation_subjects}      - name: Upload verified package handoff\n        uses: {upload}\n        with:\n          name: package-release\n          path: {workspace_expr}/{package_dir}\n          if-no-files-found: error\n          retention-days: 2\n",
     );
-    let _ = writeln!(
-        output,
-        "\n  publish:\n    name: Publish rolling package and update consumer\n    needs: build\n    if: {publish_if}\n    runs-on: {runner}\n    timeout-minutes: 30\n    environment: github-preview\n    permissions:\n      contents: write\n    env:\n      PACKAGE_DIR: package\n      VELNOR_VERIFIED_PACKAGE_DIR: {workspace_expr}/package\n      VELNOR_PACKAGE_CHANNEL: {channel_yaml}\n      EXPECTED_SOURCE_REPOSITORY: {source_repository_yaml}\n      EXPECTED_SOURCE_REF: {source_ref_yaml}\n      EXPECTED_MANIFEST_SCHEMA: {schema_yaml}\n      EXPECTED_SOURCE_COMMIT: {source_commit_expr}\n      RELEASE_TAG: {tag_yaml}\n      RELEASE_TITLE_PREFIX: {title_yaml}\n      CONSUMER_REPOSITORY: {consumer_repository_yaml}\n      CONSUMER_BRANCH: {consumer_branch_yaml}\n      UPDATER: {updater_yaml}\n      UPDATER_TOKEN: {updater_token_expr}\n      UPDATE_COMMIT_MESSAGE: {message_yaml}\n    concurrency:\n      group: {concurrency_yaml}\n      cancel-in-progress: false\n    steps:\n      - name: Download verified package handoff\n        uses: {download}\n        with:\n          name: package-release\n          path: package\n          merge-multiple: true\n      - name: Re-verify downloaded handoff\n        id: verify\n        run: |\n{publish_verify}      - name: Publish payload attestations are present\n        env:\n          GH_TOKEN: {}\n        run: |\n          set -euo pipefail\n          for payload in \\\n{publish_attestation_targets}          do\n            gh attestation verify \"$payload\" --repo \"$GITHUB_REPOSITORY\"\n          done\n      - name: Publish rolling release as one verified asset set\n        env:\n          GH_TOKEN: {}\n        run: |\n          set -euo pipefail\n          tag=\"$RELEASE_TAG\"\n          version=\"$(jq -er '.version' \"$PACKAGE_DIR/release-manifest.json\")\"\n          title=\"$RELEASE_TITLE_PREFIX $version\"\n          live=\"$(mktemp)\"\n          trap 'rm -f -- \"$live\"' EXIT\n          if gh api \"repos/$GITHUB_REPOSITORY/releases/tags/$tag\" > \"$live\" 2>/dev/null; then\n            jq -e --arg tag \"$tag\" '(.draft | not) and .tag_name == $tag' \"$live\" >/dev/null\n            live_name=\"$(jq -er '.name | strings' \"$live\")\"\n            live_version=\"$(printf '%s\\n' \"$live_name\" | sed \"s#^$RELEASE_TITLE_PREFIX ##\")\"\n            if command -v dpkg >/dev/null 2>&1 && dpkg --compare-versions \"$live_version\" gt \"$version\"; then\n              echo \"::error::rolling release is newer than candidate; refusing rollback\" >&2\n              exit 1\n            fi\n            if [ \"$live_version\" != \"$version\" ]; then\n              gh release delete \"$tag\" --cleanup-tag --yes\n              gh release create \"$tag\" --target \"$EXPECTED_SOURCE_COMMIT\" --prerelease --title \"$title\" --notes \"Verified package release $version\" {assets}\n            fi\n          else\n            gh release create \"$tag\" --target \"$EXPECTED_SOURCE_COMMIT\" --prerelease --title \"$title\" --notes \"Verified package release $version\" {assets}\n          fi\n          remote=\"$(git ls-remote origin \"refs/tags/$tag^{{}}\" | cut -f1 | head -n1)\"\n          if [ -z \"$remote\" ]; then\n            remote=\"$(git ls-remote origin \"refs/tags/$tag\" | cut -f1 | head -n1)\"\n          fi\n          if [ \"$remote\" != \"$EXPECTED_SOURCE_COMMIT\" ]; then echo \"::error::rolling tag does not resolve to the verified source commit\" >&2; exit 1; fi\n      - name: Download and verify published rolling release\n        env:\n          GH_TOKEN: {}\n        run: |\n          set -euo pipefail\n          rm -rf published-package\n          mkdir -p published-package\n          gh release download \"$RELEASE_TAG\" --dir published-package --clobber\n          export VELNOR_VERIFIED_PACKAGE_DIR=\"$GITHUB_WORKSPACE/published-package\"\n{publish_verify}\n      - name: Checkout consumer repository\n        uses: {checkout}\n        with:\n          repository: {consumer_repository_yaml}\n          ref: {consumer_branch_yaml}\n          token: {updater_token_expr}\n          path: consumer\n          persist-credentials: false\n      - name: Run verified consumer updater and push one commit\n        run: |\n          set -euo pipefail\n          cd consumer\n          git config user.name \"github-actions[bot]\"\n          git config user.email \"41898282+github-actions[bot]@users.noreply.github.com\"\n          VELNOR_PACKAGE_CHANNEL=\"$VELNOR_PACKAGE_CHANNEL\" VELNOR_VERIFIED_PACKAGE_DIR=\"$GITHUB_WORKSPACE/published-package\" bash -c \"$UPDATER\"\n          git diff --check\n          if git diff --quiet; then\n            echo \"consumer already references the verified release\"\n          else\n            git add -A\n            git commit -s -m \"$UPDATE_COMMIT_MESSAGE\"\n            git remote set-url origin \"https://x-access-token:$UPDATER_TOKEN@github.com/$CONSUMER_REPOSITORY.git\"\n            git push origin \"HEAD:$CONSUMER_BRANCH\"\n          fi\n",
-        github_expression("github.token"),
-        github_expression("github.token"),
-        github_expression("github.token"),
+    output = output.replace(
+        "          install: false\n      - name: Enforce workflow policy",
+        "          install: false\n      - name: Install locked build tools\n        run: mise --yes install --locked --include-task-tools\n      - name: Enforce workflow policy",
+    );
+    output = output.replace(
+        &format!("          path: {workspace_expr}/{package_dir}\n"),
+        &format!("          path: {package_path_yaml}\n"),
+    );
+    output.push('\n');
+    output.push_str(&render_publish_job(
+        spec,
+        &runner,
+        checkout,
+        download,
+        &publish_verify,
+        &publish_attestation_targets,
+        &assets,
+        attestation_flags,
+        &workspace_expr,
+        &updater_token_expr,
+        &github_token_expr,
+        &publish_source_commit_expr,
+        &channel_yaml,
+        &source_repository_yaml,
+        &source_ref_yaml,
+        &schema_yaml,
+        &tag_yaml,
+        &title_yaml,
+        &consumer_repository_yaml,
+        &consumer_branch_yaml,
+        &updater_yaml,
+        &message_yaml,
+        &concurrency_yaml,
+    ));
+    output = output.replace(
+        "git -C source ls-remote origin",
+        "git -C source -c \"http.extraheader=AUTHORIZATION: bearer $GH_TOKEN\" ls-remote origin",
+    );
+    output = output.replace(
+        "remote_branch_sha=\"$(git ls-remote origin",
+        "remote_branch_sha=\"$(git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" ls-remote origin",
+    );
+    output = output.replace(
+        "          response_status=0\n          gh api --repo \"$GITHUB_REPOSITORY\" -i \"repos/$GITHUB_REPOSITORY/releases/tags/$tag\" > \"$release_json\" 2>/dev/null || response_status=$?\n",
+        "          if ! gh api --repo \"$GITHUB_REPOSITORY\" -i \"repos/$GITHUB_REPOSITORY/releases/tags/$tag\" > \"$release_json\" 2>/dev/null; then\n            :\n          fi\n",
+    );
+    output = output.replace(
+        "git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" push --force-with-lease=refs/heads/$automation_branch:$remote_branch_sha origin",
+        "git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" push \"--force-with-lease=refs/heads/$automation_branch:$remote_branch_sha\" origin",
+    );
+    output
+}
+
+#[allow(clippy::too_many_lines)]
+fn render_rolling_refresh_script(
+    published_assets: &str,
+    rollback_assets: &str,
+    expected_asset_names: &str,
+    payload_names: &str,
+    publish_verify: &str,
+) -> String {
+    let mut script = String::from(
+        r#"set -Eeuo pipefail
+rolling_tag="$RELEASE_TAG"
+published_dir="$GITHUB_WORKSPACE/published-package"
+transaction_dir="$(mktemp -d)"
+rolling_response="$transaction_dir/rolling-response"
+rolling_body="$transaction_dir/rolling.json"
+expected_assets="$transaction_dir/expected-assets"
+old_assets="$transaction_dir/old-assets"
+rollback_dir="$transaction_dir/old-package"
+rolling_release_id=""
+old_tag_sha=""
+old_name=""
+old_body=""
+old_draft=""
+old_prerelease=""
+had_release=0
+mutated=0
+
+remote_tag_sha() {
+  local tag_name="$1"
+  local sha
+  sha="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name^{}" | awk 'NR == 1 {print $1}')"
+  if [ -z "$sha" ]; then
+    sha="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name" | awk 'NR == 1 {print $1}')"
+  fi
+  printf '%s\n' "$sha"
+}
+
+rollback() {
+  local status="$1"
+  trap - ERR
+  if [ "$mutated" = 1 ]; then
+    set +e
+    rollback_status=0
+    if [ "$had_release" = 1 ]; then
+      gh release upload "$rolling_tag" --repo "$GITHUB_REPOSITORY" --clobber \
+"#,
+    );
+    script.push_str(rollback_assets);
+    script.push_str(
+        r#"
+      if [ -n "$old_tag_sha" ]; then
+        gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" -f "sha=$old_tag_sha" -F force=true >/dev/null || rollback_status=1
+      fi
+      gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" \
+        -f "name=$old_name" -f "body=$old_body" -F "draft=$old_draft" -F "prerelease=$old_prerelease" -F make_latest=false >/dev/null || rollback_status=1
+    else
+      if [ -n "$rolling_release_id" ]; then
+        gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" >/dev/null || rollback_status=1
+      fi
+      gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" >/dev/null || rollback_status=1
+    fi
+    if [ "$rollback_status" -ne 0 ]; then
+      echo "::error::rolling preview publication failed and rollback was incomplete" >&2
+      status=1
+    else
+      echo "::warning::rolling preview publication failed; previous release restored" >&2
+    fi
+  fi
+  exit "$status"
+}
+trap 'rollback "$?"' ERR
+trap 'rm -rf -- "$transaction_dir"' EXIT
+
+{
+"#,
+    );
+    script.push_str(expected_asset_names);
+    script.push_str(
+        r#"
+} | LC_ALL=C sort > "$expected_assets"
+
+if gh api --repo "$GITHUB_REPOSITORY" -i "repos/$GITHUB_REPOSITORY/releases/tags/$rolling_tag" > "$rolling_response" 2>/dev/null; then
+  :
+fi
+rolling_http="$(awk 'NR == 1 {print $2; exit}' "$rolling_response")"
+case "$rolling_http" in
+  200)
+    awk 'body {print; next} /^\r?$/ {body = 1}' "$rolling_response" > "$rolling_body"
+    had_release=1
+    jq -e --arg tag "$rolling_tag" '(.draft | not) and .prerelease == true and .tag_name == $tag' "$rolling_body" >/dev/null
+    rolling_release_id="$(jq -er '.id' "$rolling_body")"
+    old_name="$(jq -er '.name | strings' "$rolling_body")"
+    old_body="$(jq -r '.body // ""' "$rolling_body")"
+    old_draft="$(jq -er '.draft | tostring' "$rolling_body")"
+    old_prerelease="$(jq -er '.prerelease | tostring' "$rolling_body")"
+    old_tag_sha="$(remote_tag_sha "$rolling_tag")"
+    [[ "$old_tag_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::rolling release tag is not a commit ref" >&2; exit 1; }
+    jq -r '.assets[].name' "$rolling_body" | LC_ALL=C sort > "$old_assets"
+    cmp -s "$expected_assets" "$old_assets" || { echo "::error::existing rolling release asset set is not the exact package contract" >&2; exit 1; }
+    mkdir -p "$rollback_dir"
+    gh release download "$rolling_tag" --repo "$GITHUB_REPOSITORY" --dir "$rollback_dir" --clobber
+    for name in \
+"#,
+    );
+    script.push_str(payload_names);
+    script.push_str(
+        r#"do
+      test -s "$rollback_dir/$name"
+      expected="$(jq -er --arg name "$name" '[.assets[] | select(.name == $name)] | select(length == 1) | .[0].sha256 | select(test("^[0-9a-f]{64}$"))' "$rollback_dir/release-manifest.json")"
+      actual="$(sha256sum "$rollback_dir/$name" | awk '{print $1}')"
+      [ "$actual" = "$expected" ] || { echo "::error::existing rolling payload checksum is invalid: $name" >&2; exit 1; }
+    done
+    old_source_commit="$(jq -er '.source_commit | strings' "$rollback_dir/release-manifest.json")"
+    [ "$old_source_commit" = "$old_tag_sha" ] || { echo "::error::existing rolling release provenance does not match its tag" >&2; exit 1; }
+    jq -e --arg repository "$EXPECTED_SOURCE_REPOSITORY" --arg source_ref "$EXPECTED_SOURCE_REF" --arg commit "$old_source_commit" --slurpfile old_manifest "$rollback_dir/release-manifest.json" 'keys == ["manifest","source_digest","source_ref","source_repository"] and .source_repository == $repository and .source_ref == $source_ref and .source_digest == $commit and .manifest == $old_manifest[0]' "$rollback_dir/identity.json" >/dev/null
+    ;;
+  404)
+    test -z "$(remote_tag_sha "$rolling_tag")" || { echo "::error::rolling tag exists without a release; refusing to overwrite it" >&2; exit 1; }
+    ;;
+  *)
+    echo "::error::rolling release preflight failed with HTTP $rolling_http" >&2
+    exit 1
+    ;;
+esac
+
+if [ "$had_release" = 0 ]; then
+  mutated=1
+  create_json="$(gh api --method POST --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases" \
+    -f "tag_name=$rolling_tag" -f "target_commitish=$EXPECTED_SOURCE_COMMIT" \
+    -f "name=$RELEASE_TITLE_PREFIX $(jq -er '.version' "$published_dir/release-manifest.json")" \
+    -f "body=Verified package release from $EXPECTED_SOURCE_COMMIT" \
+    -F draft=false -F prerelease=true -F make_latest=false)"
+  rolling_release_id="$(jq -er '.id' <<<"$create_json")"
+else
+  mutated=1
+fi
+
+gh release upload "$rolling_tag" --repo "$GITHUB_REPOSITORY" --clobber \
+"#,
+    );
+    script.push_str(published_assets);
+    script.push_str(
+        r#"
+
+if [ "$had_release" = 1 ]; then
+  gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" -f "sha=$EXPECTED_SOURCE_COMMIT" -F force=true >/dev/null
+  gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" \
+    -f "name=$RELEASE_TITLE_PREFIX $(jq -er '.version' "$published_dir/release-manifest.json")" \
+    -f "body=Verified package release from $EXPECTED_SOURCE_COMMIT" \
+    -F draft=false -F prerelease=true -F make_latest=false >/dev/null
+fi
+
+new_tag_sha="$(remote_tag_sha "$rolling_tag")"
+[ "$new_tag_sha" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::rolling tag does not resolve to the verified source commit" >&2; exit 1; }
+rolling_post_json="$(gh api --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/tags/$rolling_tag")"
+jq -e --arg tag "$rolling_tag" '(.draft | not) and .prerelease == true and .tag_name == $tag' <<<"$rolling_post_json" >/dev/null
+jq -r '.assets[].name' <<<"$rolling_post_json" | LC_ALL=C sort > "$old_assets"
+cmp -s "$expected_assets" "$old_assets" || { echo "::error::rolling release asset set is not exact after publication" >&2; exit 1; }
+rm -rf -- "$transaction_dir/rolling-published"
+mkdir -p "$transaction_dir/rolling-published"
+gh release download "$rolling_tag" --repo "$GITHUB_REPOSITORY" --dir "$transaction_dir/rolling-published" --clobber
+export VELNOR_VERIFIED_PACKAGE_DIR="$transaction_dir/rolling-published"
+"#,
+    );
+    script.push_str(publish_verify);
+    script.push_str(
+        r#"
+trap 'rm -rf -- "$transaction_dir"' EXIT
+"#,
+    );
+    script
+}
+
+fn render_formula_mapping_script(payload_names: &str) -> String {
+    let mut script = String::from(
+        r#"set -euo pipefail
+manifest="$GITHUB_WORKSPACE/published-package/release-manifest.json"
+test -d Formula
+for payload in \
+"#,
+    );
+    script.push_str(payload_names);
+    script.push_str(
+        r#"do
+  url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$payload"
+  git grep -Fq "$url" -- Formula || { echo "::error::formula URL does not use the verified rolling release: $url" >&2; exit 1; }
+  expected="$(jq -er --arg name "$payload" '[.assets[] | select(.name == $name)] | select(length == 1) | .[0].sha256' "$manifest")"
+  git grep -Fq "sha256 \"$expected\"" -- Formula || { echo "::error::formula checksum does not match the verified rolling asset: $payload" >&2; exit 1; }
+done
+"#,
+    );
+    script
+}
+
+/// Render the publication half separately from the build half.  The release
+/// tag is source-bound and immutable: the configured tag is only a namespace
+/// prefix.  This keeps a failed candidate from deleting or partially replacing
+/// the previously published preview.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn render_publish_job(
+    spec: &PackageReleaseSpec,
+    runner: &str,
+    checkout: &str,
+    download: &str,
+    publish_verify: &str,
+    publish_attestation_targets: &str,
+    assets: &str,
+    attestation_flags: &str,
+    workspace_expr: &str,
+    updater_token_expr: &str,
+    github_token_expr: &str,
+    publish_source_commit_expr: &str,
+    channel_yaml: &str,
+    source_repository_yaml: &str,
+    source_ref_yaml: &str,
+    schema_yaml: &str,
+    tag_yaml: &str,
+    title_yaml: &str,
+    consumer_repository_yaml: &str,
+    consumer_branch_yaml: &str,
+    updater_yaml: &str,
+    message_yaml: &str,
+    concurrency_yaml: &str,
+) -> String {
+    let mut payload_names = String::new();
+    for (index, name) in spec.payloads.iter().enumerate() {
+        let suffix = if index + 1 == spec.payloads.len() {
+            ""
+        } else {
+            " \\"
+        };
+        let _ = writeln!(payload_names, "  {}{}", shell_quote(name), suffix);
+    }
+    let mut expected_asset_names = String::new();
+    for name in release_asset_names(spec) {
+        let _ = writeln!(
+            expected_asset_names,
+            "  printf '%s\\n' {}",
+            shell_quote(&name)
+        );
+    }
+    let mut published_assets = String::new();
+    let mut rollback_assets = String::new();
+    for (index, name) in release_asset_names(spec).iter().enumerate() {
+        let suffix = if index + 1 == release_asset_names(spec).len() {
+            ""
+        } else {
+            " \\"
+        };
+        let _ = writeln!(published_assets, "  \"$published_dir/{name}\"{suffix}");
+        let _ = writeln!(rollback_assets, "      \"$rollback_dir/{name}\"{suffix}");
+    }
+    let rolling_refresh = indent_script(
+        &render_rolling_refresh_script(
+            &published_assets,
+            &rollback_assets,
+            &expected_asset_names,
+            &payload_names,
+            publish_verify,
+        ),
+        10,
+    );
+    let formula_mapping = indent_script(&render_formula_mapping_script(&payload_names), 10);
+    let mut output = String::new();
+    let _ = writeln!(output, "  publish:");
+    output.push_str("    name: Publish immutable package and update consumer\n");
+    output.push_str("    needs: build\n");
+    output.push_str("    if: ");
+    output.push_str(&github_expression(&format!(
+        "github.event_name == 'push' && github.ref == '{}'",
+        spec.source_ref
+    )));
+    output.push('\n');
+    output.push_str("    runs-on: ");
+    output.push_str(runner);
+    output.push_str("\n    timeout-minutes: 30\n    environment: github-preview\n");
+    output.push_str("    permissions:\n      contents: write\n      pull-requests: write\n");
+    output.push_str("    outputs:\n      release_tag: ");
+    output.push_str(&github_expression("steps.publish.outputs.immutable_tag"));
+    output.push_str("\n      consumer_pr_url: ");
+    output.push_str(&github_expression("steps.consumer-pr.outputs.pr_url"));
+    output.push_str("\n    env:\n      PACKAGE_DIR: package\n      VELNOR_VERIFIED_PACKAGE_DIR: ");
+    output.push_str(workspace_expr);
+    output.push_str("/package\n      VELNOR_PACKAGE_CHANNEL: ");
+    output.push_str(channel_yaml);
+    output.push_str("\n      EXPECTED_SOURCE_REPOSITORY: ");
+    output.push_str(source_repository_yaml);
+    output.push_str("\n      EXPECTED_SOURCE_REF: ");
+    output.push_str(source_ref_yaml);
+    output.push_str("\n      EXPECTED_MANIFEST_SCHEMA: ");
+    output.push_str(schema_yaml);
+    output.push_str("\n      EXPECTED_SOURCE_COMMIT: ");
+    output.push_str(publish_source_commit_expr);
+    output.push_str("\n      RELEASE_TAG: ");
+    output.push_str(tag_yaml);
+    output.push_str("\n      RELEASE_TITLE_PREFIX: ");
+    output.push_str(title_yaml);
+    output.push_str("\n      CONSUMER_REPOSITORY: ");
+    output.push_str(consumer_repository_yaml);
+    output.push_str("\n      CONSUMER_BRANCH: ");
+    output.push_str(consumer_branch_yaml);
+    output.push_str("\n      UPDATER: ");
+    output.push_str(updater_yaml);
+    output.push_str("\n      UPDATER_TOKEN: ");
+    output.push_str(updater_token_expr);
+    output.push_str("\n      UPDATE_COMMIT_MESSAGE: ");
+    output.push_str(message_yaml);
+    output.push_str("\n    concurrency:\n      group: ");
+    output.push_str(concurrency_yaml);
+    output.push_str("\n      cancel-in-progress: false\n    steps:\n");
+
+    output.push_str("      - name: Checkout verified source for publication\n        uses: ");
+    output.push_str(checkout);
+    output.push_str("\n        with:\n          repository: ");
+    output.push_str(source_repository_yaml);
+    output.push_str("\n          ref: ");
+    output.push_str(publish_source_commit_expr);
+    output.push_str("\n          fetch-depth: 0\n          path: source\n          persist-credentials: false\n");
+
+    output.push_str("      - name: Download verified package handoff\n        uses: ");
+    output.push_str(download);
+    output.push_str("\n        with:\n          name: package-release\n          path: package\n          merge-multiple: true\n");
+    output.push_str(
+        "      - name: Re-verify downloaded handoff\n        id: verify\n        run: |\n",
+    );
+    output.push_str(publish_verify);
+
+    output.push_str("      - name: Verify build attestations\n        env:\n          GH_TOKEN: ");
+    output.push_str(github_token_expr);
+    output.push_str("\n        run: |\n          set -euo pipefail\n          for payload in \\\n");
+    output.push_str(publish_attestation_targets);
+    output.push_str("          do\n            gh attestation verify \"$payload\" ");
+    output.push_str(attestation_flags);
+    output.push_str("\n          done\n");
+
+    output.push_str("      - name: Publish immutable source-bound release\n        id: publish\n        env:\n          GH_TOKEN: ");
+    output.push_str(github_token_expr);
+    output.push_str(
+        "\n        run: |\n          set -euo pipefail\n          tag=\"$RELEASE_TAG-$EXPECTED_SOURCE_COMMIT\"\n          version=\"$(jq -er '.version' \"$PACKAGE_DIR/release-manifest.json\")\"\n          title=\"$RELEASE_TITLE_PREFIX $version\"\n          tag_sha=\"$(git -C source ls-remote origin \"refs/tags/$tag^{}\" | awk 'NR == 1 {print $1}')\"\n          if [ -z \"$tag_sha\" ]; then\n            tag_sha=\"$(git -C source ls-remote origin \"refs/tags/$tag\" | awk 'NR == 1 {print $1}')\"\n          fi\n          if [ -n \"$tag_sha\" ] && [ \"$tag_sha\" != \"$EXPECTED_SOURCE_COMMIT\" ]; then\n            echo \"::error::immutable release tag resolves to an unexpected source commit\" >&2\n            exit 1\n          fi\n          release_json=\"$(mktemp)\"\n          trap 'rm -f -- \"$release_json\"' EXIT\n          response_status=0\n          gh api --repo \"$GITHUB_REPOSITORY\" -i \"repos/$GITHUB_REPOSITORY/releases/tags/$tag\" > \"$release_json\" 2>/dev/null || response_status=$?\n          response_http=\"$(awk 'NR == 1 {print $2; exit}' \"$release_json\")\"\n          if [ \"$response_http\" = 404 ]; then\n            if [ -n \"$tag_sha\" ]; then\n              gh release create \"$tag\" --repo \"$GITHUB_REPOSITORY\" --verify-tag --prerelease --latest=false --title \"$title\" --notes \"Verified immutable package release $version from $EXPECTED_SOURCE_COMMIT\" ",
+    );
+    output.push_str(assets);
+    output.push_str(
+        "\n            else\n              gh release create \"$tag\" --repo \"$GITHUB_REPOSITORY\" --target \"$EXPECTED_SOURCE_COMMIT\" --prerelease --latest=false --title \"$title\" --notes \"Verified immutable package release $version from $EXPECTED_SOURCE_COMMIT\" ",
+    );
+    output.push_str(assets);
+    output.push_str(
+        "\n            fi\n          elif [ \"$response_http\" != 200 ]; then\n            echo \"::error::release preflight failed; refusing publication\" >&2\n            exit 1\n          else\n            live_body=\"$(awk 'body {print; next} /^\\r?$/ {body = 1}' \"$release_json\")\"\n            jq -e --arg tag \"$tag\" --arg title \"$title\" '(.draft | not) and .prerelease == true and .tag_name == $tag and .name == $title' <<<\"$live_body\" >/dev/null\n            test -n \"$tag_sha\" || { echo \"::error::existing release has no exact source tag\" >&2; exit 1; }\n          fi\n          final_tag_sha=\"$(git -C source ls-remote origin \"refs/tags/$tag^{}\" | awk 'NR == 1 {print $1}')\"\n          [ \"$final_tag_sha\" = \"$EXPECTED_SOURCE_COMMIT\" ] || { echo \"::error::immutable tag does not resolve to the verified source commit\" >&2; exit 1; }\n          printf 'immutable_tag=%s\\n' \"$tag\" >> \"$GITHUB_OUTPUT\"\n",
+    );
+
+    let immutable_tag_output = github_expression("steps.publish.outputs.immutable_tag");
+    output.push_str("      - name: Download and re-verify published release\n        env:\n          GH_TOKEN: ");
+    output.push_str(github_token_expr);
+    output.push_str("\n          RELEASE_ASSET_TAG: ");
+    output.push_str(&immutable_tag_output);
+    output.push_str(
+        "\n        run: |\n          set -euo pipefail\n          rm -rf published-package\n          mkdir -p published-package\n          gh release download \"$RELEASE_ASSET_TAG\" --repo \"$GITHUB_REPOSITORY\" --dir published-package\n          export VELNOR_VERIFIED_PACKAGE_DIR=\"$GITHUB_WORKSPACE/published-package\"\n",
+    );
+    output.push_str(publish_verify);
+
+    output.push_str(
+        "      - name: Verify published release attestations\n        env:\n          GH_TOKEN: ",
+    );
+    output.push_str(github_token_expr);
+    output.push_str("\n          PACKAGE_DIR: published-package\n          RELEASE_ASSET_TAG: ");
+    output.push_str(&immutable_tag_output);
+    output.push_str("\n        run: |\n          set -euo pipefail\n          for payload in \\\n");
+    output.push_str(publish_attestation_targets);
+    output.push_str("          do\n            gh attestation verify \"$payload\" ");
+    output.push_str(attestation_flags);
+    output.push_str("\n          done\n");
+
+    output.push_str(
+        "      - name: Refresh rolling preview release\n        env:\n          GH_TOKEN: ",
+    );
+    output.push_str(github_token_expr);
+    output.push_str("\n        run: |\n");
+    output.push_str(&rolling_refresh);
+    output.push_str("      - name: Checkout consumer repository\n        uses: ");
+    output.push_str(checkout);
+    output.push_str("\n        with:\n          repository: ");
+    output.push_str(consumer_repository_yaml);
+    output.push_str("\n          ref: ");
+    output.push_str(consumer_branch_yaml);
+    output.push_str("\n          token: ");
+    output.push_str(updater_token_expr);
+    output.push_str("\n          path: consumer\n          persist-credentials: false\n");
+
+    output.push_str("      - name: Run updater and create or update consumer PR\n        id: consumer-pr\n        env:\n          RELEASE_ASSET_TAG: ");
+    output.push_str(&immutable_tag_output);
+    output.push_str("\n          GH_TOKEN: ");
+    output.push_str(updater_token_expr);
+    output.push_str(
+        "\n        run: |\n          set -euo pipefail\n          cd consumer\n          git config user.name \"github-actions[bot]\"\n          git config user.email \"41898282+github-actions[bot]@users.noreply.github.com\"\n          automation_branch=\"automation/package-release-$RELEASE_TAG\"\n          remote_branch_sha=\"$(git ls-remote origin \"refs/heads/$automation_branch\" | awk 'NR == 1 {print $1}')\"\n          git switch --force-create \"$automation_branch\" \"origin/$CONSUMER_BRANCH\"\n          VELNOR_PACKAGE_CHANNEL=\"$VELNOR_PACKAGE_CHANNEL\" VELNOR_PACKAGE_RELEASE_TAG=\"$RELEASE_ASSET_TAG\" VELNOR_VERIFIED_PACKAGE_DIR=\"$GITHUB_WORKSPACE/published-package\" bash -c \"$UPDATER\"\n          git diff --check\n          if git diff --quiet; then\n            echo \"consumer already references the verified release\"\n          else\n            git add -A\n            git commit -s -m \"$UPDATE_COMMIT_MESSAGE\"\n            if [ -n \"$remote_branch_sha\" ]; then\n              git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" push --force-with-lease=refs/heads/$automation_branch:$remote_branch_sha origin \"HEAD:refs/heads/$automation_branch\"\n            else\n              git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" push origin \"HEAD:refs/heads/$automation_branch\"\n            fi\n          fi\n          pr_url=\"$(gh pr list --repo \"$CONSUMER_REPOSITORY\" --head \"$automation_branch\" --base \"$CONSUMER_BRANCH\" --state open --json url --jq '.[0].url // empty')\"\n          if [ -z \"$pr_url\" ] && ! git diff --quiet HEAD \"origin/$CONSUMER_BRANCH\"; then\n            pr_url=\"$(gh pr create --repo \"$CONSUMER_REPOSITORY\" --head \"$automation_branch\" --base \"$CONSUMER_BRANCH\" --title \"$UPDATE_COMMIT_MESSAGE ($RELEASE_ASSET_TAG)\" --body \"Automated verified package update. Review and merge this PR; the publisher never merges consumer changes.\")\"\n          fi\n          printf 'pr_url=%s\\n' \"$pr_url\" >> \"$GITHUB_OUTPUT\"\n          if [ -n \"$pr_url\" ]; then echo \"::notice::Consumer update PR: $pr_url\"; else echo \"::notice::Consumer update PR: none\"; fi\n",
+    );
+    output = output.replace(
+        "          git diff --check\n          if git diff --quiet; then",
+        &format!(
+            "          git diff --check\n{formula_mapping}          if git diff --quiet; then"
+        ),
+    );
+    output = output.replace(
+        "VELNOR_PACKAGE_RELEASE_TAG=\"$RELEASE_ASSET_TAG\"",
+        "VELNOR_PACKAGE_RELEASE_TAG=\"$RELEASE_TAG\"",
     );
     output
 }
@@ -631,11 +1085,70 @@ supporting_assets = ["SHA256SUMS", "a.tar.gz.bundle", "capsule-manifest.json"]
 channel = "preview"
 release_tag = "preview"
 consumer_repository = "example/tap"
+consumer_branch = "main"
+release_title_prefix = "Preview"
 updater = "./scripts/package-update.sh"
 updater_token_secret = "TAP_TOKEN"
+update_commit_message = "chore: update verified preview"
+concurrency_group = "package-release-preview"
 "#,
         )
         .expect("fixture args")
+    }
+
+    #[test]
+    fn schema2_package_release_declaration_parses_the_complete_contract() {
+        let config = crate::s2::config::parse(
+            std::path::Path::new("/tmp/velnor-package-release-euler.toml"),
+            br#"
+schema = 2
+
+[generator]
+repository = "example/project"
+
+[workflow]
+providers = ["github-hosted"]
+automatic_providers = ["github-hosted"]
+default_dispatch_providers = ["github-hosted"]
+default_branch = "main"
+
+[workflow.selectors.github-hosted]
+runs_on = ["ubuntu-24.04"]
+
+[[declare]]
+primitive = "package-release"
+file = "preview.yml"
+
+[declare.args]
+build_tasks = ["release-preview-package"]
+package_dir = "dist/package"
+manifest_schema = "example.consumer-manifest-v1"
+source_repository = "example/project"
+source_ref = "refs/heads/main"
+payloads = ["a.tar.gz", "b.tar.gz", "c.tar.gz", "d.tar.gz", "e.tar.gz", "f.tar.gz"]
+supporting_assets = ["SHA256SUMS", "a.tar.gz.bundle", "capsule-manifest.json"]
+channel = "preview"
+release_tag = "preview"
+release_title_prefix = "Preview"
+consumer_repository = "example/tap"
+consumer_branch = "main"
+updater = "./scripts/package-update.sh"
+updater_token_secret = "TAP_TOKEN"
+update_commit_message = "chore: update verified preview"
+concurrency_group = "package-release-preview"
+"#,
+        )
+        .expect("schema 2 package declaration must parse");
+        config
+            .validate(&[], &[], &BTreeSet::new())
+            .expect("schema 2 package declaration must validate");
+        let row = config.declare().first().expect("package declaration");
+        let spec = parse_spec(&Args(row.args())).expect("complete package contract");
+        assert_eq!(spec.package_dir, "dist/package");
+        assert_eq!(spec.payloads.len(), 6);
+        assert_eq!(spec.release_title_prefix, "Preview");
+        assert_eq!(spec.consumer_branch, "main");
+        assert_eq!(spec.concurrency_group, "package-release-preview");
     }
 
     fn render_config() -> ProjectConfig {
@@ -784,5 +1297,157 @@ updater_token_secret = "TAP_TOKEN"
             "{workflow}"
         );
         assert!(workflow.contains("cancel-in-progress: false"), "{workflow}");
+        assert!(
+            workflow.contains("run: mise --yes install --locked --include-task-tools"),
+            "{workflow}"
+        );
+        assert!(
+            workflow.contains("contents: write\n      pull-requests: write"),
+            "{workflow}"
+        );
+        assert!(workflow.contains("tag=\"$RELEASE_TAG-$EXPECTED_SOURCE_COMMIT\""));
+        assert!(workflow.contains("--repo \"$GITHUB_REPOSITORY\""));
+        assert!(workflow
+            .contains("--signer-workflow \"$GITHUB_REPOSITORY/.github/workflows/preview.yml\""));
+        assert!(workflow.contains("--source-ref \"$EXPECTED_SOURCE_REF\""));
+        assert!(workflow.contains("--source-digest \"$EXPECTED_SOURCE_COMMIT\""));
+        assert!(workflow.contains("gh pr create --repo \"$CONSUMER_REPOSITORY\""));
+        assert!(workflow.contains("automation/package-release-$RELEASE_TAG"));
+        assert!(workflow.contains("--force-with-lease=refs/heads/$automation_branch"));
+        assert!(workflow.contains("PACKAGE_DIR: published-package"));
+        assert!(workflow.contains("Refresh rolling preview release"));
+        assert!(workflow.contains(
+            "gh release upload \"$rolling_tag\" --repo \"$GITHUB_REPOSITORY\" --clobber"
+        ));
+        assert!(workflow.contains("repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag"));
+        assert!(workflow.contains("previous release restored"));
+        assert!(
+            workflow.contains("gh release download \"$rolling_tag\" --repo \"$GITHUB_REPOSITORY\"")
+        );
+        assert!(workflow.contains(
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$payload"
+        ));
+        assert!(workflow.contains("git grep -Fq \"$url\" -- Formula"));
+        assert!(workflow.contains("sha256 \\\"$expected\\\""));
+        assert!(workflow.contains("VELNOR_PACKAGE_RELEASE_TAG=\"$RELEASE_TAG\""));
+        assert!(!workflow.contains("gh release delete"));
+        assert!(!workflow.contains("HEAD:$CONSUMER_BRANCH"));
+        serde_yaml::from_str::<serde_yaml::Value>(&workflow).expect("rendered workflow is YAML");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generated_formula_mapping_accepts_only_verified_rolling_assets() {
+        use std::process::Command;
+
+        let spec = parse_spec(&Args(&args())).expect("valid fixture");
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-formula-mapping-{}",
+            crate::unique_suffix()
+        ));
+        let package_dir = root.join("published-package");
+        let formula_dir = root.join("Formula");
+        std::fs::create_dir_all(&package_dir).expect("create package fixture");
+        std::fs::create_dir_all(&formula_dir).expect("create formula fixture");
+
+        let mut payload_names = String::new();
+        let mut manifest_assets = String::new();
+        let mut formula = String::new();
+        for (index, payload) in spec.payloads.iter().enumerate() {
+            let suffix = if index + 1 == spec.payloads.len() {
+                String::new()
+            } else {
+                String::from(" ") + "\\"
+            };
+            let _ = writeln!(payload_names, "  {}{suffix}", shell_quote(payload));
+            let digest = format!("{:064x}", index + 1);
+            if !manifest_assets.is_empty() {
+                manifest_assets.push(',');
+            }
+            let _ = write!(
+                manifest_assets,
+                "{{\"name\":\"{payload}\",\"sha256\":\"{digest}\"}}"
+            );
+            let _ = writeln!(
+                formula,
+                "  url \"https://github.com/example/project/releases/download/preview/{payload}\"\n  sha256 \"{digest}\""
+            );
+        }
+        std::fs::write(
+            package_dir.join("release-manifest.json"),
+            format!("{{\"assets\":[{manifest_assets}]}}"),
+        )
+        .expect("write manifest fixture");
+        std::fs::write(formula_dir.join("example-preview.rb"), &formula)
+            .expect("write formula fixture");
+        let script = root.join("formula-mapping.sh");
+        std::fs::write(&script, render_formula_mapping_script(&payload_names))
+            .expect("write mapping script");
+
+        for args in [
+            ["init", "--quiet"].as_slice(),
+            [
+                "add",
+                "Formula/example-preview.rb",
+                "published-package/release-manifest.json",
+            ]
+            .as_slice(),
+            [
+                "-c",
+                "user.name=Velnor test",
+                "-c",
+                "user.email=velnor-test@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            ]
+            .as_slice(),
+        ] {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .status()
+                .expect("run git fixture command");
+            assert!(status.success(), "git fixture command failed: {args:?}");
+        }
+
+        let run = |expected_success: bool| {
+            let output = Command::new("bash")
+                .arg(&script)
+                .current_dir(&root)
+                .env("GITHUB_WORKSPACE", &root)
+                .env("GITHUB_REPOSITORY", "example/project")
+                .env("RELEASE_TAG", "preview")
+                .output()
+                .expect("run formula mapping script");
+            assert_eq!(
+                output.status.success(),
+                expected_success,
+                "formula mapping output: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(true);
+
+        let stale = formula.replace("/releases/download/preview/", "/releases/download/old/");
+        std::fs::write(formula_dir.join("example-preview.rb"), stale)
+            .expect("write stale formula fixture");
+        run(false);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn package_release_rejects_shell_ambiguous_package_directories() {
+        for package_dir in ["dist:foo", "dist foo", "dist/../other", "dist\\foo"] {
+            let mut values = args();
+            values.insert(
+                "package_dir".to_owned(),
+                toml::Value::String(package_dir.to_owned()),
+            );
+            let error = parse_spec(&Args(&values)).expect_err("unsafe package directory must fail");
+            assert!(error.to_string().contains("portable relative directory"));
+        }
     }
 }
