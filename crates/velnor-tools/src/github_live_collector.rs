@@ -724,7 +724,7 @@ where
         ),
     )
     .await?;
-    let sha = required_string(&commit, &["sha"])?;
+    let sha = required_sha(&commit, &["sha"])?;
     let mut raw_ids = repository_raw_ids;
     raw_ids.extend(commit_raw_ids);
     raw_ids.sort();
@@ -787,7 +787,7 @@ where
         ),
     )
     .await?;
-    let default_branch_sha = required_string(&commit, &["sha"])?;
+    let default_branch_sha = required_sha(&commit, &["sha"])?;
     let rulesets = collect_rulesets(transport, store, auth, manifest, ledger).await?;
     let workflows = collect_workflows(
         transport,
@@ -972,7 +972,7 @@ where
         )
         .await?;
         validate_workflow_content(&content, &manifest.repository, &path, source_sha)?;
-        let revision = required_string(&content, &["sha"])?;
+        let revision = required_sha(&content, &["sha"])?;
         let source_text = decode_workflow_content(&content)?;
         let events = parse_workflow_events(&source_text)?;
         let (reusable_workflows, actions, scanners) = parse_workflow_dependencies(
@@ -1091,7 +1091,7 @@ where
         if !seen_runs.insert(run_id) {
             bail!("workflow run {run_id} was observed more than once");
         }
-        let run_source_sha = required_string(&run, &["head_sha"])?;
+        let run_source_sha = required_sha(&run, &["head_sha"])?;
         if run_source_sha != source_sha {
             continue;
         }
@@ -1145,7 +1145,7 @@ where
             if attempt_run_id != run_id {
                 bail!("workflow attempt {attempt_number} belongs to run {attempt_run_id}, expected {run_id}");
             }
-            let attempt_source_sha = required_string(&attempt, &["head_sha"])?;
+            let attempt_source_sha = required_sha(&attempt, &["head_sha"])?;
             if attempt_source_sha != run_source_sha {
                 bail!("workflow attempt {run_id}/{attempt_number} head SHA differs from run");
             }
@@ -1428,6 +1428,10 @@ fn parse_pull_request_identity(
     value: &Value,
     raw_object_refs: Vec<String>,
 ) -> Result<LivePullRequestIdentity> {
+    let head_sha = required_sha(value, &["head", "sha"])?;
+    let base_sha = required_sha(value, &["base", "sha"])?;
+    let tested_merge_sha = optional_revision(value, &["merge_commit_sha"])?;
+    let merge_group_sha = optional_revision(value, &["merge_group", "sha"])?;
     Ok(LivePullRequestIdentity {
         number: required_u64(value, &["number"])?,
         state: required_string(value, &["state"])?,
@@ -1439,12 +1443,12 @@ fn parse_pull_request_identity(
         author_association: required_string(value, &["author_association"])?,
         head_repository: optional_string(value, &["head", "repo", "full_name"]),
         head_ref: optional_string(value, &["head", "ref"]),
-        head_sha: required_string(value, &["head", "sha"])?,
+        head_sha,
         base_repository: optional_string(value, &["base", "repo", "full_name"]),
         base_ref: required_string(value, &["base", "ref"])?,
-        base_sha: required_string(value, &["base", "sha"])?,
-        tested_merge_sha: optional_string(value, &["merge_commit_sha"]),
-        merge_group_sha: optional_string(value, &["merge_group", "sha"]),
+        base_sha,
+        tested_merge_sha,
+        merge_group_sha,
         source_url: required_string(value, &["html_url"])?,
         raw_object_refs,
     })
@@ -1529,7 +1533,7 @@ fn parse_job(
     if job_attempt != run_attempt {
         bail!("job belongs to attempt {job_attempt}, expected {run_attempt}");
     }
-    let job_source_sha = required_string(value, &["head_sha"])?;
+    let job_source_sha = required_sha(value, &["head_sha"])?;
     if job_source_sha != source_sha {
         bail!("job head SHA differs from workflow run");
     }
@@ -1561,7 +1565,7 @@ fn parse_artifact(
     if artifact_run_id != run_id {
         bail!("artifact belongs to run {artifact_run_id}, expected {run_id}");
     }
-    let artifact_head_sha = required_string(value, &["workflow_run", "head_sha"])?;
+    let artifact_head_sha = required_sha(value, &["workflow_run", "head_sha"])?;
     if artifact_head_sha != run_head_sha {
         bail!("artifact workflow head SHA differs from run");
     }
@@ -1956,6 +1960,17 @@ fn required_string(value: &Value, fields: &[&str]) -> Result<String> {
         })
 }
 
+fn required_sha(value: &Value, fields: &[&str]) -> Result<String> {
+    let sha = required_string(value, fields)?;
+    if !is_hex_revision(&sha, 40) {
+        bail!(
+            "GitHub response field {} is not a 40-hex revision",
+            fields.join(".")
+        );
+    }
+    Ok(sha)
+}
+
 fn required_identifier(value: &Value, fields: &[&str]) -> Result<String> {
     let mut current = value;
     for field in fields {
@@ -1982,6 +1997,19 @@ fn optional_string(value: &Value, fields: &[&str]) -> Option<String> {
         .as_str()
         .filter(|value| !value.trim().is_empty())
         .map(str::to_owned)
+}
+
+fn optional_revision(value: &Value, fields: &[&str]) -> Result<Option<String>> {
+    let Some(revision) = optional_string(value, fields) else {
+        return Ok(None);
+    };
+    if !is_hex_revision(&revision, 40) {
+        bail!(
+            "GitHub response field {} is not a 40-hex revision",
+            fields.join(".")
+        );
+    }
+    Ok(Some(revision))
 }
 
 fn required_u64(value: &Value, fields: &[&str]) -> Result<u64> {
@@ -2122,8 +2150,8 @@ jobs:
             "draft": false,
             "user": {"login": "bot"},
             "author_association": "CONTRIBUTOR",
-            "head": {"repo": null, "ref": "feature", "sha": "a"},
-            "base": {"repo": {"full_name": "tailrocks/example"}, "ref": "main", "sha": "b"},
+            "head": {"repo": null, "ref": "feature", "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+            "base": {"repo": {"full_name": "tailrocks/example"}, "ref": "main", "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
             "merge_commit_sha": null,
             "html_url": "https://github.com/tailrocks/example/pull/7"
         });
@@ -2210,21 +2238,27 @@ jobs:
             "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "expired": false,
             "archive_download_url": "https://api.github.com/repos/tailrocks/velnor/actions/artifacts/9/zip",
-            "workflow_run": {"id": 7, "head_sha": "abc"}
+            "workflow_run": {"id": 7, "head_sha": "cccccccccccccccccccccccccccccccccccccccc"}
         });
-        let artifact = parse_artifact(&value, "tailrocks/velnor", 7, "abc", vec!["raw".to_owned()])
-            .expect("artifact");
+        let artifact = parse_artifact(
+            &value,
+            "tailrocks/velnor",
+            7,
+            "cccccccccccccccccccccccccccccccccccccccc",
+            vec!["raw".to_owned()],
+        )
+        .expect("artifact");
         assert_eq!(artifact.run_id, 7);
         assert!(parse_artifact(
             &serde_json::json!({
                 "id": 9,
                 "name": "bundle",
                 "archive_download_url": "https://api.github.com/repos/tailrocks/velnor/actions/artifacts/9/zip",
-                "workflow_run": {"id": 7, "head_sha": "abc"}
+                "workflow_run": {"id": 7, "head_sha": "cccccccccccccccccccccccccccccccccccccccc"}
             }),
             "tailrocks/velnor",
             7,
-            "abc",
+            "cccccccccccccccccccccccccccccccccccccccc",
             vec![]
         )
         .is_err());
