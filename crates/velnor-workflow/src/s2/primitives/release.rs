@@ -1045,7 +1045,9 @@ fn native_debian_release(config: &ProjectConfig, release: &ReleaseSpec) -> bool 
 /// A Debian matrix row the contract targets resolve to, or `None` when a
 /// target has no Debian architecture. Debian packaging stays Linux-only;
 /// anything else fails closed at the packaging step instead of silently
-/// dropping an architecture.
+/// dropping an architecture. Each row carries its native hosted runner so an
+/// arm64 release binary is built on arm64, rather than relying on an
+/// incomplete cross-linker/sysroot on an x86 host.
 fn deb_architectures(targets: &[String]) -> Option<Vec<(&'static str, &str)>> {
     targets
         .iter()
@@ -1066,10 +1068,18 @@ fn deb_arch_matrix(config: &ProjectConfig, targets: &[String], guest: bool) -> O
             "amd64" => "\n            guest_arch: x86_64",
             _ => "\n            guest_arch: aarch64",
         });
+        // Build the aarch64 Debian lane on GitHub's native arm64 runner. The
+        // release binary links OpenSSL and other C dependencies, so a Rust
+        // target alone is not a complete cross toolchain on an x86 runner.
+        let runner = if target == "aarch64-unknown-linux-gnu" {
+            "ubuntu-24.04-arm".to_owned()
+        } else {
+            release_runner(config, target)
+        };
         let _ = writeln!(
             matrix,
             "          - arch: {arch}\n            target: {target}\n            runner: {}{}",
-            release_runner(config, target),
+            runner,
             guest_arch.unwrap_or_default(),
         );
     }
@@ -1743,8 +1753,7 @@ fn render_identity_debian_job(
         preview,
     ));
     format!(
-        "  debian:\n    name: {name}\n    needs: [{needs}]\n{gate}    runs-on: {runner}\n    timeout-minutes: 90\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    env:\n      TARGET: ${{{{ matrix.target }}}}\n{lane_env}    permissions:\n      contents: read\n    steps:\n{steps}      - name: Upload Debian packages\n        uses: {upload}\n        with:\n          name: debian-packages\n          path: |\n            dist/*.deb\n            dist/*.deb.sha256\n          if-no-files-found: error\n          retention-days: {retention}\n",
-        runner = release_matrix_runner(config, &release.targets),
+        "  debian:\n    name: {name}\n    needs: [{needs}]\n{gate}    runs-on: ${{{{ matrix.runner }}}}\n    timeout-minutes: 90\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    env:\n      TARGET: ${{{{ matrix.target }}}}\n{lane_env}    permissions:\n      contents: read\n    steps:\n{steps}      - name: Upload Debian packages\n        uses: {upload}\n        with:\n          name: debian-packages\n          path: |\n            dist/*.deb\n            dist/*.deb.sha256\n          if-no-files-found: error\n          retention-days: {retention}\n",
     )
 }
 
@@ -5845,11 +5854,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "ae561323482f1a0ec3b45a2553b5dda311a69ca655576b484fea8170b3a08401",
+                "565166c0743025f4942ed950b0f8123dec209f9f621a7e7a2dada6d4555d7bed",
             ),
             (
                 "preview.yml",
-                "fca905a5d7239ad2f7ce0cd8185e0215f44f0efd0c51b1e2891afe8d448a06ab",
+                "6df477542ea5122204921dbb51ba81be1f3551026e46088310fdc2a9940088aa",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -7735,6 +7744,13 @@ mod tests {
         // The stable deb packages the build job's exact bytes: no second
         // build that merely should agree.
         let debian = yaml_job(&workflow, "debian");
+        assert!(
+            debian.contains("runs-on: ${{ matrix.runner }}")
+                && debian.contains(
+                    "- arch: arm64\n            target: aarch64-unknown-linux-gnu\n            runner: ubuntu-24.04-arm"
+                ),
+            "each Debian architecture must use its native hosted runner: {debian}"
+        );
         assert!(debian.contains("Download release binary"), "{debian}");
         assert!(
             debian.contains("name: github-hosted-${{ matrix.target }}"),
@@ -7756,6 +7772,13 @@ mod tests {
         // build and learns nothing about records or OCI indexes.
         let preview = super::render_preview(&config, Some(release));
         let preview_debian = yaml_job(&preview, "debian");
+        assert!(
+            preview_debian.contains("runs-on: ${{ matrix.runner }}")
+                && preview_debian.contains(
+                    "- arch: arm64\n            target: aarch64-unknown-linux-gnu\n            runner: ubuntu-24.04-arm"
+                ),
+            "preview Debian must use the native hosted arm64 runner: {preview_debian}"
+        );
         assert!(
             preview_debian.contains("Build release runner binary"),
             "{preview_debian}"
