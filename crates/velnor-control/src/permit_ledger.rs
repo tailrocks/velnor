@@ -169,9 +169,8 @@ pub struct PermitHolder {
     pub updated_unix: u64,
     pub generation: u64,
     /// Host pid of the acquiring process, when the lane records one.
-    /// Crash-recovery evidence for the sweep: a dead pid proves the attempt
-    /// that held the permit is gone. Pids are host-scoped; lanes whose
-    /// holders are not host processes pass `None` and are never swept.
+    /// Same-holder redelivery may adopt a dead attempt; startup never uses
+    /// local pid or root evidence alone to erase another daemon's row.
     pub pid: Option<u32>,
 }
 
@@ -277,7 +276,9 @@ impl From<rusqlite::Error> for LedgerError {
     }
 }
 
-fn unix_now() -> u64 {
+/// Current Unix time in seconds, used for durable demand and permit
+/// observation timestamps.
+pub fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
