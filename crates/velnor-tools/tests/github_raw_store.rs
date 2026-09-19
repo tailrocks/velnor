@@ -150,6 +150,18 @@ fn stores_safe_bytes_with_distinct_original_provenance() {
     remove_fixture(&root);
 }
 
+#[test]
+fn rejects_path_like_raw_id_before_publishing_an_object() {
+    let root = fixture("invalid-raw-id");
+    let mut store = must(RawObjectFileStore::new(&root), "open invalid-id store");
+    assert!(store
+        .store(capture("../escape", b"source", b"safe"))
+        .is_err());
+    let entries = must(fs::read_dir(root.join("sha256")), "read object directory");
+    assert_eq!(entries.count(), 0);
+    remove_fixture(&root);
+}
+
 #[cfg(unix)]
 #[test]
 fn refuses_root_ancestor_and_child_symlinks() {

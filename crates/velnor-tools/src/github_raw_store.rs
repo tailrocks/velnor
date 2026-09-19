@@ -95,6 +95,7 @@ impl RawObjectFileStore {
             return Err(RawStorageError::Refused);
         }
 
+        let sidecar_name = raw_id_name(&object.raw_id)?;
         let safe_digest = sha256_digest(&object.bytes);
         let safe_length =
             u64::try_from(object.bytes.len()).map_err(|_| RawStorageError::Refused)?;
@@ -114,7 +115,6 @@ impl RawObjectFileStore {
             media_type: object.media_type,
             storage_ref: content_addressed_storage_ref(&safe_digest),
         };
-        let sidecar_name = raw_id_name(&reference.raw_id)?;
         let sidecar_bytes = sidecar_bytes(&reference)?;
         publish_if_absent(&self.refs, &sidecar_name, &sidecar_bytes)?;
         Ok(reference)
