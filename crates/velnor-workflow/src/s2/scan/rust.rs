@@ -2,14 +2,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io;
 use std::path::Path;
 
 use super::file_walk::{
     files_named, has_extension, join_repo_path, path_prefix, resolve_repo_path,
 };
 use super::{RepositoryShape, ScanContext};
-use crate::rust_include::{parse_include_paths, IncludeString};
+use crate::rust_include::{parse_include_paths, resolve_include_path, IncludePathError};
 use crate::s2::{
     identifier_suffix, parent_path, shell_change_dir, shell_quote, CachePurpose, CacheSpec,
     GeneratorError, RustToolchain, Unit, UnitKind,
@@ -754,93 +753,34 @@ fn include_str_paths(
             GeneratorError::usage(format!("{error} in {}", root.join(source).display()))
         })?;
         for included in included_paths {
-            let path = match &included {
-                IncludeString::Relative(path) => resolve_repo_path(&parent_path(source), path),
-                IncludeString::ManifestDir(path) => {
-                    resolve_repo_path(package_root, path.trim_start_matches('/'))
-                }
-            };
-            let target = path.ok_or_else(|| {
-                GeneratorError::usage(format!(
+            let target = resolve_include_path(
+                root,
+                &parent_path(source),
+                package_root,
+                &included,
+                file_set,
+            )
+            .map_err(|error| match error {
+                IncludePathError::Escapes => GeneratorError::usage(format!(
                     "include_str! escapes the repository from {}: {}",
                     root.join(source).display(),
                     included.display()
-                ))
-            })?;
-            let target = if file_set.contains(&target) || static_github_input_exists(root, &target)?
-            {
-                target
-            } else if let Some(resolved) = resolve_tracked_include_path(root, &target, file_set)? {
-                resolved
-            } else {
-                return Err(GeneratorError::usage(format!(
+                )),
+                IncludePathError::Missing => GeneratorError::usage(format!(
                     "include_str! target does not exist: {} -> {}",
                     root.join(source).display(),
-                    target
-                )));
-            };
+                    included.display()
+                )),
+                IncludePathError::Io {
+                    operation,
+                    path,
+                    source,
+                } => GeneratorError::io(operation, &path, &source),
+            })?;
             targets.insert(target);
         }
     }
     Ok(targets.into_iter().collect())
-}
-
-/// Resolve an include path through a symlink to the tracked path that owns its
-/// bytes. The final canonical path must stay under the repository root; an
-/// existing but untracked or external target is not valid scan input.
-fn resolve_tracked_include_path(
-    root: &Path,
-    target: &str,
-    file_set: &BTreeSet<String>,
-) -> Result<Option<String>, GeneratorError> {
-    let canonical_root = fs::canonicalize(root)
-        .map_err(|error| GeneratorError::io("canonicalize repository root", root, &error))?;
-    let path = root.join(target);
-    let canonical_target = match fs::canonicalize(&path) {
-        Ok(path) => path,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(GeneratorError::io(
-                "resolve include_str target",
-                &path,
-                &error,
-            ));
-        }
-    };
-    let Ok(relative) = canonical_target.strip_prefix(&canonical_root) else {
-        return Ok(None);
-    };
-    let relative = relative
-        .to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "/");
-    if file_set.contains(&relative) {
-        Ok(Some(relative))
-    } else {
-        Ok(None)
-    }
-}
-
-pub(crate) fn static_github_input_exists(
-    root: &Path,
-    target: &str,
-) -> Result<bool, GeneratorError> {
-    if !target.starts_with(".github/")
-        || target == ".github/UNIFIED-ACTIONS.md"
-        || target.starts_with(".github/ci/")
-        || target.starts_with(".github/workflows/")
-    {
-        return Ok(false);
-    }
-    let path = root.join(target);
-    match fs::symlink_metadata(&path) {
-        Ok(metadata) => Ok(metadata.is_file() && !metadata.file_type().is_symlink()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(GeneratorError::io(
-            "inspect include_str target",
-            &path,
-            &error,
-        )),
-    }
 }
 
 pub(crate) fn cargo_dependency_name(key: &str) -> &str {
