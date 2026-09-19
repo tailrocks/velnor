@@ -1,0 +1,4119 @@
+{
+  "schema_version": 2,
+  "contract_kind": "g0-source-workload-supplement",
+  "status": "source_derived_not_execution",
+  "gate_status": "incomplete_no_gate_claim",
+  "captured_at_utc": "2026-09-19T23:41:44Z",
+  "scope": {
+    "repository_count": 6,
+    "repositories": [
+      "tailrocks/parallax-telemetry-playground",
+      "jackin-project/jackin",
+      "jackin-project/jackin-agent-smith",
+      "jackin-project/jackin-role-action",
+      "jackin-project/jackin-sentinel",
+      "jackin-project/jackin-the-architect"
+    ],
+    "repository_role": "remaining_exact6_product_and_action_repos",
+    "expected_workload_semantics": "logical source workloads; workflow/result rows never create the expected set"
+  },
+  "provenance": {
+    "source_mode": "GitHub REST git objects plus Actions/ruleset/PR read-only API",
+    "source_clones": [],
+    "source_query": "git/ref/heads/main, git/commit, recursive git/tree, git/ls-remote; workflow/ruleset/PR inventory",
+    "worktree_rule": "no source checkout, source edit, helper execution, dispatch, install, release, or publication",
+    "remote_ref_query": "git ls-remote https://github.com/{repository}.git refs/heads/main",
+    "initial_capture_root": "/private/tmp/g0-workload-six-20260919T232316Z",
+    "initial_capture_approximate_utc": "2026-09-19T23:23:16Z",
+    "closing_reread_at_utc": "2026-09-19T23:38:18Z",
+    "canonical_schema": "G0/skills-adapter/workload-contract-20260919T225313Z.json",
+    "historical_reuse_rule": "prior compact rows reused only where live source SHA matched; jackin-project/jackin source/config row refreshed at 3b1e1fc0a20a7d861454746c9ebb50a335c9b412"
+  },
+  "global_source_facts": [
+    {
+      "fact_id": "six_default_heads_stable",
+      "observation": "All six initial GitHub ref SHAs matched closing GitHub ref and git ls-remote SHAs.",
+      "source": "per-repository closing fields"
+    },
+    {
+      "fact_id": "recursive_trees_complete",
+      "observation": "All six recursive tree responses reported truncated=false.",
+      "source": "source_tree"
+    },
+    {
+      "fact_id": "actions_tree_mismatch_preserved",
+      "observation": "Actions workflow API path sets differ from exact source trees for jackin, jackin-agent-smith, and jackin-the-architect; discrepancy is retained as unknown.",
+      "source": "actions_workflow_api.tree_api_consistency"
+    },
+    {
+      "fact_id": "ruleset_checks_observed",
+      "observation": "Active protect-main rulesets expose DCO/Policy/ci-required contexts; producer App IDs are not exposed in the captured required-status-check entries.",
+      "source": "live.main_ruleset_required_status_checks"
+    },
+    {
+      "fact_id": "branch_protection_unknown",
+      "observation": "Branch-protection endpoint returned HTTP 404 Branch not protected for all six; rulesets remain separately recorded.",
+      "source": "live.branch_protection"
+    },
+    {
+      "fact_id": "no_execution",
+      "observation": "No jobs, run results, artifacts, provider output, Velnor host result, helper execution, publication, or release mutation was collected.",
+      "source": "audit scope"
+    }
+  ],
+  "workload_contract": [
+    {
+      "workload_class": "portable_source_workload",
+      "required_fields": [
+        "logical_id",
+        "workflow_paths",
+        "platform",
+        "architecture",
+        "provider"
+      ],
+      "pass_semantics": "source presence only; execution is separately required"
+    },
+    {
+      "workload_class": "native_platform_workload",
+      "required_fields": [
+        "logical_id",
+        "native_platform",
+        "architecture",
+        "provider",
+        "exclusion"
+      ],
+      "pass_semantics": "native route/source only; no Velnor eligibility inferred"
+    },
+    {
+      "workload_class": "role_image_contract",
+      "required_fields": [
+        "manifest",
+        "build",
+        "validation",
+        "runtime_smoke",
+        "multiarch"
+      ],
+      "pass_semantics": "missing validation/runtime/publisher remains missing"
+    },
+    {
+      "workload_class": "action_provider_contract",
+      "required_fields": [
+        "metadata",
+        "download_checksum",
+        "validation",
+        "build_cache",
+        "reusable_publisher",
+        "consumer_fixture"
+      ],
+      "pass_semantics": "partial source is not consumer execution"
+    },
+    {
+      "workload_class": "source_graph_contract",
+      "required_fields": [
+        "dependency_edge_kinds",
+        "required_checks",
+        "PR_trust"
+      ],
+      "pass_semantics": "unknown edges/check producer identity are preserved"
+    }
+  ],
+  "dependency_edge_kinds": [
+    {
+      "edge_id": "workload_to_child",
+      "relation": "logical workload invokes child/reusable workflow"
+    },
+    {
+      "edge_id": "workload_to_release",
+      "relation": "workload feeds release/sign/publication"
+    },
+    {
+      "edge_id": "workload_to_package",
+      "relation": "workload produces or consumes package/image/action artifact"
+    },
+    {
+      "edge_id": "workload_to_required_check",
+      "relation": "workload maps to protected check context"
+    }
+  ],
+  "exclusion_catalog": [
+    {
+      "exclusion_id": "no_execution_as_success",
+      "reason": "Source-present workflow/config never becomes an execution pass."
+    },
+    {
+      "exclusion_id": "missing_workflow_not_success",
+      "reason": "Required logical workload with no source workflow is explicit missing_workflow."
+    },
+    {
+      "exclusion_id": "native_not_velnor",
+      "reason": "macOS/Darwin workloads are excluded from Velnor in this source contract."
+    },
+    {
+      "exclusion_id": "no_untrusted_helper_execution",
+      "reason": "No helper was run; fork/untrusted PRs remain static-only."
+    },
+    {
+      "exclusion_id": "required_check_app_unknown",
+      "reason": "Ruleset contexts are recorded, but producer App IDs are not asserted without an API field."
+    },
+    {
+      "exclusion_id": "release_install_not_proven",
+      "reason": "No release, install, signing, or publication claim is made."
+    }
+  ],
+  "repositories": [
+    {
+      "repository": "tailrocks/parallax-telemetry-playground",
+      "repository_role": "polyglot_native_consumer",
+      "default_branch": "main",
+      "default_branch_sha": "54d09bf71181dcfc72d6829fabec3c53f55aacf9",
+      "current_revision_binding": {
+        "initial_api_sha": "54d09bf71181dcfc72d6829fabec3c53f55aacf9",
+        "initial_ref_sha": "54d09bf71181dcfc72d6829fabec3c53f55aacf9",
+        "closing_default_branch_sha": "54d09bf71181dcfc72d6829fabec3c53f55aacf9",
+        "closing_ls_remote_sha": "54d09bf71181dcfc72d6829fabec3c53f55aacf9",
+        "source_stability": "stable_between_initial_and_closing_reads"
+      },
+      "live": {
+        "github_id": 1277301638,
+        "visibility": "public",
+        "archived": false,
+        "pushed_at": "2026-09-16T15:27:21Z",
+        "access": {
+          "status": "api_readable",
+          "permissions": {
+            "admin": true,
+            "maintain": true,
+            "push": true,
+            "triage": true,
+            "pull": true
+          }
+        },
+        "branch_protection": {
+          "status": "unknown",
+          "http_status": "404",
+          "message": "Branch not protected"
+        },
+        "rulesets": [
+          {
+            "id": 19573003,
+            "name": "protect-tags",
+            "target": "tag",
+            "source_type": "Repository",
+            "source": "tailrocks/parallax-telemetry-playground",
+            "enforcement": "active",
+            "updated_at": "2026-07-23T00:48:28.733+07:00"
+          },
+          {
+            "id": 19573032,
+            "name": "protect-main",
+            "target": "branch",
+            "source_type": "Repository",
+            "source": "tailrocks/parallax-telemetry-playground",
+            "enforcement": "active",
+            "updated_at": "2026-09-15T18:29:50.435+07:00"
+          }
+        ],
+        "main_ruleset_required_status_checks": {
+          "strict_required_status_checks_policy": false,
+          "do_not_enforce_on_create": false,
+          "required_status_checks": [
+            {
+              "context": "DCO"
+            },
+            {
+              "context": "ci-required"
+            }
+          ]
+        }
+      },
+      "source_tree": {
+        "entry_count": 581,
+        "tree_truncated": null,
+        "listing_sha256": "sha256:83d0efea083c7df6312a8d62e0e027ddff0d1e10b66a001fb10b8c2389fa3a57",
+        "workflow_paths": [
+          {
+            "path": ".github/workflows/ci-main.yml",
+            "blob_sha": "f5cb4f3e5d0971f4a434e24c46abb7b900d6a9c7"
+          },
+          {
+            "path": ".github/workflows/ci-policy.yml",
+            "blob_sha": "8d15612171851938a8f673e7a1fe95aaa7c2f93e"
+          },
+          {
+            "path": ".github/workflows/ci-pr.yml",
+            "blob_sha": "9416b4132f9cc56d0e208183ff48e4b93299b531"
+          },
+          {
+            "path": ".github/workflows/ci-unit-bun.yml",
+            "blob_sha": "98f114f63fd4a8b0eb10da3e697f1be78a4d14df"
+          },
+          {
+            "path": ".github/workflows/ci-unit-docker.yml",
+            "blob_sha": "b7c190bc083029962675f198dceb23c9bdda41f1"
+          },
+          {
+            "path": ".github/workflows/ci-unit-gradle.yml",
+            "blob_sha": "903de3b0754bccfa6029c180387481e1b376cc5e"
+          },
+          {
+            "path": ".github/workflows/ci-unit-rust.yml",
+            "blob_sha": "42320c849203a491b1ae7f9f0480a05d0c4e1427"
+          },
+          {
+            "path": ".github/workflows/ci-unit-swift.yml",
+            "blob_sha": "334d182e2d935ebbba265c393b83b72ab53277f4"
+          },
+          {
+            "path": ".github/workflows/maintenance.yml",
+            "blob_sha": "5c5fb601f6949a8c61fc7e039c4b845d079728fc"
+          },
+          {
+            "path": ".github/workflows/nightly.yml",
+            "blob_sha": "843b92edf02ecb1159bfc50d0542d13daab35e9d"
+          }
+        ],
+        "reusable_workflow_candidates": [
+          {
+            "path": ".github/workflows/ci-unit-bun.yml",
+            "blob_sha": "98f114f63fd4a8b0eb10da3e697f1be78a4d14df"
+          },
+          {
+            "path": ".github/workflows/ci-unit-docker.yml",
+            "blob_sha": "b7c190bc083029962675f198dceb23c9bdda41f1"
+          },
+          {
+            "path": ".github/workflows/ci-unit-gradle.yml",
+            "blob_sha": "903de3b0754bccfa6029c180387481e1b376cc5e"
+          },
+          {
+            "path": ".github/workflows/ci-unit-rust.yml",
+            "blob_sha": "42320c849203a491b1ae7f9f0480a05d0c4e1427"
+          },
+          {
+            "path": ".github/workflows/ci-unit-swift.yml",
+            "blob_sha": "334d182e2d935ebbba265c393b83b72ab53277f4"
+          }
+        ],
+        "reusable_classification": "name_candidate_only; content execution not performed",
+        "action_paths": [],
+        "config_paths": [
+          {
+            "path": ".github-gen/velnor-workflow.toml",
+            "blob_sha": "5fe937e02454446e1460362f51af5e2963d8e422"
+          },
+          {
+            "path": ".github/ci/.github-actions-generator-state",
+            "blob_sha": "440becf5ebcd20a342ef712333d39176f37104c3"
+          },
+          {
+            "path": ".github/ci/project.toml",
+            "blob_sha": "50c56a80d921e5d2a271fb603fe73a11a99931c6"
+          },
+          {
+            "path": "Cargo.toml",
+            "blob_sha": "b9cba5342d53e586c6248d7f223681606b4b59cf"
+          },
+          {
+            "path": "macos/Package.swift",
+            "blob_sha": "e6e214eb9bb07e446610ab4c1319d12dfcceb7a7"
+          },
+          {
+            "path": "mise.toml",
+            "blob_sha": "eddd5d5cb5ded8efefd19b19cb43075ae03c0678"
+          }
+        ],
+        "scan_paths": [
+          {
+            "path": ".github-gen/velnor-workflow.toml",
+            "blob_sha": "5fe937e02454446e1460362f51af5e2963d8e422"
+          },
+          {
+            "path": ".github/workflows/ci-main.yml",
+            "blob_sha": "f5cb4f3e5d0971f4a434e24c46abb7b900d6a9c7"
+          },
+          {
+            "path": ".github/workflows/ci-policy.yml",
+            "blob_sha": "8d15612171851938a8f673e7a1fe95aaa7c2f93e"
+          },
+          {
+            "path": ".github/workflows/ci-pr.yml",
+            "blob_sha": "9416b4132f9cc56d0e208183ff48e4b93299b531"
+          },
+          {
+            "path": ".github/workflows/ci-unit-bun.yml",
+            "blob_sha": "98f114f63fd4a8b0eb10da3e697f1be78a4d14df"
+          },
+          {
+            "path": ".github/workflows/ci-unit-docker.yml",
+            "blob_sha": "b7c190bc083029962675f198dceb23c9bdda41f1"
+          },
+          {
+            "path": ".github/workflows/ci-unit-gradle.yml",
+            "blob_sha": "903de3b0754bccfa6029c180387481e1b376cc5e"
+          },
+          {
+            "path": ".github/workflows/ci-unit-rust.yml",
+            "blob_sha": "42320c849203a491b1ae7f9f0480a05d0c4e1427"
+          },
+          {
+            "path": ".github/workflows/ci-unit-swift.yml",
+            "blob_sha": "334d182e2d935ebbba265c393b83b72ab53277f4"
+          },
+          {
+            "path": ".github/workflows/maintenance.yml",
+            "blob_sha": "5c5fb601f6949a8c61fc7e039c4b845d079728fc"
+          },
+          {
+            "path": ".github/workflows/nightly.yml",
+            "blob_sha": "843b92edf02ecb1159bfc50d0542d13daab35e9d"
+          },
+          {
+            "path": "macos/Package.swift",
+            "blob_sha": "e6e214eb9bb07e446610ab4c1319d12dfcceb7a7"
+          }
+        ]
+      },
+      "workflow": {
+        "source_paths": [
+          {
+            "path": ".github/workflows/ci-main.yml",
+            "blob_sha": "f5cb4f3e5d0971f4a434e24c46abb7b900d6a9c7"
+          },
+          {
+            "path": ".github/workflows/ci-policy.yml",
+            "blob_sha": "8d15612171851938a8f673e7a1fe95aaa7c2f93e"
+          },
+          {
+            "path": ".github/workflows/ci-pr.yml",
+            "blob_sha": "9416b4132f9cc56d0e208183ff48e4b93299b531"
+          },
+          {
+            "path": ".github/workflows/ci-unit-bun.yml",
+            "blob_sha": "98f114f63fd4a8b0eb10da3e697f1be78a4d14df"
+          },
+          {
+            "path": ".github/workflows/ci-unit-docker.yml",
+            "blob_sha": "b7c190bc083029962675f198dceb23c9bdda41f1"
+          },
+          {
+            "path": ".github/workflows/ci-unit-gradle.yml",
+            "blob_sha": "903de3b0754bccfa6029c180387481e1b376cc5e"
+          },
+          {
+            "path": ".github/workflows/ci-unit-rust.yml",
+            "blob_sha": "42320c849203a491b1ae7f9f0480a05d0c4e1427"
+          },
+          {
+            "path": ".github/workflows/ci-unit-swift.yml",
+            "blob_sha": "334d182e2d935ebbba265c393b83b72ab53277f4"
+          },
+          {
+            "path": ".github/workflows/maintenance.yml",
+            "blob_sha": "5c5fb601f6949a8c61fc7e039c4b845d079728fc"
+          },
+          {
+            "path": ".github/workflows/nightly.yml",
+            "blob_sha": "843b92edf02ecb1159bfc50d0542d13daab35e9d"
+          }
+        ],
+        "reusable_workflow_candidates": [
+          {
+            "path": ".github/workflows/ci-unit-bun.yml",
+            "blob_sha": "98f114f63fd4a8b0eb10da3e697f1be78a4d14df"
+          },
+          {
+            "path": ".github/workflows/ci-unit-docker.yml",
+            "blob_sha": "b7c190bc083029962675f198dceb23c9bdda41f1"
+          },
+          {
+            "path": ".github/workflows/ci-unit-gradle.yml",
+            "blob_sha": "903de3b0754bccfa6029c180387481e1b376cc5e"
+          },
+          {
+            "path": ".github/workflows/ci-unit-rust.yml",
+            "blob_sha": "42320c849203a491b1ae7f9f0480a05d0c4e1427"
+          },
+          {
+            "path": ".github/workflows/ci-unit-swift.yml",
+            "blob_sha": "334d182e2d935ebbba265c393b83b72ab53277f4"
+          }
+        ],
+        "api_paths": [
+          ".github/workflows/ci-main.yml",
+          ".github/workflows/ci-policy.yml",
+          ".github/workflows/ci-pr.yml",
+          ".github/workflows/ci-unit-bun.yml",
+          ".github/workflows/ci-unit-docker.yml",
+          ".github/workflows/ci-unit-gradle.yml",
+          ".github/workflows/ci-unit-rust.yml",
+          ".github/workflows/ci-unit-swift.yml",
+          ".github/workflows/maintenance.yml",
+          ".github/workflows/nightly.yml"
+        ],
+        "api_count": 10,
+        "tree_count": 10,
+        "api_tree_consistency": "match",
+        "missing_expected_workflow_paths": [],
+        "source_only_no_execution": true,
+        "empty_success_forbidden": true
+      },
+      "expected_workload_ids": [
+        "playground-rust-bun-gradle-docker",
+        "swift-package-macos",
+        "playground-native-context"
+      ],
+      "expected_workloads": [
+        {
+          "id": "playground-rust-bun-gradle-docker",
+          "required": true,
+          "status": "source_present_no_execution",
+          "workflow_paths": [
+            ".github/workflows/ci-unit-bun.yml",
+            ".github/workflows/ci-unit-docker.yml",
+            ".github/workflows/ci-unit-gradle.yml",
+            ".github/workflows/ci-unit-rust.yml"
+          ],
+          "notes": "Portable generated unit families are present in the exact source tree; no run/result is claimed."
+        },
+        {
+          "id": "swift-package-macos",
+          "required": true,
+          "status": "source_present_misrouted_no_execution",
+          "workflow_paths": [
+            ".github/workflows/ci-unit-swift.yml"
+          ],
+          "platform_requirement": {
+            "os": "macos",
+            "architecture": "arm64"
+          },
+          "notes": "macos/Package.swift statically uses Darwin, MachO, MetricKit, and os APIs; the reused native-routing report records an Ubuntu route. No hosted native transcript."
+        },
+        {
+          "id": "playground-native-context",
+          "required": true,
+          "status": "source_present_no_execution",
+          "workflow_paths": [
+            ".github/workflows/ci-main.yml",
+            ".github/workflows/ci-unit-swift.yml"
+          ],
+          "notes": "Apple-bound thermal/sysctl/process/Mach-O/MetricKit context is source-observed only."
+        }
+      ],
+      "platform_architecture_provider": [
+        {
+          "workloads": [
+            "playground-rust-bun-gradle-docker"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "configured_source_only",
+          "velnor": "eligible_in_principle_static_only"
+        },
+        {
+          "workloads": [
+            "swift-package-macos",
+            "playground-native-context"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "required_route": {
+            "os": "macos",
+            "architecture": "arm64"
+          },
+          "status": "misrouted_darwin_required_source_only",
+          "velnor": "excluded"
+        }
+      ],
+      "provider_eligibility": {
+        "github_hosted": "configured_source_only",
+        "velnor": "portable_only_not_native",
+        "trusted_source": "eligible_for_static_review_only",
+        "fork_or_untrusted": "not_eligible_for_native_api_or_release"
+      },
+      "justified_exclusions": [
+        {
+          "id": "no_execution_claim",
+          "workloads": [
+            "playground-rust-bun-gradle-docker",
+            "swift-package-macos",
+            "playground-native-context"
+          ],
+          "reason": "No workflow jobs/results were collected."
+        },
+        {
+          "id": "swift-native-route",
+          "workloads": [
+            "swift-package-macos",
+            "playground-native-context"
+          ],
+          "reason": "Apple-bound route is not admitted to Velnor; source route is Ubuntu and native hosted proof is absent."
+        }
+      ],
+      "unsupported_blocks": [
+        {
+          "id": "playground-swift-routing",
+          "kind": "misrouted",
+          "reason": "Swift package requires Darwin APIs but source routing is Ubuntu.",
+          "evidence": [
+            "G0/native-routing/report.md"
+          ]
+        },
+        {
+          "id": "playground-native-execution",
+          "kind": "not_observed",
+          "reason": "No hosted macOS native transcript was collected.",
+          "evidence": [
+            "source_only_audit"
+          ]
+        }
+      ],
+      "dependency_graph": {
+        "status": "unknown_source_only",
+        "edge_kinds_required": [
+          "workload_to_child",
+          "workload_to_release",
+          "workload_to_package",
+          "workload_to_required_check"
+        ],
+        "edges": [],
+        "reason": "No generated caller/result graph was executed; edges are not invented."
+      },
+      "required_check_contexts_and_apps": {
+        "state": "ruleset_main_observed_app_identity_unknown",
+        "branch_protection_endpoint": {
+          "status": "unknown",
+          "http_status": "404",
+          "message": "Branch not protected"
+        },
+        "ruleset_contexts": [
+          "DCO",
+          "ci-required"
+        ],
+        "ruleset_raw": {
+          "strict_required_status_checks_policy": false,
+          "do_not_enforce_on_create": false,
+          "required_status_checks": [
+            {
+              "context": "DCO"
+            },
+            {
+              "context": "ci-required"
+            }
+          ]
+        },
+        "producer_app_ids": [],
+        "producer_app_ids_reason": "Required-status-check detail did not expose App IDs; no identity invented."
+      },
+      "pr_trust": {
+        "status": "complete_paginated_open_pr_observation",
+        "open_pr_count": 0,
+        "rows": [],
+        "future_trust_tuple_unknowns": [
+          "head/base SHA and repository must be reread for every candidate",
+          "author/fork/trusted-event/provider/check identity must be bound per run",
+          "open PR inventory is not an execution result"
+        ]
+      },
+      "access_observation": {
+        "status": "api_readable",
+        "permissions": {
+          "admin": true,
+          "maintain": true,
+          "push": true,
+          "triage": true,
+          "pull": true
+        }
+      },
+      "source_validation_state": {
+        "source_inventory": "observed_at_exact_default_branch_tree",
+        "expected_set": "source_derived_nonempty",
+        "workflow_presence": "source_presence_only",
+        "helper_execution": "not_run",
+        "execution_result": "not_collected"
+      },
+      "actual_jobs": null,
+      "release_install": {
+        "status": "not_evaluated_source_contract",
+        "publication_claim": false
+      },
+      "gate_status": "not_evaluated",
+      "evidence_paths": [
+        "G0/native-routing/report.md",
+        "G0/fleet/main-revisions.tsv",
+        "G0/fleet/configs.tsv",
+        "G0/fleet/workloads-full.json",
+        "live source tree and API capture"
+      ],
+      "unknowns": [
+        "No workflow job/run result, artifact, provider transcript, or Velnor output was collected.",
+        "Branch protection endpoint is HTTP 404; organization/inherited check policy may remain unknown.",
+        "Ruleset required contexts are visible, but producer GitHub App IDs are unknown.",
+        "Actions API/tree workflow mismatch, when present, is preserved and not resolved into execution truth.",
+        "Dependency edges are required but not resolved from source-only inventory.",
+        "Future PR trust requires live head/base/fork/event/check binding."
+      ]
+    },
+    {
+      "repository": "jackin-project/jackin",
+      "repository_role": "native_polyglot_product_consumer",
+      "default_branch": "main",
+      "default_branch_sha": "3b1e1fc0a20a7d861454746c9ebb50a335c9b412",
+      "current_revision_binding": {
+        "initial_api_sha": "3b1e1fc0a20a7d861454746c9ebb50a335c9b412",
+        "initial_ref_sha": "3b1e1fc0a20a7d861454746c9ebb50a335c9b412",
+        "closing_default_branch_sha": "3b1e1fc0a20a7d861454746c9ebb50a335c9b412",
+        "closing_ls_remote_sha": "3b1e1fc0a20a7d861454746c9ebb50a335c9b412",
+        "source_stability": "stable_between_initial_and_closing_reads"
+      },
+      "live": {
+        "github_id": 1197700841,
+        "visibility": "public",
+        "archived": false,
+        "pushed_at": "2026-09-19T23:20:24Z",
+        "access": {
+          "status": "api_readable",
+          "permissions": {
+            "admin": true,
+            "maintain": true,
+            "push": true,
+            "triage": true,
+            "pull": true
+          }
+        },
+        "branch_protection": {
+          "status": "unknown",
+          "http_status": "404",
+          "message": "Branch not protected"
+        },
+        "rulesets": [
+          {
+            "id": 14746904,
+            "name": "protect-main",
+            "target": "branch",
+            "source_type": "Repository",
+            "source": "jackin-project/jackin",
+            "enforcement": "active",
+            "updated_at": "2026-09-17T06:16:20.922+07:00"
+          },
+          {
+            "id": 15179226,
+            "name": "protect-tags",
+            "target": "tag",
+            "source_type": "Repository",
+            "source": "jackin-project/jackin",
+            "enforcement": "active",
+            "updated_at": "2026-05-11T03:07:40.534+07:00"
+          }
+        ],
+        "main_ruleset_required_status_checks": {
+          "strict_required_status_checks_policy": false,
+          "do_not_enforce_on_create": false,
+          "required_status_checks": [
+            {
+              "context": "DCO"
+            },
+            {
+              "context": "Policy"
+            },
+            {
+              "context": "ci-required"
+            }
+          ]
+        }
+      },
+      "source_tree": {
+        "entry_count": 3313,
+        "tree_truncated": null,
+        "listing_sha256": "sha256:17c7071d4d69d0e82650a565f58b99ef1e322b457c6dcfa678e3591ea0eee0be",
+        "workflow_paths": [
+          {
+            "path": ".github/workflows/ci-main.yml",
+            "blob_sha": "32bd6a45881b4e7599bb39c1fbb09756f94be130"
+          },
+          {
+            "path": ".github/workflows/ci-policy.yml",
+            "blob_sha": "08582251ee4f29bf43d1bcc6c9499accddccc398"
+          },
+          {
+            "path": ".github/workflows/ci-pr.yml",
+            "blob_sha": "cf0bb796e259d06db99ae014f1842e74cce5b9ce"
+          },
+          {
+            "path": ".github/workflows/ci-unit-bun.yml",
+            "blob_sha": "b126ea4f3a27472ae8a4342664021d17bd52d854"
+          },
+          {
+            "path": ".github/workflows/ci-unit-docker.yml",
+            "blob_sha": "6f5879638faabe89f16f2766e6fee35439577fce"
+          },
+          {
+            "path": ".github/workflows/ci-unit-rust.yml",
+            "blob_sha": "3fd68ac743db590cf82082c3167c43e72d2682a4"
+          },
+          {
+            "path": ".github/workflows/ci-unit-swift.yml",
+            "blob_sha": "cd00997a1ac16348220798d2481c5989646a337e"
+          },
+          {
+            "path": ".github/workflows/desktop-merge.yml",
+            "blob_sha": "d9faf33f7a307c6679f3d5388edaf98374f22db7"
+          },
+          {
+            "path": ".github/workflows/desktop-scheduled.yml",
+            "blob_sha": "06209ab6205f20d56819d4b26e032c6ff4738325"
+          },
+          {
+            "path": ".github/workflows/maintenance.yml",
+            "blob_sha": "2ea67f217dda31b41a14cc226d836e550f004aa1"
+          },
+          {
+            "path": ".github/workflows/nightly.yml",
+            "blob_sha": "5c7ef5b483af8b662b89a1f1b239bd7da58b9c8e"
+          },
+          {
+            "path": ".github/workflows/release.yml",
+            "blob_sha": "2a0a49b83e4bbd9512e1c6eda1c1b07ca145f7d1"
+          },
+          {
+            "path": ".github/workflows/renovate-upstream-sources.yml",
+            "blob_sha": "f46835bf09852b77f9144357f13b4a9b5f4b33f6"
+          },
+          {
+            "path": ".github/workflows/renovate-validate.yml",
+            "blob_sha": "472e9b4589255c45b978279997461e4cb2b130ec"
+          },
+          {
+            "path": ".github/workflows/renovate.yml",
+            "blob_sha": "bf649a5167a455ca797e47544649d4fb32c176bc"
+          }
+        ],
+        "reusable_workflow_candidates": [
+          {
+            "path": ".github/workflows/ci-unit-bun.yml",
+            "blob_sha": "b126ea4f3a27472ae8a4342664021d17bd52d854"
+          },
+          {
+            "path": ".github/workflows/ci-unit-docker.yml",
+            "blob_sha": "6f5879638faabe89f16f2766e6fee35439577fce"
+          },
+          {
+            "path": ".github/workflows/ci-unit-rust.yml",
+            "blob_sha": "3fd68ac743db590cf82082c3167c43e72d2682a4"
+          },
+          {
+            "path": ".github/workflows/ci-unit-swift.yml",
+            "blob_sha": "cd00997a1ac16348220798d2481c5989646a337e"
+          }
+        ],
+        "reusable_classification": "name_candidate_only; content execution not performed",
+        "action_paths": [],
+        "config_paths": [
+          {
+            "path": ".github-gen/velnor-workflow.toml",
+            "blob_sha": "9b664299ddbf9ce36d66a8bc71248186fc048351"
+          },
+          {
+            "path": ".github/ci/.github-actions-generator-state",
+            "blob_sha": "8258bf4964b204fa4693f8c6d2ef5a2f8a7edd9b"
+          },
+          {
+            "path": ".github/ci/project.toml",
+            "blob_sha": "cd0b7e77ab66519349afab12231b026e44d9b8b7"
+          },
+          {
+            "path": "Cargo.toml",
+            "blob_sha": "779babfb19f8b97822f85be818584d4232820a9b"
+          },
+          {
+            "path": "crates/jackin/tests/fixtures/roles/jackin-sentinel/Dockerfile",
+            "blob_sha": "c554ab568223a263184518ca092abb555b55bd58"
+          },
+          {
+            "path": "crates/jackin/tests/fixtures/roles/jackin-sentinel/jackin.role.toml",
+            "blob_sha": "ad2439292b2dacefcc068ee1f1743cff91b3dffd"
+          },
+          {
+            "path": "docker/construct/Dockerfile",
+            "blob_sha": "0bdbd31d086eaaea29d0999d97f7ef6e559936a5"
+          },
+          {
+            "path": "mise.toml",
+            "blob_sha": "a1453e19c965d8f17b208f3dcee12bfbbf4b9acc"
+          },
+          {
+            "path": "native/Design/Prototypes/UnifiedAgentUsage/Package.swift",
+            "blob_sha": "9a88ebf57d9e06e1e2067df4c729b49ad46974e5"
+          },
+          {
+            "path": "native/Package.swift",
+            "blob_sha": "d5209e673f15c5c0bb52fb73d296743625f51343"
+          },
+          {
+            "path": "native/project.yml",
+            "blob_sha": "e688246b512210de72bdf93235772728853db183"
+          }
+        ],
+        "scan_paths": [
+          {
+            "path": ".github-gen/velnor-workflow.toml",
+            "blob_sha": "9b664299ddbf9ce36d66a8bc71248186fc048351"
+          },
+          {
+            "path": ".github/workflows/ci-main.yml",
+            "blob_sha": "32bd6a45881b4e7599bb39c1fbb09756f94be130"
+          },
+          {
+            "path": ".github/workflows/ci-policy.yml",
+            "blob_sha": "08582251ee4f29bf43d1bcc6c9499accddccc398"
+          },
+          {
+            "path": ".github/workflows/ci-pr.yml",
+            "blob_sha": "cf0bb796e259d06db99ae014f1842e74cce5b9ce"
+          },
+          {
+            "path": ".github/workflows/ci-unit-bun.yml",
+            "blob_sha": "b126ea4f3a27472ae8a4342664021d17bd52d854"
+          },
+          {
+            "path": ".github/workflows/ci-unit-docker.yml",
+            "blob_sha": "6f5879638faabe89f16f2766e6fee35439577fce"
+          },
+          {
+            "path": ".github/workflows/ci-unit-rust.yml",
+            "blob_sha": "3fd68ac743db590cf82082c3167c43e72d2682a4"
+          },
+          {
+            "path": ".github/workflows/ci-unit-swift.yml",
+            "blob_sha": "cd00997a1ac16348220798d2481c5989646a337e"
+          },
+          {
+            "path": ".github/workflows/desktop-merge.yml",
+            "blob_sha": "d9faf33f7a307c6679f3d5388edaf98374f22db7"
+          },
+          {
+            "path": ".github/workflows/desktop-scheduled.yml",
+            "blob_sha": "06209ab6205f20d56819d4b26e032c6ff4738325"
+          },
+          {
+            "path": ".github/workflows/maintenance.yml",
+            "blob_sha": "2ea67f217dda31b41a14cc226d836e550f004aa1"
+          },
+          {
+            "path": ".github/workflows/nightly.yml",
+            "blob_sha": "5c7ef5b483af8b662b89a1f1b239bd7da58b9c8e"
+          },
+          {
+            "path": ".github/workflows/release.yml",
+            "blob_sha": "2a0a49b83e4bbd9512e1c6eda1c1b07ca145f7d1"
+          },
+          {
+            "path": ".github/workflows/renovate-upstream-sources.yml",
+            "blob_sha": "f46835bf09852b77f9144357f13b4a9b5f4b33f6"
+          },
+          {
+            "path": ".github/workflows/renovate-validate.yml",
+            "blob_sha": "472e9b4589255c45b978279997461e4cb2b130ec"
+          },
+          {
+            "path": ".github/workflows/renovate.yml",
+            "blob_sha": "bf649a5167a455ca797e47544649d4fb32c176bc"
+          },
+          {
+            "path": "crates/jackin/tests/fixtures/roles/jackin-sentinel/Dockerfile",
+            "blob_sha": "c554ab568223a263184518ca092abb555b55bd58"
+          },
+          {
+            "path": "crates/jackin/tests/fixtures/roles/jackin-sentinel/jackin.role.toml",
+            "blob_sha": "ad2439292b2dacefcc068ee1f1743cff91b3dffd"
+          },
+          {
+            "path": "docker/construct/Dockerfile",
+            "blob_sha": "0bdbd31d086eaaea29d0999d97f7ef6e559936a5"
+          },
+          {
+            "path": "native/Design/Prototypes/UnifiedAgentUsage/Package.swift",
+            "blob_sha": "9a88ebf57d9e06e1e2067df4c729b49ad46974e5"
+          },
+          {
+            "path": "native/Package.swift",
+            "blob_sha": "d5209e673f15c5c0bb52fb73d296743625f51343"
+          },
+          {
+            "path": "native/project.yml",
+            "blob_sha": "e688246b512210de72bdf93235772728853db183"
+          }
+        ]
+      },
+      "workflow": {
+        "source_paths": [
+          {
+            "path": ".github/workflows/ci-main.yml",
+            "blob_sha": "32bd6a45881b4e7599bb39c1fbb09756f94be130"
+          },
+          {
+            "path": ".github/workflows/ci-policy.yml",
+            "blob_sha": "08582251ee4f29bf43d1bcc6c9499accddccc398"
+          },
+          {
+            "path": ".github/workflows/ci-pr.yml",
+            "blob_sha": "cf0bb796e259d06db99ae014f1842e74cce5b9ce"
+          },
+          {
+            "path": ".github/workflows/ci-unit-bun.yml",
+            "blob_sha": "b126ea4f3a27472ae8a4342664021d17bd52d854"
+          },
+          {
+            "path": ".github/workflows/ci-unit-docker.yml",
+            "blob_sha": "6f5879638faabe89f16f2766e6fee35439577fce"
+          },
+          {
+            "path": ".github/workflows/ci-unit-rust.yml",
+            "blob_sha": "3fd68ac743db590cf82082c3167c43e72d2682a4"
+          },
+          {
+            "path": ".github/workflows/ci-unit-swift.yml",
+            "blob_sha": "cd00997a1ac16348220798d2481c5989646a337e"
+          },
+          {
+            "path": ".github/workflows/desktop-merge.yml",
+            "blob_sha": "d9faf33f7a307c6679f3d5388edaf98374f22db7"
+          },
+          {
+            "path": ".github/workflows/desktop-scheduled.yml",
+            "blob_sha": "06209ab6205f20d56819d4b26e032c6ff4738325"
+          },
+          {
+            "path": ".github/workflows/maintenance.yml",
+            "blob_sha": "2ea67f217dda31b41a14cc226d836e550f004aa1"
+          },
+          {
+            "path": ".github/workflows/nightly.yml",
+            "blob_sha": "5c7ef5b483af8b662b89a1f1b239bd7da58b9c8e"
+          },
+          {
+            "path": ".github/workflows/release.yml",
+            "blob_sha": "2a0a49b83e4bbd9512e1c6eda1c1b07ca145f7d1"
+          },
+          {
+            "path": ".github/workflows/renovate-upstream-sources.yml",
+            "blob_sha": "f46835bf09852b77f9144357f13b4a9b5f4b33f6"
+          },
+          {
+            "path": ".github/workflows/renovate-validate.yml",
+            "blob_sha": "472e9b4589255c45b978279997461e4cb2b130ec"
+          },
+          {
+            "path": ".github/workflows/renovate.yml",
+            "blob_sha": "bf649a5167a455ca797e47544649d4fb32c176bc"
+          }
+        ],
+        "reusable_workflow_candidates": [
+          {
+            "path": ".github/workflows/ci-unit-bun.yml",
+            "blob_sha": "b126ea4f3a27472ae8a4342664021d17bd52d854"
+          },
+          {
+            "path": ".github/workflows/ci-unit-docker.yml",
+            "blob_sha": "6f5879638faabe89f16f2766e6fee35439577fce"
+          },
+          {
+            "path": ".github/workflows/ci-unit-rust.yml",
+            "blob_sha": "3fd68ac743db590cf82082c3167c43e72d2682a4"
+          },
+          {
+            "path": ".github/workflows/ci-unit-swift.yml",
+            "blob_sha": "cd00997a1ac16348220798d2481c5989646a337e"
+          }
+        ],
+        "api_paths": [
+          ".github/workflows/ci-main.yml",
+          ".github/workflows/ci-policy.yml",
+          ".github/workflows/ci-pr.yml",
+          ".github/workflows/ci-unit-bun.yml",
+          ".github/workflows/ci-unit-docker.yml",
+          ".github/workflows/ci-unit-rust.yml",
+          ".github/workflows/ci-unit-swift.yml",
+          ".github/workflows/ci.yml",
+          ".github/workflows/construct.yml",
+          ".github/workflows/desktop-merge.yml",
+          ".github/workflows/desktop-scheduled.yml",
+          ".github/workflows/docs.yml",
+          ".github/workflows/jackin-dev.yml",
+          ".github/workflows/maintenance.yml",
+          ".github/workflows/nightly.yml",
+          ".github/workflows/release.yml",
+          ".github/workflows/renovate-upstream-sources.yml",
+          ".github/workflows/renovate-validate.yml",
+          ".github/workflows/renovate.yml",
+          ".github/workflows/reuse-compliance.yml"
+        ],
+        "api_count": 20,
+        "tree_count": 15,
+        "api_tree_consistency": "mismatch_preserved_unknown",
+        "missing_expected_workflow_paths": [],
+        "source_only_no_execution": true,
+        "empty_success_forbidden": true
+      },
+      "expected_workload_ids": [
+        "jackin-rust-bun-docker-docs",
+        "jackin-swift-package-native",
+        "jackin-prototype-xcode-package",
+        "jackin-desktop-cadence-release"
+      ],
+      "expected_workloads": [
+        {
+          "id": "jackin-rust-bun-docker-docs",
+          "required": true,
+          "status": "source_present_no_execution",
+          "workflow_paths": [
+            ".github/workflows/ci-unit-bun.yml",
+            ".github/workflows/ci-unit-docker.yml",
+            ".github/workflows/ci-unit-rust.yml"
+          ],
+          "notes": "Portable generated units are source-present; no result row is treated as success. Docs are source inputs, not a separate workflow here."
+        },
+        {
+          "id": "jackin-swift-package-native",
+          "required": true,
+          "status": "source_present_no_execution",
+          "workflow_paths": [
+            ".github/workflows/ci-unit-swift.yml"
+          ],
+          "platform_requirement": {
+            "os": "macos",
+            "architecture": "arm64"
+          },
+          "notes": "Native Package.swift/XCFramework unit is source-present; no job result is claimed."
+        },
+        {
+          "id": "jackin-prototype-xcode-package",
+          "required": true,
+          "status": "source_present_no_execution",
+          "workflow_paths": [
+            ".github/workflows/ci-unit-swift.yml"
+          ],
+          "platform_requirement": {
+            "os": "macos",
+            "architecture": "arm64"
+          },
+          "notes": "native/Design/Prototypes/UnifiedAgentUsage/Package.swift is source-present; no job result is claimed."
+        },
+        {
+          "id": "jackin-desktop-cadence-release",
+          "required": true,
+          "status": "source_present_no_execution",
+          "workflow_paths": [
+            ".github/workflows/desktop-merge.yml",
+            ".github/workflows/desktop-scheduled.yml",
+            ".github/workflows/release.yml"
+          ],
+          "notes": "Desktop cadence and release workflow paths are source-present; publication/signing was not executed."
+        }
+      ],
+      "platform_architecture_provider": [
+        {
+          "workloads": [
+            "jackin-rust-bun-docker-docs"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-26.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "configured_github_only_source_only",
+          "velnor": "not_admitted_by_current_policy"
+        },
+        {
+          "workloads": [
+            "jackin-swift-package-native",
+            "jackin-prototype-xcode-package",
+            "jackin-desktop-cadence-release"
+          ],
+          "provider": "github-hosted",
+          "runner": "macos-26",
+          "os": "macos",
+          "architectures": [
+            "arm64"
+          ],
+          "status": "configured_correct_native_route_source_only",
+          "velnor": "excluded"
+        }
+      ],
+      "provider_eligibility": {
+        "github_hosted": "configured_source_only",
+        "velnor": "not_admitted_by_current_policy",
+        "trusted_source": "eligible_for_static_review_only",
+        "fork_or_untrusted": "not_eligible_for_signing_or_release"
+      },
+      "justified_exclusions": [
+        {
+          "id": "no_execution_claim",
+          "workloads": [
+            "jackin-rust-bun-docker-docs",
+            "jackin-swift-package-native",
+            "jackin-prototype-xcode-package",
+            "jackin-desktop-cadence-release"
+          ],
+          "reason": "No workflow jobs/results were collected."
+        },
+        {
+          "id": "native_not_velnor",
+          "workloads": [
+            "jackin-swift-package-native",
+            "jackin-prototype-xcode-package",
+            "jackin-desktop-cadence-release"
+          ],
+          "reason": "macOS arm64 workloads are excluded from Velnor."
+        },
+        {
+          "id": "release_not_executed",
+          "workloads": [
+            "jackin-desktop-cadence-release"
+          ],
+          "reason": "Source release/sign/attest declarations do not prove a publication."
+        }
+      ],
+      "unsupported_blocks": [
+        {
+          "id": "jackin-native-clean-proof",
+          "kind": "not_observed",
+          "reason": "Correct macOS routing is source/config evidence only; no clean native execution transcript.",
+          "evidence": [
+            "G0/native-routing/report.md",
+            "source_only_audit"
+          ]
+        },
+        {
+          "id": "jackin-velnor-portable-policy",
+          "kind": "excluded",
+          "reason": "Current generator policy keeps product automatic lanes GitHub-only.",
+          "evidence": [
+            "live .github-gen/velnor-workflow.toml"
+          ]
+        },
+        {
+          "id": "jackin-workflow-api-tree-mismatch",
+          "kind": "unknown",
+          "reason": "Actions API exposes 20 workflow rows while the exact 3b1e... tree contains 15 workflow blobs; both observations are retained.",
+          "evidence": [
+            "actions_workflow_api",
+            "source_tree"
+          ]
+        }
+      ],
+      "dependency_graph": {
+        "status": "unknown_source_only",
+        "edge_kinds_required": [
+          "workload_to_child",
+          "workload_to_release",
+          "workload_to_package",
+          "workload_to_required_check"
+        ],
+        "edges": [],
+        "reason": "Static config declares unit dependencies but no generated caller/result graph was executed."
+      },
+      "required_check_contexts_and_apps": {
+        "state": "ruleset_main_observed_app_identity_unknown",
+        "branch_protection_endpoint": {
+          "status": "unknown",
+          "http_status": "404",
+          "message": "Branch not protected"
+        },
+        "ruleset_contexts": [
+          "DCO",
+          "Policy",
+          "ci-required"
+        ],
+        "ruleset_raw": {
+          "strict_required_status_checks_policy": false,
+          "do_not_enforce_on_create": false,
+          "required_status_checks": [
+            {
+              "context": "DCO"
+            },
+            {
+              "context": "Policy"
+            },
+            {
+              "context": "ci-required"
+            }
+          ]
+        },
+        "producer_app_ids": [],
+        "producer_app_ids_reason": "Required-status-check detail did not expose App IDs; no identity invented."
+      },
+      "pr_trust": {
+        "status": "complete_paginated_open_pr_observation",
+        "open_pr_count": 2,
+        "rows": [
+          {
+            "number": 1002,
+            "title": "feat(multi-account): settings, usage, workspace selection, container support",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin",
+              "sha": "19e9f00e08a1587262d44dd057308183dcaf122d",
+              "ref": "feat/multi-account-support"
+            },
+            "base": {
+              "repository": "jackin-project/jackin",
+              "sha": "3b1e1fc0a20a7d861454746c9ebb50a335c9b412",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 1003,
+            "title": "feat(config): add v1alpha10 to v1alpha11 migration",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin",
+              "sha": "24ad0bc335c79f9dbc4cfadde257a18b1f58222e",
+              "ref": "codex/pr1002-config-v1alpha11"
+            },
+            "base": {
+              "repository": "jackin-project/jackin",
+              "sha": "3b1e1fc0a20a7d861454746c9ebb50a335c9b412",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          }
+        ],
+        "future_trust_tuple_unknowns": [
+          "head/base SHA and repository must be reread for every candidate",
+          "author/fork/trusted-event/provider/check identity must be bound per run",
+          "open PR inventory is not an execution result"
+        ]
+      },
+      "access_observation": {
+        "status": "api_readable",
+        "permissions": {
+          "admin": true,
+          "maintain": true,
+          "push": true,
+          "triage": true,
+          "pull": true
+        }
+      },
+      "source_validation_state": {
+        "source_inventory": "observed_at_exact_default_branch_tree",
+        "expected_set": "source_derived_nonempty",
+        "workflow_presence": "source_presence_only",
+        "helper_execution": "not_run",
+        "execution_result": "not_collected"
+      },
+      "actual_jobs": null,
+      "release_install": {
+        "status": "not_evaluated_source_contract",
+        "publication_claim": false
+      },
+      "gate_status": "not_evaluated",
+      "evidence_paths": [
+        "live .github-gen/velnor-workflow.toml at exact main SHA",
+        "G0/native-routing/report.md",
+        "G0/fleet/main-revisions.tsv",
+        "G0/fleet/configs.tsv",
+        "live source tree and API capture"
+      ],
+      "unknowns": [
+        "No workflow job/run result, artifact, provider transcript, or Velnor output was collected.",
+        "Branch protection endpoint is HTTP 404; organization/inherited check policy may remain unknown.",
+        "Ruleset required contexts are visible, but producer GitHub App IDs are unknown.",
+        "Actions API/tree workflow mismatch, when present, is preserved and not resolved into execution truth.",
+        "Dependency edges are required but not resolved from source-only inventory.",
+        "Future PR trust requires live head/base/fork/event/check binding."
+      ]
+    },
+    {
+      "repository": "jackin-project/jackin-agent-smith",
+      "repository_role": "jackin_role_image",
+      "default_branch": "main",
+      "default_branch_sha": "08cb1c2f82519bab1aa0c164879955a84d35463b",
+      "current_revision_binding": {
+        "initial_api_sha": "08cb1c2f82519bab1aa0c164879955a84d35463b",
+        "initial_ref_sha": "08cb1c2f82519bab1aa0c164879955a84d35463b",
+        "closing_default_branch_sha": "08cb1c2f82519bab1aa0c164879955a84d35463b",
+        "closing_ls_remote_sha": "08cb1c2f82519bab1aa0c164879955a84d35463b",
+        "source_stability": "stable_between_initial_and_closing_reads"
+      },
+      "live": {
+        "github_id": 1197909684,
+        "visibility": "public",
+        "archived": false,
+        "pushed_at": "2026-09-16T15:41:08Z",
+        "access": {
+          "status": "api_readable",
+          "permissions": {
+            "admin": true,
+            "maintain": true,
+            "push": true,
+            "triage": true,
+            "pull": true
+          }
+        },
+        "branch_protection": {
+          "status": "unknown",
+          "http_status": "404",
+          "message": "Branch not protected"
+        },
+        "rulesets": [
+          {
+            "id": 14742580,
+            "name": "protect-main",
+            "target": "branch",
+            "source_type": "Repository",
+            "source": "jackin-project/jackin-agent-smith",
+            "enforcement": "active",
+            "updated_at": "2026-09-16T21:29:04.197+07:00"
+          },
+          {
+            "id": 15179228,
+            "name": "protect-tags",
+            "target": "tag",
+            "source_type": "Repository",
+            "source": "jackin-project/jackin-agent-smith",
+            "enforcement": "active",
+            "updated_at": "2026-04-21T15:49:21.742+07:00"
+          }
+        ],
+        "main_ruleset_required_status_checks": {
+          "strict_required_status_checks_policy": false,
+          "do_not_enforce_on_create": false,
+          "required_status_checks": [
+            {
+              "context": "DCO"
+            },
+            {
+              "context": "Policy"
+            },
+            {
+              "context": "ci-required"
+            }
+          ]
+        }
+      },
+      "source_tree": {
+        "entry_count": 37,
+        "tree_truncated": null,
+        "listing_sha256": "sha256:f540c560a5e7fc48432a7a1baba1aa13d20560ca8df9ae7980206dde2b53c7ea",
+        "workflow_paths": [
+          {
+            "path": ".github/workflows/ci-main.yml",
+            "blob_sha": "b8915aeb75e68904f94edc79ec2b258992b0372a"
+          },
+          {
+            "path": ".github/workflows/ci-policy.yml",
+            "blob_sha": "c939ac8edf6bbdc0a7c56ec69fa4293f417942f0"
+          },
+          {
+            "path": ".github/workflows/ci-pr.yml",
+            "blob_sha": "c1e78494cf63c05a0eb4c5ac7b32f2cd71691eaf"
+          },
+          {
+            "path": ".github/workflows/ci-unit-docker.yml",
+            "blob_sha": "b2726d27862c7be665a6658777444e85ed4fe8be"
+          },
+          {
+            "path": ".github/workflows/maintenance.yml",
+            "blob_sha": "5c5fb601f6949a8c61fc7e039c4b845d079728fc"
+          },
+          {
+            "path": ".github/workflows/nightly.yml",
+            "blob_sha": "7db67da1f6a6b487e7c6b3f979d224b3e1f5f8b4"
+          }
+        ],
+        "reusable_workflow_candidates": [
+          {
+            "path": ".github/workflows/ci-unit-docker.yml",
+            "blob_sha": "b2726d27862c7be665a6658777444e85ed4fe8be"
+          }
+        ],
+        "reusable_classification": "name_candidate_only; content execution not performed",
+        "action_paths": [],
+        "config_paths": [
+          {
+            "path": ".github-gen/velnor-workflow.toml",
+            "blob_sha": "1bfb1f6fcff56c66ae892d9882acd14f88fe97f3"
+          },
+          {
+            "path": ".github/ci/.github-actions-generator-state",
+            "blob_sha": "31b3153533f5024efd5966a0b0b1b7db8d46cf22"
+          },
+          {
+            "path": ".github/ci/project.toml",
+            "blob_sha": "3086f5ea469db2cb94d0c36059a1058b4e075953"
+          },
+          {
+            "path": "Dockerfile",
+            "blob_sha": "09cd108902f37406a4d9299681b37021ff27d0da"
+          },
+          {
+            "path": "jackin.role.toml",
+            "blob_sha": "7c349e6e7f7427bd5dcdcf09536f52b71753c298"
+          },
+          {
+            "path": "mise.toml",
+            "blob_sha": "429696ba3c88ae9299c77819db6953328417b382"
+          }
+        ],
+        "scan_paths": [
+          {
+            "path": ".github-gen/velnor-workflow.toml",
+            "blob_sha": "1bfb1f6fcff56c66ae892d9882acd14f88fe97f3"
+          },
+          {
+            "path": ".github/workflows/ci-main.yml",
+            "blob_sha": "b8915aeb75e68904f94edc79ec2b258992b0372a"
+          },
+          {
+            "path": ".github/workflows/ci-policy.yml",
+            "blob_sha": "c939ac8edf6bbdc0a7c56ec69fa4293f417942f0"
+          },
+          {
+            "path": ".github/workflows/ci-pr.yml",
+            "blob_sha": "c1e78494cf63c05a0eb4c5ac7b32f2cd71691eaf"
+          },
+          {
+            "path": ".github/workflows/ci-unit-docker.yml",
+            "blob_sha": "b2726d27862c7be665a6658777444e85ed4fe8be"
+          },
+          {
+            "path": ".github/workflows/maintenance.yml",
+            "blob_sha": "5c5fb601f6949a8c61fc7e039c4b845d079728fc"
+          },
+          {
+            "path": ".github/workflows/nightly.yml",
+            "blob_sha": "7db67da1f6a6b487e7c6b3f979d224b3e1f5f8b4"
+          },
+          {
+            "path": "Dockerfile",
+            "blob_sha": "09cd108902f37406a4d9299681b37021ff27d0da"
+          },
+          {
+            "path": "jackin.role.toml",
+            "blob_sha": "7c349e6e7f7427bd5dcdcf09536f52b71753c298"
+          }
+        ]
+      },
+      "workflow": {
+        "source_paths": [
+          {
+            "path": ".github/workflows/ci-main.yml",
+            "blob_sha": "b8915aeb75e68904f94edc79ec2b258992b0372a"
+          },
+          {
+            "path": ".github/workflows/ci-policy.yml",
+            "blob_sha": "c939ac8edf6bbdc0a7c56ec69fa4293f417942f0"
+          },
+          {
+            "path": ".github/workflows/ci-pr.yml",
+            "blob_sha": "c1e78494cf63c05a0eb4c5ac7b32f2cd71691eaf"
+          },
+          {
+            "path": ".github/workflows/ci-unit-docker.yml",
+            "blob_sha": "b2726d27862c7be665a6658777444e85ed4fe8be"
+          },
+          {
+            "path": ".github/workflows/maintenance.yml",
+            "blob_sha": "5c5fb601f6949a8c61fc7e039c4b845d079728fc"
+          },
+          {
+            "path": ".github/workflows/nightly.yml",
+            "blob_sha": "7db67da1f6a6b487e7c6b3f979d224b3e1f5f8b4"
+          }
+        ],
+        "reusable_workflow_candidates": [
+          {
+            "path": ".github/workflows/ci-unit-docker.yml",
+            "blob_sha": "b2726d27862c7be665a6658777444e85ed4fe8be"
+          }
+        ],
+        "api_paths": [
+          ".github/workflows/ci-main.yml",
+          ".github/workflows/ci-policy.yml",
+          ".github/workflows/ci-pr.yml",
+          ".github/workflows/ci-unit-docker.yml",
+          ".github/workflows/fleet-upgrade-runner.yml",
+          ".github/workflows/gitleaks.yml",
+          ".github/workflows/maintenance.yml",
+          ".github/workflows/nightly.yml"
+        ],
+        "api_count": 8,
+        "tree_count": 6,
+        "api_tree_consistency": "mismatch_preserved_unknown",
+        "missing_expected_workflow_paths": [
+          "role-validation",
+          "runtime-smoke-and-multiarch"
+        ],
+        "source_only_no_execution": true,
+        "empty_success_forbidden": true
+      },
+      "expected_workload_ids": [
+        "smith-role-manifest",
+        "smith-docker-build",
+        "smith-role-validation",
+        "smith-runtime-smoke-and-multiarch"
+      ],
+      "expected_workloads": [
+        {
+          "id": "smith-role-manifest",
+          "required": true,
+          "status": "source_present_no_execution",
+          "workflow_paths": [],
+          "notes": "jackin.role.toml, Dockerfile, Construct base, and published_image are source-present; no manifest execution."
+        },
+        {
+          "id": "smith-docker-build",
+          "required": true,
+          "status": "source_present_no_execution",
+          "workflow_paths": [
+            ".github/workflows/ci-unit-docker.yml"
+          ],
+          "notes": "Plain Docker unit path is source-present; no build result is claimed."
+        },
+        {
+          "id": "smith-role-validation",
+          "required": true,
+          "status": "missing_workflow",
+          "workflow_paths": [],
+          "notes": "No role-validator workflow unit is present; missing is not success."
+        },
+        {
+          "id": "smith-runtime-smoke-and-multiarch",
+          "required": true,
+          "status": "missing_workflow",
+          "workflow_paths": [],
+          "notes": "No runtime smoke or amd64/arm64 publisher workflow is present; missing is not success."
+        }
+      ],
+      "platform_architecture_provider": [
+        {
+          "workloads": [
+            "smith-docker-build",
+            "smith-role-validation"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "plain_single_arch_build_source_only",
+          "velnor": "not_admitted_by_current_policy"
+        },
+        {
+          "workloads": [
+            "smith-runtime-smoke-and-multiarch"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04_buildx",
+          "os": "linux",
+          "architectures": [
+            "amd64",
+            "arm64"
+          ],
+          "status": "required_but_missing",
+          "velnor": "not_admitted"
+        }
+      ],
+      "provider_eligibility": {
+        "github_hosted": "configured_generic_docker_only_source_only",
+        "velnor": "not_admitted_by_current_policy",
+        "trusted_source": "eligible_for_static_review_only",
+        "fork_or_untrusted": "not_eligible_for_publish_or_sign"
+      },
+      "justified_exclusions": [
+        {
+          "id": "missing-role-validation",
+          "workloads": [
+            "smith-role-validation"
+          ],
+          "reason": "No workflow path exists."
+        },
+        {
+          "id": "missing-runtime-multiarch",
+          "workloads": [
+            "smith-runtime-smoke-and-multiarch"
+          ],
+          "reason": "No workflow path exists."
+        },
+        {
+          "id": "no_execution_claim",
+          "workloads": [
+            "smith-role-manifest",
+            "smith-docker-build"
+          ],
+          "reason": "No jobs/results were collected."
+        }
+      ],
+      "unsupported_blocks": [
+        {
+          "id": "role-validate",
+          "kind": "missing",
+          "reason": "Generated Docker unit does not invoke role validator.",
+          "evidence": [
+            "G0/action-roles/findings.md"
+          ]
+        },
+        {
+          "id": "role-runtime-smoke",
+          "kind": "missing",
+          "reason": "No runtime launch/hooks/report smoke.",
+          "evidence": [
+            "G0/action-roles/findings.md"
+          ]
+        },
+        {
+          "id": "role-multiarch-publisher",
+          "kind": "missing",
+          "reason": "No platform matrix, digest merge, registry, or signing proof.",
+          "evidence": [
+            "G0/action-roles/findings.md"
+          ]
+        }
+      ],
+      "dependency_graph": {
+        "status": "unknown_source_only",
+        "edge_kinds_required": [
+          "workload_to_child",
+          "workload_to_release",
+          "workload_to_package",
+          "workload_to_required_check"
+        ],
+        "edges": [],
+        "reason": "No role-image caller/result graph was executed."
+      },
+      "required_check_contexts_and_apps": {
+        "state": "ruleset_main_observed_app_identity_unknown",
+        "branch_protection_endpoint": {
+          "status": "unknown",
+          "http_status": "404",
+          "message": "Branch not protected"
+        },
+        "ruleset_contexts": [
+          "DCO",
+          "Policy",
+          "ci-required"
+        ],
+        "ruleset_raw": {
+          "strict_required_status_checks_policy": false,
+          "do_not_enforce_on_create": false,
+          "required_status_checks": [
+            {
+              "context": "DCO"
+            },
+            {
+              "context": "Policy"
+            },
+            {
+              "context": "ci-required"
+            }
+          ]
+        },
+        "producer_app_ids": [],
+        "producer_app_ids_reason": "Required-status-check detail did not expose App IDs; no identity invented."
+      },
+      "pr_trust": {
+        "status": "complete_paginated_open_pr_observation",
+        "open_pr_count": 9,
+        "rows": [
+          {
+            "number": 181,
+            "title": "chore(deps): update chainargos/velnor-actions action to v2026.8.33",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-agent-smith",
+              "sha": "842b9519f067f22e1ee5c639b03eb01db96696d7",
+              "ref": "renovate/chainargos-velnor-actions-2026.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-agent-smith",
+              "sha": "fe81191e5d08bd63265da37fa2557c769f825943",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 182,
+            "title": "chore(deps): update jackin-project/velnor-actions action to v2026.8.33",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-agent-smith",
+              "sha": "52b07df8c81fe8cf277f8b7da5fce3905da530c7",
+              "ref": "renovate/jackin-project-velnor-actions-2026.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-agent-smith",
+              "sha": "fe81191e5d08bd63265da37fa2557c769f825943",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 183,
+            "title": "chore(deps): update renovatebot/github-action action to v46.3.1",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-agent-smith",
+              "sha": "4d87e333a3b52693d1d04319571752855cb52885",
+              "ref": "renovate/renovatebot-github-action-46.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-agent-smith",
+              "sha": "c34ffdb522e0bf2e23ec041716760a2916a61b0c",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 184,
+            "title": "chore(deps): update tailrocks/velnor-actions action to v2026.8.33",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-agent-smith",
+              "sha": "0049e6025849c538949143755c840a3e80507a2f",
+              "ref": "renovate/tailrocks-velnor-actions-2026.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-agent-smith",
+              "sha": "fe81191e5d08bd63265da37fa2557c769f825943",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 188,
+            "title": "chore(deps): update dependency prek to v0.5.3",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-agent-smith",
+              "sha": "5589b0460d388884e990b3c721e40a5498e53b69",
+              "ref": "renovate/prek-0.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-agent-smith",
+              "sha": "c34ffdb522e0bf2e23ec041716760a2916a61b0c",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 189,
+            "title": "chore(deps): update dependency uv to v0.12.15",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-agent-smith",
+              "sha": "84996698e3ae2eef36c9054a65fcb44f097cd67b",
+              "ref": "renovate/uv-0.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-agent-smith",
+              "sha": "c34ffdb522e0bf2e23ec041716760a2916a61b0c",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 190,
+            "title": "chore(deps): update node.js to v24.21.0",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-agent-smith",
+              "sha": "3b799438fb64e1877bbb10701b7bb4296b6eaf9d",
+              "ref": "renovate/node-24.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-agent-smith",
+              "sha": "c34ffdb522e0bf2e23ec041716760a2916a61b0c",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 191,
+            "title": "chore(deps): update projectjackin/construct docker tag to v0.37-trixie",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-agent-smith",
+              "sha": "f4ff5a6c53459e57853454d214a8f1e08cae8131",
+              "ref": "renovate/projectjackin-construct-0.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-agent-smith",
+              "sha": "c34ffdb522e0bf2e23ec041716760a2916a61b0c",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 206,
+            "title": "chore: sync velnor-workflow to 92c34786",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-agent-smith",
+              "sha": "b9db5b149cc46baba9c49549432307c29e3972b0",
+              "ref": "velnor/fleet-92c3478694ef423fb4160b8c934d6671ca85b51a"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-agent-smith",
+              "sha": "8c1dbe3d16a30aa88ac3c5881c6b68aad4a1055e",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          }
+        ],
+        "future_trust_tuple_unknowns": [
+          "head/base SHA and repository must be reread for every candidate",
+          "author/fork/trusted-event/provider/check identity must be bound per run",
+          "open PR inventory is not an execution result"
+        ]
+      },
+      "access_observation": {
+        "status": "api_readable",
+        "permissions": {
+          "admin": true,
+          "maintain": true,
+          "push": true,
+          "triage": true,
+          "pull": true
+        }
+      },
+      "source_validation_state": {
+        "source_inventory": "observed_at_exact_default_branch_tree",
+        "expected_set": "source_derived_nonempty",
+        "workflow_presence": "source_presence_only",
+        "helper_execution": "not_run",
+        "execution_result": "not_collected"
+      },
+      "actual_jobs": null,
+      "release_install": {
+        "status": "not_evaluated_source_contract",
+        "publication_claim": false
+      },
+      "gate_status": "not_evaluated",
+      "evidence_paths": [
+        "G0/action-roles/findings.md",
+        "G0/fleet/main-revisions.tsv",
+        "G0/fleet/configs.tsv",
+        "G0/fleet/workloads-full.json",
+        "live source tree and API capture"
+      ],
+      "unknowns": [
+        "No workflow job/run result, artifact, provider transcript, or Velnor output was collected.",
+        "Branch protection endpoint is HTTP 404; organization/inherited check policy may remain unknown.",
+        "Ruleset required contexts are visible, but producer GitHub App IDs are unknown.",
+        "Actions API/tree workflow mismatch, when present, is preserved and not resolved into execution truth.",
+        "Dependency edges are required but not resolved from source-only inventory.",
+        "Future PR trust requires live head/base/fork/event/check binding."
+      ]
+    },
+    {
+      "repository": "jackin-project/jackin-role-action",
+      "repository_role": "github_action_role_provider",
+      "default_branch": "main",
+      "default_branch_sha": "8882236041e149153491ada7091382e76be1c313",
+      "current_revision_binding": {
+        "initial_api_sha": "8882236041e149153491ada7091382e76be1c313",
+        "initial_ref_sha": "8882236041e149153491ada7091382e76be1c313",
+        "closing_default_branch_sha": "8882236041e149153491ada7091382e76be1c313",
+        "closing_ls_remote_sha": "8882236041e149153491ada7091382e76be1c313",
+        "source_stability": "stable_between_initial_and_closing_reads"
+      },
+      "live": {
+        "github_id": 1205101915,
+        "visibility": "public",
+        "archived": false,
+        "pushed_at": "2026-09-16T15:36:06Z",
+        "access": {
+          "status": "api_readable",
+          "permissions": {
+            "admin": true,
+            "maintain": true,
+            "push": true,
+            "triage": true,
+            "pull": true
+          }
+        },
+        "branch_protection": {
+          "status": "unknown",
+          "http_status": "404",
+          "message": "Branch not protected"
+        },
+        "rulesets": [
+          {
+            "id": 15170996,
+            "name": "protect-main",
+            "target": "branch",
+            "source_type": "Repository",
+            "source": "jackin-project/jackin-role-action",
+            "enforcement": "active",
+            "updated_at": "2026-09-16T15:25:00.430+07:00"
+          },
+          {
+            "id": 16515394,
+            "name": "protect-tags",
+            "target": "tag",
+            "source_type": "Repository",
+            "source": "jackin-project/jackin-role-action",
+            "enforcement": "active",
+            "updated_at": "2026-05-18T08:45:10.850+07:00"
+          }
+        ],
+        "main_ruleset_required_status_checks": {
+          "strict_required_status_checks_policy": false,
+          "do_not_enforce_on_create": false,
+          "required_status_checks": [
+            {
+              "context": "DCO"
+            },
+            {
+              "context": "Policy"
+            },
+            {
+              "context": "ci-required"
+            }
+          ]
+        }
+      },
+      "source_tree": {
+        "entry_count": 33,
+        "tree_truncated": null,
+        "listing_sha256": "sha256:06ddad0224f42321f143a3ad20b11baa6663bb50c8a47f2447334629287b77d2",
+        "workflow_paths": [
+          {
+            "path": ".github/workflows/ci-main.yml",
+            "blob_sha": "854339faf8b84cdc56857fdf1e711f03c9dc7f73"
+          },
+          {
+            "path": ".github/workflows/ci-policy.yml",
+            "blob_sha": "bd4d103c633d0c6f35cf20d82a35a4f3e8c55aac"
+          },
+          {
+            "path": ".github/workflows/ci-pr.yml",
+            "blob_sha": "caad9a831fab734aa1e0b6ae53dafab5668a066b"
+          },
+          {
+            "path": ".github/workflows/ci-unit-docs.yml",
+            "blob_sha": "1499141dccaeb2d3e69889d8f5c0c62717cdb258"
+          },
+          {
+            "path": ".github/workflows/maintenance.yml",
+            "blob_sha": "8ad50af55bbdb362a7cf7426ddfca0090a478c76"
+          },
+          {
+            "path": ".github/workflows/nightly.yml",
+            "blob_sha": "7db67da1f6a6b487e7c6b3f979d224b3e1f5f8b4"
+          }
+        ],
+        "reusable_workflow_candidates": [
+          {
+            "path": ".github/workflows/ci-unit-docs.yml",
+            "blob_sha": "1499141dccaeb2d3e69889d8f5c0c62717cdb258"
+          }
+        ],
+        "reusable_classification": "name_candidate_only; content execution not performed",
+        "action_paths": [
+          {
+            "path": "action.yml",
+            "blob_sha": "33a600606345317404e1c8c065f8d9494ba10bfa"
+          }
+        ],
+        "config_paths": [
+          {
+            "path": ".github-gen/velnor-workflow.toml",
+            "blob_sha": "aa5624add889b0da8d27e8a3bc3d49cbe728a23d"
+          },
+          {
+            "path": ".github/ci/.github-actions-generator-state",
+            "blob_sha": "197b9a07f625b395e33bbd71deb5be847797b539"
+          },
+          {
+            "path": ".github/ci/project.toml",
+            "blob_sha": "8112fce176ecbd1156a233e40009c919fb85b9d0"
+          },
+          {
+            "path": "action.yml",
+            "blob_sha": "33a600606345317404e1c8c065f8d9494ba10bfa"
+          },
+          {
+            "path": "mise.toml",
+            "blob_sha": "5a8067d3c4f047959c161f41b37ffd2b3cddd2eb"
+          }
+        ],
+        "scan_paths": [
+          {
+            "path": ".github-gen/velnor-workflow.toml",
+            "blob_sha": "aa5624add889b0da8d27e8a3bc3d49cbe728a23d"
+          },
+          {
+            "path": ".github/workflows/ci-main.yml",
+            "blob_sha": "854339faf8b84cdc56857fdf1e711f03c9dc7f73"
+          },
+          {
+            "path": ".github/workflows/ci-policy.yml",
+            "blob_sha": "bd4d103c633d0c6f35cf20d82a35a4f3e8c55aac"
+          },
+          {
+            "path": ".github/workflows/ci-pr.yml",
+            "blob_sha": "caad9a831fab734aa1e0b6ae53dafab5668a066b"
+          },
+          {
+            "path": ".github/workflows/ci-unit-docs.yml",
+            "blob_sha": "1499141dccaeb2d3e69889d8f5c0c62717cdb258"
+          },
+          {
+            "path": ".github/workflows/maintenance.yml",
+            "blob_sha": "8ad50af55bbdb362a7cf7426ddfca0090a478c76"
+          },
+          {
+            "path": ".github/workflows/nightly.yml",
+            "blob_sha": "7db67da1f6a6b487e7c6b3f979d224b3e1f5f8b4"
+          },
+          {
+            "path": "action.yml",
+            "blob_sha": "33a600606345317404e1c8c065f8d9494ba10bfa"
+          }
+        ]
+      },
+      "workflow": {
+        "source_paths": [
+          {
+            "path": ".github/workflows/ci-main.yml",
+            "blob_sha": "854339faf8b84cdc56857fdf1e711f03c9dc7f73"
+          },
+          {
+            "path": ".github/workflows/ci-policy.yml",
+            "blob_sha": "bd4d103c633d0c6f35cf20d82a35a4f3e8c55aac"
+          },
+          {
+            "path": ".github/workflows/ci-pr.yml",
+            "blob_sha": "caad9a831fab734aa1e0b6ae53dafab5668a066b"
+          },
+          {
+            "path": ".github/workflows/ci-unit-docs.yml",
+            "blob_sha": "1499141dccaeb2d3e69889d8f5c0c62717cdb258"
+          },
+          {
+            "path": ".github/workflows/maintenance.yml",
+            "blob_sha": "8ad50af55bbdb362a7cf7426ddfca0090a478c76"
+          },
+          {
+            "path": ".github/workflows/nightly.yml",
+            "blob_sha": "7db67da1f6a6b487e7c6b3f979d224b3e1f5f8b4"
+          }
+        ],
+        "reusable_workflow_candidates": [
+          {
+            "path": ".github/workflows/ci-unit-docs.yml",
+            "blob_sha": "1499141dccaeb2d3e69889d8f5c0c62717cdb258"
+          }
+        ],
+        "api_paths": [
+          ".github/workflows/ci-main.yml",
+          ".github/workflows/ci-policy.yml",
+          ".github/workflows/ci-pr.yml",
+          ".github/workflows/ci-unit-docs.yml",
+          ".github/workflows/maintenance.yml",
+          ".github/workflows/nightly.yml"
+        ],
+        "api_count": 6,
+        "tree_count": 6,
+        "api_tree_consistency": "match",
+        "missing_expected_workflow_paths": [
+          ".github/workflows/publish.yml",
+          "immutable-consumer-fixture"
+        ],
+        "source_only_no_execution": true,
+        "empty_success_forbidden": true
+      },
+      "expected_workload_ids": [
+        "action-metadata-and-runner-contract",
+        "download-version-checksum",
+        "role-validation-and-hadolint",
+        "single_arch_build_cache",
+        "reusable_multiarch_publisher",
+        "immutable_consumer_fixture",
+        "docs-reuse"
+      ],
+      "expected_workloads": [
+        {
+          "id": "action-metadata-and-runner-contract",
+          "required": true,
+          "status": "source_present_no_execution",
+          "workflow_paths": [
+            ".github/workflows/ci-unit-docs.yml"
+          ],
+          "notes": "Composite action metadata and docs-unit contract are source-present; no parser/job result."
+        },
+        {
+          "id": "download-version-checksum",
+          "required": true,
+          "status": "source_partial_no_execution",
+          "workflow_paths": [],
+          "notes": "Downloader supports version/latest-build and checksum paths in action source; no generated consumer execution."
+        },
+        {
+          "id": "role-validation-and-hadolint",
+          "required": true,
+          "status": "source_partial_no_execution",
+          "workflow_paths": [],
+          "notes": "Action source invokes validator/linter; no generated consumer proof."
+        },
+        {
+          "id": "single_arch_build_cache",
+          "required": true,
+          "status": "source_partial_no_execution",
+          "workflow_paths": [],
+          "notes": "Action source declares Buildx/cache behavior; no current build result."
+        },
+        {
+          "id": "reusable_multiarch_publisher",
+          "required": true,
+          "status": "missing_workflow",
+          "workflow_paths": [],
+          "required_path": ".github/workflows/publish.yml",
+          "notes": "Required reusable publisher path is absent; missing is not success."
+        },
+        {
+          "id": "immutable_consumer_fixture",
+          "required": true,
+          "status": "missing_workflow",
+          "workflow_paths": [],
+          "notes": "No executed immutable consumer success/failure fixture."
+        },
+        {
+          "id": "docs-reuse",
+          "required": true,
+          "status": "source_present_no_execution",
+          "workflow_paths": [
+            ".github/workflows/ci-unit-docs.yml"
+          ],
+          "notes": "Docs unit source is present; semantic action behavior remains unexecuted."
+        }
+      ],
+      "platform_architecture_provider": [
+        {
+          "workloads": [
+            "action-metadata-and-runner-contract",
+            "download-version-checksum",
+            "role-validation-and-hadolint",
+            "single_arch_build_cache",
+            "immutable_consumer_fixture",
+            "docs-reuse"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "docs_unit_only_source_only",
+          "velnor": "not_admitted_by_current_policy"
+        },
+        {
+          "workloads": [
+            "reusable_multiarch_publisher"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04_buildx",
+          "os": "linux",
+          "architectures": [
+            "amd64",
+            "arm64"
+          ],
+          "status": "required_but_missing",
+          "velnor": "not_admitted"
+        }
+      ],
+      "provider_eligibility": {
+        "github_hosted": "configured_docs_only_source_only",
+        "velnor": "not_admitted_by_current_policy",
+        "trusted_source": "eligible_for_static_review_only",
+        "fork_or_untrusted": "not_eligible_for_download_publish_or_sign"
+      },
+      "justified_exclusions": [
+        {
+          "id": "missing-reusable-publisher",
+          "workloads": [
+            "reusable_multiarch_publisher"
+          ],
+          "reason": "publish.yml is absent at exact main tree."
+        },
+        {
+          "id": "missing-immutable-consumer",
+          "workloads": [
+            "immutable-consumer-fixture"
+          ],
+          "reason": "No immutable consumer fixture execution path is present."
+        },
+        {
+          "id": "no-execution-claim",
+          "workloads": [
+            "action-metadata-and-runner-contract",
+            "download-version-checksum",
+            "role-validation-and-hadolint",
+            "single_arch_build_cache",
+            "docs-reuse"
+          ],
+          "reason": "No jobs/results were collected."
+        }
+      ],
+      "unsupported_blocks": [
+        {
+          "id": "action-reusable-publisher",
+          "kind": "missing",
+          "reason": "Current main lacks .github/workflows/publish.yml while historical callers pin it.",
+          "evidence": [
+            "G0/action-roles/findings.md",
+            "source_tree"
+          ]
+        },
+        {
+          "id": "action-consumer-execution",
+          "kind": "missing",
+          "reason": "Generated docs/unit checks do not execute immutable consumer success/failure fixtures.",
+          "evidence": [
+            "G0/action-review/report.md"
+          ]
+        },
+        {
+          "id": "action-runner-parity",
+          "kind": "unknown",
+          "reason": "Exact candidate requires clean actions/runner parity review; no helper was executed.",
+          "evidence": [
+            "G0/action-review/report.md"
+          ]
+        }
+      ],
+      "dependency_graph": {
+        "status": "unknown_source_only",
+        "edge_kinds_required": [
+          "workload_to_child",
+          "workload_to_release",
+          "workload_to_package",
+          "workload_to_required_check"
+        ],
+        "edges": [],
+        "reason": "No action caller/result graph was executed."
+      },
+      "required_check_contexts_and_apps": {
+        "state": "ruleset_main_observed_app_identity_unknown",
+        "branch_protection_endpoint": {
+          "status": "unknown",
+          "http_status": "404",
+          "message": "Branch not protected"
+        },
+        "ruleset_contexts": [
+          "DCO",
+          "Policy",
+          "ci-required"
+        ],
+        "ruleset_raw": {
+          "strict_required_status_checks_policy": false,
+          "do_not_enforce_on_create": false,
+          "required_status_checks": [
+            {
+              "context": "DCO"
+            },
+            {
+              "context": "Policy"
+            },
+            {
+              "context": "ci-required"
+            }
+          ]
+        },
+        "producer_app_ids": [],
+        "producer_app_ids_reason": "Required-status-check detail did not expose App IDs; no identity invented."
+      },
+      "pr_trust": {
+        "status": "complete_paginated_open_pr_observation",
+        "open_pr_count": 10,
+        "rows": [
+          {
+            "number": 157,
+            "title": "chore(deps): update chainargos/velnor-actions action to v2026.8.33",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-role-action",
+              "sha": "3b89ee29ed362fa1290bc5cfb4d47fc721edb216",
+              "ref": "renovate/chainargos-velnor-actions-2026.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-role-action",
+              "sha": "82528e86c50d457fa6bb515b8475e1bdc0be1419",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 158,
+            "title": "chore(deps): update jackin-project/velnor-actions action to v2026.8.33",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-role-action",
+              "sha": "b459e3088635b9dd503b98452630ac2a5eb39823",
+              "ref": "renovate/jackin-project-velnor-actions-2026.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-role-action",
+              "sha": "82528e86c50d457fa6bb515b8475e1bdc0be1419",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 159,
+            "title": "chore(deps): update renovatebot/github-action action to v46.3.1",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-role-action",
+              "sha": "9b524cf22f5c7fd93e69ac31e5fa9da537ac72f8",
+              "ref": "renovate/renovatebot-github-action-46.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-role-action",
+              "sha": "52ee2604aa660d8840fc5644113e0918615f90e2",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 160,
+            "title": "chore(deps): update tailrocks/velnor-actions action to v2026.8.33",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-role-action",
+              "sha": "3df1559270c87e1d789447e3eeab3da678cb675b",
+              "ref": "renovate/tailrocks-velnor-actions-2026.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-role-action",
+              "sha": "82528e86c50d457fa6bb515b8475e1bdc0be1419",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 164,
+            "title": "chore(deps): update docker/setup-qemu-action action to v4.4.0",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-role-action",
+              "sha": "5e0f99cf761306d3b202b025c944dd21d4df2b7f",
+              "ref": "renovate/docker-setup-qemu-action-4.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-role-action",
+              "sha": "52ee2604aa660d8840fc5644113e0918615f90e2",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 165,
+            "title": "chore(deps): update docker/build-push-action digest to c3c9e26",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-role-action",
+              "sha": "db452f4ee7a285917ab9132397e873b9a085cb69",
+              "ref": "renovate/docker-build-push-action-digest"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-role-action",
+              "sha": "52ee2604aa660d8840fc5644113e0918615f90e2",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 166,
+            "title": "chore(deps): update docker/setup-buildx-action digest to 594f3bf",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-role-action",
+              "sha": "449057cf889cdbbac4f296ba3adb7ae2e1d5cdaf",
+              "ref": "renovate/docker-setup-buildx-action-digest"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-role-action",
+              "sha": "52ee2604aa660d8840fc5644113e0918615f90e2",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 167,
+            "title": "chore(deps): update docker/setup-buildx-action action to v4.4.0",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-role-action",
+              "sha": "1faaef2420bac36d5b67c92b6ae4d3c61ca48295",
+              "ref": "renovate/docker-setup-buildx-action-4.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-role-action",
+              "sha": "52ee2604aa660d8840fc5644113e0918615f90e2",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 181,
+            "title": "chore: sync velnor-workflow to 92c34786",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-role-action",
+              "sha": "b4bd446c0da372d5c8f89b2102dacb7fc2ea4d16",
+              "ref": "velnor/fleet-92c3478694ef423fb4160b8c934d6671ca85b51a"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-role-action",
+              "sha": "8882236041e149153491ada7091382e76be1c313",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 182,
+            "title": "chore: sync velnor-workflow to b9c3156c",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-role-action",
+              "sha": "8ea816d2cfd33645ecce61b20bdf9655e4781307",
+              "ref": "velnor/fleet-b9c3156cdb88e63c11b9e595a3e694b02238c09a"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-role-action",
+              "sha": "8882236041e149153491ada7091382e76be1c313",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          }
+        ],
+        "future_trust_tuple_unknowns": [
+          "head/base SHA and repository must be reread for every candidate",
+          "author/fork/trusted-event/provider/check identity must be bound per run",
+          "open PR inventory is not an execution result"
+        ]
+      },
+      "access_observation": {
+        "status": "api_readable",
+        "permissions": {
+          "admin": true,
+          "maintain": true,
+          "push": true,
+          "triage": true,
+          "pull": true
+        }
+      },
+      "source_validation_state": {
+        "source_inventory": "observed_at_exact_default_branch_tree",
+        "expected_set": "source_derived_nonempty",
+        "workflow_presence": "source_presence_only",
+        "helper_execution": "not_run",
+        "execution_result": "not_collected"
+      },
+      "actual_jobs": null,
+      "release_install": {
+        "status": "not_evaluated_source_contract",
+        "publication_claim": false
+      },
+      "gate_status": "not_evaluated",
+      "evidence_paths": [
+        "G0/action-roles/findings.md",
+        "G0/action-review/report.md",
+        "G0/fleet/main-revisions.tsv",
+        "G0/fleet/configs.tsv",
+        "G0/fleet/workloads-full.json",
+        "live source tree and API capture"
+      ],
+      "unknowns": [
+        "No workflow job/run result, artifact, provider transcript, or Velnor output was collected.",
+        "Branch protection endpoint is HTTP 404; organization/inherited check policy may remain unknown.",
+        "Ruleset required contexts are visible, but producer GitHub App IDs are unknown.",
+        "Actions API/tree workflow mismatch, when present, is preserved and not resolved into execution truth.",
+        "Dependency edges are required but not resolved from source-only inventory.",
+        "Future PR trust requires live head/base/fork/event/check binding."
+      ]
+    },
+    {
+      "repository": "jackin-project/jackin-sentinel",
+      "repository_role": "jackin_role_image",
+      "default_branch": "main",
+      "default_branch_sha": "a668b869b9a31622f3088c1d891c45716e94cff2",
+      "current_revision_binding": {
+        "initial_api_sha": "a668b869b9a31622f3088c1d891c45716e94cff2",
+        "initial_ref_sha": "a668b869b9a31622f3088c1d891c45716e94cff2",
+        "closing_default_branch_sha": "a668b869b9a31622f3088c1d891c45716e94cff2",
+        "closing_ls_remote_sha": "a668b869b9a31622f3088c1d891c45716e94cff2",
+        "source_stability": "stable_between_initial_and_closing_reads"
+      },
+      "live": {
+        "github_id": 1252589990,
+        "visibility": "public",
+        "archived": false,
+        "pushed_at": "2026-09-16T15:36:20Z",
+        "access": {
+          "status": "api_readable",
+          "permissions": {
+            "admin": true,
+            "maintain": true,
+            "push": true,
+            "triage": true,
+            "pull": true
+          }
+        },
+        "branch_protection": {
+          "status": "unknown",
+          "http_status": "404",
+          "message": "Branch not protected"
+        },
+        "rulesets": [
+          {
+            "id": 17461058,
+            "name": "protect-main",
+            "target": "branch",
+            "source_type": "Repository",
+            "source": "jackin-project/jackin-sentinel",
+            "enforcement": "active",
+            "updated_at": "2026-09-16T19:41:19.426+07:00"
+          },
+          {
+            "id": 17461059,
+            "name": "protect-tags",
+            "target": "tag",
+            "source_type": "Repository",
+            "source": "jackin-project/jackin-sentinel",
+            "enforcement": "active",
+            "updated_at": "2026-06-09T23:46:11.913+07:00"
+          }
+        ],
+        "main_ruleset_required_status_checks": {
+          "strict_required_status_checks_policy": false,
+          "do_not_enforce_on_create": false,
+          "required_status_checks": [
+            {
+              "context": "DCO"
+            },
+            {
+              "context": "Policy"
+            },
+            {
+              "context": "ci-required"
+            }
+          ]
+        }
+      },
+      "source_tree": {
+        "entry_count": 41,
+        "tree_truncated": null,
+        "listing_sha256": "sha256:aedb3181b0d2f1527b60b61e5ebe403942b91b76939c260c351a94d723798980",
+        "workflow_paths": [
+          {
+            "path": ".github/workflows/ci-main.yml",
+            "blob_sha": "81d1283ce9478a1840641acc526ca5e1714eddef"
+          },
+          {
+            "path": ".github/workflows/ci-policy.yml",
+            "blob_sha": "bd4d103c633d0c6f35cf20d82a35a4f3e8c55aac"
+          },
+          {
+            "path": ".github/workflows/ci-pr.yml",
+            "blob_sha": "431e75ea64bb4cd6d475f8fc550fd5a6f53ceaa1"
+          },
+          {
+            "path": ".github/workflows/ci-unit-docker.yml",
+            "blob_sha": "7896011513dbe7f2d411b13953afa093fb3164ce"
+          },
+          {
+            "path": ".github/workflows/maintenance.yml",
+            "blob_sha": "8ad50af55bbdb362a7cf7426ddfca0090a478c76"
+          },
+          {
+            "path": ".github/workflows/nightly.yml",
+            "blob_sha": "7db67da1f6a6b487e7c6b3f979d224b3e1f5f8b4"
+          }
+        ],
+        "reusable_workflow_candidates": [
+          {
+            "path": ".github/workflows/ci-unit-docker.yml",
+            "blob_sha": "7896011513dbe7f2d411b13953afa093fb3164ce"
+          }
+        ],
+        "reusable_classification": "name_candidate_only; content execution not performed",
+        "action_paths": [],
+        "config_paths": [
+          {
+            "path": ".github-gen/velnor-workflow.toml",
+            "blob_sha": "78357b23d483502a2bca6b5f51aa2b04ac682cea"
+          },
+          {
+            "path": ".github/ci/.github-actions-generator-state",
+            "blob_sha": "108f575352ae2f2014b197422bbf679e2d741567"
+          },
+          {
+            "path": ".github/ci/project.toml",
+            "blob_sha": "f7ae6345e9e05fea31e74e910138fd3b5825ced8"
+          },
+          {
+            "path": "Dockerfile",
+            "blob_sha": "a1eaaef353aeb6e527dccbf7342af2c562310cfb"
+          },
+          {
+            "path": "jackin.role.toml",
+            "blob_sha": "4d33dc702f4aa7f542cd4d0bf9f181f8d39015fa"
+          },
+          {
+            "path": "mise.toml",
+            "blob_sha": "17374f2cfb4886edc4a6b90178c51c16eded4333"
+          }
+        ],
+        "scan_paths": [
+          {
+            "path": ".github-gen/velnor-workflow.toml",
+            "blob_sha": "78357b23d483502a2bca6b5f51aa2b04ac682cea"
+          },
+          {
+            "path": ".github/workflows/ci-main.yml",
+            "blob_sha": "81d1283ce9478a1840641acc526ca5e1714eddef"
+          },
+          {
+            "path": ".github/workflows/ci-policy.yml",
+            "blob_sha": "bd4d103c633d0c6f35cf20d82a35a4f3e8c55aac"
+          },
+          {
+            "path": ".github/workflows/ci-pr.yml",
+            "blob_sha": "431e75ea64bb4cd6d475f8fc550fd5a6f53ceaa1"
+          },
+          {
+            "path": ".github/workflows/ci-unit-docker.yml",
+            "blob_sha": "7896011513dbe7f2d411b13953afa093fb3164ce"
+          },
+          {
+            "path": ".github/workflows/maintenance.yml",
+            "blob_sha": "8ad50af55bbdb362a7cf7426ddfca0090a478c76"
+          },
+          {
+            "path": ".github/workflows/nightly.yml",
+            "blob_sha": "7db67da1f6a6b487e7c6b3f979d224b3e1f5f8b4"
+          },
+          {
+            "path": "Dockerfile",
+            "blob_sha": "a1eaaef353aeb6e527dccbf7342af2c562310cfb"
+          },
+          {
+            "path": "jackin.role.toml",
+            "blob_sha": "4d33dc702f4aa7f542cd4d0bf9f181f8d39015fa"
+          }
+        ]
+      },
+      "workflow": {
+        "source_paths": [
+          {
+            "path": ".github/workflows/ci-main.yml",
+            "blob_sha": "81d1283ce9478a1840641acc526ca5e1714eddef"
+          },
+          {
+            "path": ".github/workflows/ci-policy.yml",
+            "blob_sha": "bd4d103c633d0c6f35cf20d82a35a4f3e8c55aac"
+          },
+          {
+            "path": ".github/workflows/ci-pr.yml",
+            "blob_sha": "431e75ea64bb4cd6d475f8fc550fd5a6f53ceaa1"
+          },
+          {
+            "path": ".github/workflows/ci-unit-docker.yml",
+            "blob_sha": "7896011513dbe7f2d411b13953afa093fb3164ce"
+          },
+          {
+            "path": ".github/workflows/maintenance.yml",
+            "blob_sha": "8ad50af55bbdb362a7cf7426ddfca0090a478c76"
+          },
+          {
+            "path": ".github/workflows/nightly.yml",
+            "blob_sha": "7db67da1f6a6b487e7c6b3f979d224b3e1f5f8b4"
+          }
+        ],
+        "reusable_workflow_candidates": [
+          {
+            "path": ".github/workflows/ci-unit-docker.yml",
+            "blob_sha": "7896011513dbe7f2d411b13953afa093fb3164ce"
+          }
+        ],
+        "api_paths": [
+          ".github/workflows/ci-main.yml",
+          ".github/workflows/ci-policy.yml",
+          ".github/workflows/ci-pr.yml",
+          ".github/workflows/ci-unit-docker.yml",
+          ".github/workflows/maintenance.yml",
+          ".github/workflows/nightly.yml"
+        ],
+        "api_count": 6,
+        "tree_count": 6,
+        "api_tree_consistency": "match",
+        "missing_expected_workflow_paths": [
+          "role-validation",
+          "runtime-smoke-and-multiarch"
+        ],
+        "source_only_no_execution": true,
+        "empty_success_forbidden": true
+      },
+      "expected_workload_ids": [
+        "sentinel-role-manifest",
+        "sentinel-docker-build",
+        "sentinel-role-validation",
+        "sentinel-runtime-smoke-and-multiarch"
+      ],
+      "expected_workloads": [
+        {
+          "id": "sentinel-role-manifest",
+          "required": true,
+          "status": "source_present_no_execution",
+          "workflow_paths": [],
+          "notes": "Role manifest includes agents/hooks/env/prompts/selects and dependency interpolation; source only."
+        },
+        {
+          "id": "sentinel-docker-build",
+          "required": true,
+          "status": "source_present_no_execution",
+          "workflow_paths": [
+            ".github/workflows/ci-unit-docker.yml"
+          ],
+          "notes": "Plain Docker unit path is source-present; no build result is claimed."
+        },
+        {
+          "id": "sentinel-role-validation",
+          "required": true,
+          "status": "missing_workflow",
+          "workflow_paths": [],
+          "notes": "No role-validator workflow unit is present; missing is not success."
+        },
+        {
+          "id": "sentinel-runtime-smoke-and-multiarch",
+          "required": true,
+          "status": "missing_workflow",
+          "workflow_paths": [],
+          "notes": "README describes runtime behavior, but no runtime smoke or publisher workflow is present; missing is not success."
+        }
+      ],
+      "platform_architecture_provider": [
+        {
+          "workloads": [
+            "sentinel-docker-build",
+            "sentinel-role-validation"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "plain_single_arch_build_source_only",
+          "velnor": "not_admitted_by_current_policy"
+        },
+        {
+          "workloads": [
+            "sentinel-runtime-smoke-and-multiarch"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04_buildx",
+          "os": "linux",
+          "architectures": [
+            "amd64",
+            "arm64"
+          ],
+          "status": "required_but_missing",
+          "velnor": "not_admitted"
+        }
+      ],
+      "provider_eligibility": {
+        "github_hosted": "configured_generic_docker_only_source_only",
+        "velnor": "not_admitted_by_current_policy",
+        "trusted_source": "eligible_for_static_review_only",
+        "fork_or_untrusted": "not_eligible_for_publish_or_sign"
+      },
+      "justified_exclusions": [
+        {
+          "id": "missing-role-validation",
+          "workloads": [
+            "sentinel-role-validation"
+          ],
+          "reason": "No workflow path exists."
+        },
+        {
+          "id": "missing-runtime-multiarch",
+          "workloads": [
+            "sentinel-runtime-smoke-and-multiarch"
+          ],
+          "reason": "No workflow path exists."
+        },
+        {
+          "id": "no-execution-claim",
+          "workloads": [
+            "sentinel-role-manifest",
+            "sentinel-docker-build"
+          ],
+          "reason": "No jobs/results were collected."
+        }
+      ],
+      "unsupported_blocks": [
+        {
+          "id": "role-validate",
+          "kind": "missing",
+          "reason": "Generated Docker unit does not invoke role validator.",
+          "evidence": [
+            "G0/action-roles/findings.md"
+          ]
+        },
+        {
+          "id": "role-runtime-smoke",
+          "kind": "missing",
+          "reason": "No runtime launch/hooks/report/dirty-worktree cleanup smoke.",
+          "evidence": [
+            "G0/action-roles/findings.md"
+          ]
+        },
+        {
+          "id": "role-multiarch-publisher",
+          "kind": "missing",
+          "reason": "No platform matrix, digest merge, registry, or signing proof.",
+          "evidence": [
+            "G0/action-roles/findings.md"
+          ]
+        }
+      ],
+      "dependency_graph": {
+        "status": "unknown_source_only",
+        "edge_kinds_required": [
+          "workload_to_child",
+          "workload_to_release",
+          "workload_to_package",
+          "workload_to_required_check"
+        ],
+        "edges": [],
+        "reason": "No role-image caller/result graph was executed."
+      },
+      "required_check_contexts_and_apps": {
+        "state": "ruleset_main_observed_app_identity_unknown",
+        "branch_protection_endpoint": {
+          "status": "unknown",
+          "http_status": "404",
+          "message": "Branch not protected"
+        },
+        "ruleset_contexts": [
+          "DCO",
+          "Policy",
+          "ci-required"
+        ],
+        "ruleset_raw": {
+          "strict_required_status_checks_policy": false,
+          "do_not_enforce_on_create": false,
+          "required_status_checks": [
+            {
+              "context": "DCO"
+            },
+            {
+              "context": "Policy"
+            },
+            {
+              "context": "ci-required"
+            }
+          ]
+        },
+        "producer_app_ids": [],
+        "producer_app_ids_reason": "Required-status-check detail did not expose App IDs; no identity invented."
+      },
+      "pr_trust": {
+        "status": "complete_paginated_open_pr_observation",
+        "open_pr_count": 9,
+        "rows": [
+          {
+            "number": 117,
+            "title": "chore(deps): update chainargos/velnor-actions action to v2026.8.33",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-sentinel",
+              "sha": "4a80ff7190dcf4cb14b649df97011125e5231e55",
+              "ref": "renovate/chainargos-velnor-actions-2026.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-sentinel",
+              "sha": "c100647cc06e5845aaa24a1c8e239ed46a0829d8",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 118,
+            "title": "chore(deps): update jackin-project/velnor-actions action to v2026.8.33",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-sentinel",
+              "sha": "72421c6f29c18976cb755d54e1595e1b1e171dfd",
+              "ref": "renovate/jackin-project-velnor-actions-2026.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-sentinel",
+              "sha": "c100647cc06e5845aaa24a1c8e239ed46a0829d8",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 119,
+            "title": "chore(deps): update renovatebot/github-action action to v46.3.1",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-sentinel",
+              "sha": "5fc7dd4c999df2cd0ed9ee7a6cdaa5a60682c962",
+              "ref": "renovate/renovatebot-github-action-46.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-sentinel",
+              "sha": "89cefcb9df1bc4823f6e90aa9d5e49df73c4779f",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 120,
+            "title": "chore(deps): update tailrocks/velnor-actions action to v2026.8.33",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-sentinel",
+              "sha": "38942dd30c5f8048e174c64042241c290e316a9b",
+              "ref": "renovate/tailrocks-velnor-actions-2026.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-sentinel",
+              "sha": "c100647cc06e5845aaa24a1c8e239ed46a0829d8",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 124,
+            "title": "chore(deps): update dependency prek to v0.5.3",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-sentinel",
+              "sha": "ebb2decffea5e0749ff8e2f971930252aba78016",
+              "ref": "renovate/prek-0.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-sentinel",
+              "sha": "89cefcb9df1bc4823f6e90aa9d5e49df73c4779f",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 125,
+            "title": "chore(deps): update dependency uv to v0.12.15",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-sentinel",
+              "sha": "64f57cc997e1034c5ebe32659136f2537a1eb749",
+              "ref": "renovate/uv-0.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-sentinel",
+              "sha": "89cefcb9df1bc4823f6e90aa9d5e49df73c4779f",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 126,
+            "title": "chore(deps): update projectjackin/construct docker tag to v0.37-trixie",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-sentinel",
+              "sha": "91ec78f45db9de44aea843e6157597cb6e0aab65",
+              "ref": "renovate/projectjackin-construct-0.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-sentinel",
+              "sha": "89cefcb9df1bc4823f6e90aa9d5e49df73c4779f",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 143,
+            "title": "chore: sync velnor-workflow to 92c34786",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-sentinel",
+              "sha": "cc6dac7b22bf22fb0e79ab0b884c299c1f900249",
+              "ref": "velnor/fleet-92c3478694ef423fb4160b8c934d6671ca85b51a"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-sentinel",
+              "sha": "a668b869b9a31622f3088c1d891c45716e94cff2",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 144,
+            "title": "chore: sync velnor-workflow to b9c3156c",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-sentinel",
+              "sha": "cdf18c2b19f7b95a85868c824b6bdffb88156b3d",
+              "ref": "velnor/fleet-b9c3156cdb88e63c11b9e595a3e694b02238c09a"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-sentinel",
+              "sha": "a668b869b9a31622f3088c1d891c45716e94cff2",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          }
+        ],
+        "future_trust_tuple_unknowns": [
+          "head/base SHA and repository must be reread for every candidate",
+          "author/fork/trusted-event/provider/check identity must be bound per run",
+          "open PR inventory is not an execution result"
+        ]
+      },
+      "access_observation": {
+        "status": "api_readable",
+        "permissions": {
+          "admin": true,
+          "maintain": true,
+          "push": true,
+          "triage": true,
+          "pull": true
+        }
+      },
+      "source_validation_state": {
+        "source_inventory": "observed_at_exact_default_branch_tree",
+        "expected_set": "source_derived_nonempty",
+        "workflow_presence": "source_presence_only",
+        "helper_execution": "not_run",
+        "execution_result": "not_collected"
+      },
+      "actual_jobs": null,
+      "release_install": {
+        "status": "not_evaluated_source_contract",
+        "publication_claim": false
+      },
+      "gate_status": "not_evaluated",
+      "evidence_paths": [
+        "G0/action-roles/findings.md",
+        "G0/fleet/main-revisions.tsv",
+        "G0/fleet/configs.tsv",
+        "G0/fleet/workloads-full.json",
+        "live source tree and API capture"
+      ],
+      "unknowns": [
+        "No workflow job/run result, artifact, provider transcript, or Velnor output was collected.",
+        "Branch protection endpoint is HTTP 404; organization/inherited check policy may remain unknown.",
+        "Ruleset required contexts are visible, but producer GitHub App IDs are unknown.",
+        "Actions API/tree workflow mismatch, when present, is preserved and not resolved into execution truth.",
+        "Dependency edges are required but not resolved from source-only inventory.",
+        "Future PR trust requires live head/base/fork/event/check binding."
+      ]
+    },
+    {
+      "repository": "jackin-project/jackin-the-architect",
+      "repository_role": "jackin_role_image",
+      "default_branch": "main",
+      "default_branch_sha": "d0956f0192d2605cbd26d84bf8911211a727b6c0",
+      "current_revision_binding": {
+        "initial_api_sha": "d0956f0192d2605cbd26d84bf8911211a727b6c0",
+        "initial_ref_sha": "d0956f0192d2605cbd26d84bf8911211a727b6c0",
+        "closing_default_branch_sha": "d0956f0192d2605cbd26d84bf8911211a727b6c0",
+        "closing_ls_remote_sha": "d0956f0192d2605cbd26d84bf8911211a727b6c0",
+        "source_stability": "stable_between_initial_and_closing_reads"
+      },
+      "live": {
+        "github_id": 1199879399,
+        "visibility": "public",
+        "archived": false,
+        "pushed_at": "2026-09-16T15:36:33Z",
+        "access": {
+          "status": "api_readable",
+          "permissions": {
+            "admin": true,
+            "maintain": true,
+            "push": true,
+            "triage": true,
+            "pull": true
+          }
+        },
+        "branch_protection": {
+          "status": "unknown",
+          "http_status": "404",
+          "message": "Branch not protected"
+        },
+        "rulesets": [
+          {
+            "id": 14742576,
+            "name": "protect-main",
+            "target": "branch",
+            "source_type": "Repository",
+            "source": "jackin-project/jackin-the-architect",
+            "enforcement": "active",
+            "updated_at": "2026-09-16T15:25:02.884+07:00"
+          },
+          {
+            "id": 15179230,
+            "name": "protect-tags",
+            "target": "tag",
+            "source_type": "Repository",
+            "source": "jackin-project/jackin-the-architect",
+            "enforcement": "active",
+            "updated_at": "2026-04-21T15:49:26.879+07:00"
+          }
+        ],
+        "main_ruleset_required_status_checks": {
+          "strict_required_status_checks_policy": false,
+          "do_not_enforce_on_create": false,
+          "required_status_checks": [
+            {
+              "context": "DCO"
+            },
+            {
+              "context": "Policy"
+            },
+            {
+              "context": "ci-required"
+            }
+          ]
+        }
+      },
+      "source_tree": {
+        "entry_count": 49,
+        "tree_truncated": null,
+        "listing_sha256": "sha256:f88b83059f43b357e46fe29f5e71fbb9d8a41037e7e7c77af8066f03f9a96991",
+        "workflow_paths": [
+          {
+            "path": ".github/workflows/ci-main.yml",
+            "blob_sha": "81d1283ce9478a1840641acc526ca5e1714eddef"
+          },
+          {
+            "path": ".github/workflows/ci-policy.yml",
+            "blob_sha": "bd4d103c633d0c6f35cf20d82a35a4f3e8c55aac"
+          },
+          {
+            "path": ".github/workflows/ci-pr.yml",
+            "blob_sha": "431e75ea64bb4cd6d475f8fc550fd5a6f53ceaa1"
+          },
+          {
+            "path": ".github/workflows/ci-unit-docker.yml",
+            "blob_sha": "7896011513dbe7f2d411b13953afa093fb3164ce"
+          },
+          {
+            "path": ".github/workflows/maintenance.yml",
+            "blob_sha": "8ad50af55bbdb362a7cf7426ddfca0090a478c76"
+          },
+          {
+            "path": ".github/workflows/nightly.yml",
+            "blob_sha": "7db67da1f6a6b487e7c6b3f979d224b3e1f5f8b4"
+          }
+        ],
+        "reusable_workflow_candidates": [
+          {
+            "path": ".github/workflows/ci-unit-docker.yml",
+            "blob_sha": "7896011513dbe7f2d411b13953afa093fb3164ce"
+          }
+        ],
+        "reusable_classification": "name_candidate_only; content execution not performed",
+        "action_paths": [],
+        "config_paths": [
+          {
+            "path": ".github-gen/velnor-workflow.toml",
+            "blob_sha": "2764e6085713dd0fe69eb03fdb7e4afb9ffbfc80"
+          },
+          {
+            "path": ".github/ci/.github-actions-generator-state",
+            "blob_sha": "30f54d48863ca2807da995e3528395e54824a916"
+          },
+          {
+            "path": ".github/ci/project.toml",
+            "blob_sha": "387a2bb2540c2217dd2ddd61d8b0a4e7a234b27c"
+          },
+          {
+            "path": "Dockerfile",
+            "blob_sha": "968e8a8e7faadfa48477f92634115dc8d6db3838"
+          },
+          {
+            "path": "jackin.role.toml",
+            "blob_sha": "a11d8e7fe94bdea19a02274b2d8b8ed7ac67d0e2"
+          },
+          {
+            "path": "mise.toml",
+            "blob_sha": "17374f2cfb4886edc4a6b90178c51c16eded4333"
+          }
+        ],
+        "scan_paths": [
+          {
+            "path": ".github-gen/velnor-workflow.toml",
+            "blob_sha": "2764e6085713dd0fe69eb03fdb7e4afb9ffbfc80"
+          },
+          {
+            "path": ".github/workflows/ci-main.yml",
+            "blob_sha": "81d1283ce9478a1840641acc526ca5e1714eddef"
+          },
+          {
+            "path": ".github/workflows/ci-policy.yml",
+            "blob_sha": "bd4d103c633d0c6f35cf20d82a35a4f3e8c55aac"
+          },
+          {
+            "path": ".github/workflows/ci-pr.yml",
+            "blob_sha": "431e75ea64bb4cd6d475f8fc550fd5a6f53ceaa1"
+          },
+          {
+            "path": ".github/workflows/ci-unit-docker.yml",
+            "blob_sha": "7896011513dbe7f2d411b13953afa093fb3164ce"
+          },
+          {
+            "path": ".github/workflows/maintenance.yml",
+            "blob_sha": "8ad50af55bbdb362a7cf7426ddfca0090a478c76"
+          },
+          {
+            "path": ".github/workflows/nightly.yml",
+            "blob_sha": "7db67da1f6a6b487e7c6b3f979d224b3e1f5f8b4"
+          },
+          {
+            "path": "Dockerfile",
+            "blob_sha": "968e8a8e7faadfa48477f92634115dc8d6db3838"
+          },
+          {
+            "path": "jackin.role.toml",
+            "blob_sha": "a11d8e7fe94bdea19a02274b2d8b8ed7ac67d0e2"
+          }
+        ]
+      },
+      "workflow": {
+        "source_paths": [
+          {
+            "path": ".github/workflows/ci-main.yml",
+            "blob_sha": "81d1283ce9478a1840641acc526ca5e1714eddef"
+          },
+          {
+            "path": ".github/workflows/ci-policy.yml",
+            "blob_sha": "bd4d103c633d0c6f35cf20d82a35a4f3e8c55aac"
+          },
+          {
+            "path": ".github/workflows/ci-pr.yml",
+            "blob_sha": "431e75ea64bb4cd6d475f8fc550fd5a6f53ceaa1"
+          },
+          {
+            "path": ".github/workflows/ci-unit-docker.yml",
+            "blob_sha": "7896011513dbe7f2d411b13953afa093fb3164ce"
+          },
+          {
+            "path": ".github/workflows/maintenance.yml",
+            "blob_sha": "8ad50af55bbdb362a7cf7426ddfca0090a478c76"
+          },
+          {
+            "path": ".github/workflows/nightly.yml",
+            "blob_sha": "7db67da1f6a6b487e7c6b3f979d224b3e1f5f8b4"
+          }
+        ],
+        "reusable_workflow_candidates": [
+          {
+            "path": ".github/workflows/ci-unit-docker.yml",
+            "blob_sha": "7896011513dbe7f2d411b13953afa093fb3164ce"
+          }
+        ],
+        "api_paths": [
+          ".github/workflows/ci-main.yml",
+          ".github/workflows/ci-policy.yml",
+          ".github/workflows/ci-pr.yml",
+          ".github/workflows/ci-unit-docker.yml",
+          ".github/workflows/gitleaks.yml",
+          ".github/workflows/maintenance.yml",
+          ".github/workflows/nightly.yml"
+        ],
+        "api_count": 7,
+        "tree_count": 6,
+        "api_tree_consistency": "mismatch_preserved_unknown",
+        "missing_expected_workflow_paths": [
+          "role-validation",
+          "runtime-smoke-and-multiarch"
+        ],
+        "source_only_no_execution": true,
+        "empty_success_forbidden": true
+      },
+      "expected_workload_ids": [
+        "architect-role-manifest",
+        "architect-docker-build",
+        "architect-role-validation",
+        "architect-runtime-smoke-and-multiarch"
+      ],
+      "expected_workloads": [
+        {
+          "id": "architect-role-manifest",
+          "required": true,
+          "status": "source_present_no_execution",
+          "workflow_paths": [],
+          "notes": "Toolchain-heavy Dockerfile, role manifest, hooks/config are source-present; no manifest execution."
+        },
+        {
+          "id": "architect-docker-build",
+          "required": true,
+          "status": "source_present_no_execution",
+          "workflow_paths": [
+            ".github/workflows/ci-unit-docker.yml"
+          ],
+          "notes": "Plain Docker unit path is source-present; no build result is claimed."
+        },
+        {
+          "id": "architect-role-validation",
+          "required": true,
+          "status": "missing_workflow",
+          "workflow_paths": [],
+          "notes": "No role-validator workflow unit is present; missing is not success."
+        },
+        {
+          "id": "architect-runtime-smoke-and-multiarch",
+          "required": true,
+          "status": "missing_workflow",
+          "workflow_paths": [],
+          "notes": "No runtime smoke or amd64/arm64 publisher workflow is present; missing is not success."
+        }
+      ],
+      "platform_architecture_provider": [
+        {
+          "workloads": [
+            "architect-docker-build",
+            "architect-role-validation"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04",
+          "os": "linux",
+          "architectures": [
+            "x86_64"
+          ],
+          "status": "plain_single_arch_build_source_only",
+          "velnor": "not_admitted_by_current_policy"
+        },
+        {
+          "workloads": [
+            "architect-runtime-smoke-and-multiarch"
+          ],
+          "provider": "github-hosted",
+          "runner": "ubuntu-24.04_buildx",
+          "os": "linux",
+          "architectures": [
+            "amd64",
+            "arm64"
+          ],
+          "status": "required_but_missing",
+          "velnor": "not_admitted"
+        }
+      ],
+      "provider_eligibility": {
+        "github_hosted": "configured_generic_docker_only_source_only",
+        "velnor": "not_admitted_by_current_policy",
+        "trusted_source": "eligible_for_static_review_only",
+        "fork_or_untrusted": "not_eligible_for_publish_or_sign"
+      },
+      "justified_exclusions": [
+        {
+          "id": "missing-role-validation",
+          "workloads": [
+            "architect-role-validation"
+          ],
+          "reason": "No workflow path exists."
+        },
+        {
+          "id": "missing-runtime-multiarch",
+          "workloads": [
+            "architect-runtime-smoke-and-multiarch"
+          ],
+          "reason": "No workflow path exists."
+        },
+        {
+          "id": "no_execution_claim",
+          "workloads": [
+            "architect-role-manifest",
+            "architect-docker-build"
+          ],
+          "reason": "No jobs/results were collected."
+        }
+      ],
+      "unsupported_blocks": [
+        {
+          "id": "role-validate",
+          "kind": "missing",
+          "reason": "Generated Docker unit does not invoke role validator.",
+          "evidence": [
+            "G0/action-roles/findings.md"
+          ]
+        },
+        {
+          "id": "role-runtime-smoke",
+          "kind": "missing",
+          "reason": "No runtime launch/hooks/report smoke.",
+          "evidence": [
+            "G0/action-roles/findings.md"
+          ]
+        },
+        {
+          "id": "role-multiarch-publisher",
+          "kind": "missing",
+          "reason": "No platform matrix, digest merge, registry, or signing proof.",
+          "evidence": [
+            "G0/action-roles/findings.md"
+          ]
+        }
+      ],
+      "dependency_graph": {
+        "status": "unknown_source_only",
+        "edge_kinds_required": [
+          "workload_to_child",
+          "workload_to_release",
+          "workload_to_package",
+          "workload_to_required_check"
+        ],
+        "edges": [],
+        "reason": "No role-image caller/result graph was executed."
+      },
+      "required_check_contexts_and_apps": {
+        "state": "ruleset_main_observed_app_identity_unknown",
+        "branch_protection_endpoint": {
+          "status": "unknown",
+          "http_status": "404",
+          "message": "Branch not protected"
+        },
+        "ruleset_contexts": [
+          "DCO",
+          "Policy",
+          "ci-required"
+        ],
+        "ruleset_raw": {
+          "strict_required_status_checks_policy": false,
+          "do_not_enforce_on_create": false,
+          "required_status_checks": [
+            {
+              "context": "DCO"
+            },
+            {
+              "context": "Policy"
+            },
+            {
+              "context": "ci-required"
+            }
+          ]
+        },
+        "producer_app_ids": [],
+        "producer_app_ids_reason": "Required-status-check detail did not expose App IDs; no identity invented."
+      },
+      "pr_trust": {
+        "status": "complete_paginated_open_pr_observation",
+        "open_pr_count": 21,
+        "rows": [
+          {
+            "number": 418,
+            "title": "chore(deps): update chainargos/velnor-actions action to v2026.8.33",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "f883cd096e164e0447088d434b9e69a749ee3848",
+              "ref": "renovate/chainargos-velnor-actions-2026.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "29e0e600b395195f5fa1bc3c70ea585cfe7518d3",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 419,
+            "title": "chore(deps): update jackin-project/velnor-actions action to v2026.8.33",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "20874a71b47d83b6f6d5b0f0b278337ad77ee023",
+              "ref": "renovate/jackin-project-velnor-actions-2026.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "29e0e600b395195f5fa1bc3c70ea585cfe7518d3",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 420,
+            "title": "chore(deps): update renovatebot/github-action action to v46.3.1",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "9bfa429c31142fbeec0e44e028ba293c45929e0b",
+              "ref": "renovate/renovatebot-github-action-46.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "0dc1b98bd27bfdf192f359afeb125f2103923a02",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 421,
+            "title": "chore(deps): update tailrocks/velnor-actions action to v2026.8.33",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "506cb518f36f45fbffd1c22cef37806a3d585b8f",
+              "ref": "renovate/tailrocks-velnor-actions-2026.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "29e0e600b395195f5fa1bc3c70ea585cfe7518d3",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 425,
+            "title": "chore(deps): update dependency astral-sh/uv to v0.12.15",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "137eec43c37762f2481f0b513ea6d45fc089b5f9",
+              "ref": "renovate/astral-sh-uv-0.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "0dc1b98bd27bfdf192f359afeb125f2103923a02",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 426,
+            "title": "chore(deps): update dependency bun to v1.4.2",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "8374c0fbbd44bcc43c1824a763dabcfdf57cf38a",
+              "ref": "renovate/bun-1.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "0dc1b98bd27bfdf192f359afeb125f2103923a02",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 427,
+            "title": "chore(deps): update dependency prek to v0.5.3",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "7501b50bfad703cc1c3b1a9b573cf689217acfb7",
+              "ref": "renovate/prek-0.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "0dc1b98bd27bfdf192f359afeb125f2103923a02",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 428,
+            "title": "chore(deps): update dependency uv to v0.12.15",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "740674e7d835d121f0977d51fe35d617b946c0c3",
+              "ref": "renovate/uv-0.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "0dc1b98bd27bfdf192f359afeb125f2103923a02",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 429,
+            "title": "chore(deps): update rust to v1.98.1",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "f5fe2e109c06e694d70a91cd451316cfeb2fd70d",
+              "ref": "renovate/rust-1.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "0dc1b98bd27bfdf192f359afeb125f2103923a02",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 430,
+            "title": "chore(deps): update dependency cargo-bins/cargo-binstall to v1.23.0",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "c183fcf076d63b920932f96c5ccdcd058096b928",
+              "ref": "renovate/cargo-bins-cargo-binstall-1.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "0dc1b98bd27bfdf192f359afeb125f2103923a02",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 431,
+            "title": "chore(deps): update dependency cargo-binstall to v1.23.0",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "6725b98f3efda134e7d6afa488faa77a799955d0",
+              "ref": "renovate/cargo-binstall-1.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "0dc1b98bd27bfdf192f359afeb125f2103923a02",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 432,
+            "title": "chore(deps): update dependency github:open-telemetry/weaver to v0.26.1",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "8e229c2f4dc8d0cc16ae4afb8206e98f02550997",
+              "ref": "renovate/github-open-telemetry-weaver-0.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "0dc1b98bd27bfdf192f359afeb125f2103923a02",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 433,
+            "title": "chore(deps): update dependency juliusbrussee/caveman to v2.7.0",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "10ed53bc177c760594aaa42c58839f32f4e7dbfc",
+              "ref": "renovate/juliusbrussee-caveman-2.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "0dc1b98bd27bfdf192f359afeb125f2103923a02",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 434,
+            "title": "chore(deps): update dependency rtk-ai/rtk to v0.49.0",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "6fb48dd91a8c4f3c6803d64e52af8e6bcfd05488",
+              "ref": "renovate/rtk-ai-rtk-0.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "0dc1b98bd27bfdf192f359afeb125f2103923a02",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 436,
+            "title": "chore(deps): update dependency ctx7 to v0.5.11",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "c5fa516a4cc7258f90aef76cbd528342c31fbb44",
+              "ref": "renovate/ctx7-0.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "0dc1b98bd27bfdf192f359afeb125f2103923a02",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 437,
+            "title": "chore(deps): update dependency aqua:apple/container to v1.4.1",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "b9fdce0ad9ddab61d29d723aca0017a2f25b4f24",
+              "ref": "renovate/aqua-apple-container-1.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "0dc1b98bd27bfdf192f359afeb125f2103923a02",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 438,
+            "title": "chore(deps): update node.js to v24.21.0",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "0c0d40a8797ca5bd1308e04400742e92f3ab29cc",
+              "ref": "renovate/node-24.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "0dc1b98bd27bfdf192f359afeb125f2103923a02",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 440,
+            "title": "chore(deps): update dependency sccache to v0.18.0",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "e1d42c30b3162cff9224fe738e32d2f8b044f023",
+              "ref": "renovate/sccache-0.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "0dc1b98bd27bfdf192f359afeb125f2103923a02",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 441,
+            "title": "chore(deps): update projectjackin/construct docker tag to v0.37-trixie",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "e792c1c1f17db6f93b18a3a17cd33998b789647e",
+              "ref": "renovate/projectjackin-construct-0.x"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "0dc1b98bd27bfdf192f359afeb125f2103923a02",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 455,
+            "title": "chore: sync velnor-workflow to 92c34786",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "5443ee65e68729448b88fc4f21d5fd5fbf350f13",
+              "ref": "velnor/fleet-92c3478694ef423fb4160b8c934d6671ca85b51a"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "d0956f0192d2605cbd26d84bf8911211a727b6c0",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          },
+          {
+            "number": 456,
+            "title": "chore: sync velnor-workflow to b9c3156c",
+            "state": "open",
+            "draft": false,
+            "head": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "eaf9c16399b70fc9c325394e683145007a19d710",
+              "ref": "velnor/fleet-b9c3156cdb88e63c11b9e595a3e694b02238c09a"
+            },
+            "base": {
+              "repository": "jackin-project/jackin-the-architect",
+              "sha": "d0956f0192d2605cbd26d84bf8911211a727b6c0",
+              "ref": "main"
+            },
+            "author": "donbeave",
+            "head_is_fork": false,
+            "mergeable_state": null,
+            "maintainer_can_modify": null
+          }
+        ],
+        "future_trust_tuple_unknowns": [
+          "head/base SHA and repository must be reread for every candidate",
+          "author/fork/trusted-event/provider/check identity must be bound per run",
+          "open PR inventory is not an execution result"
+        ]
+      },
+      "access_observation": {
+        "status": "api_readable",
+        "permissions": {
+          "admin": true,
+          "maintain": true,
+          "push": true,
+          "triage": true,
+          "pull": true
+        }
+      },
+      "source_validation_state": {
+        "source_inventory": "observed_at_exact_default_branch_tree",
+        "expected_set": "source_derived_nonempty",
+        "workflow_presence": "source_presence_only",
+        "helper_execution": "not_run",
+        "execution_result": "not_collected"
+      },
+      "actual_jobs": null,
+      "release_install": {
+        "status": "not_evaluated_source_contract",
+        "publication_claim": false
+      },
+      "gate_status": "not_evaluated",
+      "evidence_paths": [
+        "G0/action-roles/findings.md",
+        "G0/fleet/main-revisions.tsv",
+        "G0/fleet/configs.tsv",
+        "G0/fleet/workloads-full.json",
+        "live source tree and API capture"
+      ],
+      "unknowns": [
+        "No workflow job/run result, artifact, provider transcript, or Velnor output was collected.",
+        "Branch protection endpoint is HTTP 404; organization/inherited check policy may remain unknown.",
+        "Ruleset required contexts are visible, but producer GitHub App IDs are unknown.",
+        "Actions API/tree workflow mismatch, when present, is preserved and not resolved into execution truth.",
+        "Dependency edges are required but not resolved from source-only inventory.",
+        "Future PR trust requires live head/base/fork/event/check binding."
+      ]
+    }
+  ],
+  "collector_consumption": {
+    "expected_set_rule": "Use repositories[].expected_workload_ids exactly; never derive expected workloads from observed results.",
+    "source_inventory_rule": "Consume exact source_tree path/blob inventories bound to stable default-branch SHA.",
+    "missing_workflow_rule": "Represent absent required paths as missing_workflow; never map missing/empty to success.",
+    "execution_rule": "actual_jobs remains null; this supplement cannot satisfy job/provider/run gates.",
+    "check_rule": "Retain ruleset contexts and unknown App IDs; do not infer producer identity.",
+    "pr_rule": "Retain every open PR row and require a fresh trust tuple before execution interpretation.",
+    "gate_rule": "This file has no G0/G1/G2/G3/G4/G5/G6/G7 pass or fleet-wide claim."
+  }
+}

@@ -1,0 +1,178 @@
+{
+  "base_case_canonical_sha256": "64c9b3bdda0ad36d3eee2ef6d418bced6130256afbd7f5a78868d0f3bd580c10",
+  "case_count": 34,
+  "fixtures": [
+    {
+      "bytes": 10831,
+      "id": "H01-forged-job-id",
+      "sha256": "23dbef70f89617efd69bd40bc98118525fcb10983bed27f389f7ec186470d014"
+    },
+    {
+      "bytes": 10805,
+      "id": "H02-forged-run-id",
+      "sha256": "6c23da175b1257eeda28ee909922992f121365dd3b2b56469ffdd98bfa05940b"
+    },
+    {
+      "bytes": 10825,
+      "id": "H03-forged-run-attempt",
+      "sha256": "e3b2af8d7b34de777d55120400c64a4b4a2560268d14b3711ea92fdff0856622"
+    },
+    {
+      "bytes": 11057,
+      "id": "H04-forged-artifact-id",
+      "sha256": "4ec3cf0d35c1bf0dacbe180485c3d21e80a0d27550d1f842e339899ddb747374"
+    },
+    {
+      "bytes": 10894,
+      "id": "H05-name-only-sibling",
+      "sha256": "37b3ff6f35c1d409e497737df8577aa27ef96981f63666f21f6644bbcecc8eb7"
+    },
+    {
+      "bytes": 11060,
+      "id": "H06-forged-artifact-name",
+      "sha256": "36b71d318506b5af473d880361226af621337ce5b01851acb62e8599587ef98b"
+    },
+    {
+      "bytes": 11149,
+      "id": "H07-service-zip-digest-forgery",
+      "sha256": "11e6773ff4ce10135466849e3f6d521c6d56ac1e3c4b171647a9f99e1f0d8bb0"
+    },
+    {
+      "bytes": 10942,
+      "id": "H08-inner-payload-digest-forgery",
+      "sha256": "30e082b1c8fa261edf3e5ac9780a918aa371bad4f2ad1c44438fcf49fec35bb1"
+    },
+    {
+      "bytes": 10942,
+      "id": "H09-service-zip-vs-binary-hash-confusion",
+      "sha256": "9328dff1ef60f54febfefb4e16a7eaffd2a83c99f24dc08aa51eaeda1e3a8e45"
+    },
+    {
+      "bytes": 10917,
+      "id": "H10-forged-binary-hash",
+      "sha256": "b42d16c3574578ffddade5d5dff1d7908d921a9cc34267a7693aadf87cda9145"
+    },
+    {
+      "bytes": 10897,
+      "id": "H11-forged-source-sha",
+      "sha256": "b8231a1f1d40d96003ac4076dbe673aa0e4dc898f964f10b282209f463bc6996"
+    },
+    {
+      "bytes": 10920,
+      "id": "H12-forged-source-closure",
+      "sha256": "2a397530f70013d056ed986936ddbff1e8ad3f3140c80f8560c5dc46048fd142"
+    },
+    {
+      "bytes": 10838,
+      "id": "H13-source-ref-pull-request",
+      "sha256": "85878b8bb275edbc8f2076c48b36e3a4d7793527c9d73a50e610d7384c2c0661"
+    },
+    {
+      "bytes": 10917,
+      "id": "H14-workflow-ref-pull-request",
+      "sha256": "e5ccc72c5ca688dd77b2770f87045c31c7df51cfdc2b7c2430f721cbec6444dc"
+    },
+    {
+      "bytes": 10884,
+      "id": "H15-workflow-sha-forgery",
+      "sha256": "36e27527702d04aeace4def19e2be21431f3f292b1350c68d24c7e523b7b7723"
+    },
+    {
+      "bytes": 10796,
+      "id": "H16-signer-repository",
+      "sha256": "91b12c19a82648a4428cae31909f15fe947ed39a70ef923eb56a585494ccba06"
+    },
+    {
+      "bytes": 10833,
+      "id": "H17-signer-workflow",
+      "sha256": "e1631a08a5df56ca3dcd91286be4eb14d742c556ea6baa5444cafec1b4ef1f79"
+    },
+    {
+      "bytes": 10805,
+      "id": "H18-signer-event",
+      "sha256": "d5e3239bddf4db82aeae987bd4ca8505bac3f67a3aee3ab2350ccfe354529dd2"
+    },
+    {
+      "bytes": 10812,
+      "id": "H19-unverified-signature",
+      "sha256": "8a5d1b6f1265701146d2587ce2262583d836106c8856fc5be6d6be86dd4890ad"
+    },
+    {
+      "bytes": 10824,
+      "id": "H20-wrong-predicate-type",
+      "sha256": "3fd502000154edab11d08e02918f13ae13b7985bd2f77a20602afa150d807bdf"
+    },
+    {
+      "bytes": 10817,
+      "id": "H21-run-head-sha-mismatch",
+      "sha256": "eaa348bc715a639f9fc0e49e3e7e8619d7234152b884ca0653063e22bb45c958"
+    },
+    {
+      "bytes": 10800,
+      "id": "H22-artifact-workflow-run-mismatch",
+      "sha256": "0cbe23ba82cea77e52058928650151c6281bd49b37d270d22c1c52215f6507eb"
+    },
+    {
+      "bytes": 10808,
+      "id": "H23-failed-upload-step",
+      "sha256": "a52aa84a469296dded62902d6a17d9d5a289dbb5131cfcdc265c32eb56b6538c"
+    },
+    {
+      "bytes": 10839,
+      "id": "H24-upload-output-id-mismatch",
+      "sha256": "402defe786c5994882bc041aeb7591117bdb57b0bce053988080da265c5436ab"
+    },
+    {
+      "bytes": 10926,
+      "id": "H25-upload-output-digest-mismatch",
+      "sha256": "215cc5bbe337e123d83695cae025817778b529c2799b3a0603b46fd9e5d853c1"
+    },
+    {
+      "bytes": 10802,
+      "id": "H26-expired-artifact",
+      "sha256": "2e2f4c1bde1a74a08289f8762ea98ef42d8f36b01feff9cd6789147254c65175"
+    },
+    {
+      "bytes": 11332,
+      "id": "H27-duplicate-sibling-artifact",
+      "sha256": "26904604f1cf5aa4fe1af3605e9363d5361a97d2941483cd843e67e21b803b78"
+    },
+    {
+      "bytes": 10860,
+      "id": "H28-binary-self-report-closure-mismatch",
+      "sha256": "95ec8ebc0057d7dd9e8a03161eb172f8db30b38b8a9a091cbde836fad45dca57"
+    },
+    {
+      "bytes": 10848,
+      "id": "H29-upload-step-id-mismatch",
+      "sha256": "dd597a9ae029eb163ab2dc9394db41ae84555a282466d303146b02942500120f"
+    },
+    {
+      "bytes": 11219,
+      "id": "H30-release-id-zero-before-draft",
+      "sha256": "73c359d55c06317ffcbab374e4be1112366fa2e4ed2f2f20247877f25a5bdc40"
+    },
+    {
+      "bytes": 10909,
+      "id": "H31-release-id-mismatch",
+      "sha256": "60dc39e986a297aa0e9f5ca961fbfc52232615a324ab403e056ff0a67f605f8f"
+    },
+    {
+      "bytes": 11003,
+      "id": "H32-release-target-mismatch",
+      "sha256": "8d5ef0314ab0d52582f4869dccbc22c7c05bd688e0d70bd55ce1ec346ee9ca8a"
+    },
+    {
+      "bytes": 11062,
+      "id": "H33-application-namespace-substitution",
+      "sha256": "e29a7162c3a1c1c4fa88cf8bd5cd2a361b0e6b28d62138c36ac080513df448d6"
+    },
+    {
+      "bytes": 10826,
+      "id": "H34-workflow-source-step-remap",
+      "sha256": "715ee6579035d742fc41635401db1b58e905523222c9daf0c3c04e7515d367e9"
+    }
+  ],
+  "schema": "velnor.validator-binding-hostile-index.v1",
+  "source_fixture_sha256": "3fa58aab41a0893fb386f55257474cce04036753440525d0d938f424226f1e6d"
+}

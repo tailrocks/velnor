@@ -1,0 +1,519 @@
+{
+  "schema_version": 2,
+  "contract_kind": "g0-source-workload-supplement",
+  "status": "source_derived_not_execution",
+  "gate_status": "incomplete",
+  "captured_at_utc": "2026-09-19T23:33:08Z",
+  "scope": {
+    "repository_count": 8,
+    "repositories": [
+      "tailrocks/velnor-apt",
+      "tailrocks/holla-apt",
+      "tailrocks/homebrew-tablerock",
+      "tailrocks/homebrew-ruxel",
+      "tailrocks/homebrew-parallax",
+      "tailrocks/homebrew-holla",
+      "tailrocks/homebrew-velnor",
+      "jackin-project/homebrew-tap"
+    ],
+    "repository_role": "distribution_consumer",
+    "exact_scope_only": true
+  },
+  "provenance": {
+    "source_mode": "git_object_at_HEAD",
+    "source_clones": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/distribution-workload-contract/research/<repo>",
+    "source_query": "git ls-tree -r --format='%(objectname) %(path)' HEAD; git show HEAD:<path>",
+    "worktree_rule": "Only committed tree objects were read. Research clones are external evidence; no source checkout was edited.",
+    "remote_ref_query": "git ls-remote https://github.com/<repo>.git refs/heads/main",
+    "initial_live_capture_utc": "2026-09-19T23:33:08Z",
+    "closing_live_capture_utc": "2026-09-19T23:47:02Z",
+    "closing_live_capture_required": true,
+    "closing_live_ref_match_all_records": true,
+    "github_api_query_mode": "GET-only gh api; no dispatch, install, publish, or write endpoint",
+    "base_contract_schema": {
+      "path": "G0/skills-adapter/workload-contract-20260919T225313Z.json",
+      "sha256": "sha256:745921e2df5ffc286e63bbccb2ff8e6f328639a1b27c5198c784fbd896b872f8"
+    },
+    "prior_source_inputs": [
+      {"path": "G0/workload-matrix.json", "sha256": "sha256:f6d91897469474a28dc754d6f50521af2667ad4ef3c2694553e2afb01cd98820"},
+      {"path": "G0/distribution-consumers/consumer-inventory.json", "sha256": "sha256:5391eb3c80d535af5f6a8630f849f11dacb1e3049550b0bdbed1bc4895e38936"},
+      {"path": "G0/distribution-consumers/report.md", "sha256": "sha256:67ffc2f5de0e798b7d661373467c5dc7619898951bcc8d6bd99e72a736576dee"}
+    ]
+  },
+  "workload_contract": [
+    {
+      "workload_id": "apt-package-state-source-identity-checksum",
+      "required": true,
+      "purpose": "Project an upstream immutable release manifest into the consumer package-state file and reject wrong source, missing targets, or wrong bytes.",
+      "source_inputs": ["package-state*.json", "scripts/package-update.sh", "scripts/test-package-update.sh"],
+      "source_predicates": ["identity source repository/ref/digest equals release manifest", "package asset names and SHA-256 values are complete and unique", "unsupported or extra assets fail closed"],
+      "platform_architecture": [{"platform": "linux", "architecture": "amd64"}, {"platform": "linux", "architecture": "arm64"}],
+      "provider_policy": {"github_hosted": "eligible_for_static_or_sandboxed_validator", "velnor": "not_eligible_unproven", "trusted_source": "eligible_for_static_review_only", "fork_or_untrusted": "static_only_no_helper_execution"},
+      "logical_job": {"job_id": "apt-package-state-source-identity-checksum", "provider": "github", "required": true, "child_workflow": null}
+    },
+    {
+      "workload_id": "apt-signed-feed-index-publication",
+      "required": true,
+      "purpose": "Verify signed reprepro indexes and publish stable/preview feed content only after source and signature checks.",
+      "source_inputs": ["conf/distributions", "release workflow", "scripts/verify-release.sh", "scripts/publication-previous.jq"],
+      "source_predicates": ["amd64 and arm64 indexes are declared", "signer identity is pinned", "verify precedes publication and deploy", "rollback/previous pointer is validated"],
+      "platform_architecture": [{"platform": "linux", "architecture": "amd64"}, {"platform": "linux", "architecture": "arm64"}],
+      "provider_policy": {"github_hosted": "eligible_for_trusted_publisher_only", "velnor": "explicitly_not_eligible_for_feed_mutation", "trusted_source": "static_review_only_without_environment", "fork_or_untrusted": "not_eligible_for_publish"},
+      "logical_job": {"job_id": "apt-signed-feed-index-publication", "provider": "github", "required": true, "child_workflow": "release.yml"}
+    },
+    {
+      "workload_id": "apt-stable-preview-release-discovery",
+      "required": true,
+      "purpose": "Resolve stable and preview release identities from the producer's release/manifest namespace, never from an unrelated runtime tag.",
+      "source_inputs": ["release workflow", "package-state*.json", "upstream tailrocks/velnor release manifest"],
+      "source_predicates": ["stable uses a release tag and attested manifest", "preview uses the explicit preview release manifest and main source identity", "resolved source commit binds every package asset"],
+      "platform_architecture": [{"platform": "linux", "architecture": "amd64"}, {"platform": "linux", "architecture": "arm64"}],
+      "provider_policy": {"github_hosted": "eligible_for_read_only_discovery_and_verified_publish", "velnor": "not_eligible_unproven", "trusted_source": "static_review_only", "fork_or_untrusted": "static_only"},
+      "logical_job": {"job_id": "apt-stable-preview-release-discovery", "provider": "github", "required": true, "child_workflow": "release.yml"}
+    },
+    {
+      "workload_id": "apt-clean-install-upgrade-signature-service",
+      "required": true,
+      "purpose": "Install each required architecture, verify feed signatures and binary identity, upgrade in-channel, switch stable/preview, and check the runner service boundary.",
+      "source_inputs": ["conf/distributions", "package-state*.json", "upstream release manifest", "consumer feed URL"],
+      "source_predicates": ["clean client has no ambient source build or PATH dependency", "signature and package digest are checked", "same-channel upgrade and cross-channel switch are explicit", "service/binary identity is checked"],
+      "platform_architecture": [{"platform": "linux", "architecture": "amd64"}, {"platform": "linux", "architecture": "arm64"}],
+      "provider_policy": {"github_hosted": "not_a_clean_client_environment", "velnor": "not_eligible_unproven", "trusted_source": "execution_not_performed_here", "fork_or_untrusted": "not_eligible"},
+      "logical_job": {"job_id": "apt-clean-install-upgrade-signature-service", "provider": "future_clean_client", "required": true, "child_workflow": null}
+    },
+    {
+      "workload_id": "homebrew-formula-audit-version",
+      "required": true,
+      "purpose": "Audit stable and preview formula syntax, target branches, source version identity, checksums, conflicts, and the formula version command.",
+      "source_inputs": ["Formula/*.rb", "Casks/*.rb when committed", ".github/ci/project.toml", "ci-unit-homebrew.yml"],
+      "source_predicates": ["stable and preview source identities are explicit", "all declared target assets have checksums", "formula test checks the installed binary version", "disabled, rolling, stale, or mutable URLs remain failures"],
+      "platform_architecture": [{"platform": "linux", "architecture": "x86_64", "runner": "ubuntu-24.04", "mode": "static_formula_audit"}, {"platform": "macos", "architecture": "arm64", "mode": "native_formula_or_cask"}, {"platform": "macos", "architecture": "x86_64", "mode": "only_if_artifact_is_declared"}],
+      "provider_policy": {"github_hosted": "eligible_for_static_audit_pending_execution", "velnor": "not_eligible_unproven", "trusted_source": "eligible_for_static_review_only", "fork_or_untrusted": "static_only_no_helper_execution"},
+      "logical_job": {"job_id": "homebrew-formula-audit-version", "provider": "github", "required": true, "child_workflow": ".github/workflows/ci-unit-homebrew.yml"}
+    },
+    {
+      "workload_id": "homebrew-source-identity-checksum",
+      "required": true,
+      "purpose": "Regenerate formula/cask release references from a typed upstream manifest and prove source identity, complete assets, and byte checksums for both channels.",
+      "source_inputs": ["scripts/package-update.sh", "scripts/test-package-update.sh", "Formula/*.rb", "Casks/*.rb when generated"],
+      "source_predicates": ["producer repository/ref/commit is exact", "stable and preview asset sets are complete", "local generated files cannot retain stale source/checksum values", "update fixtures cover wrong identity, missing asset, and extra asset"],
+      "platform_architecture": [{"platform": "macos", "architecture": "arm64"}, {"platform": "macos", "architecture": "x86_64"}, {"platform": "linux", "architecture": "arm64"}, {"platform": "linux", "architecture": "x86_64"}],
+      "provider_policy": {"github_hosted": "eligible_for_sandboxed_validator_pending_workflow", "velnor": "not_eligible_unproven", "trusted_source": "static_review_only", "fork_or_untrusted": "not_eligible_for_helper_execution"},
+      "logical_job": {"job_id": "homebrew-source-identity-checksum", "provider": "github", "required": true, "child_workflow": ".github/workflows/ci-unit-homebrew.yml"}
+    },
+    {
+      "workload_id": "homebrew-native-install-upgrade-channel",
+      "required": true,
+      "purpose": "On supported native macOS architecture, clean-install stable and preview, check version/path, upgrade in channel, switch channel, and uninstall without source-build substitution.",
+      "source_inputs": ["Formula/*.rb", "Casks/*.rb when committed", "upstream release assets", "channel conflict declarations"],
+      "source_predicates": ["native arm64 artifact and checksum are present", "stable/preview conflict or switch semantics are explicit", "same-channel upgrade preserves binary identity", "Intel is unsupported unless a matching artifact and test exist"],
+      "platform_architecture": [{"platform": "macos", "architecture": "arm64", "runner": "macos-arm64"}, {"platform": "macos", "architecture": "x86_64", "eligibility": "only_if_explicit_asset"}],
+      "provider_policy": {"github_hosted": "requires_native_macos_runner_and_release_assets", "velnor": "not_eligible_unproven", "trusted_source": "execution_not_performed_here", "fork_or_untrusted": "not_eligible"},
+      "logical_job": {"job_id": "homebrew-native-install-upgrade-channel", "provider": "future-macos-native", "required": true, "child_workflow": null}
+    },
+    {
+      "workload_id": "homebrew-generated-cask-conditional",
+      "required": true,
+      "purpose": "When the producer manifest contains a desktop asset, generate and audit the cask; when it does not, retain an explicit no-cask fact rather than silently skipping it.",
+      "source_inputs": ["scripts/package-update.sh", "Casks/**", "upstream release manifest"],
+      "source_predicates": ["desktop asset presence controls cask generation", "generated cask URL/checksum/source commit are exact", "absence of a cask is typed as source state, not observed success"],
+      "platform_architecture": [{"platform": "macos", "architecture": "arm64"}],
+      "provider_policy": {"github_hosted": "eligible_for_static_conditional_review", "velnor": "not_eligible_unproven", "trusted_source": "static_review_only", "fork_or_untrusted": "static_only"},
+      "logical_job": {"job_id": "homebrew-generated-cask-conditional", "provider": "github", "required": true, "child_workflow": ".github/workflows/ci-unit-homebrew.yml"}
+    },
+    {
+      "workload_id": "velnorctl-formula-source-build",
+      "required": true,
+      "purpose": "Keep the native velnorctl formula tied to an immutable Velnor source tag and checksum, without confusing it with the Linux runner package.",
+      "source_inputs": ["Formula/velnorctl.rb", "README.md", "tailrocks/velnor release archive"],
+      "source_predicates": ["source URL is a release tag archive", "archive SHA-256 is pinned", "formula builds crates/velnorctl", "README separates operator CLI from Linux runner"],
+      "platform_architecture": [{"platform": "macos", "architecture": "arm64"}],
+      "provider_policy": {"github_hosted": "eligible_for_static_review_pending_native_run", "velnor": "not_eligible_unproven", "trusted_source": "static_review_only", "fork_or_untrusted": "static_only"},
+      "logical_job": {"job_id": "velnorctl-formula-source-build", "provider": "github", "required": true, "child_workflow": null}
+    },
+    {
+      "workload_id": "velnorctl-native-install-version",
+      "required": true,
+      "purpose": "Clean-install the native operator CLI and verify help, version, path, and upgrade behavior on supported macOS architecture.",
+      "source_inputs": ["Formula/velnorctl.rb", "README.md", "immutable Velnor release archive"],
+      "source_predicates": ["formula test is exercised on a clean native host", "version output remains distinguishable from runner release version", "no Linux runner or native Actions claim is inferred"],
+      "platform_architecture": [{"platform": "macos", "architecture": "arm64"}],
+      "provider_policy": {"github_hosted": "requires_native_macos_runner", "velnor": "not_eligible_unproven", "trusted_source": "execution_not_performed_here", "fork_or_untrusted": "not_eligible"},
+      "logical_job": {"job_id": "velnorctl-native-install-version", "provider": "future-macos-native", "required": true, "child_workflow": null}
+    },
+    {
+      "workload_id": "velnorctl-stable-preview-channel-contract",
+      "required": true,
+      "purpose": "Define stable/preview formula channels and source/checksum transitions for the native operator CLI.",
+      "source_inputs": ["Formula/velnorctl.rb", "release manifest contract", "README.md"],
+      "source_predicates": ["stable and preview channel records are explicit", "channel switch and rollback are tested", "missing preview source is a typed gap"],
+      "platform_architecture": [{"platform": "macos", "architecture": "arm64"}],
+      "provider_policy": {"github_hosted": "eligible_for_static_contract_review", "velnor": "not_eligible_unproven", "trusted_source": "static_review_only", "fork_or_untrusted": "static_only"},
+      "logical_job": {"job_id": "velnorctl-stable-preview-channel-contract", "provider": "github", "required": true, "child_workflow": null}
+    }
+  ],
+  "dependency_edge_kinds": [
+    {"edge_id": "workflow-to-local-reusable-workflow", "from": ".github/workflows/ci-main.yml|ci-pr.yml", "to": ".github/workflows/ci-unit-{docs,homebrew}.yml", "relation": "caller_to_workflow_call"},
+    {"edge_id": "workflow-to-pinned-action", "from": ".github/workflows/**", "to": "external uses refs", "relation": "pinned_action_dependency"},
+    {"edge_id": "generator-config-to-workflow-tree", "from": ".github-gen/velnor-workflow.toml", "to": ".github/workflows/**", "relation": "declares_generator_profile_revision_runners_and_files"},
+    {"edge_id": "project-config-to-workflow-tasks", "from": ".github/ci/project.toml", "to": ".github/workflows/**", "relation": "declares_units_commands_and_release_profile"},
+    {"edge_id": "formula-to-source-release", "from": "Formula/*.rb|Casks/*.rb", "to": "upstream release archive/tag", "relation": "source_ref_asset_checksum_consumer"},
+    {"edge_id": "update-script-to-formula-cask", "from": "scripts/package-update.sh", "to": "Formula/*.rb|Casks/*.rb", "relation": "manifest_bound_generated_projection"},
+    {"edge_id": "package-state-to-release-manifest", "from": "package-state*.json", "to": "release-manifest.json plus identity.json", "relation": "typed_package_projection"},
+    {"edge_id": "release-workflow-to-source-release", "from": ".github/workflows/release.yml", "to": "upstream product release/attestation", "relation": "discover_fetch_verify"},
+    {"edge_id": "publisher-to-feed-tree", "from": "release workflow plus conf/distributions", "to": "signed APT feed and Pages", "relation": "verify_publish_deploy"},
+    {"edge_id": "formula-to-native-platform", "from": "formula/cask platform branches", "to": "macOS/Linux target architecture", "relation": "artifact_eligibility"},
+    {"edge_id": "fixture-to-source-validator", "from": "scripts/test-*.sh", "to": "temporary fixture copy", "relation": "negative_and_positive_source_contract_test_only"},
+    {"edge_id": "scan-exclusion-to-packaging", "from": "jackin .github-gen scan.exclude", "to": "Formula/** and Casks/**", "relation": "packaging_paths_excluded_from_generic_scan"},
+    {"edge_id": "config-to-provider-admission", "from": "runners/automatic_lanes/runner labels", "to": "GitHub-hosted or Velnor provider", "relation": "provider_policy_input"}
+  ],
+  "global_source_facts": {
+    "source_revision_rule": "Every record is bound to live refs/heads/main and its isolated clone HEAD. No historical success is promoted to current source success.",
+    "common_generator_revisions": {"generic_distribution_consumers": "b9c3156cdb88e63c11b9e595a3e694b02238c09", "velnor_apt": "fdeed261bd2247a38db6922a7726cd45d3d6f31e"},
+    "common_external_action_pins": {
+      "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "actions/upload-artifact": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+      "actions/download-artifact": "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+      "jdx/mise-action": "c2a87611a18de5b3828c5652fe268e992400cb5c",
+      "jdx/mr-boxington-action": "7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777"
+    },
+    "provider_facts": [
+      "Generic Homebrew and Jackin configs declare GitHub automatic lanes; Velnor jobs may be rendered but no trusted Velnor capability evidence is supplied here.",
+      "velnor-apt release.yml explicitly rejects Velnor-only feed mutation; publication is guarded by GitHub-hosted plus environment permissions.",
+      "No source tree in scope contains a local action.yml/action.yaml. Local reusable workflows exist only in the listed ci-unit files.",
+      "Formula and package-update fixture scripts are source predicates; they are not observed execution success."
+    ],
+    "platform_facts": [
+      "APT package metadata declares amd64 and arm64; the committed feed workflow runs on ubuntu-24.04 and does not prove clean clients.",
+      "Homebrew formulae declare macOS arm64/x86_64 and Linux arm64/x86_64 where the formula has those branches; native casks in scope are arm64-only.",
+      "homebrew-velnor is a macOS arm64 operator-CLI formula and explicitly disclaims native Actions execution."
+    ]
+  },
+  "exclusion_catalog": [
+    {"exclusion_id": "no_install_publish_dispatch", "reason": "This collector did not install packages, publish feeds, dispatch workflows, or mutate any repository."},
+    {"exclusion_id": "source_semantics_not_observed_success", "reason": "A source test script or workflow body describes an intended check; it does not prove a run, runner, artifact, or clean client succeeded."},
+    {"exclusion_id": "embedded_fixture_not_production_unit", "reason": "scripts/test-package-update.sh and generated fixture data are inputs to source-contract tests, not separate package workloads."},
+    {"exclusion_id": "native_platform_not_implied", "reason": "Linux hosted formula audit cannot substitute for a macOS native install; Intel support is not inferred without an explicit artifact and test."},
+    {"exclusion_id": "velnor_provider_unproven", "reason": "Declared Velnor labels/runners are configuration claims only; no trusted Velnor runner identity or execution evidence is included."},
+    {"exclusion_id": "required_app_binding_unknown", "reason": "Ruleset required-check objects returned context names without integration_id/app_id fields. Unknown is retained, not converted to an empty or trusted binding."},
+    {"exclusion_id": "api_only_pages_workflow_not_source", "reason": "The GitHub Actions API reports dynamic/pages/pages-build-deployment for velnor-apt, but it is not a committed source workflow and is not used to create a source dependency edge."},
+    {"exclusion_id": "jackin_cask_generation_not_current_tree", "reason": "Jackin's updater can emit a stable desktop cask when a manifest contains the asset, but current HEAD has no Casks tree; conditional behavior remains unexecuted."}
+  ],
+  "repositories": [
+    {
+      "repository": "tailrocks/velnor-apt",
+      "repository_role": "apt_distribution_consumer",
+      "default_branch": "main",
+      "default_branch_sha": "b24d7d4370001119cd5ddcb6f9e07aa9007051e7",
+      "closing_default_branch_sha": "b24d7d4370001119cd5ddcb6f9e07aa9007051e7",
+      "inventory_reuse": {"reused_existing_record": false, "reason": "velnor-apt was outside the prior six-repository inventory; fresh source read"},
+      "live": {"github_id": 1259812770, "default_branch": "main", "actions_workflow_count": 10, "open_pr_count": 3, "active_ruleset_ids": [19572991, 19572989], "branch_protection_http": 404, "branch_protection_state": "classic_endpoint_not_configured_or_not_visible; active_rulesets_are_separate"},
+      "source_tree": {"entry_count": 33, "listing_sha256": "sha256:8e1508de3d3c88647bb600716596fcd81fff864b9faffec93d2e86b482813378", "committed_workflow_paths": [".github/workflows/ci-main.yml", ".github/workflows/ci-policy.yml", ".github/workflows/ci-pr.yml", ".github/workflows/ci-unit-docs.yml", ".github/workflows/maintenance.yml", ".github/workflows/nightly.yml", ".github/workflows/release.yml", ".github/workflows/renovate-validate.yml", ".github/workflows/renovate.yml"], "committed_workflow_count": 9, "api_only_workflow_paths": ["dynamic/pages/pages-build-deployment"], "committed_action_paths": [], "local_reusable_workflow_paths": [".github/workflows/ci-unit-docs.yml"]},
+      "source_dependencies": {
+        "workflow_nodes": [
+          {"path": ".github/workflows/ci-main.yml", "blob_sha": "935823d33c565c3a9ceb395a768c38873178cb66"},
+          {"path": ".github/workflows/ci-policy.yml", "blob_sha": "40e2dcf1e55a00e900726e89c1f02e595a3427c4"},
+          {"path": ".github/workflows/ci-pr.yml", "blob_sha": "2e26d8ea922a166474cf7848549155fa89b78d92"},
+          {"path": ".github/workflows/ci-unit-docs.yml", "blob_sha": "07222ed1f4c9e63399b4b535489a1e2fa79a5a8d"},
+          {"path": ".github/workflows/maintenance.yml", "blob_sha": "e4f9f09af5a47f4359c47f76994fbceffc134137"},
+          {"path": ".github/workflows/nightly.yml", "blob_sha": "843b92edf02ecb1159bfc50d0542d13daab35e9d"},
+          {"path": ".github/workflows/release.yml", "blob_sha": "2af82e1ef0d17650253deec37db28c7f698f7b38"},
+          {"path": ".github/workflows/renovate-validate.yml", "blob_sha": "55ac607ceb8b485bb82692b85f65405632a7bf40"},
+          {"path": ".github/workflows/renovate.yml", "blob_sha": "00613ca6e49039391921633885cbc57a7c02a619"}
+        ],
+        "reusable_workflow_nodes": [{"path": ".github/workflows/ci-unit-docs.yml", "blob_sha": "07222ed1f4c9e63399b4b535489a1e2fa79a5a8d"}],
+        "action_nodes": [],
+        "configuration_nodes": [
+          {"path": ".github-gen/velnor-workflow.toml", "blob_sha": "672dd0c4644557150e300b6abb6806d68ff9c9a8"},
+          {"path": ".github/ci/project.toml", "blob_sha": "4c28e9ce79376052b3b36a05ec71d18ba4804e50"},
+          {"path": "config/fleet/velnor-host.env", "blob_sha": "069db88638d52a4cc8793deff3248642712fd24d"}
+        ],
+        "publisher_and_update_nodes": [
+          {"path": "conf/distributions", "blob_sha": "4443bcff3c23043bf2b682eb2dfaf2c1654bbff1"},
+          {"path": "scripts/package-update.sh", "blob_sha": "087cb08c08f5a9a57898c184dc5df61d7f180545"},
+          {"path": "scripts/publication-previous.jq", "blob_sha": "3a043cda3afef010499a14e178ca0fe6d695e908"},
+          {"path": "scripts/verify-release.sh", "blob_sha": "681f54c223f90073f03c323d5dd9d5f33c55cc12"}
+        ],
+        "source_release_nodes": [
+          {"path": "package-state.json", "blob_sha": "37d838dd0e626c498dfada4a09014c6a469c4e52"},
+          {"path": "package-state-preview.json", "blob_sha": "2724fd6fc6397c034a3d895760560a9bdad6c9a9"},
+          {"path": "velnor.gpg", "blob_sha": "b7347ade4e7003e2ccbfb87acd879d66198cbf5b"},
+          {"path": "scripts/test-package-update.sh", "blob_sha": "39111019f64be61d96a5f21b9ce59c708bdb3ef0"},
+          {"path": "scripts/test-verify-release.sh", "blob_sha": "7693331f06ec9dcf829850b87947b46496f06587"}
+        ]
+      },
+      "expected_workload_ids": ["apt-package-state-source-identity-checksum", "apt-signed-feed-index-publication", "apt-stable-preview-release-discovery", "apt-clean-install-upgrade-signature-service"],
+      "expected_jobs": [
+        {"job_id": "velnor-apt-package-state", "workload_id": "apt-package-state-source-identity-checksum", "provider": "github", "platform_architecture": [{"platform": "linux", "architecture": "amd64"}, {"platform": "linux", "architecture": "arm64"}], "required": true, "child_workflow": null, "plan_state": "source_configured_partial_no_execution", "validation_tasks": ["validate package-state and preview projection", "recompute source identity and every asset checksum"], "install_tasks": ["install signed stable deb on amd64 and arm64 clean clients"], "upgrade_tasks": ["same-channel apt upgrade and package digest check"], "channel_tasks": ["stable-to-preview and preview-to-stable source identity check"]},
+        {"job_id": "velnor-apt-signed-feed-publish", "workload_id": "apt-signed-feed-index-publication", "provider": "github", "platform_architecture": [{"platform": "linux", "architecture": "amd64"}, {"platform": "linux", "architecture": "arm64"}], "required": true, "child_workflow": "release.yml", "plan_state": "source_configured_partial_no_execution", "validation_tasks": ["verify manifest attestation, signer, reprepro indexes, and hidden sentinel"], "install_tasks": ["consume published signed index in a clean client"], "upgrade_tasks": ["preserve rollback pair on retry and monotonic update"], "channel_tasks": ["publish stable and explicit preview suites without cross-suite mutation"]},
+        {"job_id": "velnor-apt-release-discovery", "workload_id": "apt-stable-preview-release-discovery", "provider": "github", "platform_architecture": [{"platform": "linux", "architecture": "amd64"}, {"platform": "linux", "architecture": "arm64"}], "required": true, "child_workflow": "release.yml", "plan_state": "source_configured_partial_no_execution", "validation_tasks": ["resolve stable tag and preview release manifest", "bind source commit to manifest and attestation"], "install_tasks": ["stage exact target package pair"], "upgrade_tasks": ["reject stale or equal candidate against retained pointer"], "channel_tasks": ["keep stable release namespace distinct from preview namespace"]},
+        {"job_id": "velnor-apt-clean-client", "workload_id": "apt-clean-install-upgrade-signature-service", "provider": "future-clean-client", "platform_architecture": [{"platform": "linux", "architecture": "amd64"}, {"platform": "linux", "architecture": "arm64"}], "required": true, "child_workflow": null, "plan_state": "unknown_no_clean_client_source_or_execution", "validation_tasks": ["verify InRelease/Release.gpg and package SHA-256"], "install_tasks": ["clean apt install and binary identity"], "upgrade_tasks": ["same-channel upgrade and rollback refusal"], "channel_tasks": ["channel switch plus runner service start/status"]}
+      ],
+      "dependency_edge_ids": ["workflow-to-local-reusable-workflow", "workflow-to-pinned-action", "generator-config-to-workflow-tree", "project-config-to-workflow-tasks", "package-state-to-release-manifest", "release-workflow-to-source-release", "publisher-to-feed-tree", "fixture-to-source-validator", "config-to-provider-admission"],
+      "provider_eligibility": {"github_hosted": "eligible_for_source_validation_and_trusted_feed_workflow; clean client not supplied", "velnor": "not_eligible_for_feed_mutation_and_unproven_for_docs", "trusted_source": "static_review_only_without_environment", "fork_or_untrusted": "not_eligible_for_publish"},
+      "required_check_contexts_and_apps": [{"context": "DCO", "integration_id": null, "app_id": null}, {"context": "ci-required", "integration_id": null, "app_id": null}, {"context": "Policy", "integration_id": null, "app_id": null}],
+      "required_check_contexts_state": "ruleset_19572991_active_contexts_observed_app_binding_fields_absent; tag ruleset 19572989 listed but not used for main context inventory",
+      "access": {"rulesets_list_http": 200, "ruleset_detail_http": 200, "classic_branch_protection_http": 404, "organization_inherited_policy": "unknown_not_collected", "write_operations": "none"},
+      "workflow": {"generator_revision": "fdeed261bd2247a38db6922a7726cd45d3d6f31e", "event_triggers_observed": ["push", "pull_request", "pull_request_target", "schedule", "workflow_dispatch", "workflow_call"], "runner_policy": {"github": "ubuntu-24.04", "velnor": ["self-hosted", "velnor-target-mvp"]}, "release_mutation_guard": "release.yml rejects runner=velnor for feed mutation and requires GitHub-hosted environment steps"},
+      "source_validation_state": {"apt_package_state": "source_consistency_observed_not_execution", "signed_feed_publication": "source_configured_partial_no_execution", "stable_preview_discovery": "source_configured_partial_no_execution", "clean_install_upgrade": "unknown_no_clean_client_proof"},
+      "observed_source_contract": {"package": "velnor-runner", "source_repository": "tailrocks/velnor", "manifest_schema": "velnor.package-release.v1", "signer_fingerprint": "7E66E3A53F9B3B5CA61D0F53261EDAC957DEB801", "feed_url": "https://velnor-apt.tailrocks.com", "conf_architectures": ["amd64", "arm64"]},
+      "release_install": {"release_applicability": "required", "install_applicability": "required", "g2_proof": "not_supplied_here", "operation_state": "not_operated"},
+      "actual_jobs": null,
+      "justified_exclusion_ids": ["no_install_publish_dispatch", "source_semantics_not_observed_success", "velnor_provider_unproven", "required_app_binding_unknown", "api_only_pages_workflow_not_source"],
+      "unknowns": ["GitHub Actions API reports 10 workflows because dynamic/pages/pages-build-deployment is API-only; committed source has 9.", "Ruleset app/integration ownership and organization-inherited policy were not available from returned fields.", "Feed publication, Pages deployment, clean apt install/upgrade, and runner service behavior were not executed.", "Current upstream release artifact bytes were not fetched in this read-only source inventory."]
+    },
+    {
+      "repository": "tailrocks/holla-apt",
+      "repository_role": "apt_distribution_consumer",
+      "default_branch": "main",
+      "default_branch_sha": "0636074d4a16be4771685bd95bf2cec739cf359c",
+      "closing_default_branch_sha": "0636074d4a16be4771685bd95bf2cec739cf359c",
+      "inventory_reuse": {"reused_existing_record": true, "artifact": "G0/distribution-consumers/consumer-inventory.json", "artifact_sha256": "sha256:5391eb3c80d535af5f6a8630f849f11dacb1e3049550b0bdbed1bc4895e38936", "reason": "existing record SHA equals live main SHA; source tree remains immutable"},
+      "live": {"github_id": 1262993132, "default_branch": "main", "actions_workflow_count": 1, "open_pr_count": 4, "active_ruleset_ids": [19573059, 19573011], "branch_protection_http": 404, "branch_protection_state": "classic_endpoint_not_configured_or_not_visible; active_rulesets_are_separate"},
+      "source_tree": {"entry_count": 20, "listing_sha256": "sha256:5d5c4c8e9439fbf76b7149ea7ffecb8552b8e88ddbde5249bb937863b2ab3669", "committed_workflow_paths": [".github/workflows/ci-unit-docs.yml"], "committed_workflow_count": 1, "api_only_workflow_paths": [], "committed_action_paths": [], "local_reusable_workflow_paths": [".github/workflows/ci-unit-docs.yml"]},
+      "source_dependencies": {
+        "workflow_nodes": [{"path": ".github/workflows/ci-unit-docs.yml", "blob_sha": "2e79e0f0c367300576661fb72446fb9b0cabd902"}],
+        "reusable_workflow_nodes": [{"path": ".github/workflows/ci-unit-docs.yml", "blob_sha": "2e79e0f0c367300576661fb72446fb9b0cabd902"}],
+        "action_nodes": [],
+        "configuration_nodes": [{"path": ".github-gen/velnor-workflow.toml", "blob_sha": "0716e7583cb8f498ef366ac609ac02cc16e6ccdc"}, {"path": ".github/ci/project.toml", "blob_sha": "93911e445f7a54e41078ef7630d0700d29ac4d0c"}, {"path": "config/fleet/velnor-host.env", "blob_sha": "069db88638d52a4cc8793deff3248642712fd24d"}],
+        "publisher_and_update_nodes": [{"path": "conf/distributions", "blob_sha": "51fcd3de9b2220e99d6e3276e567d3152874e592"}, {"path": "scripts/package-update.sh", "blob_sha": "95640229bd18b47945c8467dd2205e1edbf502fe"}, {"path": "scripts/test-package-update.sh", "blob_sha": "9cc700afe62ef4ce805b3e8f7ebffd3244d63d9e"}],
+        "source_release_nodes": [{"path": "package-state.json", "blob_sha": "24311d252d5989c69337a1e6e9089b51b6ec0be3"}]
+      },
+      "expected_workload_ids": ["apt-package-state-source-identity-checksum", "apt-signed-feed-index-publication", "apt-stable-preview-release-discovery", "apt-clean-install-upgrade-signature-service"],
+      "expected_jobs": [
+        {"job_id": "holla-apt-package-state", "workload_id": "apt-package-state-source-identity-checksum", "provider": "github", "platform_architecture": [{"platform": "linux", "architecture": "amd64"}, {"platform": "linux", "architecture": "arm64"}], "required": true, "child_workflow": "ci-unit-docs.yml", "plan_state": "source_consistency_observed_not_execution", "validation_tasks": ["validate holla package-state source/ref/digest and two deb assets", "recompute checksums"], "install_tasks": ["clean install signed holla deb for amd64 and arm64"], "upgrade_tasks": ["same-channel apt upgrade and package identity"], "channel_tasks": ["stable/preview source namespace decision and switch"]},
+        {"job_id": "holla-apt-signed-feed", "workload_id": "apt-signed-feed-index-publication", "provider": "github", "platform_architecture": [{"platform": "linux", "architecture": "amd64"}, {"platform": "linux", "architecture": "arm64"}], "required": true, "child_workflow": null, "plan_state": "missing_publisher_workflow", "validation_tasks": ["validate conf/distributions architecture and signer declaration"], "install_tasks": ["consume a trusted Pages feed only after publisher exists"], "upgrade_tasks": ["verify monotonic feed update and retained rollback"], "channel_tasks": ["publish stable and preview only through an authorized publisher"]},
+        {"job_id": "holla-apt-release-discovery", "workload_id": "apt-stable-preview-release-discovery", "provider": "github", "platform_architecture": [{"platform": "linux", "architecture": "amd64"}, {"platform": "linux", "architecture": "arm64"}], "required": true, "child_workflow": null, "plan_state": "missing_release_workflow", "validation_tasks": ["bind holla release manifest to source commit and assets"], "install_tasks": ["stage exact two-architecture package pair"], "upgrade_tasks": ["reject stale or mismatched source identity"], "channel_tasks": ["retain an explicit preview contract or state its absence"]},
+        {"job_id": "holla-apt-clean-client", "workload_id": "apt-clean-install-upgrade-signature-service", "provider": "future-clean-client", "platform_architecture": [{"platform": "linux", "architecture": "amd64"}, {"platform": "linux", "architecture": "arm64"}], "required": true, "child_workflow": null, "plan_state": "unknown_no_publisher_or_clean_client", "validation_tasks": ["check Release/InRelease signatures and package digest"], "install_tasks": ["clean apt install and binary identity"], "upgrade_tasks": ["same-channel upgrade"], "channel_tasks": ["channel switch and service behavior"]}
+      ],
+      "dependency_edge_ids": ["workflow-to-local-reusable-workflow", "workflow-to-pinned-action", "generator-config-to-workflow-tree", "project-config-to-workflow-tasks", "package-state-to-release-manifest", "publisher-to-feed-tree", "fixture-to-source-validator", "config-to-provider-admission"],
+      "provider_eligibility": {"github_hosted": "eligible_for_static_source_review; no publisher configured", "velnor": "not_eligible_unproven", "trusted_source": "static_review_only", "fork_or_untrusted": "not_eligible_for_publish"},
+      "required_check_contexts_and_apps": [{"context": "DCO", "integration_id": null, "app_id": null}, {"context": "ci-required", "integration_id": null, "app_id": null}],
+      "required_check_contexts_state": "ruleset_19573059_active_contexts_observed_app_binding_fields_absent",
+      "access": {"rulesets_list_http": 200, "ruleset_detail_http": 200, "classic_branch_protection_http": 404, "organization_inherited_policy": "unknown_not_collected", "write_operations": "none"},
+      "workflow": {"generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09", "event_triggers_observed": ["workflow_call"], "runner_policy": {"github": "ubuntu-24.04", "velnor": ["self-hosted", "velnor-target-mvp"]}, "source_note": ".github-gen/NO_WORKFLOWS_REQUIRED.md and project.toml describe a docs-only/omitted automation profile"},
+      "source_validation_state": {"apt_package_state": "source_consistency_observed_not_execution", "signed_feed_index": "source_consistency_observed_not_execution", "publisher": "missing_source_workflow", "clean_install_upgrade": "unknown_no_clean_client_proof"},
+      "observed_source_contract": {"package": "holla", "source_repository": "tailrocks/holla", "manifest_schema": "velnor.package-release.v1", "package_state_schema": "holla.apt-package-state.v1", "conf_architectures": ["amd64", "arm64"], "source_ref": "refs/tags/v1.0.3"},
+      "release_install": {"release_applicability": "required", "install_applicability": "required", "g2_proof": "not_supplied_here", "operation_state": "not_operated"},
+      "actual_jobs": null,
+      "justified_exclusion_ids": ["no_install_publish_dispatch", "source_semantics_not_observed_success", "velnor_provider_unproven", "required_app_binding_unknown"],
+      "unknowns": ["A real signed feed tree is not proof of current publication automation.", "No release/publisher workflow or trusted Pages dispatch exists in the committed source.", "No clean apt install, upgrade, channel switch, signature, or service run was performed.", "Ruleset app/integration ownership and organization-inherited policy remain unknown."]
+    },
+    {
+      "repository": "tailrocks/homebrew-tablerock",
+      "repository_role": "homebrew_tap",
+      "default_branch": "main",
+      "default_branch_sha": "7d376cad41088420e92e49bf4030d761180a3512",
+      "closing_default_branch_sha": "7d376cad41088420e92e49bf4030d761180a3512",
+      "inventory_reuse": {"reused_existing_record": true, "artifact": "G0/distribution-consumers/consumer-inventory.json", "artifact_sha256": "sha256:5391eb3c80d535af5f6a8630f849f11dacb1e3049550b0bdbed1bc4895e38936", "reason": "existing record SHA equals live main SHA; source tree remains immutable"},
+      "live": {"github_id": 1307223747, "default_branch": "main", "actions_workflow_count": 6, "open_pr_count": 0, "active_ruleset_ids": [19572984, 19573016], "branch_protection_http": 404, "branch_protection_state": "classic_endpoint_not_configured_or_not_visible; active_rulesets_are_separate"},
+      "source_tree": {"entry_count": 24, "listing_sha256": "sha256:3027a718d8c4864e46d68358e45c2cad5e372970328f3a42fded13576e97afad", "committed_workflow_paths": [".github/workflows/ci-main.yml", ".github/workflows/ci-policy.yml", ".github/workflows/ci-pr.yml", ".github/workflows/ci-unit-homebrew.yml", ".github/workflows/maintenance.yml", ".github/workflows/nightly.yml"], "committed_workflow_count": 6, "api_only_workflow_paths": [], "committed_action_paths": [], "local_reusable_workflow_paths": [".github/workflows/ci-unit-homebrew.yml"]},
+      "source_dependencies": {
+        "workflow_nodes": [{"path": ".github/workflows/ci-main.yml", "blob_sha": "5eeb8bf26cdb57187f22bda936f3850ac984d951"}, {"path": ".github/workflows/ci-policy.yml", "blob_sha": "8d15612171851938a8f673e7a1fe95aaa7c2f93e"}, {"path": ".github/workflows/ci-pr.yml", "blob_sha": "8029e31d69b6d851c9fb5621749c604d9e6feccf"}, {"path": ".github/workflows/ci-unit-homebrew.yml", "blob_sha": "ca2970621df0d98164504cd67641be2a79aaa491"}, {"path": ".github/workflows/maintenance.yml", "blob_sha": "5c5fb601f6949a8c61fc7e039c4b845d079728fc"}, {"path": ".github/workflows/nightly.yml", "blob_sha": "843b92edf02ecb1159bfc50d0542d13daab35e9d"}],
+        "reusable_workflow_nodes": [{"path": ".github/workflows/ci-unit-homebrew.yml", "blob_sha": "ca2970621df0d98164504cd67641be2a79aaa491"}],
+        "action_nodes": [],
+        "configuration_nodes": [{"path": ".github-gen/velnor-workflow.toml", "blob_sha": "d144051a34054b882a2549b8b82e47f130e08f22"}, {"path": ".github/ci/project.toml", "blob_sha": "78168fcc7bcf58878c755f2d05539818ed43f6f5"}, {"path": "config/fleet/velnor-host.env", "blob_sha": "069db88638d52a4cc8793deff3248642712fd24d"}],
+        "publisher_and_update_nodes": [{"path": "scripts/package-update.sh", "blob_sha": "4d95f0c0922d64a4aa833757161d4dde57cf1304"}, {"path": "scripts/test-package-update.sh", "blob_sha": "be94b1a15f2f0a385af160edf49a7a7239426084"}],
+        "source_release_nodes": [{"path": "Formula/tablerock.rb", "blob_sha": "77fe7130dd29292e1c915edf0e02dfaf34ffdb82"}, {"path": "Formula/tablerock-preview.rb", "blob_sha": "aa9c00ca82383fe13e330d3a9fd658a590d0b034"}, {"path": "Casks/tablerock-app.rb", "blob_sha": "07cb5663d3dc5ab1c32ff888ce0360d1e31e21a2"}, {"path": "Casks/tablerock-app@preview.rb", "blob_sha": "5b2161327dfa65c9fa007c9a577d159a714939b7"}, {"path": "Aliases/tablerock@preview", "blob_sha": "053d57ce13c250abee8460ae26434598445809d6"}]
+      },
+      "expected_workload_ids": ["homebrew-formula-audit-version", "homebrew-source-identity-checksum", "homebrew-native-install-upgrade-channel"],
+      "expected_jobs": [
+        {"job_id": "tablerock-formula-audit", "workload_id": "homebrew-formula-audit-version", "provider": "github", "platform_architecture": [{"platform": "linux", "architecture": "x86_64", "runner": "ubuntu-24.04"}, {"platform": "macos", "architecture": "arm64"}], "required": true, "child_workflow": ".github/workflows/ci-unit-homebrew.yml", "plan_state": "source_contract_partial_no_execution", "validation_tasks": ["brew audit stable and preview formula/cask", "check version, conflict, source-sha, target checksum"], "install_tasks": ["clean arm64 native cask and formula install"], "upgrade_tasks": ["stable same-channel formula/cask upgrade"], "channel_tasks": ["stable/preview install conflict and switch"]},
+        {"job_id": "tablerock-source-update", "workload_id": "homebrew-source-identity-checksum", "provider": "github", "platform_architecture": [{"platform": "macos", "architecture": "arm64"}, {"platform": "macos", "architecture": "x86_64"}, {"platform": "linux", "architecture": "arm64"}, {"platform": "linux", "architecture": "x86_64"}], "required": true, "child_workflow": ".github/workflows/ci-unit-homebrew.yml", "plan_state": "source_fixture_present_no_execution", "validation_tasks": ["regenerate all stable assets from manifest", "reject stale or wrong checksum/source identity"], "install_tasks": ["install generated stable and preview targets"], "upgrade_tasks": ["re-run update idempotently and verify changed source"], "channel_tasks": ["preserve stable/preview formula and cask separation"]},
+        {"job_id": "tablerock-native-channel", "workload_id": "homebrew-native-install-upgrade-channel", "provider": "future-macos-native", "platform_architecture": [{"platform": "macos", "architecture": "arm64"}], "required": true, "child_workflow": null, "plan_state": "missing_clean_native_proof; source_cask_audit_known_failure", "validation_tasks": ["strict native cask audit on supported macOS"], "install_tasks": ["clean stable and preview cask install and app launch/version"], "upgrade_tasks": ["same-channel upgrade without stale URL"], "channel_tasks": ["stable/preview switch and conflict behavior"]}
+      ],
+      "dependency_edge_ids": ["workflow-to-local-reusable-workflow", "workflow-to-pinned-action", "generator-config-to-workflow-tree", "project-config-to-workflow-tasks", "formula-to-source-release", "update-script-to-formula-cask", "formula-to-native-platform", "fixture-to-source-validator", "config-to-provider-admission"],
+      "provider_eligibility": {"github_hosted": "eligible_for_static_formula_audit; native macOS proof absent", "velnor": "not_eligible_unproven", "trusted_source": "static_review_only", "fork_or_untrusted": "static_only_no_helper_execution"},
+      "required_check_contexts_and_apps": [{"context": "DCO", "integration_id": null, "app_id": null}, {"context": "ci-required", "integration_id": null, "app_id": null}],
+      "required_check_contexts_state": "ruleset_19572984_active_contexts_observed_app_binding_fields_absent",
+      "access": {"rulesets_list_http": 200, "ruleset_detail_http": 200, "classic_branch_protection_http": 404, "organization_inherited_policy": "unknown_not_collected", "write_operations": "none"},
+      "workflow": {"generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09", "event_triggers_observed": ["push", "pull_request", "pull_request_target", "schedule", "workflow_dispatch", "workflow_call"], "runner_policy": {"github": "ubuntu-24.04", "velnor": ["self-hosted", "velnor-target-mvp"]}, "automatic_lane": "github"},
+      "source_validation_state": {"formula_audit": "source_consistency_observed_not_execution", "source_update": "fixture_contract_present_not_execution", "native_install": "partial_cask_audit_failure_and_no_clean_install"},
+      "observed_source_contract": {"stable_source_sha": "e18cc91bc8efef3ca6b3ed9470468cf274c5af1b", "preview_source_sha": "a37344a9a2366c0e563613c25325e0b357803e8a", "stable_version": "0.1.0", "preview_version": "0.1.0-preview.867+a37344a", "native_casks": "arm64 macOS; macOS 26/Tahoe declaration", "source_report_state": "formula/cask checksums present; native cask audit and clean install not proven"},
+      "release_install": {"release_applicability": "required", "install_applicability": "required", "g2_proof": "not_supplied_here", "operation_state": "not_operated"},
+      "actual_jobs": null,
+      "justified_exclusion_ids": ["no_install_publish_dispatch", "source_semantics_not_observed_success", "native_platform_not_implied", "velnor_provider_unproven", "required_app_binding_unknown"],
+      "unknowns": ["Hosted Ubuntu formula audit cannot prove native arm64 cask install or app behavior.", "Cask audit defects and clean native install remain unresolved source-contract gaps.", "Ruleset app/integration binding is unknown; API required contexts are not positive App attestations."]
+    },
+    {
+      "repository": "tailrocks/homebrew-ruxel",
+      "repository_role": "homebrew_tap",
+      "default_branch": "main",
+      "default_branch_sha": "ce29c817d29c54563bc479bce3966e4ea32845e6",
+      "closing_default_branch_sha": "ce29c817d29c54563bc479bce3966e4ea32845e6",
+      "inventory_reuse": {"reused_existing_record": true, "artifact": "G0/distribution-consumers/consumer-inventory.json", "artifact_sha256": "sha256:5391eb3c80d535af5f6a8630f849f11dacb1e3049550b0bdbed1bc4895e38936", "reason": "existing record SHA equals live main SHA; source tree remains immutable"},
+      "live": {"github_id": 1328281709, "default_branch": "main", "actions_workflow_count": 6, "open_pr_count": 0, "active_ruleset_ids": [20788282, 21890154], "branch_protection_http": 404, "branch_protection_state": "classic_endpoint_not_configured_or_not_visible; active_rulesets_are_separate"},
+      "source_tree": {"entry_count": 19, "listing_sha256": "sha256:e42d5c160bb220316bdd137dd35c4cfbaf48354631d4abbe6d1f7f8ce7a565e3", "committed_workflow_paths": [".github/workflows/ci-main.yml", ".github/workflows/ci-policy.yml", ".github/workflows/ci-pr.yml", ".github/workflows/ci-unit-homebrew.yml", ".github/workflows/maintenance.yml", ".github/workflows/nightly.yml"], "committed_workflow_count": 6, "api_only_workflow_paths": [], "committed_action_paths": [], "local_reusable_workflow_paths": [".github/workflows/ci-unit-homebrew.yml"]},
+      "source_dependencies": {
+        "workflow_nodes": [{"path": ".github/workflows/ci-main.yml", "blob_sha": "5eeb8bf26cdb57187f22bda936f3850ac984d951"}, {"path": ".github/workflows/ci-policy.yml", "blob_sha": "8d15612171851938a8f673e7a1fe95aaa7c2f93e"}, {"path": ".github/workflows/ci-pr.yml", "blob_sha": "8029e31d69b6d851c9fb5621749c604d9e6feccf"}, {"path": ".github/workflows/ci-unit-homebrew.yml", "blob_sha": "ca2970621df0d98164504cd67641be2a79aaa491"}, {"path": ".github/workflows/maintenance.yml", "blob_sha": "5c5fb601f6949a8c61fc7e039c4b845d079728fc"}, {"path": ".github/workflows/nightly.yml", "blob_sha": "843b92edf02ecb1159bfc50d0542d13daab35e9d"}],
+        "reusable_workflow_nodes": [{"path": ".github/workflows/ci-unit-homebrew.yml", "blob_sha": "ca2970621df0d98164504cd67641be2a79aaa491"}],
+        "action_nodes": [],
+        "configuration_nodes": [{"path": ".github-gen/velnor-workflow.toml", "blob_sha": "5c5c6a476490141c4ce0ad173400713f7272dcc7"}, {"path": ".github/ci/project.toml", "blob_sha": "afa9f4487b48d7cd63bb52b2a31514e61bee2f6e"}, {"path": "config/fleet/velnor-host.env", "blob_sha": "069db88638d52a4cc8793deff3248642712fd24d"}],
+        "publisher_and_update_nodes": [],
+        "source_release_nodes": [{"path": "Formula/ruxel.rb", "blob_sha": "ebf02944bea16813cbc0b52611b069b8a4c4ac6d"}, {"path": "Formula/ruxel-preview.rb", "blob_sha": "682c38b97896aee5dbdddf44f07bd0ef8c3b5875"}, {"path": "Aliases/ruxel@preview", "blob_sha": "fa2582b70b847473e1b3a89a13e935bb1f35c044"}]
+      },
+      "expected_workload_ids": ["homebrew-formula-audit-version", "homebrew-source-identity-checksum", "homebrew-native-install-upgrade-channel"],
+      "expected_jobs": [
+        {"job_id": "ruxel-formula-audit", "workload_id": "homebrew-formula-audit-version", "provider": "github", "platform_architecture": [{"platform": "linux", "architecture": "x86_64", "runner": "ubuntu-24.04"}, {"platform": "macos", "architecture": "arm64"}], "required": true, "child_workflow": ".github/workflows/ci-unit-homebrew.yml", "plan_state": "partial_source_contract_no_execution", "validation_tasks": ["reject mutable stable main.tar.gz URL", "audit preview/stable version and checksum/conflict"], "install_tasks": ["clean formula install and version on native supported platform"], "upgrade_tasks": ["stable and preview update from immutable source"], "channel_tasks": ["explicit stable/preview conflict and switch"]},
+        {"job_id": "ruxel-source-update", "workload_id": "homebrew-source-identity-checksum", "provider": "github", "platform_architecture": [{"platform": "macos", "architecture": "arm64"}, {"platform": "macos", "architecture": "x86_64"}, {"platform": "linux", "architecture": "arm64"}, {"platform": "linux", "architecture": "x86_64"}], "required": true, "child_workflow": ".github/workflows/ci-unit-homebrew.yml", "plan_state": "missing_update_source_contract", "validation_tasks": ["require typed release identity and all target checksums"], "install_tasks": ["install formula built from verified assets"], "upgrade_tasks": ["idempotent manifest-bound update"], "channel_tasks": ["update stable and preview independently"]},
+        {"job_id": "ruxel-native-channel", "workload_id": "homebrew-native-install-upgrade-channel", "provider": "future-macos-native", "platform_architecture": [{"platform": "macos", "architecture": "arm64"}], "required": true, "child_workflow": null, "plan_state": "missing_clean_native_proof", "validation_tasks": ["strict formula audit on source and checksum"], "install_tasks": ["clean stable/preview install and version"], "upgrade_tasks": ["same-channel upgrade"], "channel_tasks": ["stable/preview conflict and switch"]}
+      ],
+      "dependency_edge_ids": ["workflow-to-local-reusable-workflow", "workflow-to-pinned-action", "generator-config-to-workflow-tree", "project-config-to-workflow-tasks", "formula-to-source-release", "formula-to-native-platform", "config-to-provider-admission"],
+      "provider_eligibility": {"github_hosted": "eligible_for_static_formula_audit; source update and native proof absent", "velnor": "not_eligible_unproven", "trusted_source": "static_review_only", "fork_or_untrusted": "static_only_no_helper_execution"},
+      "required_check_contexts_and_apps": [{"context": "DCO", "integration_id": null, "app_id": null}, {"context": "ci-required", "integration_id": null, "app_id": null}],
+      "required_check_contexts_state": "ruleset_20788282_active_contexts_observed_app_binding_fields_absent",
+      "access": {"rulesets_list_http": 200, "ruleset_detail_http": 200, "classic_branch_protection_http": 404, "organization_inherited_policy": "unknown_not_collected", "write_operations": "none"},
+      "workflow": {"generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09", "event_triggers_observed": ["push", "pull_request", "pull_request_target", "schedule", "workflow_dispatch", "workflow_call"], "runner_policy": {"github": "ubuntu-24.04", "velnor": ["self-hosted", "velnor-target-mvp"]}, "automatic_lane": "github"},
+      "source_validation_state": {"formula_audit": "partial_mutable_stable_and_stale_preview", "source_update": "missing_source_update_script", "native_install": "missing_clean_native_proof"},
+      "observed_source_contract": {"stable_source": "mutable archive/refs/heads/main.tar.gz; no stable checksum", "preview_source_sha": "cb5d1e957e93a14eb0e827d77d36dd46d716d029", "preview_version": "0.1.0-preview.85+cb5d1e9", "source_report_state": "stable/preview refresh and install contract incomplete"},
+      "release_install": {"release_applicability": "required", "install_applicability": "required", "g2_proof": "not_supplied_here", "operation_state": "not_operated"},
+      "actual_jobs": null,
+      "justified_exclusion_ids": ["no_install_publish_dispatch", "source_semantics_not_observed_success", "native_platform_not_implied", "velnor_provider_unproven", "required_app_binding_unknown"],
+      "unknowns": ["No package-update/source identity script exists in the committed tree.", "Stable formula points at mutable main archive and has no checksum; preview is not proven fresh against a producer manifest.", "No clean native install, upgrade, or channel switch was run."]
+    },
+    {
+      "repository": "tailrocks/homebrew-parallax",
+      "repository_role": "homebrew_tap",
+      "default_branch": "main",
+      "default_branch_sha": "c9c59277f35cb1e81988c2bef0be2c688dadd608",
+      "closing_default_branch_sha": "c9c59277f35cb1e81988c2bef0be2c688dadd608",
+      "inventory_reuse": {"reused_existing_record": true, "artifact": "G0/distribution-consumers/consumer-inventory.json", "artifact_sha256": "sha256:5391eb3c80d535af5f6a8630f849f11dacb1e3049550b0bdbed1bc4895e38936", "reason": "existing record SHA equals live main SHA; source tree remains immutable"},
+      "live": {"github_id": 1269643904, "default_branch": "main", "actions_workflow_count": 6, "open_pr_count": 0, "active_ruleset_ids": [19573077, 19573018], "branch_protection_http": 404, "branch_protection_state": "classic_endpoint_not_configured_or_not_visible; active_rulesets_are_separate"},
+      "source_tree": {"entry_count": 22, "listing_sha256": "sha256:67a96e4138fd33ca2aea2e9d110b3e637e61c47452a624fb463785101a40edb4", "committed_workflow_paths": [".github/workflows/ci-main.yml", ".github/workflows/ci-policy.yml", ".github/workflows/ci-pr.yml", ".github/workflows/ci-unit-homebrew.yml", ".github/workflows/maintenance.yml", ".github/workflows/nightly.yml"], "committed_workflow_count": 6, "api_only_workflow_paths": [], "committed_action_paths": [], "local_reusable_workflow_paths": [".github/workflows/ci-unit-homebrew.yml"]},
+      "source_dependencies": {
+        "workflow_nodes": [{"path": ".github/workflows/ci-main.yml", "blob_sha": "5eeb8bf26cdb57187f22bda936f3850ac984d951"}, {"path": ".github/workflows/ci-policy.yml", "blob_sha": "8d15612171851938a8f673e7a1fe95aaa7c2f93e"}, {"path": ".github/workflows/ci-pr.yml", "blob_sha": "8029e31d69b6d851c9fb5621749c604d9e6feccf"}, {"path": ".github/workflows/ci-unit-homebrew.yml", "blob_sha": "ca2970621df0d98164504cd67641be2a79aaa491"}, {"path": ".github/workflows/maintenance.yml", "blob_sha": "5c5fb601f6949a8c61fc7e039c4b845d079728fc"}, {"path": ".github/workflows/nightly.yml", "blob_sha": "843b92edf02ecb1159bfc50d0542d13daab35e9d"}],
+        "reusable_workflow_nodes": [{"path": ".github/workflows/ci-unit-homebrew.yml", "blob_sha": "ca2970621df0d98164504cd67641be2a79aaa491"}],
+        "action_nodes": [],
+        "configuration_nodes": [{"path": ".github-gen/velnor-workflow.toml", "blob_sha": "c34f6d8f12c6eb6f78a90f1258e71570f8ba43f4"}, {"path": ".github/ci/project.toml", "blob_sha": "088425bc32a2eae411fda95b7adacc5ec9ca4c1f"}, {"path": "config/fleet/velnor-host.env", "blob_sha": "069db88638d52a4cc8793deff3248642712fd24d"}],
+        "publisher_and_update_nodes": [{"path": "scripts/package-update.sh", "blob_sha": "cb343a4e3bc22b2c7f1f3a30df569dfb169882d5"}, {"path": "scripts/test-package-update.sh", "blob_sha": "773a79d3e3a989cb2ff374f13786dec6abd24555"}],
+        "source_release_nodes": [{"path": "Formula/parallax.rb", "blob_sha": "3251076f6e738ba3a2a23b0e8cb594885679fa68"}, {"path": "Formula/parallax-preview.rb", "blob_sha": "5982934ad86afc72aefc6ea397074e8e0d9a19f2"}, {"path": "Aliases/parallax@preview", "blob_sha": "67532c29aa16b13010f545927e8a3cb787c3f608"}]
+      },
+      "expected_workload_ids": ["homebrew-formula-audit-version", "homebrew-source-identity-checksum", "homebrew-native-install-upgrade-channel"],
+      "expected_jobs": [
+        {"job_id": "parallax-formula-audit", "workload_id": "homebrew-formula-audit-version", "provider": "github", "platform_architecture": [{"platform": "linux", "architecture": "x86_64", "runner": "ubuntu-24.04"}, {"platform": "macos", "architecture": "arm64"}], "required": true, "child_workflow": ".github/workflows/ci-unit-homebrew.yml", "plan_state": "partial_source_contract_no_execution", "validation_tasks": ["audit stable/preview source identities, four target checksums, conflicts", "validate version test and serve command contract"], "install_tasks": ["clean native formula install and version"], "upgrade_tasks": ["same-channel upgrade with source/checksum identity"], "channel_tasks": ["stable/preview conflict and switch"]},
+        {"job_id": "parallax-source-update", "workload_id": "homebrew-source-identity-checksum", "provider": "github", "platform_architecture": [{"platform": "macos", "architecture": "arm64"}, {"platform": "macos", "architecture": "x86_64"}, {"platform": "linux", "architecture": "arm64"}, {"platform": "linux", "architecture": "x86_64"}], "required": true, "child_workflow": ".github/workflows/ci-unit-homebrew.yml", "plan_state": "stable_fixture_present_preview_update_missing", "validation_tasks": ["regenerate stable formula from typed manifest", "detect static/stale preview source and checksum"], "install_tasks": ["install stable and preview target binaries"], "upgrade_tasks": ["idempotent update and stale refresh"], "channel_tasks": ["preserve independent stable/preview paths"]},
+        {"job_id": "parallax-native-behavior", "workload_id": "homebrew-native-install-upgrade-channel", "provider": "future-macos-native", "platform_architecture": [{"platform": "macos", "architecture": "arm64"}], "required": true, "child_workflow": null, "plan_state": "missing_serve_and_clean_install_proof", "validation_tasks": ["strict audit without redundant version or unpinned behavior"], "install_tasks": ["clean install and --version"], "upgrade_tasks": ["same-channel upgrade"], "channel_tasks": ["stable/preview switch plus parallax serve behavior smoke"]}
+      ],
+      "dependency_edge_ids": ["workflow-to-local-reusable-workflow", "workflow-to-pinned-action", "generator-config-to-workflow-tree", "project-config-to-workflow-tasks", "formula-to-source-release", "update-script-to-formula-cask", "formula-to-native-platform", "fixture-to-source-validator", "config-to-provider-admission"],
+      "provider_eligibility": {"github_hosted": "eligible_for_static_formula_audit; native serve/install absent", "velnor": "not_eligible_unproven", "trusted_source": "static_review_only", "fork_or_untrusted": "static_only_no_helper_execution"},
+      "required_check_contexts_and_apps": [{"context": "DCO", "integration_id": null, "app_id": null}, {"context": "ci-required", "integration_id": null, "app_id": null}],
+      "required_check_contexts_state": "ruleset_19573077_active_contexts_observed_app_binding_fields_absent",
+      "access": {"rulesets_list_http": 200, "ruleset_detail_http": 200, "classic_branch_protection_http": 404, "organization_inherited_policy": "unknown_not_collected", "write_operations": "none"},
+      "workflow": {"generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09", "event_triggers_observed": ["push", "pull_request", "pull_request_target", "schedule", "workflow_dispatch", "workflow_call"], "runner_policy": {"github": "ubuntu-24.04", "velnor": ["self-hosted", "velnor-target-mvp"]}, "automatic_lane": "github"},
+      "source_validation_state": {"formula_audit": "partial_strict_audit_issue", "source_update": "partial_stable_only_preview_static", "native_install_and_serve": "missing"},
+      "observed_source_contract": {"stable_source_sha": "da3ce716ecbe50f6d5e00ce89948a7f376636f12", "preview_source_sha": "1fa9666d5d98a3e1518aa103b18a9a949cce38c5", "stable_version": "0.1.0", "preview_version": "0.1.0-preview.2526+1fa9666", "source_report_state": "formula checksums present; preview updater and serve/native proof absent"},
+      "release_install": {"release_applicability": "required", "install_applicability": "required", "g2_proof": "not_supplied_here", "operation_state": "not_operated"},
+      "actual_jobs": null,
+      "justified_exclusion_ids": ["no_install_publish_dispatch", "source_semantics_not_observed_success", "native_platform_not_implied", "velnor_provider_unproven", "required_app_binding_unknown"],
+      "unknowns": ["Formula test only asserts --version; no serve/GreptimeDB behavior was run.", "Preview update/source identity remains static rather than producer-manifest bound.", "No clean native install, upgrade, channel switch, or service behavior was observed."]
+    },
+    {
+      "repository": "tailrocks/homebrew-holla",
+      "repository_role": "homebrew_tap",
+      "default_branch": "main",
+      "default_branch_sha": "cc25db8fd911cdf965652d3b094c10d006d056ee",
+      "closing_default_branch_sha": "cc25db8fd911cdf965652d3b094c10d006d056ee",
+      "inventory_reuse": {"reused_existing_record": true, "artifact": "G0/distribution-consumers/consumer-inventory.json", "artifact_sha256": "sha256:5391eb3c80d535af5f6a8630f849f11dacb1e3049550b0bdbed1bc4895e38936", "reason": "existing record SHA equals live main SHA; source tree remains immutable"},
+      "live": {"github_id": 1262212487, "default_branch": "main", "actions_workflow_count": 6, "open_pr_count": 2, "active_ruleset_ids": [19573039, 19573001], "branch_protection_http": 404, "branch_protection_state": "classic_endpoint_not_configured_or_not_visible; active_rulesets_are_separate"},
+      "source_tree": {"entry_count": 23, "listing_sha256": "sha256:ceda797d5a8f6a260094a52956682305cab6e1134c4a5614fac3f17d0e8b5fd0", "committed_workflow_paths": [".github/workflows/ci-main.yml", ".github/workflows/ci-policy.yml", ".github/workflows/ci-pr.yml", ".github/workflows/ci-unit-homebrew.yml", ".github/workflows/maintenance.yml", ".github/workflows/nightly.yml"], "committed_workflow_count": 6, "api_only_workflow_paths": [], "committed_action_paths": [], "local_reusable_workflow_paths": [".github/workflows/ci-unit-homebrew.yml"]},
+      "source_dependencies": {
+        "workflow_nodes": [{"path": ".github/workflows/ci-main.yml", "blob_sha": "5eeb8bf26cdb57187f22bda936f3850ac984d951"}, {"path": ".github/workflows/ci-policy.yml", "blob_sha": "8d15612171851938a8f673e7a1fe95aaa7c2f93e"}, {"path": ".github/workflows/ci-pr.yml", "blob_sha": "8029e31d69b6d851c9fb5621749c604d9e6feccf"}, {"path": ".github/workflows/ci-unit-homebrew.yml", "blob_sha": "ca2970621df0d98164504cd67641be2a79aaa491"}, {"path": ".github/workflows/maintenance.yml", "blob_sha": "5c5fb601f6949a8c61fc7e039c4b845d079728fc"}, {"path": ".github/workflows/nightly.yml", "blob_sha": "843b92edf02ecb1159bfc50d0542d13daab35e9d"}],
+        "reusable_workflow_nodes": [{"path": ".github/workflows/ci-unit-homebrew.yml", "blob_sha": "ca2970621df0d98164504cd67641be2a79aaa491"}],
+        "action_nodes": [],
+        "configuration_nodes": [{"path": ".github-gen/velnor-workflow.toml", "blob_sha": "5a21e84e0f064d994818b8e3b2567a723579f307"}, {"path": ".github/ci/project.toml", "blob_sha": "4e3dc30e2f2185a470e01fa847707433d24b8543"}, {"path": "config/fleet/velnor-host.env", "blob_sha": "069db88638d52a4cc8793deff3248642712fd24d"}],
+        "publisher_and_update_nodes": [{"path": "scripts/package-update.sh", "blob_sha": "37562ccb0a9674dbc1aa703b0038eea7a98c9aed"}, {"path": "scripts/test-package-update.sh", "blob_sha": "3efd153649c7d8f089e8827ef504385905c5c491"}],
+        "source_release_nodes": [{"path": "Formula/holla.rb", "blob_sha": "d48562e1797bbc4fab79911e79d6582ecf8f6ea1"}, {"path": "Formula/holla-preview.rb", "blob_sha": "e8cc15222c82a06640f6e2bc71018b0d2e260c6e"}, {"path": "Aliases/holla@preview", "blob_sha": "31fe397b8a3b85bffba7630b43b7c7916c752444"}]
+      },
+      "expected_workload_ids": ["homebrew-formula-audit-version", "homebrew-source-identity-checksum", "homebrew-native-install-upgrade-channel"],
+      "expected_jobs": [
+        {"job_id": "holla-formula-audit", "workload_id": "homebrew-formula-audit-version", "provider": "github", "platform_architecture": [{"platform": "linux", "architecture": "x86_64", "runner": "ubuntu-24.04"}, {"platform": "macos", "architecture": "arm64"}], "required": true, "child_workflow": ".github/workflows/ci-unit-homebrew.yml", "plan_state": "partial_source_contract_no_execution", "validation_tasks": ["audit stable/preview formula version, source identity, checksums, conflict"], "install_tasks": ["clean native formula install and version"], "upgrade_tasks": ["same-channel update from verified source"], "channel_tasks": ["stable/preview switch and conflict"]},
+        {"job_id": "holla-source-update", "workload_id": "homebrew-source-identity-checksum", "provider": "github", "platform_architecture": [{"platform": "macos", "architecture": "arm64"}, {"platform": "macos", "architecture": "x86_64"}, {"platform": "linux", "architecture": "arm64"}, {"platform": "linux", "architecture": "x86_64"}], "required": true, "child_workflow": ".github/workflows/ci-unit-homebrew.yml", "plan_state": "stable_fixture_present_preview_static", "validation_tasks": ["regenerate four target URLs/checksums from typed manifest", "verify stable source identity and reject stale preview"], "install_tasks": ["install stable and preview targets"], "upgrade_tasks": ["idempotent update and source refresh"], "channel_tasks": ["independent stable/preview update paths"]},
+        {"job_id": "holla-native-channel", "workload_id": "homebrew-native-install-upgrade-channel", "provider": "future-macos-native", "platform_architecture": [{"platform": "macos", "architecture": "arm64"}], "required": true, "child_workflow": null, "plan_state": "missing_clean_native_proof_and_one_sided_conflict", "validation_tasks": ["strict native formula audit"], "install_tasks": ["clean stable/preview install and version"], "upgrade_tasks": ["same-channel upgrade"], "channel_tasks": ["both-direction channel conflict/switch behavior"]}
+      ],
+      "dependency_edge_ids": ["workflow-to-local-reusable-workflow", "workflow-to-pinned-action", "generator-config-to-workflow-tree", "project-config-to-workflow-tasks", "formula-to-source-release", "update-script-to-formula-cask", "formula-to-native-platform", "fixture-to-source-validator", "config-to-provider-admission"],
+      "provider_eligibility": {"github_hosted": "eligible_for_static_formula_audit; native proof absent", "velnor": "not_eligible_unproven", "trusted_source": "static_review_only", "fork_or_untrusted": "static_only_no_helper_execution"},
+      "required_check_contexts_and_apps": [{"context": "DCO", "integration_id": null, "app_id": null}, {"context": "Policy", "integration_id": null, "app_id": null}, {"context": "ci-required", "integration_id": null, "app_id": null}],
+      "required_check_contexts_state": "ruleset_19573039_active_contexts_observed_app_binding_fields_absent",
+      "access": {"rulesets_list_http": 200, "ruleset_detail_http": 200, "classic_branch_protection_http": 404, "organization_inherited_policy": "unknown_not_collected", "write_operations": "none"},
+      "workflow": {"generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09", "event_triggers_observed": ["push", "pull_request", "pull_request_target", "schedule", "workflow_dispatch", "workflow_call"], "runner_policy": {"github": "ubuntu-24.04", "velnor": ["self-hosted", "velnor-target-mvp"]}, "automatic_lane": "github"},
+      "source_validation_state": {"formula_audit": "partial_stable_identity_and_audit_gap", "source_update": "partial_stable_fixture_preview_static", "native_install": "missing_clean_native_proof_and_channel_conflict_completeness"},
+      "observed_source_contract": {"stable_version": "1.0.3", "preview_source_sha": "fca7d0cc41e139014900e1876a4ab30f126cddda", "preview_version": "1.0.3-preview.285+fca7d0c", "targets": ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"], "source_report_state": "stable/preview formula checksums present; stable identity/audit, preview update, and native proof incomplete"},
+      "release_install": {"release_applicability": "required", "install_applicability": "required", "g2_proof": "not_supplied_here", "operation_state": "not_operated"},
+      "actual_jobs": null,
+      "justified_exclusion_ids": ["no_install_publish_dispatch", "source_semantics_not_observed_success", "native_platform_not_implied", "velnor_provider_unproven", "required_app_binding_unknown"],
+      "unknowns": ["No clean native install/upgrade/channel switch was run.", "Formula source/update contracts are read from current files, not a successful updater execution.", "Ruleset app/integration binding and inherited organization policy are unknown."]
+    },
+    {
+      "repository": "tailrocks/homebrew-velnor",
+      "repository_role": "homebrew_tap",
+      "default_branch": "main",
+      "default_branch_sha": "7af1249f3d69c9f2e548583cdc9f3e737da41b81",
+      "closing_default_branch_sha": "7af1249f3d69c9f2e548583cdc9f3e737da41b81",
+      "inventory_reuse": {"reused_existing_record": false, "reason": "homebrew-velnor was outside the prior six-repository inventory; fresh source clone/read"},
+      "live": {"github_id": 1371621772, "default_branch": "main", "actions_workflow_count": 0, "open_pr_count": 0, "active_ruleset_ids": [], "branch_protection_http": 404, "branch_protection_state": "classic_endpoint_not_configured_or_not_visible; no repository ruleset observed"},
+      "source_tree": {"entry_count": 2, "listing_sha256": "sha256:1f683462eb8b074de75d4aaebc9f741022c7b33baf21a30889135912694c41aa", "committed_workflow_paths": [], "committed_workflow_count": 0, "api_only_workflow_paths": [], "committed_action_paths": [], "local_reusable_workflow_paths": []},
+      "source_dependencies": {"workflow_nodes": [], "reusable_workflow_nodes": [], "action_nodes": [], "configuration_nodes": [], "publisher_and_update_nodes": [], "source_release_nodes": [{"path": "README.md", "blob_sha": "8fffcb7b67d19a029e44be6ad0a2bb3ea46738ac"}, {"path": "Formula/velnorctl.rb", "blob_sha": "56e48e03f30a246c14001579d3299fc742999c62"}]},
+      "expected_workload_ids": ["velnorctl-formula-source-build", "velnorctl-native-install-version", "velnorctl-stable-preview-channel-contract"],
+      "expected_jobs": [
+        {"job_id": "velnorctl-formula-source-build", "workload_id": "velnorctl-formula-source-build", "provider": "github", "platform_architecture": [{"platform": "macos", "architecture": "arm64"}], "required": true, "child_workflow": null, "plan_state": "source_formula_observed_no_workflow", "validation_tasks": ["validate immutable Velnor tag URL and archive SHA-256", "check crates/velnorctl source path and CLI distinction"], "install_tasks": ["clean brew formula install on native arm64"], "upgrade_tasks": ["upgrade from one immutable release tag to the next"], "channel_tasks": ["stable formula channel remains separate from any future preview"]},
+        {"job_id": "velnorctl-native-install", "workload_id": "velnorctl-native-install-version", "provider": "future-macos-native", "platform_architecture": [{"platform": "macos", "architecture": "arm64"}], "required": true, "child_workflow": null, "plan_state": "missing_workflow_and_execution", "validation_tasks": ["run formula test for help and version"], "install_tasks": ["clean install/path/binary identity"], "upgrade_tasks": ["same-channel upgrade and version check"], "channel_tasks": ["switch/rollback behavior when preview exists"]},
+        {"job_id": "velnorctl-channel-contract", "workload_id": "velnorctl-stable-preview-channel-contract", "provider": "github", "platform_architecture": [{"platform": "macos", "architecture": "arm64"}], "required": true, "child_workflow": null, "plan_state": "missing_preview_source_contract", "validation_tasks": ["require typed stable/preview manifest and source identity"], "install_tasks": ["install each declared channel from immutable artifacts"], "upgrade_tasks": ["reject stale or cross-channel artifact"], "channel_tasks": ["explicit stable/preview switch and rollback"]}
+      ],
+      "dependency_edge_ids": ["formula-to-source-release", "formula-to-native-platform", "config-to-provider-admission"],
+      "provider_eligibility": {"github_hosted": "eligible_for_future_static_formula_review; no workflow configured", "velnor": "not_eligible_unproven", "trusted_source": "static_review_only", "fork_or_untrusted": "static_only_no_helper_execution"},
+      "required_check_contexts_and_apps": null,
+      "required_check_contexts_state": "unknown_no_ruleset_observed_and_classic_endpoint_404; organization_inherited_policy_unknown",
+      "access": {"rulesets_list_http": 200, "ruleset_detail_http": null, "classic_branch_protection_http": 404, "organization_inherited_policy": "unknown_not_collected", "write_operations": "none"},
+      "workflow": {"generator_revision": null, "event_triggers_observed": [], "runner_policy": {}, "source_note": "No committed workflow, generated config, reusable workflow, or local action."},
+      "source_validation_state": {"formula_source_identity": "source_consistency_observed_not_execution", "native_install_version": "missing_workflow_and_execution", "stable_preview_channel": "missing_preview_source_contract"},
+      "observed_source_contract": {"formula": "Formula/velnorctl.rb", "source_url": "https://github.com/tailrocks/velnor/archive/refs/tags/v0.1.274.tar.gz", "formula_sha256": "106c7c439e5a57137b48c7fe20c7fe5ccc7aabb321a2e604cbde2b59a95301a6", "package": "crates/velnorctl", "native_platform": "macOS arm64", "scope_boundary": "does not install Linux velnor-runner or claim native Actions execution"},
+      "release_install": {"release_applicability": "required", "install_applicability": "required", "g2_proof": "not_supplied_here", "operation_state": "not_operated"},
+      "actual_jobs": null,
+      "justified_exclusion_ids": ["no_install_publish_dispatch", "source_semantics_not_observed_success", "native_platform_not_implied", "velnor_provider_unproven", "required_app_binding_unknown"],
+      "unknowns": ["No workflow or ruleset binds any check context.", "No preview formula/manifest/update contract exists in current HEAD.", "No clean native install, version, upgrade, switch, or rollback was performed.", "Formula source archive bytes were not fetched here; the declared checksum is source evidence only."]
+    },
+    {
+      "repository": "jackin-project/homebrew-tap",
+      "repository_role": "homebrew_tap",
+      "default_branch": "main",
+      "default_branch_sha": "c501e90d014c207234ed94ea41f7a1c9b6ea0c7c",
+      "closing_default_branch_sha": "c501e90d014c207234ed94ea41f7a1c9b6ea0c7c",
+      "inventory_reuse": {"reused_existing_record": false, "artifact": "G0/distribution-consumers/consumer-inventory.json", "artifact_sha256": "sha256:5391eb3c80d535af5f6a8630f849f11dacb1e3049550b0bdbed1bc4895e38936", "prior_record_sha": "2281ae9c95dfcb5bf82dfd025fdf58a50658b1d1", "reason": "live SHA changed from prior record; fresh clone/read required"},
+      "live": {"github_id": 1200197694, "default_branch": "main", "actions_workflow_count": 6, "open_pr_count": 1, "active_ruleset_ids": [15170998, 15179223], "branch_protection_http": 404, "branch_protection_state": "classic_endpoint_not_configured_or_not_visible; active_rulesets_are_separate"},
+      "source_tree": {"entry_count": 27, "listing_sha256": "sha256:c57ab799fa990e62411e3c05770a0f647183dc74283805d3cf0b5c013018fc63", "committed_workflow_paths": [".github/workflows/ci-main.yml", ".github/workflows/ci-policy.yml", ".github/workflows/ci-pr.yml", ".github/workflows/ci-unit-homebrew.yml", ".github/workflows/maintenance.yml", ".github/workflows/nightly.yml"], "committed_workflow_count": 6, "api_only_workflow_paths": [], "committed_action_paths": [], "local_reusable_workflow_paths": [".github/workflows/ci-unit-homebrew.yml"]},
+      "source_dependencies": {
+        "workflow_nodes": [{"path": ".github/workflows/ci-main.yml", "blob_sha": "dd8f50897b9ab1ea4ed800ad56f1fcb7d1860272"}, {"path": ".github/workflows/ci-policy.yml", "blob_sha": "c939ac8edf6bbdc0a7c56ec69fa4293f417942f0"}, {"path": ".github/workflows/ci-pr.yml", "blob_sha": "81349d319769bc82ed4a090db0023d051b7c06be"}, {"path": ".github/workflows/ci-unit-homebrew.yml", "blob_sha": "48ddb798474db4f2d650449b7351b07fcda0baa9"}, {"path": ".github/workflows/maintenance.yml", "blob_sha": "5c5fb601f6949a8c61fc7e039c4b845d079728fc"}, {"path": ".github/workflows/nightly.yml", "blob_sha": "7db67da1f6a6b487e7c6b3f979d224b3e1f5f8b4"}],
+        "reusable_workflow_nodes": [{"path": ".github/workflows/ci-unit-homebrew.yml", "blob_sha": "48ddb798474db4f2d650449b7351b07fcda0baa9"}],
+        "action_nodes": [],
+        "configuration_nodes": [{"path": ".github-gen/velnor-workflow.toml", "blob_sha": "b5f224527b3ad243ccab6321cc1e4759be14814d"}, {"path": ".github/ci/project.toml", "blob_sha": "7255920156b599802e5d705b45cecd85499fa1c8"}, {"path": "config/fleet/velnor-host.env", "blob_sha": "069db88638d52a4cc8793deff3248642712fd24d"}],
+        "publisher_and_update_nodes": [{"path": "scripts/package-update.sh", "blob_sha": "59c8d10430e376e58ba299bca2573991374acab5"}, {"path": "scripts/test-package-update.sh", "blob_sha": "cf4c7789d76a626f56d80f3f5f67ae5a069d813f"}],
+        "source_release_nodes": [{"path": "Formula/jackin.rb", "blob_sha": "72f3d1c96c7501bb33736f18d827d6e347429b23"}, {"path": "Formula/jackin-preview.rb", "blob_sha": "655462afd4b7415faced6d56c8ed4bb6a2a9f17a"}, {"path": "Formula/jackin-dev.rb", "blob_sha": "376c5d1720aba8a936a249e4eb78239f722cbf49"}, {"path": "Aliases/jackin@preview", "blob_sha": "3cb454529391f5f6b94154373c43633138dc8f10"}]
+      },
+      "expected_workload_ids": ["homebrew-formula-audit-version", "homebrew-source-identity-checksum", "homebrew-generated-cask-conditional", "homebrew-native-install-upgrade-channel"],
+      "expected_jobs": [
+        {"job_id": "jackin-formula-audit", "workload_id": "homebrew-formula-audit-version", "provider": "github", "platform_architecture": [{"platform": "linux", "architecture": "x86_64", "runner": "ubuntu-24.04", "mode": "static audit"}, {"platform": "macos", "architecture": "arm64"}, {"platform": "macos", "architecture": "x86_64"}], "required": true, "child_workflow": ".github/workflows/ci-unit-homebrew.yml", "plan_state": "partial_current_source_no_execution", "validation_tasks": ["audit preview and all stable/dev formula branches", "reject disabled HEAD stable URL and stale dev version"], "install_tasks": ["clean formula install and version for supported target"], "upgrade_tasks": ["same-channel formula update"], "channel_tasks": ["stable/preview/dev conflict and switch"]},
+        {"job_id": "jackin-preview-source-update", "workload_id": "homebrew-source-identity-checksum", "provider": "github", "platform_architecture": [{"platform": "macos", "architecture": "arm64"}, {"platform": "macos", "architecture": "x86_64"}, {"platform": "linux", "architecture": "arm64"}, {"platform": "linux", "architecture": "x86_64"}], "required": true, "child_workflow": ".github/workflows/ci-unit-homebrew.yml", "plan_state": "source_fixture_present_no_execution", "validation_tasks": ["bind preview refs/heads/main identity, six payload assets, supporting assets, and checksums"], "install_tasks": ["install preview formula and capsule resources"], "upgrade_tasks": ["idempotent preview update and reject incomplete/extra/tampered assets"], "channel_tasks": ["preview tag must be explicit and distinct from stable"]},
+        {"job_id": "jackin-conditional-desktop-cask", "workload_id": "homebrew-generated-cask-conditional", "provider": "github", "platform_architecture": [{"platform": "macos", "architecture": "arm64"}], "required": true, "child_workflow": ".github/workflows/ci-unit-homebrew.yml", "plan_state": "conditional_generator_path_missing_current_casks_tree", "validation_tasks": ["if stable manifest has desktop asset, generate cask with source/checksum and audit it", "if absent, record explicit no-cask state"], "install_tasks": ["clean desktop cask install when generated"], "upgrade_tasks": ["desktop cask update from stable manifest"], "channel_tasks": ["avoid silently treating formula-only preview as desktop channel"]},
+        {"job_id": "jackin-native-channel", "workload_id": "homebrew-native-install-upgrade-channel", "provider": "future-macos-native", "platform_architecture": [{"platform": "macos", "architecture": "arm64"}, {"platform": "macos", "architecture": "x86_64"}], "required": true, "child_workflow": null, "plan_state": "missing_clean_native_install_proof", "validation_tasks": ["native strict audit of formula and conditional cask"], "install_tasks": ["clean install and jackin --version"], "upgrade_tasks": ["same-channel upgrade and capsule resource identity"], "channel_tasks": ["stable/preview channel switch and conflict"]}
+      ],
+      "dependency_edge_ids": ["workflow-to-local-reusable-workflow", "workflow-to-pinned-action", "generator-config-to-workflow-tree", "project-config-to-workflow-tasks", "formula-to-source-release", "update-script-to-formula-cask", "formula-to-native-platform", "fixture-to-source-validator", "scan-exclusion-to-packaging", "config-to-provider-admission"],
+      "provider_eligibility": {"github_hosted": "eligible_for static formula/update review; native macOS proof absent", "velnor": "not_eligible_unproven; generated config declares github only", "trusted_source": "static_review_only", "fork_or_untrusted": "static_only_no_helper_execution"},
+      "required_check_contexts_and_apps": [{"context": "DCO", "integration_id": null, "app_id": null}, {"context": "Policy", "integration_id": null, "app_id": null}, {"context": "ci-required", "integration_id": null, "app_id": null}],
+      "required_check_contexts_state": "ruleset_15170998_active_contexts_observed_app_binding_fields_absent",
+      "access": {"rulesets_list_http": 200, "ruleset_detail_http": 200, "classic_branch_protection_http": 404, "organization_inherited_policy": "unknown_not_collected", "write_operations": "none"},
+      "workflow": {"generator_revision": "b9c3156cdb88e63c11b9e595a3e694b02238c09", "event_triggers_observed": ["push", "pull_request", "pull_request_target", "schedule", "workflow_dispatch", "workflow_call"], "runner_policy": {"github": "ubuntu-24.04", "velnor": "not_declared_as_automatic_provider"}, "automatic_lane": "github", "scan_exclusions": ["Formula/**", "Casks/**"]},
+      "source_validation_state": {"formula_audit": "partial_preview_current_stable_disabled_and_dev_stale", "preview_update": "source_consistency_observed_not_execution", "conditional_cask": "missing_current_casks_tree", "native_install": "unknown_not_executed"},
+      "observed_source_contract": {"preview_source_sha": "a506eee0581ef7add4f615281dbb90d828d5a657", "preview_version": "0.6.4-preview.1181+a506eee", "preview_payload_assets": 6, "preview_supporting_assets": "required and checked by updater", "stable_state": "disabled HEAD formula; updater can generate stable formula plus desktop cask from a stable manifest", "dev_state": "0.1.39 source archive in current formula", "current_tree_casks": false},
+      "release_install": {"release_applicability": "required", "install_applicability": "required", "g2_proof": "not_supplied_here", "operation_state": "not_operated"},
+      "actual_jobs": null,
+      "justified_exclusion_ids": ["no_install_publish_dispatch", "source_semantics_not_observed_success", "native_platform_not_implied", "jackin_cask_generation_not_current_tree", "velnor_provider_unproven", "required_app_binding_unknown"],
+      "unknowns": ["Current HEAD has no Casks directory; stable cask generation is conditional on an upstream desktop asset and was not run.", "No native Homebrew install/upgrade/version or generated cask audit was performed.", "Ruleset app/integration ownership and organization-inherited policy remain unknown.", "The prior six-repository Jackin inventory used an older SHA; this record intentionally uses current c501e90d only."]
+    }
+  ],
+  "collector_consumption": {
+    "scope_coverage": {"requested": 8, "records": 8, "dangling_edges": [], "unsupported_scanner_edges": ["upstream release manifest/artifact object graph was not fetched; consumer references are retained as typed external nodes" ]},
+    "reuse_rule": "Existing six-repository inventory may be reused only when live main SHA equals its record SHA. Six source SHAs were unchanged and their source semantics are retained; current Jackin SHA changed from the old inventory and was freshly cloned/read. velnor-apt and homebrew-velnor were freshly represented.",
+    "source_vs_observation": "Expected workload sets and dependency edges are source-derived. required contexts, API workflow counts, and ruleset responses are read-only inventory facts. No field claims a job, install, publish, dispatch, or release succeeded.",
+    "gate_handoff": "This typed supplement is G0 inventory input only. It does not approve G1/G2/G3/G4/G5/G6/G7 and remains incomplete until closing SHA reread plus downstream execution/release evidence."
+  }
+}

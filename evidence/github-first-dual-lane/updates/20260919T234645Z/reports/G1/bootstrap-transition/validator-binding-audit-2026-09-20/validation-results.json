@@ -1,0 +1,253 @@
+{
+  "schema": "velnor.validator-binding-audit-results.v1",
+  "status": "unimplemented-no-real-verifier",
+  "claim": "No validator pass or hostile rejection is claimed. The proposed typed custom binding has a precise contract and 34 isolated hostile mutations, but the product/verifier does not exist in the inspected source.",
+  "observed_at_utc": "2026-09-20T00:00:00Z",
+  "source_snapshot": {
+    "checkout": "tailrocks/velnor",
+    "checkout_head": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+    "authoritative_ref": "origin/main",
+    "authoritative_main_sha": "1048337062ea625fada1b4f7c07f2feed75f60c7",
+    "authoritative_main_parent_sha": "b5a4b4afaa6ca807927cacc03659b570a895dd5c",
+    "authoritative_main_subject": "fix: make generated workflow rendering reproducible",
+    "authoritative_main_is_origin_head": true,
+    "design_main_sha": "b5a4b4afaa6ca807927cacc03659b570a895dd5c",
+    "design_md_sha256": "029f639a5cf7aa5e7df248abc714b3206e023bff8a4d23496392273b9c6c90eb",
+    "design_json_sha256": "925c19715d10082f5416f5e1e11486208eefbbf50097f23325d82256edd1ce4d",
+    "pr_number": 957,
+    "pr_head_sha": "92387e88c32f933a9061b819256e535662655cb2",
+    "pr_base_sha": "b5a4b4afaa6ca807927cacc03659b570a895dd5c"
+  },
+  "verifier_search": {
+    "commands": [
+      "rg -n --hidden 'velnor-workflow-policy-validator' 'artifact_service_zip_sha256' 'upload_artifact_id_output' 'producer_binding_subject_sha256' 'ci-policy-validator-products.yml' . /private/tmp/pr957-review-923",
+      "git grep -n -i -E 'policy-validator|artifact_service_zip_sha256|producer_binding_subject_sha256|ci-policy-validator-products' 92387e88c32f933a9061b819256e535662655cb2",
+      "git grep -n -i -E 'velnor-workflow-policy-validator|artifact_service_zip_sha256|upload_artifact_id_output|producer_binding_subject_sha256|ci-policy-validator-products\\.yml|workflow-policy-validator\\.v1|artifact-binding\\.v1' origin/main --",
+      "git ls-tree -r --name-only origin/main | rg '(^|/)(ci-policy-validator-products\\.yml|setup-velnor-policy-validator|policy_validator_products\\.rs)$'"
+    ],
+    "all_exact_contract_searches_exit": 1,
+    "authoritative_origin_main_exact_contract_searches_exit": 1,
+    "found_existing_validator_product": false,
+    "found_custom_binding_schema": false,
+    "found_signed_binding_verifier": false,
+    "found_validator_publisher_workflow": false,
+    "existing_generic_producer_binding_is_different": true,
+    "existing_generic_binding_note": "At authoritative origin/main 1048337062ea625fada1b4f7c07f2feed75f60c7, crates/velnor-workflow/src/s2/primitives/release.rs has a workflow_run source/publish gate keyed by producer_workflow; it does not bind a GitHub artifact ID/archive to a numeric producer job, attempt, upload step, and custom attestation."
+  },
+  "authoritative_surface": {
+    "ref": "origin/main",
+    "sha": "1048337062ea625fada1b4f7c07f2feed75f60c7",
+    "typed_product_implementation_presence": {
+      "workflow_.github/workflows/ci-policy-validator-products.yml": false,
+      "generated_workflow_source_.github-gen/sources/workflows/ci-policy-validator-products.yml": false,
+      "setup_action_.github/actions/setup-velnor-policy-validator/action.yml": false,
+      "rust_module_crates/velnor-workflow/src/s2/primitives/policy_validator_products.rs": false,
+      "custom_predicate_schema_or_verifier": false,
+      "protected_typed_publisher": false
+    },
+    "present_relevant_paths": [
+      ".github/workflows/ci-policy.yml",
+      ".github/workflows/ci-runtime-products.yml",
+      ".github-gen/sources/actions/setup-velnor-workflow/action.yml",
+      ".github/actions/setup-velnor-workflow/action.yml",
+      "crates/velnor-workflow/src/s2/primitives/release.rs",
+      "crates/velnor-workflow/src/s2/primitives/package_release.rs",
+      "crates/velnor-workflow/src/s2/primitives/runtime_products.rs"
+    ],
+    "existing_workflow_observations": {
+      ".github/workflows/ci-policy.yml": "At line 112 the candidate lookup filters artifact name and expired=false; this is a name/expiry lookup, not the typed artifact-to-job/attempt/upload-step binding.",
+      ".github/workflows/ci-runtime-products.yml": "At line 192 existing runtime publication pins actions/upload-artifact to 043fb46d1a93c77aae656e7c1c64a875d1fc6a0a; lines 275-276 run standard gh attestation verify for runtime assets/manifest. No validator service-artifact custom predicate or raw-REST binding is present."
+    },
+    "official_action_reference_checks": {
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "actions/attest@v4": {
+        "resolved_sha": "1e69f48acb82d1966a394da916b4c1698aa569d6",
+        "resolution_evidence": "Official GitHub API ref resolution plus official actions/attest action.yml and README inspection",
+        "status": "officially-resolved-reference-only; no validator implementation pin exists on authoritative origin/main"
+      },
+      "actions/upload-artifact@v7": {
+        "resolved_sha": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+        "resolution_evidence": "Full SHA used by authoritative origin/main ci-runtime-products.yml at line 192",
+        "status": "existing runtime-workflow pin only; not a typed validator product pin"
+      },
+      "actions/checkout@v5": {
+        "resolved_sha": "fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09",
+        "resolution_evidence": "Official GitHub API ref resolution",
+        "status": "officially-resolved-reference-only; not a typed validator product pin"
+      }
+    }
+  },
+  "current_design_attestation_contract": {
+    "status": "design requirement; not executed",
+    "actions_attest_full_sha": "1e69f48acb82d1966a394da916b4c1698aa569d6",
+    "permissions": ["contents:read", "id-token:write", "attestations:write"],
+    "publisher_release_permissions": ["contents:read", "contents:write", "actions:read", "id-token:write", "attestations:write"],
+    "push_to_registry": false,
+    "create_storage_record": false,
+    "artifact_metadata_write": false,
+    "subject_name_template": "velnor-workflow-policy-validator-artifact-<artifact-id>.zip",
+    "subject_digest": "sha256:<raw-service-zip-sha256>",
+    "predicate_type": "https://tailrocks.dev/velnor/attestation/validator-artifact-binding/v1",
+    "predicate_path": "<isolated>/binding.json",
+    "release_predicate_type": "https://tailrocks.dev/velnor/attestation/validator-release/v1",
+    "release_predicate_path": "<isolated>/release-predicate.json",
+    "verify_command": "gh attestation verify <service.zip> --repo tailrocks/velnor --signer-workflow tailrocks/velnor/.github/workflows/ci-policy-validator-products.yml --source-ref refs/heads/main --predicate-type https://tailrocks.dev/velnor/attestation/validator-artifact-binding/v1 --format json",
+    "draft_reservation_commands": ["gh api -H 'Accept: application/vnd.github+json' /repos/tailrocks/velnor/releases/tags/$TAG", "gh api --method POST -H 'Accept: application/vnd.github+json' /repos/tailrocks/velnor/releases -f tag_name=$TAG -f target_commitish=$SOURCE_SHA -F draft=true -F prerelease=false", "gh api -H 'Accept: application/vnd.github+json' /repos/tailrocks/velnor/releases/$RELEASE_ID"],
+    "raw_zip_api_command": "gh api -H 'Accept: application/vnd.github+json' /repos/tailrocks/velnor/actions/artifacts/$ARTIFACT_ID/zip --output service-artifact.zip",
+    "manifest_attest_contract": "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 with subject-path=<isolated>/manifest.json, predicate-type=https://tailrocks.dev/velnor/attestation/validator-release/v1, predicate-path=<isolated>/release-predicate.json, push-to-registry=false, create-storage-record=false",
+    "required_live_cross_checks": ["artifact REST id/name/digest/expired/workflow_run", "run REST id/run_attempt/head_sha/event/workflow_sha", "exact-attempt jobs REST numeric job/check-run/steps", "sha256sum raw service-artifact.zip", "safe extraction and inner payload digest/size/architecture"],
+    "fixture_only_ids_not_live": {"artifact_id": 77001, "run_id": 88001, "run_attempt": 1, "job_id": 99001, "check_run_id": 99002, "release_id": 90001}
+  },
+  "revision_reconciliation": {
+    "draft_first_release_id_fixed": true,
+    "raw_zip_subject_fixed": true,
+    "custom_predicate_type_fixed": true,
+    "release_predicate_type_fixed": true,
+    "attest_full_sha_officially_resolved": true,
+    "attest_sha_is_product_pin": false,
+    "upload_artifact_full_sha_resolved_for_validator": false,
+    "upload_artifact_sha_status": "validator design retains a reviewed-full-40-hex-sha requirement; existing 043fb46d1a93c77aae656e7c1c64a875d1fc6a0a is the current runtime workflow pin only",
+    "event_mode_ambiguity": "design lists push-main and workflow-dispatch-main; schema permits push/workflow_dispatch, but dispatch acceptance requires a separately trusted protected-main authorization claim absent from P00; implementation must prove it or narrow to push-only",
+    "typed_producer_exists_on_authoritative_main": false,
+    "real_verifier_exists": false,
+    "live_api_or_signature_execution": false,
+    "protected_pre_main_authority_exists": false,
+    "g1_complete": false
+  },
+  "fixture_artifacts": {
+    "predicate_schema": {
+      "path": "binding-predicate.schema.json",
+      "sha256": "4bcd53cdd4e1900d4edf240f46da4c14ab570fc7be09f37484a9f56402da3b06"
+    },
+    "fixture_bundle": {
+      "path": "validator-binding-fixtures.json",
+      "sha256": "3fa58aab41a0893fb386f55257474cce04036753440525d0d938f424226f1e6d"
+    },
+    "materialized_hostile_directory": {
+      "path": "hostile/",
+      "index_path": "hostile-fixtures.index.json",
+      "index_sha256": "1652ebf312aa4ccf047b4cf93c77f2fe8e3feff72a490ccf022c528226fb5912",
+      "case_files": 34,
+      "base_case_canonical_sha256": "64c9b3bdda0ad36d3eee2ef6d418bced6130256afbd7f5a78868d0f3bd580c10",
+      "materializer_path": "materialize-hostile-fixtures.py",
+      "materializer_sha256": "6113b9083fdd859a944d6d014522a6f62b18fec348fca9ae012a6e5a4a104ea3"
+    },
+    "case_count": 34,
+    "base_case": "P00-valid-after-draft-reservation",
+    "all_case_expected_decision": "reject"
+  },
+  "execution": {
+    "json_syntax": {
+      "binding-predicate.schema.json": "pass-jq-empty",
+      "validator-binding-fixtures.json": "pass-jq-empty"
+    },
+    "fixture_contract_integrity": "pass-read-only; 34 unique hostile fixtures regenerated against the revised design; all expected reject; materialized hashes match index; this is not verifier execution",
+    "real_verifier": "unimplemented",
+    "surrogate_schema_validation": "not-run; Python jsonschema package unavailable and no product verifier exists",
+    "cryptographic_attestation_verification": "not-run; fixtures carry explicit cryptographic_verification_required=true and are not signatures",
+    "raw_artifact_download_and_hash": "not-run; no live artifact download or credentials/dispatch authorized",
+    "release_lifecycle_execution": "not-run; no draft/release mutation authorized"
+  },
+  "case_ids": [
+    "H01-forged-job-id",
+    "H02-forged-run-id",
+    "H03-forged-run-attempt",
+    "H04-forged-artifact-id",
+    "H05-name-only-sibling",
+    "H06-forged-artifact-name",
+    "H07-service-zip-digest-forgery",
+    "H08-inner-payload-digest-forgery",
+    "H09-service-zip-vs-binary-hash-confusion",
+    "H10-forged-binary-hash",
+    "H11-forged-source-sha",
+    "H12-forged-source-closure",
+    "H13-source-ref-pull-request",
+    "H14-workflow-ref-pull-request",
+    "H15-workflow-sha-forgery",
+    "H16-signer-repository",
+    "H17-signer-workflow",
+    "H18-signer-event",
+    "H19-unverified-signature",
+    "H20-wrong-predicate-type",
+    "H21-run-head-sha-mismatch",
+    "H22-artifact-workflow-run-mismatch",
+    "H23-failed-upload-step",
+    "H24-upload-output-id-mismatch",
+    "H25-upload-output-digest-mismatch",
+    "H26-expired-artifact",
+    "H27-duplicate-sibling-artifact",
+    "H28-binary-self-report-closure-mismatch",
+    "H29-upload-step-id-mismatch",
+    "H30-release-id-zero-before-draft",
+    "H31-release-id-mismatch",
+    "H32-release-target-mismatch",
+    "H33-application-namespace-substitution",
+    "H34-workflow-source-step-remap"
+  ],
+  "required_rejection_groups": {
+    "forged_numeric_identity": ["H01-forged-job-id", "H02-forged-run-id", "H03-forged-run-attempt", "H04-forged-artifact-id", "H22-artifact-workflow-run-mismatch"],
+    "name_only_or_duplicate": ["H05-name-only-sibling", "H06-forged-artifact-name", "H27-duplicate-sibling-artifact"],
+    "digest_layer_confusion": ["H07-service-zip-digest-forgery", "H08-inner-payload-digest-forgery", "H09-service-zip-vs-binary-hash-confusion", "H10-forged-binary-hash", "H24-upload-output-id-mismatch", "H25-upload-output-digest-mismatch"],
+    "source_and_closure": ["H11-forged-source-sha", "H12-forged-source-closure", "H13-source-ref-pull-request", "H21-run-head-sha-mismatch", "H28-binary-self-report-closure-mismatch"],
+    "workflow_and_signer": ["H14-workflow-ref-pull-request", "H15-workflow-sha-forgery", "H16-signer-repository", "H17-signer-workflow", "H18-signer-event", "H19-unverified-signature", "H20-wrong-predicate-type", "H29-upload-step-id-mismatch", "H34-workflow-source-step-remap"],
+    "terminal_and_expiry": ["H23-failed-upload-step", "H26-expired-artifact"],
+    "release_lifecycle": ["H30-release-id-zero-before-draft", "H31-release-id-mismatch", "H32-release-target-mismatch"],
+    "namespace": ["H33-application-namespace-substitution"]
+  },
+  "draft_first_release_contract": {
+    "problem": "A release.id=0 placeholder is never a valid signed value; the revised design resolves the ordering by reserving the draft before creating the custom binding predicate and final manifest.",
+    "required_sequence": [
+      "Query the immutable closure-derived tag and reject any existing published/draft release with conflicting target, assets, manifest, or attestations.",
+      "Create one unique draft release with the exact source target; require nonzero release.id, exact tag/target, draft=true, and no published timestamp.",
+      "Download the Actions artifact by numeric ID, hash raw ZIP bytes, safely extract, and independently hash inner payload and binary.",
+      "Write binding.json containing exact draft release.id plus producer IDs, workflow/source fields, raw ZIP digest, inner payload digest, and closure.",
+      "Attest the raw ZIP with the exact custom subject/predicate contract and verify signer, predicate, subject, and live API facts.",
+      "Generate and attest the final manifest with the existing release ID using the separate release predicate; upload immutable assets, verify the draft API object, then publish."
+    ],
+    "forbidden_shortcuts": ["release.id=0", "manifest attested before draft reservation while claiming a final release ID", "moving/latest tag", "overwrite existing tag or same-version bytes", "stale draft ID", "release ID inferred from tag/name"]
+  },
+  "official_primary_sources_consulted": [
+    {
+      "url": "https://docs.github.com/en/rest/actions/artifacts",
+      "finding": "artifact REST fields include id, name, digest, expiry, and workflow_run metadata; no job ID, run attempt, uploader, upload step, or attestation ID"
+    },
+    {
+      "url": "https://docs.github.com/en/rest/actions/workflow-jobs",
+      "finding": "jobs API exposes id, run_id, run_attempt, head_sha, name, check_run_url, and step name/status/conclusion; no artifact ID/digest"
+    },
+    {
+      "url": "https://github.com/actions/upload-artifact",
+      "finding": "artifact-id is REST lookup key; artifact-digest is SHA-256 of the uploaded artifact ZIP; displayed size is ZIP size"
+    },
+    {
+      "url": "https://github.com/actions/attest/blob/main/README.md",
+      "finding": "custom attestation requires subject digest plus predicate-type and exactly one predicate/predicate-path; signs an in-toto subject-to-predicate statement"
+    },
+    {
+      "url": "https://github.com/actions/attest/blob/main/action.yml",
+      "finding": "custom subject-digest/predicate inputs are supported; id-token:write and attestations:write are required; artifact metadata permission is not a job binding"
+    },
+    {
+      "url": "https://cli.github.com/manual/gh_attestation_verify",
+      "finding": "verification checks signed actor identity and predicate type; owner/repo/signer-workflow constraints must be supplied for exact signer policy"
+    },
+    {
+      "url": "https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations",
+      "finding": "artifact attestations bind subject digest and predicate type; custom predicates require explicit predicate-type verification"
+    }
+  ],
+  "gate_disposition": {
+    "g1_product_binding": "incomplete",
+    "g1_reason": "The real typed validator product, custom predicate verifier, protected publisher, and live artifact/attestation evidence are absent; these fixtures are a contract and hostile test plan only.",
+    "no_gate_claim": true,
+    "next_required_owner": "validator product/publisher implementer plus independent reviewer",
+    "reviewer_must_run": [
+      "Materialize each JSON-pointer mutation against the base fixture.",
+      "Validate strict schema and cryptographic attestation with the real verifier.",
+      "Fetch exact REST artifact/run/jobs/release objects and compare every signed field.",
+      "Download the exact artifact by numeric ID and recompute raw ZIP, inner payload, and binary hashes.",
+      "Run the draft-first lifecycle fixture with nonzero release ID and stale/zero/mismatched negative cases.",
+      "Report each case pass/fail/unavailable; never convert unavailable into success."
+    ]
+  }
+}

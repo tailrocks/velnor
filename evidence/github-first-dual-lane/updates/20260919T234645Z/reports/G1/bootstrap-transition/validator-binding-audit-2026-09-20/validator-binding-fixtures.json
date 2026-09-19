@@ -1,0 +1,515 @@
+{
+  "$schema": "velnor.validator-binding-fixtures.v1",
+  "fixture_role": "design-only-adversarial-contract",
+  "design_snapshot": {
+    "repository": "tailrocks/velnor",
+    "main_sha": "1048337062ea625fada1b4f7c07f2feed75f60c7",
+    "historical_main_sha": "b5a4b4afaa6ca807927cacc03659b570a895dd5c",
+    "pr_number": 957,
+    "pr_head_sha": "92387e88c32f933a9061b819256e535662655cb2",
+    "design_md_sha256": "029f639a5cf7aa5e7df248abc714b3206e023bff8a4d23496392273b9c6c90eb",
+    "design_json_sha256": "925c19715d10082f5416f5e1e11486208eefbbf50097f23325d82256edd1ce4d",
+    "artifact_feasibility_sha256": "3316446c8ca5715c1d75b198a6884a26f8fdd769fbcd0a036db9a8a55685070e",
+    "artifact_binding_research_sha256": "e30587f4e1acb8b47b006361af8a982b3c89da265bc698c018dda0696ea47c16"
+  },
+  "test_status": "unimplemented-no-real-verifier",
+  "base_case": {
+    "case_id": "P00-valid-after-draft-reservation",
+    "phase": "draft_reserved_before_final_manifest_attestation",
+    "attestation": {
+      "cryptographic_verification_required": true,
+      "statement": {
+        "_type": "https://in-toto.io/Statement/v1",
+        "subject": [
+          {
+            "name": "velnor-workflow-policy-validator-artifact-77001.zip",
+            "digest": {
+              "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          }
+        ],
+        "predicateType": "https://tailrocks.dev/velnor/attestation/validator-artifact-binding/v1",
+        "predicate": {
+          "schema": "velnor.policy-validator.artifact-binding.v1",
+          "product": {
+            "id": "velnor-workflow-policy-validator",
+            "purpose": "policy-validator",
+            "platform": "Linux-X64"
+          },
+          "source": {
+            "repository": "tailrocks/velnor",
+            "ref": "refs/heads/main",
+            "sha": "1048337062ea625fada1b4f7c07f2feed75f60c7",
+            "closure": "1111111111111111111111111111111111111111111111111111111111111111"
+          },
+          "workflow": {
+            "repository": "tailrocks/velnor",
+            "path": ".github/workflows/ci-policy-validator-products.yml",
+            "ref": "tailrocks/velnor/.github/workflows/ci-policy-validator-products.yml@refs/heads/main",
+            "sha": "2222222222222222222222222222222222222222",
+            "event": "push",
+            "head_branch": "main",
+            "head_sha": "1048337062ea625fada1b4f7c07f2feed75f60c7",
+            "repository_id": 1255367013
+          },
+          "run": {
+            "id": 88001,
+            "database_id": 88001,
+            "attempt": 1
+          },
+          "job": {
+            "key": "build-linux-x64",
+            "id": 99001,
+            "check_run_id": 99002
+          },
+          "artifact": {
+            "id": 77001,
+            "name": "policy-validator-1111111111111111-Linux-X64",
+            "service_zip_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "inner_payload_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "upload": {
+            "step_id": "upload-validator",
+            "artifact_id_output": 77001,
+            "artifact_digest_output": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "steps": {
+            "build": {
+              "id": "build-validator",
+              "name": "Build policy validator",
+              "status": "completed",
+              "conclusion": "success"
+            },
+            "upload": {
+              "id": "upload-validator",
+              "name": "Upload validator artifact",
+              "status": "completed",
+              "conclusion": "success"
+            }
+          },
+          "binary": {
+            "sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "size": 123456,
+            "mode": 493,
+            "revision": "1048337062ea625fada1b4f7c07f2feed75f60c7",
+            "closure": "1111111111111111111111111111111111111111111111111111111111111111"
+          },
+          "release": {
+            "id": 90001,
+            "tag": "velnor-workflow-policy-validator-v1-1111111111111111",
+            "target_sha": "1048337062ea625fada1b4f7c07f2feed75f60c7",
+            "draft_reserved": true
+          },
+          "manifest": {
+            "sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          }
+        }
+      },
+      "signer": {
+        "verified": true,
+        "repository": "tailrocks/velnor",
+        "workflow_path": ".github/workflows/ci-policy-validator-products.yml",
+        "workflow_ref": "tailrocks/velnor/.github/workflows/ci-policy-validator-products.yml@refs/heads/main",
+        "workflow_sha": "2222222222222222222222222222222222222222",
+        "source_ref": "refs/heads/main",
+        "source_sha": "1048337062ea625fada1b4f7c07f2feed75f60c7",
+        "event": "push"
+      }
+    },
+    "producer_contract": {
+      "actions_attest": "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6",
+      "permissions": ["contents:read", "id-token:write", "attestations:write"],
+      "push_to_registry": false,
+      "create_storage_record": false,
+      "artifact_metadata_write": false,
+      "event_policy": "push-or-protected-main-dispatch",
+      "subject_name": "velnor-workflow-policy-validator-artifact-77001.zip",
+      "subject_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "predicate_type": "https://tailrocks.dev/velnor/attestation/validator-artifact-binding/v1",
+      "predicate_path": "isolated/binding.json",
+      "release_predicate_type": "https://tailrocks.dev/velnor/attestation/validator-release/v1",
+      "release_predicate_path": "isolated/release-predicate.json"
+    },
+    "artifact_api": {
+      "id": 77001,
+      "name": "policy-validator-1111111111111111-Linux-X64",
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expired": false,
+      "expires_at": "2099-09-20T00:00:00Z",
+      "workflow_run": {
+        "id": 88001,
+        "repository_id": 1255367013,
+        "head_repository_id": 1255367013,
+        "head_branch": "main",
+        "head_sha": "1048337062ea625fada1b4f7c07f2feed75f60c7"
+      }
+    },
+    "run_api": {
+      "id": 88001,
+      "run_attempt": 1,
+      "status": "completed",
+      "conclusion": "success",
+      "event": "push",
+      "path": ".github/workflows/ci-policy-validator-products.yml",
+      "workflow_sha": "2222222222222222222222222222222222222222",
+      "head_branch": "main",
+      "head_sha": "1048337062ea625fada1b4f7c07f2feed75f60c7",
+      "repository_id": 1255367013
+    },
+    "job_api": {
+      "id": 99001,
+      "run_id": 88001,
+      "run_attempt": 1,
+      "head_sha": "1048337062ea625fada1b4f7c07f2feed75f60c7",
+      "name": "build-linux-x64",
+      "status": "completed",
+      "conclusion": "success",
+      "check_run_id": 99002,
+      "check_run_url": "https://api.github.com/repos/tailrocks/velnor/check-runs/99002",
+      "steps": [
+        {
+          "name": "Build policy validator",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "name": "Upload validator artifact",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ]
+    },
+    "workflow_source": {
+      "repository": "tailrocks/velnor",
+      "path": ".github/workflows/ci-policy-validator-products.yml",
+      "sha": "2222222222222222222222222222222222222222",
+      "job_key": "build-linux-x64",
+      "upload_step_id": "upload-validator",
+      "upload_step_name": "Upload validator artifact",
+      "build_step_id": "build-validator",
+      "build_step_name": "Build policy validator",
+      "upload_overwrite": false,
+      "upload_if_no_files_found": "error",
+      "runner": "ubuntu-24.04"
+    },
+    "downloaded_payload": {
+      "raw_service_zip_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "inner_payload_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "binary_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "binary_size": 123456,
+      "binary_mode": 493,
+      "binary_revision": "1048337062ea625fada1b4f7c07f2feed75f60c7",
+      "binary_closure": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "manifest": {
+      "schema": "velnor.workflow-policy-validator.v1",
+      "product_id": "velnor-workflow-policy-validator",
+      "purpose": "policy-validator",
+      "platform": "Linux-X64",
+      "profile": "release",
+      "features": "",
+      "source": {
+        "repository": "tailrocks/velnor",
+        "ref": "refs/heads/main",
+        "sha": "1048337062ea625fada1b4f7c07f2feed75f60c7",
+        "closure": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "asset": {
+        "name": "velnor-workflow-policy-validator-Linux-X64",
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "size": 123456,
+        "mode": 493
+      },
+      "release": {
+        "tag": "velnor-workflow-policy-validator-v1-1111111111111111",
+        "id": 90001,
+        "target_sha": "1048337062ea625fada1b4f7c07f2feed75f60c7",
+        "draft_reserved": true
+      },
+      "producer": {
+        "workflow_path": ".github/workflows/ci-policy-validator-products.yml",
+        "workflow_sha": "2222222222222222222222222222222222222222",
+        "run_id": 88001,
+        "run_attempt": 1,
+        "run_database_id": 88001,
+        "job_key": "build-linux-x64",
+        "job_id": 99001,
+        "check_run_id": 99002,
+        "artifact_id": 77001,
+        "artifact_name": "policy-validator-1111111111111111-Linux-X64",
+        "artifact_service_zip_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "artifact_inner_payload_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "upload_step_id": "upload-validator",
+        "upload_artifact_id_output": 77001,
+        "upload_artifact_digest_output": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "attestation": {
+        "binary_subject_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "producer_binding_subject_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "manifest_subject_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "signer_workflow": "tailrocks/velnor/.github/workflows/ci-policy-validator-products.yml",
+        "source_ref": "refs/heads/main"
+      }
+    },
+    "release_api": {
+      "id": 90001,
+      "tag_name": "velnor-workflow-policy-validator-v1-1111111111111111",
+      "target_commitish": "1048337062ea625fada1b4f7c07f2feed75f60c7",
+      "draft": true,
+      "prerelease": false,
+      "immutable": false,
+      "assets": []
+    }
+  },
+  "hostile_cases": [
+    {
+      "id": "H01-forged-job-id",
+      "mutations": [{"path": "/attestation/statement/predicate/job/id", "op": "replace", "value": 99003}],
+      "expected": "reject",
+      "reason": "signed job ID must equal the exact jobs API numeric ID; names and run correlation are insufficient"
+    },
+    {
+      "id": "H02-forged-run-id",
+      "mutations": [{"path": "/attestation/statement/predicate/run/id", "op": "replace", "value": 88000}],
+      "expected": "reject",
+      "reason": "signed run ID must equal artifact.workflow_run.id and the fetched run ID"
+    },
+    {
+      "id": "H03-forged-run-attempt",
+      "mutations": [{"path": "/attestation/statement/predicate/run/attempt", "op": "replace", "value": 2}],
+      "expected": "reject",
+      "reason": "rerun replay: run_attempt must equal the enclosing run and exact-attempt jobs response"
+    },
+    {
+      "id": "H04-forged-artifact-id",
+      "mutations": [
+        {"path": "/attestation/statement/predicate/artifact/id", "op": "replace", "value": 77002},
+        {"path": "/attestation/statement/subject/0/name", "op": "replace", "value": "velnor-workflow-policy-validator-artifact-77002.zip"}
+      ],
+      "expected": "reject",
+      "reason": "artifact ID is the selection key and the raw-ZIP subject name must encode that same ID; the REST object fetched by that ID must match the signed predicate"
+    },
+    {
+      "id": "H05-name-only-sibling",
+      "mutations": [
+        {"path": "/attestation/statement/predicate/artifact/id", "op": "delete"},
+        {"path": "/attestation/statement/predicate/job/id", "op": "delete"},
+        {"path": "/attestation/statement/predicate/run/id", "op": "delete"}
+      ],
+      "expected": "reject",
+      "reason": "artifact/job/run names and display fields cannot replace numeric IDs"
+    },
+    {
+      "id": "H06-forged-artifact-name",
+      "mutations": [
+        {"path": "/attestation/statement/predicate/artifact/name", "op": "replace", "value": "policy-validator-1111111111111111-Linux-ARM64"},
+        {"path": "/attestation/statement/subject/0/name", "op": "replace", "value": "velnor-workflow-policy-validator-artifact-77002.zip"}
+      ],
+      "expected": "reject",
+      "reason": "platform/artifact name and raw-ZIP subject name must equal the exact fixed Linux-X64 contract and REST object"
+    },
+    {
+      "id": "H07-service-zip-digest-forgery",
+      "mutations": [
+        {"path": "/attestation/statement/predicate/artifact/service_zip_sha256", "op": "replace", "value": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},
+        {"path": "/attestation/statement/subject/0/digest/sha256", "op": "replace", "value": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}
+      ],
+      "expected": "reject",
+      "reason": "signed service/archive digest and raw-ZIP subject digest must equal upload-artifact output, REST digest, and raw downloaded ZIP hash"
+    },
+    {
+      "id": "H08-inner-payload-digest-forgery",
+      "mutations": [{"path": "/attestation/statement/predicate/artifact/inner_payload_sha256", "op": "replace", "value": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}],
+      "expected": "reject",
+      "reason": "inner payload digest must be recomputed from the downloaded archive, not accepted from a manifest claim"
+    },
+    {
+      "id": "H09-service-zip-vs-binary-hash-confusion",
+      "mutations": [{"path": "/attestation/statement/predicate/artifact/service_zip_sha256", "op": "replace", "value": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}],
+      "expected": "reject",
+      "reason": "service ZIP digest is transport identity and cannot be substituted with the extracted binary hash"
+    },
+    {
+      "id": "H10-forged-binary-hash",
+      "mutations": [{"path": "/attestation/statement/predicate/binary/sha256", "op": "replace", "value": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}],
+      "expected": "reject",
+      "reason": "binary hash must equal extracted bytes, manifest asset hash, binary attestation subject, and self-report"
+    },
+    {
+      "id": "H11-forged-source-sha",
+      "mutations": [{"path": "/attestation/statement/predicate/source/sha", "op": "replace", "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],
+      "expected": "reject",
+      "reason": "source SHA must equal trusted main head, run head_sha, artifact workflow_run head_sha, manifest, and binary self-report"
+    },
+    {
+      "id": "H12-forged-source-closure",
+      "mutations": [{"path": "/attestation/statement/predicate/source/closure", "op": "replace", "value": "2222222222222222222222222222222222222222222222222222222222222222"}],
+      "expected": "reject",
+      "reason": "closure must match the independently recomputed closure and binary self-report; source SHA alone is not enough"
+    },
+    {
+      "id": "H13-source-ref-pull-request",
+      "mutations": [{"path": "/attestation/statement/predicate/source/ref", "op": "replace", "value": "refs/pull/957/merge"}],
+      "expected": "reject",
+      "reason": "candidate or merge-ref source is not the trusted refs/heads/main source"
+    },
+    {
+      "id": "H14-workflow-ref-pull-request",
+      "mutations": [{"path": "/attestation/statement/predicate/workflow/ref", "op": "replace", "value": "tailrocks/velnor/.github/workflows/ci-policy-validator-products.yml@refs/pull/957/merge"}],
+      "expected": "reject",
+      "reason": "workflow ref must be the protected main workflow, not a PR-controlled workflow"
+    },
+    {
+      "id": "H15-workflow-sha-forgery",
+      "mutations": [{"path": "/attestation/statement/predicate/workflow/sha", "op": "replace", "value": "3333333333333333333333333333333333333333"}],
+      "expected": "reject",
+      "reason": "workflow SHA must equal the exact protected workflow source used to map fixed job and upload step IDs"
+    },
+    {
+      "id": "H16-signer-repository",
+      "mutations": [{"path": "/attestation/signer/repository", "op": "replace", "value": "attacker/fork"}],
+      "expected": "reject",
+      "reason": "attestation certificate identity must be the owner repository"
+    },
+    {
+      "id": "H17-signer-workflow",
+      "mutations": [{"path": "/attestation/signer/workflow_path", "op": "replace", "value": ".github/workflows/ci-runtime-products.yml"}],
+      "expected": "reject",
+      "reason": "application/runtime publisher signer cannot satisfy the validator namespace"
+    },
+    {
+      "id": "H18-signer-event",
+      "mutations": [{"path": "/attestation/signer/event", "op": "replace", "value": "pull_request"}],
+      "expected": "reject",
+      "reason": "PR/fork signer event is not an admitted protected-main publisher event"
+    },
+    {
+      "id": "H19-unverified-signature",
+      "mutations": [{"path": "/attestation/signer/verified", "op": "replace", "value": false}],
+      "expected": "reject",
+      "reason": "JSON claims cannot substitute cryptographic signature and certificate verification"
+    },
+    {
+      "id": "H20-wrong-predicate-type",
+      "mutations": [{"path": "/attestation/statement/predicateType", "op": "replace", "value": "https://slsa.dev/provenance/v1"}],
+      "expected": "reject",
+      "reason": "standard binary provenance does not prove artifact-to-job binding; custom predicate type is required"
+    },
+    {
+      "id": "H21-run-head-sha-mismatch",
+      "mutations": [{"path": "/run_api/head_sha", "op": "replace", "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],
+      "expected": "reject",
+      "reason": "live run source must equal signed source and trusted main SHA"
+    },
+    {
+      "id": "H22-artifact-workflow-run-mismatch",
+      "mutations": [{"path": "/artifact_api/workflow_run/id", "op": "replace", "value": 88000}],
+      "expected": "reject",
+      "reason": "artifact enclosing run must equal signed run and fetched run"
+    },
+    {
+      "id": "H23-failed-upload-step",
+      "mutations": [{"path": "/job_api/steps/1/conclusion", "op": "replace", "value": "failure"}],
+      "expected": "reject",
+      "reason": "every required build/upload step must be terminal success in the exact attempt"
+    },
+    {
+      "id": "H24-upload-output-id-mismatch",
+      "mutations": [{"path": "/attestation/statement/predicate/upload/artifact_id_output", "op": "replace", "value": 77002}],
+      "expected": "reject",
+      "reason": "captured upload-artifact ID output must equal the selected REST artifact ID"
+    },
+    {
+      "id": "H25-upload-output-digest-mismatch",
+      "mutations": [{"path": "/attestation/statement/predicate/upload/artifact_digest_output", "op": "replace", "value": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}],
+      "expected": "reject",
+      "reason": "captured upload-artifact digest output must equal REST service digest and raw ZIP hash"
+    },
+    {
+      "id": "H26-expired-artifact",
+      "mutations": [{"path": "/artifact_api/expired", "op": "replace", "value": true}],
+      "expected": "reject",
+      "reason": "expired or unavailable service artifact cannot be used for live transport verification"
+    },
+    {
+      "id": "H27-duplicate-sibling-artifact",
+      "mutations": [{"path": "/artifact_catalog", "op": "add", "value": [{"id": 77002, "name": "policy-validator-1111111111111111-Linux-X64", "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "workflow_run_id": 88001}]}],
+      "expected": "reject",
+      "reason": "duplicate same-name sibling makes name-based selection ambiguous; fixed uploader must be unique and ID-selected"
+    },
+    {
+      "id": "H28-binary-self-report-closure-mismatch",
+      "mutations": [{"path": "/downloaded_payload/binary_closure", "op": "replace", "value": "2222222222222222222222222222222222222222222222222222222222222222"}],
+      "expected": "reject",
+      "reason": "binary --closure must equal signed source closure"
+    },
+    {
+      "id": "H29-upload-step-id-mismatch",
+      "mutations": [{"path": "/attestation/statement/predicate/upload/step_id", "op": "replace", "value": "upload-other"}],
+      "expected": "reject",
+      "reason": "stable upload step ID must match protected workflow source; REST jobs only expose step names"
+    },
+    {
+      "id": "H30-release-id-zero-before-draft",
+      "mutations": [
+        {"path": "/attestation/statement/predicate/release/id", "op": "replace", "value": 0},
+        {"path": "/release_api/id", "op": "replace", "value": 0},
+        {"path": "/release_api/draft", "op": "replace", "value": false},
+        {"path": "/manifest/release/id", "op": "replace", "value": 0},
+        {"path": "/manifest/release/draft_reserved", "op": "replace", "value": false}
+      ],
+      "expected": "reject",
+      "reason": "final manifest must not attest placeholder release.id=0; reserve a unique immutable tag in a draft first"
+    },
+    {
+      "id": "H31-release-id-mismatch",
+      "mutations": [
+        {"path": "/attestation/statement/predicate/release/id", "op": "replace", "value": 90002},
+        {"path": "/manifest/release/id", "op": "replace", "value": 90002}
+      ],
+      "expected": "reject",
+      "reason": "final manifest release ID must equal the non-stale draft release API ID"
+    },
+    {
+      "id": "H32-release-target-mismatch",
+      "mutations": [
+        {"path": "/attestation/statement/predicate/release/target_sha", "op": "replace", "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        {"path": "/manifest/release/target_sha", "op": "replace", "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+      ],
+      "expected": "reject",
+      "reason": "draft release target must equal source SHA and signed producer head SHA"
+    },
+    {
+      "id": "H33-application-namespace-substitution",
+      "mutations": [
+        {"path": "/manifest/product_id", "op": "replace", "value": "velnor-workflow"},
+        {"path": "/manifest/schema", "op": "replace", "value": "velnor.workflow-runtime.v1"},
+        {"path": "/manifest/producer/workflow_path", "op": "replace", "value": ".github/workflows/ci-runtime-products.yml"}
+      ],
+      "expected": "reject",
+      "reason": "application/runtime product namespace, schema, and signer cannot satisfy validator identity"
+    },
+    {
+      "id": "H34-workflow-source-step-remap",
+      "mutations": [{"path": "/workflow_source/upload_step_id", "op": "replace", "value": "upload-other"}],
+      "expected": "reject",
+      "reason": "protected workflow source must map the signed upload step ID to the actual uploader"
+    }
+  ],
+  "semantic_requirements": [
+    "Verify the signed in-toto statement cryptographically; do not trust verified=true fixture data.",
+    "Require the exact custom subject name velnor-workflow-policy-validator-artifact-<artifact-id>.zip and subject digest == REST artifact digest == upload-artifact digest output == downloaded raw service ZIP SHA-256.",
+    "Require predicate type https://tailrocks.dev/velnor/attestation/validator-artifact-binding/v1 and reject standard binary provenance or the old namespace/type.",
+    "Require actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 with contents:read, id-token:write, attestations:write, push-to-registry=false, create-storage-record=false, and artifact-metadata:write absent.",
+    "Require the release predicate type https://tailrocks.dev/velnor/attestation/validator-release/v1 and exact final manifest subject verification after draft reservation.",
+    "Allow workflow event push, or workflow_dispatch only when a separately trusted protected-main dispatch authorization is verified; an unprotected dispatch must reject. The current positive fixture uses push and has no dispatch authorization claim.",
+    "Require extracted inner payload digest and raw binary SHA-256 to be computed independently; never equate service ZIP, inner payload, and binary hashes by name.",
+    "Fetch artifact by numeric ID, enclosing run by numeric ID, and exact-attempt jobs; do not resolve by name.",
+    "Require artifact ID, run ID, run attempt, job ID, check-run ID, workflow path/SHA/ref, source SHA/closure, fixed job key, and required step conclusions to agree across signed predicate, REST, protected workflow source, manifest, and binary self-report.",
+    "Because REST job steps expose names/status/conclusion rather than workflow step IDs, resolve upload-validator from the exact protected workflow source SHA, then match the corresponding live step name and terminal success.",
+    "Reject duplicate/stale/expired/queued/failed/canceled objects and ambiguous same-name siblings.",
+    "Use a two-phase release sequence: create a unique draft release/tag targeting the exact source SHA, obtain nonzero release ID, then generate/sign the final manifest with that ID; upload immutable assets and publish the draft only after all checks.",
+    "Verify final release ID/tag/target and manifest attestation after draft reservation; never accept a placeholder ID or a stale draft object.",
+    "Require the validator namespace, predicate type, owner repository, protected main workflow path/ref, and Linux-X64 platform exactly; reject application/runtime provenance and standard binary provenance alone."
+  ]
+}

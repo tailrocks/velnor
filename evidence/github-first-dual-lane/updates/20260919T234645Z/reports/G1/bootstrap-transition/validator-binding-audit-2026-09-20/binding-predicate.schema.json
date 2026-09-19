@@ -1,0 +1,195 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tailrocks.dev/velnor/attestation/validator-artifact-binding/v1",
+  "title": "Velnor policy-validator artifact-to-producer binding",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "product",
+    "source",
+    "workflow",
+    "run",
+    "job",
+    "artifact",
+    "upload",
+    "steps",
+    "binary",
+    "release",
+    "manifest"
+  ],
+  "properties": {
+    "schema": {
+      "const": "velnor.policy-validator.artifact-binding.v1"
+    },
+    "product": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "purpose", "platform"],
+      "properties": {
+        "id": { "const": "velnor-workflow-policy-validator" },
+        "purpose": { "const": "policy-validator" },
+        "platform": { "const": "Linux-X64" }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "ref", "sha", "closure"],
+      "properties": {
+        "repository": { "const": "tailrocks/velnor" },
+        "ref": { "const": "refs/heads/main" },
+        "sha": { "$ref": "#/$defs/sha40" },
+        "closure": { "$ref": "#/$defs/hex64" }
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "path",
+        "ref",
+        "sha",
+        "event",
+        "head_branch",
+        "head_sha",
+        "repository_id"
+      ],
+      "properties": {
+        "repository": { "const": "tailrocks/velnor" },
+        "path": {
+          "const": ".github/workflows/ci-policy-validator-products.yml"
+        },
+        "ref": {
+          "const": "tailrocks/velnor/.github/workflows/ci-policy-validator-products.yml@refs/heads/main"
+        },
+        "sha": { "$ref": "#/$defs/sha40" },
+        "event": { "enum": ["push", "workflow_dispatch"] },
+        "head_branch": { "const": "main" },
+        "head_sha": { "$ref": "#/$defs/sha40" },
+        "repository_id": { "$ref": "#/$defs/positiveInteger" }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "database_id", "attempt"],
+      "properties": {
+        "id": { "$ref": "#/$defs/positiveInteger" },
+        "database_id": { "$ref": "#/$defs/positiveInteger" },
+        "attempt": { "$ref": "#/$defs/positiveInteger" }
+      }
+    },
+    "job": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "id", "check_run_id"],
+      "properties": {
+        "key": { "const": "build-linux-x64" },
+        "id": { "$ref": "#/$defs/positiveInteger" },
+        "check_run_id": { "$ref": "#/$defs/positiveInteger" }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "service_zip_sha256", "inner_payload_sha256"],
+      "properties": {
+        "id": { "$ref": "#/$defs/positiveInteger" },
+        "name": {
+          "pattern": "^policy-validator-[0-9a-f]{16}-Linux-X64$",
+          "type": "string"
+        },
+        "service_zip_sha256": { "$ref": "#/$defs/digest" },
+        "inner_payload_sha256": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "upload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "step_id",
+        "artifact_id_output",
+        "artifact_digest_output"
+      ],
+      "properties": {
+        "step_id": { "const": "upload-validator" },
+        "artifact_id_output": { "$ref": "#/$defs/positiveInteger" },
+        "artifact_digest_output": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "steps": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["build", "upload"],
+      "properties": {
+        "build": { "$ref": "#/$defs/successfulStep" },
+        "upload": { "$ref": "#/$defs/successfulStep" }
+      }
+    },
+    "binary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "size", "mode", "revision", "closure"],
+      "properties": {
+        "sha256": { "$ref": "#/$defs/digest" },
+        "size": { "$ref": "#/$defs/positiveInteger" },
+        "mode": { "const": 493 },
+        "revision": { "$ref": "#/$defs/sha40" },
+        "closure": { "$ref": "#/$defs/hex64" }
+      }
+    },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "tag", "target_sha", "draft_reserved"],
+      "properties": {
+        "id": { "$ref": "#/$defs/positiveInteger" },
+        "tag": {
+          "type": "string",
+          "pattern": "^velnor-workflow-policy-validator-v1-[0-9a-f]{16}$"
+        },
+        "target_sha": { "$ref": "#/$defs/sha40" },
+        "draft_reserved": { "const": true }
+      }
+    },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256"],
+      "properties": {
+        "sha256": { "$ref": "#/$defs/digest" }
+      }
+    }
+  },
+  "$defs": {
+    "sha40": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "hex64": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "positiveInteger": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "successfulStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "status", "conclusion"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "status": { "const": "completed" },
+        "conclusion": { "const": "success" }
+      }
+    }
+  }
+}

@@ -1,0 +1,79 @@
+{
+  "$schema": "velnor.external-evidence-update.v1",
+  "update_id": "20260919T234645Z",
+  "captured_at_utc": "2026-09-19T23:51:00Z",
+  "new_cutoff_utc": "2026-09-19T23:51:00Z",
+  "repository": "tailrocks/velnor",
+  "ref": "refs/heads/evidence/github-first-dual-lane-20260919T181508Z",
+  "parent_checkpoint_commit": "c14dffabe5e5cfabea6f3e8978c6047e8e3e7014",
+  "remote_before_copy": "c14dffabe5e5cfabea6f3e8978c6047e8e3e7014",
+  "prior_cutoff_utc": "2026-09-19T22:33:18Z",
+  "source_base_revision": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+  "publication_owner": "/root",
+  "records_owner": "/root/g0_records",
+  "attestation": "none",
+  "gate_status": "not-evaluated",
+  "gate_statement": "This append-only evidence snapshot does not establish G0, G1, G2, G3, G4, G5, G6, or G7 success.",
+  "original_evidence_root": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence",
+  "included_file_count_before_manifests": 20,
+  "included_symlink_count_before_manifests": 0,
+  "included_entry_count_before_manifests": 20,
+  "included_source_bytes": 524664,
+  "included_groups": {
+    "G0/fleet": 2,
+    "G0/distribution-workload-contract": 1,
+    "G0/skills-adapter": 2,
+    "G1/bootstrap": 1,
+    "G1/bootstrap-transition": 12,
+    "G1/generated-recovery": 1,
+    "G1/reviews": 1
+  },
+  "selected_reviews": [
+    "exact G1 bootstrap source-review-b61f19e7",
+    "G0 disjoint-ten source-derived workload contract",
+    "G0 distribution-consumer source-derived workload contract",
+    "G0 remaining-six source-derived workload contract",
+    "validator-only admission probe and design/preflight records",
+    "validator-binding-audit independent adversarial report and typed fixture indexes",
+    "independent PR961 exact-head review",
+    "independent PR963 exact-head review"
+  ],
+  "source_observation": {
+    "before_copy_utc": "2026-09-19T23:48:46Z",
+    "after_copy_utc": "2026-09-19T23:49:39Z",
+    "final_source_reread_utc": "2026-09-19T23:51:00Z",
+    "candidate_rule": "Only explicitly finished source-derived contracts and review reports after prior_cutoff_utc were selected. Mutable session/live/current/monitor/push snapshots, raw logs, builds, and research trees were excluded.",
+    "source_hash_inventory_verified": true,
+    "source_snapshot_equal": true,
+    "source_changed_during_copy": false,
+    "destination_hashes_match_source": true,
+    "source_symlinks": 0,
+    "source_metadata_tmp": "/private/tmp/evidence-20260919T234645Z-source-before.tsv"
+  },
+  "validation": {
+    "json_and_manifest_files_parsed": 10,
+    "ndjson_files_parsed": 0,
+    "ndjson_lines_parsed": 0,
+    "secret_pattern_hits": 0,
+    "source_changed": false,
+    "prior_snapshot_preserved": true,
+    "source_base_unchanged": true,
+    "source_branch_written": false,
+    "active_writer_paths_excluded": true
+  },
+  "excluded": [
+    "mutable session.json and active task/session ledgers",
+    "all live/current/monitor/push-named recovery snapshots",
+    "raw *.stderr, *.stdout, *.log outputs",
+    "research clones, build targets, binaries, caches, temporary trees, credentials",
+    "unselected reports outside the explicit finished post-cutoff list",
+    "symlink entries: none selected in this update; no links were dereferenced"
+  ],
+  "integrity": {
+    "inventory": "INVENTORY.tsv",
+    "sha256_manifest": "SHA256SUMS",
+    "manifest_scope": "All regular files in this update directory except SHA256SUMS itself; inventory covers the 20 copied regular source files and does not include manifests.",
+    "source_hash_scope": "All 20 copied regular source files, with source-relative path, bytes, source mtime UTC, and SHA-256 in INVENTORY.tsv.",
+    "symlink_policy": "No symlinks selected in this bounded update; no symlink was dereferenced."
+  }
+}

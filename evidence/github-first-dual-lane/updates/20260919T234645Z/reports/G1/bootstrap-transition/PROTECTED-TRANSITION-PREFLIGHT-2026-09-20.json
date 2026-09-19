@@ -1,0 +1,177 @@
+{
+  "status": "planning-only-no-authority-write",
+  "observed_at": "2026-09-20",
+  "repository": "tailrocks/velnor",
+  "refreshed_main": {
+    "sha": "d20d4d1d17590cca85b501d982cbaad70d42c641",
+    "parent": "1048337062ea625fada1b4f7c07f2feed75f60c7",
+    "tree": "ec2d82aa83a1b2db692d1d3d46d48568d756c602",
+    "subject": "fix(workflow): route hosted Apple jobs to macOS 26"
+  },
+  "old_validator": {
+    "source": "0dc79895ff1c5e88be7c3822c437e1c5b5282e12",
+    "binary": "/private/tmp/velnor-old-target/release/velnor-workflow",
+    "binary_sha256": "ade826fd3a27de43cfce55acfda870493b4921770199fe0afaa653b9a96f1750",
+    "candidate_manifest": "",
+    "pin_build": false
+  },
+  "fixture": {
+    "root": "/private/tmp/velnor-current-d20-admission-fixture",
+    "fingerprint": "9e9bdecae910121647ef984865d930fbd51e0da0f4161291c60410171288d254",
+    "raw_check_command": "(cd \"$ROOT\" && \"$OLD\" . --plain --check)",
+    "raw_check_exit": 1,
+    "raw_check_findings": [
+      ".github/actionlint.yaml differs from pinned render",
+      ".github/ci/.github-actions-generator-state differs from pinned render",
+      ".github/workflows/ci-runtime-products.yml differs from pinned render"
+    ],
+    "policy_command": "VELNOR_WORKFLOW_PINNED_BINARY=\"$OLD\" \"$OLD\" policy --workflow-root \"$ROOT\" --head-sha d20d4d1d17590cca85b501d982cbaad70d42c641 --base-sha 1048337062ea625fada1b4f7c07f2feed75f60c7 --base-revision 0dc79895ff1c5e88be7c3822c437e1c5b5282e12 --ruleset-contexts DCO,Policy,ci-required --candidate-manifest \"\"",
+    "policy_exit": 1,
+    "policy_failed_rules": ["generated-tree"],
+    "policy_passed_rules": 10,
+    "force_normalization_used": false
+  },
+  "current_main_transition_negative": {
+    "runtime_runner_label": "macos-26",
+    "spec_required_current_mapping": "xcode-27",
+    "old_validator_accepts_broad_macos_prefix": true,
+    "semantic_acceptance_is_spec_acceptance": false
+  },
+  "first_main_live_runs": {
+    "snapshot_query": "gh api 'repos/tailrocks/velnor/actions/runs?head_sha=d20d4d1d17590cca85b501d982cbaad70d42c641&per_page=100'",
+    "runs": [
+      {
+        "workflow": ".github/workflows/ci-runtime-products.yml",
+        "workflow_id": 359790572,
+        "run_id": 35475920678,
+        "event": "push",
+        "head_branch": "main",
+        "head_sha": "d20d4d1d17590cca85b501d982cbaad70d42c641",
+        "run_attempt": 1,
+        "created_at": "2026-09-19T23:21:55Z",
+        "run_started_at": "2026-09-19T23:21:55Z",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      {
+        "workflow": ".github/workflows/ci-main.yml",
+        "workflow_id": 347921603,
+        "run_id": 35475920826,
+        "event": "push",
+        "head_branch": "main",
+        "head_sha": "d20d4d1d17590cca85b501d982cbaad70d42c641",
+        "run_attempt": 1,
+        "created_at": "2026-09-19T23:21:55Z",
+        "run_started_at": "2026-09-19T23:21:55Z",
+        "status": "in_progress",
+        "policy_old_candidate_acquisition_started_at": "2026-09-19T23:22:56Z"
+      },
+      {
+        "workflow": ".github/workflows/preview.yml",
+        "workflow_id": 356264144,
+        "run_id": 35475920808,
+        "event": "push",
+        "head_branch": "main",
+        "head_sha": "d20d4d1d17590cca85b501d982cbaad70d42c641",
+        "run_attempt": 1,
+        "created_at": "2026-09-19T23:21:55Z",
+        "run_started_at": "2026-09-19T23:21:55Z",
+        "status": "completed",
+        "conclusion": "failure",
+        "identity_policy_failed_at": "2026-09-19T23:22:13Z"
+      }
+    ],
+    "runtime_jobs": [
+      {"job": "Resolve runtime closure", "job_id": 105985038423, "label": "ubuntu-24.04", "started_at": "2026-09-19T23:22:03Z", "conclusion": "success"},
+      {"job": "Build runtime (Linux-ARM64)", "job_id": 105985069779, "label": "ubuntu-24.04-arm", "started_at": "2026-09-19T23:22:16Z", "conclusion": "success"},
+      {"job": "Build runtime (Linux-X64)", "job_id": 105985069769, "label": "ubuntu-24.04", "started_at": "2026-09-19T23:22:17Z", "conclusion": "success"},
+      {"job": "Build runtime (macOS-ARM64)", "job_id": 105985069822, "label": "macos-26", "started_at": "2026-09-19T23:22:25Z", "conclusion": "success"},
+      {"job": "Publish runtime products", "job_id": 105985414162, "label": "ubuntu-24.04", "started_at": "2026-09-19T23:25:07Z", "conclusion": "success"}
+    ]
+  },
+  "static_first_main_graph": {
+    "push_main_workflows": [
+      {
+        "path": ".github/workflows/ci-main.yml",
+        "jobs": ["plan", "policy", "generated unit jobs", "ci-required"],
+        "policy_runtime": "old 0dc plus candidate acquisition"
+      },
+      {
+        "path": ".github/workflows/ci-runtime-products.yml",
+        "jobs": ["closure", "build Linux-X64", "build Linux-ARM64", "build macOS-ARM64", "publish"],
+        "macos_label_at_ref": "macos-26"
+      },
+      {
+        "path": ".github/workflows/preview.yml",
+        "path_condition": "push main paths include .github-gen/velnor-workflow.toml and .github/ci/**",
+        "jobs": ["identity", "metadata", "debian", "sign-deb", "publish"],
+        "identity_policy_runtime": "old 0dc"
+      }
+    ],
+    "not_push_main": [
+      {"path": ".github/workflows/ci-policy.yml", "triggers": ["pull_request_target", "workflow_dispatch"]},
+      {"path": ".github/workflows/release.yml", "triggers": ["tag push", "workflow_dispatch"]}
+    ]
+  },
+  "ruleset_snapshot": {
+    "id": 19573071,
+    "name": "protect-main",
+    "updated_at": "2026-09-16T08:47:23.561+07:00",
+    "required_contexts": ["DCO", "ci-required", "Policy"],
+    "strict_required_status_checks_policy": false,
+    "required_approving_review_count": 0,
+    "allowed_merge_methods": ["merge", "squash", "rebase"],
+    "api_response_sha256": "eb3d84d532e97b5dc64772af83a2e53f85427a824086b2bd6d8fa24752e2e46b"
+  },
+  "old_schema_contract": {
+    "unknown_policy_validator_section": "reject before render",
+    "supported_sidecar": {
+      "source": ".github-gen/policy-validator.toml",
+      "destination": ".github/ci/policy-validator.toml",
+      "mechanism": "existing static_files",
+      "authority": "transport only; trusted B must parse/authenticate later"
+    },
+    "required_proof": ["old 0dc --plain --check", "old 0dc policy with empty candidate"],
+    "force_normalization_as_proof": false
+  },
+  "preflight_assertions": [
+    "Freeze repository identity, current main parent, PR/base/head, merge method, final target SHA/tree, closure, workflow/action/config blobs.",
+    "Compare target commit/tree and refs/heads/main expected parent before build and immediately before CAS update.",
+    "Build B only from exact frozen target; clean detached checkout; binary revision and closure self-reports equal manifest.",
+    "B schema/product/purpose/platform/profile/features/tag/asset/source/namespace all exact.",
+    "B final release, assets, custom binding, standard provenance, and live API checks complete before main ref update; draft-only fails.",
+    "Prove source.ref refs/heads/main claim for pre-main build via exact target commit/CAS or custom owner-signed transaction predicate; staging/PR relabel fails.",
+    "Handoff all policy consumers: pull_request_target ci-policy, push-main ci-main Policy, push-main Preview identity, and any selected release/policy path.",
+    "Required B-backed check proves exact workflow path/blob, source SHA/tree, event, repository, PR, actor/integration, attempt, job, conclusion, and B identity.",
+    "Reject current ruleset strict=false, zero reviews, and context-only Policy unless protected transition supplies equivalent exact binding.",
+    "First main push contains complete Linux-X64, Linux-ARM64, and xcode-27 macOS-ARM64 application matrix; reject macos-26/15/latest, skip, empty, if:false, reroute.",
+    "After main update, assert every push run exact head SHA/branch/event/workflow source and B use before accepting."
+  ],
+  "negative_cases": [
+    "B built from PR or staging SHA but manifest claims refs/heads/main",
+    "GitHub merge/squash/rebase changes planned target SHA or tree",
+    "main advances between B publication and CAS merge",
+    "B release is draft, asset/attestation missing, tag target/source mismatched, or same closure has different source",
+    "artifact name/run ID matches but job/check/step/attempt binding is stale or ambiguous",
+    "publisher workflow path/blob, repository, event, branch, run attempt, or source SHA mismatches",
+    "base ci-policy changed but ci-main Policy or Preview identity still uses 0dc",
+    "same-name Policy check from wrong workflow/integration satisfies context",
+    "old --force normalized current raw drift and result was claimed as source admission",
+    "candidate manifest, --pin-build, local checkout, app runtime product, fallback, mutable latest, or self-attested sidecar used",
+    "runtime matrix has macos-26, macos-15, macos-latest, missing xcode-27, skipped, empty, or rerouted native cell",
+    "application runtime publisher replaced by Linux-only B product or namespace",
+    "B publisher starts after main push and relies on first-main workflow ordering",
+    "sidecar not rendered by old 0dc or old unknown config section is introduced"
+  ],
+  "unresolved_gaps": [
+    "No current repository workflow can build and publish B before the first main push; a new PR workflow cannot bootstrap itself under base pull_request_target.",
+    "A normal pre-main GitHub Actions run cannot truthfully carry refs/heads/main provenance before that ref exists; exact commit/CAS or custom owner transaction is not implemented.",
+    "Current protect-main permits stale required checks (strict=false), zero approvals, and all merge methods; exact target binding is not guaranteed.",
+    "Current required Policy context has no visible integration binding; same-name check spoofing/staleness needs protected identity enforcement.",
+    "Current first-main push has multiple policy consumers; a pull_request_target-only handoff is incomplete.",
+    "Current main d20 old checker raw tree is not fixed point; --force normalization cannot be used as proof.",
+    "Current d20 runtime success on macos-26 violates the latestOS rule even though old 0dc accepts macos-*."
+  ],
+  "conclusion": "Conditionally viable only with a real protected pre-main source-bound B publisher, complete old-to-B policy handoff, atomic target-SHA main update, and exact required-check identity. No approval."
+}
+
