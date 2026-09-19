@@ -1,4 +1,5 @@
 mod audit_ci;
+mod evidence_check;
 mod fleet_policy;
 mod fleet_policy_client;
 mod lane_compare;
@@ -72,6 +73,12 @@ enum CommandKind {
     AuditCi(audit_ci::AuditCiArgs),
     /// Compare GitHub and Velnor lanes (promoted alias of lane-compare).
     Compare(lane_compare::LaneCompareArgs),
+    /// Validate an external manifest, authoritative snapshot, and evidence envelope.
+    #[command(
+        name = "evidence-check",
+        aliases = ["check-evidence", "evidence-verify", "verify-evidence"]
+    )]
+    EvidenceCheck(evidence_check::EvidenceCheckArgs),
     /// Diff the GitHub-hosted and Velnor lanes of one run via the GitHub API (equal-or-better gate).
     LaneCompare(lane_compare::LaneCompareArgs),
     /// Maintainer-only org-JIT fleet policy operations (Plan 039).
@@ -539,6 +546,7 @@ async fn main() -> Result<()> {
         CommandKind::CheckFixtureLanes(args) => check_fixture_lanes(args).await,
         CommandKind::AuditCi(args) => audit_ci::audit_ci(args),
         CommandKind::Compare(args) => lane_compare::lane_compare(&root, args),
+        CommandKind::EvidenceCheck(args) => evidence_check::evidence_check(args),
         CommandKind::LaneCompare(args) => lane_compare::lane_compare(&root, args),
         CommandKind::FleetPolicy(args) => fleet_policy::fleet_policy(args.command).await,
     }
