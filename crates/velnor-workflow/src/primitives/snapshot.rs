@@ -1250,7 +1250,7 @@ mod tests {
             aged("guest", "guest-seed-x86_64-deadbeef", 1, 30 * HOUR),
             aged(
                 "policy",
-                "velnor-policy-mbx-1.12.0-Linux-X64-deadbeef",
+                "velnor-policy-mbx-1.11.1-Linux-X64-deadbeef",
                 1,
                 30 * HOUR,
             ),

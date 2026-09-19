@@ -162,7 +162,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       cache_paths: ".velnor-docker-cache"
-      seed_compat: "7e67216c9e23"
+      seed_compat: "743cc362f16c"
       seed_dependency_files: |
         Cargo.lock
         Dockerfile
@@ -304,7 +304,7 @@ jobs:
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
-      mbx_compat: fe8982552e68
+      mbx_compat: ec62b8b58bab
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -363,7 +363,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
-      mbx_compat: "877491872343"
+      mbx_compat: f75156e9e834
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -429,7 +429,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
-      mbx_compat: "5b4a6ae1e5aa"
+      mbx_compat: "9874c4732ec4"
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -549,7 +549,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
-      mbx_compat: "701ca1f39aa3"
+      mbx_compat: d7ddd7df48d1
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -621,7 +621,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
-      mbx_compat: "3ea4cac963f4"
+      mbx_compat: fed6b5542fa2
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -693,7 +693,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
-      mbx_compat: "4f1bcff55c5e"
+      mbx_compat: "6caac7864631"
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -758,7 +758,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
-      mbx_compat: a86708708123
+      mbx_compat: "81e65c6ca644"
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -830,7 +830,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
-      mbx_compat: "7a4d74b185e3"
+      mbx_compat: "91fc926cb724"
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -945,7 +945,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
-      mbx_compat: ed56b5dcf3d7
+      mbx_compat: "64c5561b2930"
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -1024,7 +1024,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
-      mbx_compat: "13a355ab0f86"
+      mbx_compat: a1e6d261b1d9
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -1154,7 +1154,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
-      mbx_compat: "6af73ff64799"
+      mbx_compat: "3b2aa59909ca"
       mbx_dependency_files: |
         .cargo/**
         crates/velnor-workflow-contract/Cargo.lock
@@ -1218,7 +1218,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
-      mbx_compat: bda00faa9a52
+      mbx_compat: f9bd0478a352
       mbx_dependency_files: |
         .cargo/**
         Cargo.lock
@@ -1349,7 +1349,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_runner: true
-      mbx_compat: "4f81dcee4c93"
+      mbx_compat: "84d1e28baf02"
       mbx_dependency_files: |
         Cargo.lock
         Cargo.toml

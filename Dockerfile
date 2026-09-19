@@ -60,7 +60,7 @@ RUN --mount=type=secret,id=github_token \
     && mise reshim \
     && mise exec -- rustc --version \
     && XDG_DATA_HOME=/opt mise exec -- mbx setup --yes \
-    && mise exec -- mbx --version | grep -F '1.12.0'
+    && mise exec -- mbx --version | grep -F '1.11.1'
 
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
@@ -128,7 +128,7 @@ COPY tools/unit-collector ./tools/unit-collector
 # the release binaries for every Rust source edit. Full/default builds below
 # remain the release-image guardrail used by trusted main and release flows.
 RUN cd /opt/mise/config \
-    && mise exec -- mbx --version | grep -F '1.12.0' \
+    && mise exec -- mbx --version | grep -F '1.11.1' \
     && test -f /src/Cargo.lock \
     && test -f /src/crates/velnor-workflow/src/lib.rs \
     && touch /tmp/velnor-ci-inputs-validated

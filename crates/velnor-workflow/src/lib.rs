@@ -134,7 +134,7 @@ pub const VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV: &str = "VELNOR_WORKFLOW_CANDID
 // policy validator the *base* branch runs; `velnor-workflow policy` requires
 // the audited tree's pin to descend from it.
 const VELNOR_POLICY_REVISION_ENV: &str = "VELNOR_WORKFLOW_POLICY_REVISION";
-const MR_BOXINGTON_VERSION: &str = "1.12.0";
+const MR_BOXINGTON_VERSION: &str = "1.11.1";
 /// mbx's action-store budget setting (`gc.max_size`). It is the bound the
 /// automatic sweep prunes the store to after a build, and the only budget
 /// that applies on a hosted runner: `gc.max_total_size` is unset there and
@@ -154,13 +154,11 @@ pub(crate) const MR_BOXINGTON_STORE_BUDGET_ENV: &str = "MBX_GC_MAX_SIZE";
 /// and stays inside the hosted image's free disk (about 20 GiB on
 /// `ubuntu-24.04`); it is a ceiling on the store, not a reservation.
 ///
-/// `jdx/mr-boxington-action` v1.4.0 uses mbx 1.12's directory bundle in
-/// object mode. This avoids the v1.3.1 tar restore path writing every byte
-/// twice during cache-action extraction and importer unpacking. The Velnor
-/// runner admits that exact ref in its compiled capability manifest; the
-/// explicit 12 GiB budget remains the safety ceiling for jobs that enable
-/// collection, keeping the store bounded rather than growing to the runner's
-/// disk.
+/// `jdx/mr-boxington-action` v1.3.1 defaults `MBX_GC_AUTO=0` on hosted
+/// runners in objects mode unless a job opts back in. The Velnor runner
+/// admits that exact ref in its compiled capability manifest; the explicit
+/// 12 GiB budget remains the safety ceiling for jobs that enable collection,
+/// keeping the store bounded rather than growing to the runner's disk.
 pub(crate) const MR_BOXINGTON_HOSTED_STORE_BUDGET: &str = "12GiB";
 
 /// The step that exports the hosted action-store budget for the rest of the
@@ -266,13 +264,14 @@ impl ActionPin {
             Self::Sccache => {
                 "mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11"
             }
-            // jdx/mr-boxington-action v1.4.0 with mbx 1.12.0. The Velnor runner admits this
+            // jdx/mr-boxington-action v1.3.1. The Velnor runner admits this
             // action only at the ref its compiled capability manifest lists
             // (`crates/velnor-runner/src/manifest.rs`), so the pin moves in
-            // lockstep with a runner release, not here. v1.4.0 uses directory
-            // bundles, avoiding the v1.3.1 nested-tar restore quota failure.
+            // lockstep with a runner release, not here. v1.3.1 defaults
+            // `MBX_GC_AUTO=0` on hosted runners in object mode; the explicit
+            // budget remains the ceiling when collection is enabled.
             Self::MrBoxington => {
-                "jdx/mr-boxington-action@867fc530102eec5b756075d70d850dc8330d2272 # v1.4.0"
+                "jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1"
             }
             // rui314/setup-mold v1 (current v1 tag)
             Self::Mold => "rui314/setup-mold@7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3 # v1",
@@ -12754,7 +12753,7 @@ channel = "stable"
         assert!(rendered.contains("jdx/mr-boxington-action@"));
         assert!(rendered.contains("run: |\n          mbx test --locked"));
         assert!(rendered.contains("mbx +\"${MSRV}\" check --locked"));
-        assert!(rendered.contains("version: 1.12.0"));
+        assert!(rendered.contains("version: 1.11.1"));
         assert!(rendered.contains("cargo install --locked --path ."));
         assert!(!rendered.contains("cargo test"));
         assert!(!rendered.contains("cargo check"));
@@ -12767,7 +12766,7 @@ channel = "stable"
     /// because a keyless snapshot import restores nothing (§9.1 test 7).
     #[test]
     fn static_templates_reject_local_mbx_without_declared_persistence() {
-        let hosted_local = "name: CI\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0\n        with:\n          backend: local\n          version: 1.11.1\n";
+        let hosted_local = "name: CI\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1\n        with:\n          backend: local\n          version: 1.11.1\n";
         let rejected = must_fail(
             validate_static_template_cache_transports(hosted_local),
             "hosted local mbx must be rejected",
@@ -12776,19 +12775,19 @@ channel = "stable"
         assert!(message.contains("build"), "{message}");
         assert!(message.contains("backend: local"), "{message}");
 
-        let self_hosted_local = "name: CI\njobs:\n  build:\n    runs-on: [self-hosted, pool]\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0\n        with:\n          backend: local\n";
+        let self_hosted_local = "name: CI\njobs:\n  build:\n    runs-on: [self-hosted, pool]\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1\n        with:\n          backend: local\n";
         must(
             validate_static_template_cache_transports(self_hosted_local),
             "local mbx on the persistent pool is accepted",
         );
 
-        let group_local = "name: CI\njobs:\n  build:\n    runs-on: ${{ fromJSON('{\"group\":\"ci\",\"labels\":[\"self-hosted\",\"pool\"]}') }}\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0\n        with:\n          backend: local\n";
+        let group_local = "name: CI\njobs:\n  build:\n    runs-on: ${{ fromJSON('{\"group\":\"ci\",\"labels\":[\"self-hosted\",\"pool\"]}') }}\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1\n        with:\n          backend: local\n";
         must(
             validate_static_template_cache_transports(group_local),
             "local mbx behind the persistent runner group is accepted",
         );
 
-        let keyless_github = "name: CI\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0\n        with:\n          backend: github\n          version: 1.11.1\n";
+        let keyless_github = "name: CI\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1\n        with:\n          backend: github\n          version: 1.11.1\n";
         let rejected = must_fail(
             validate_static_template_cache_transports(keyless_github),
             "keyless object-cache mbx must be rejected",
@@ -12799,7 +12798,7 @@ channel = "stable"
         // A key that names compatibility but hashes no source state is the
         // frozen-snapshot defect itself: GitHub cache entries are immutable,
         // so the first save under that key refuses every later save.
-        let compatibility_only = "name: CI\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0\n        with:\n          backend: github\n          github-cache-mode: objects\n          version: 1.11.1\n          cache-key: example-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}\n          restore-keys: |\n            example-${{ runner.os }}-\n";
+        let compatibility_only = "name: CI\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1\n        with:\n          backend: github\n          github-cache-mode: objects\n          version: 1.11.1\n          cache-key: example-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}\n          restore-keys: |\n            example-${{ runner.os }}-\n";
         let rejected = must_fail(
             validate_static_template_cache_transports(compatibility_only),
             "a compatibility-only key must be rejected",
@@ -12809,7 +12808,7 @@ channel = "stable"
 
         // A complete key with a freshness segment, and prefixes-only restore
         // keys, is the shape generation accepts.
-        let keyed_github = "name: CI\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0\n        with:\n          backend: github\n          github-cache-mode: objects\n          version: 1.11.1\n          cache-key: example-mbx-v3-a1b2c3d4e5f6-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('**/*.rs') }}\n          restore-keys: |\n            example-mbx-v3-a1b2c3d4e5f6-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-\n            example-mbx-v3-a1b2c3d4e5f6-${{ runner.os }}-\n";
+        let keyed_github = "name: CI\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1\n        with:\n          backend: github\n          github-cache-mode: objects\n          version: 1.11.1\n          cache-key: example-mbx-v3-a1b2c3d4e5f6-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('**/*.rs') }}\n          restore-keys: |\n            example-mbx-v3-a1b2c3d4e5f6-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-\n            example-mbx-v3-a1b2c3d4e5f6-${{ runner.os }}-\n";
         must(
             validate_static_template_cache_transports(keyed_github),
             "a freshness-carrying snapshot key is accepted",
@@ -12817,7 +12816,7 @@ channel = "stable"
 
         // A complete generation on the restore list would shadow newer
         // compatible fallbacks, so generation refuses it.
-        let complete_restore_key = "name: CI\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0\n        with:\n          backend: github\n          github-cache-mode: objects\n          version: 1.11.1\n          cache-key: example-mbx-v3-a1b2c3d4e5f6-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('**/*.rs') }}\n          restore-keys: |\n            example-mbx-v3-a1b2c3d4e5f6-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('**/*.rs') }}\n";
+        let complete_restore_key = "name: CI\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    steps:\n      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1\n        with:\n          backend: github\n          github-cache-mode: objects\n          version: 1.11.1\n          cache-key: example-mbx-v3-a1b2c3d4e5f6-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('**/*.rs') }}\n          restore-keys: |\n            example-mbx-v3-a1b2c3d4e5f6-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('**/*.rs') }}\n";
         let rejected = must_fail(
             validate_static_template_cache_transports(complete_restore_key),
             "a complete generation on the restore list must be rejected",
@@ -12981,8 +12980,8 @@ channel = "stable"
     #[test]
     fn hosted_store_budget_validator_requires_the_export_before_the_action() {
         let budget = mr_boxington_store_budget_step();
-        let action = "      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0\n        with:\n          backend: github\n          github-cache-mode: objects\n";
-        let local = "      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0\n        with:\n          backend: local\n";
+        let action = "      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1\n        with:\n          backend: github\n          github-cache-mode: objects\n";
+        let local = "      - name: Set up Mr. Boxington\n        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1\n        with:\n          backend: local\n";
         let workflow = |steps: &str| {
             BTreeMap::from([(
                 PathBuf::from(".github/workflows/ci.yml"),
