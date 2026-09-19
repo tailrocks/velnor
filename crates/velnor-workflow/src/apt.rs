@@ -946,8 +946,7 @@ fn require_directory(path: &Path) -> Result<(), GeneratorError> {
         if error.kind() == std::io::ErrorKind::NotFound {
             GeneratorError::usage(format!("required directory missing: {}", path.display()))
         } else if std::fs::symlink_metadata(path)
-            .ok()
-            .is_some_and(|metadata| metadata.file_type().is_symlink())
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
         {
             GeneratorError::usage(format!(
                 "required directory is a symlink: {}",
@@ -983,8 +982,7 @@ fn open_regular_file(path: &Path) -> Result<File, GeneratorError> {
         if error.kind() == std::io::ErrorKind::NotFound {
             GeneratorError::usage(format!("required file missing: {}", path.display()))
         } else if std::fs::symlink_metadata(path)
-            .ok()
-            .is_some_and(|metadata| metadata.file_type().is_symlink())
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
         {
             GeneratorError::usage(format!("required file is a symlink: {}", path.display()))
         } else {
@@ -1073,12 +1071,7 @@ fn arm_sentinel(incoming: &Path) -> Result<(), GeneratorError> {
     file.sync_all()
         .map_err(|error| GeneratorError::io("sync verification sentinel", &path, &error))?;
     #[cfg(unix)]
-    if file
-        .metadata()
-        .map(|metadata| metadata.nlink())
-        .unwrap_or(0)
-        != 1
-    {
+    if file.metadata().map_or(0, |metadata| metadata.nlink()) != 1 {
         return Err(GeneratorError::usage(
             "APT verification sentinel has multiple links",
         ));
@@ -1109,12 +1102,7 @@ fn create_new_regular_file(
     file.sync_all()
         .map_err(|error| GeneratorError::io("sync file", path, &error))?;
     #[cfg(unix)]
-    if file
-        .metadata()
-        .map(|metadata| metadata.nlink())
-        .unwrap_or(0)
-        != 1
-    {
+    if file.metadata().map_or(0, |metadata| metadata.nlink()) != 1 {
         return Err(GeneratorError::usage(format!(
             "{operation} destination has multiple links"
         )));
@@ -1838,11 +1826,15 @@ pub(crate) fn read_discovery_selection(path: &Path) -> Result<DiscoverySelection
     parse_discovery_selection(&document)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "selection parsing is one exact immutable contract gate"
+)]
 fn parse_discovery_selection(
     document: &serde_json::Value,
 ) -> Result<DiscoverySelection, GeneratorError> {
     exact_object_keys(
-        &document,
+        document,
         &[
             "channel",
             "manifest",
@@ -1867,40 +1859,40 @@ fn parse_discovery_selection(
         ],
         "discovery selection",
     )?;
-    let channel = field(&document, "channel")?.to_owned();
+    let channel = field(document, "channel")?.to_owned();
     if !matches!(channel.as_str(), "stable" | "preview") {
         return Err(GeneratorError::usage(
             "discovery channel must be stable or preview",
         ));
     }
-    let product_id = field(&document, "product_id")?.to_owned();
+    let product_id = field(document, "product_id")?.to_owned();
     if product_id.is_empty() {
         return Err(GeneratorError::usage(
             "discovery product_id must be non-empty",
         ));
     }
-    let source_repository = field(&document, "source_repository")?.to_owned();
+    let source_repository = field(document, "source_repository")?.to_owned();
     if !valid_repository_slug(&source_repository) {
         return Err(GeneratorError::usage(
             "discovery source repository is not an owner/name slug",
         ));
     }
-    let package = field(&document, "package")?.to_owned();
+    let package = field(document, "package")?.to_owned();
     if !valid_package_name(&package) {
         return Err(GeneratorError::usage(
             "discovery package is not a safe package name",
         ));
     }
-    let tag = field(&document, "tag")?.to_owned();
-    let release_tag = field(&document, "release_tag")?.to_owned();
+    let tag = field(document, "tag")?.to_owned();
+    let release_tag = field(document, "release_tag")?.to_owned();
     if tag != release_tag {
         return Err(GeneratorError::usage(
             "discovery tag and release_tag differ",
         ));
     }
-    let version = field(&document, "version")?.to_owned();
-    let source_ref = field(&document, "source_ref")?.to_owned();
-    let source_commit = field(&document, "source_commit")?.to_owned();
+    let version = field(document, "version")?.to_owned();
+    let source_ref = field(document, "source_ref")?.to_owned();
+    let source_commit = field(document, "source_commit")?.to_owned();
     if !valid_commit(&source_commit) {
         return Err(GeneratorError::usage(
             "discovery source_commit is not 40 lowercase hex characters",
@@ -1930,45 +1922,45 @@ fn parse_discovery_selection(
             return Err(GeneratorError::usage("discovery channel is unsupported"));
         }
     }
-    validate_source_ref_resolution(&document, &channel, &tag, &source_commit)?;
-    let manifest_asset = field(&document, "manifest_asset")?.to_owned();
+    validate_source_ref_resolution(document, &channel, &tag, &source_commit)?;
+    let manifest_asset = field(document, "manifest_asset")?.to_owned();
     if manifest_asset != PRODUCT_MANIFEST_ASSET {
         return Err(GeneratorError::usage(format!(
             "discovery manifest asset must be {PRODUCT_MANIFEST_ASSET}"
         )));
     }
-    let manifest_schema = field(&document, "manifest_schema")?.to_owned();
+    let manifest_schema = field(document, "manifest_schema")?.to_owned();
     if manifest_schema != PRODUCT_MANIFEST_SCHEMA {
         return Err(GeneratorError::usage(format!(
             "discovery manifest schema must be {PRODUCT_MANIFEST_SCHEMA}"
         )));
     }
-    let manifest_sha256 = field(&document, "manifest_sha256")?.to_owned();
+    let manifest_sha256 = field(document, "manifest_sha256")?.to_owned();
     if !valid_digest(&manifest_sha256) {
         return Err(GeneratorError::usage(
             "discovery manifest_sha256 is not a lowercase SHA-256 digest",
         ));
     }
-    let release_id = field(&document, "release_id")?.to_owned();
+    let release_id = field(document, "release_id")?.to_owned();
     if !valid_release_id(&release_id) {
         return Err(GeneratorError::usage(
             "discovery release_id has an invalid shared grammar",
         ));
     }
-    let provider_release_id = positive_field(&document, "provider_release_id")?;
+    let provider_release_id = positive_field(document, "provider_release_id")?;
     let expected_release_url = format!("https://github.com/{source_repository}/releases/tag/{tag}");
-    if field(&document, "release_url")? != expected_release_url {
+    if field(document, "release_url")? != expected_release_url {
         return Err(GeneratorError::usage(
             "discovery release_url is not the canonical GitHub release URL",
         ));
     }
-    let _ = field(&document, "target_commitish")?;
-    let _ = field(&document, "published_at")?;
+    let _ = field(document, "target_commitish")?;
+    let _ = field(document, "published_at")?;
     let manifest = document
         .get("manifest")
         .cloned()
         .ok_or_else(|| GeneratorError::usage("discovery product manifest is missing"))?;
-    validate_product_manifest_selection(&manifest, &document)?;
+    validate_product_manifest_selection(&manifest, document)?;
     let assets = document
         .get("release_assets")
         .and_then(serde_json::Value::as_array)
@@ -2229,12 +2221,12 @@ pub(crate) fn run_fetch_selection(
                 "selection fetch requires an empty incoming directory",
             ));
         }
-        if dir.join(DISCOVERY_SELECTION_FILE).exists() {
-            if read_json(&dir.join(DISCOVERY_SELECTION_FILE))? != selected_document {
-                return Err(GeneratorError::usage(
-                    "incoming discovery.json differs from the selected release",
-                ));
-            }
+        if dir.join(DISCOVERY_SELECTION_FILE).exists()
+            && read_json(&dir.join(DISCOVERY_SELECTION_FILE))? != selected_document
+        {
+            return Err(GeneratorError::usage(
+                "incoming discovery.json differs from the selected release",
+            ));
         }
     } else {
         std::fs::create_dir_all(dir)
