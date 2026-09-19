@@ -24742,7 +24742,7 @@ jobs:
 
     #[cfg(feature = "test-support")]
     #[tokio::test]
-    async fn transient_acquire_failure_keeps_broker_session_alive() {
+    async fn transient_acquire_failure_retains_uncertain_permit_and_session() {
         use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
 
         let transport_guard = crate::test_support::github_http_transport_env().await;
@@ -24797,11 +24797,17 @@ jobs:
         .unwrap();
 
         assert_eq!(action, V2MessageAction::None);
-        // The failed attempt freed its permit: the ledger is empty again.
+        // A 5xx after sending acquire is ambiguous: the service may have
+        // committed the assignment before losing its response. Keep the
+        // permit occupied until intent recovery proves the terminal result.
         let ledger =
             velnor_control::permit_ledger::PermitLedger::open(&args.permit_ledger.clone().unwrap())
                 .unwrap();
-        assert_eq!(ledger.occupied().unwrap(), 0);
+        assert_eq!(ledger.occupied().unwrap(), 1);
+        assert_eq!(
+            ledger.holder_state("native/request-1").unwrap(),
+            Some(velnor_control::permit_ledger::PermitState::Uncertain)
+        );
         std::fs::remove_dir_all(temp).ok();
     }
 
