@@ -155,7 +155,12 @@ pub fn map_g0_inventory_with_supplement(
                         repository.repository
                     )
                 })?;
-            map_repository(repository, manifest_repository, &raw_by_id)
+            map_repository(
+                repository,
+                manifest_repository,
+                &raw_by_id,
+                &live.observed_at_utc,
+            )
         })
         .collect::<Result<Vec<_>>>()?;
     let dependency_graph = map_dependency_graph(live, manifest, bindings, &raw_by_id)?;
@@ -453,37 +458,57 @@ fn map_repository(
     repository: &LiveRepository,
     manifest: &ManifestRepository,
     raw_by_id: &BTreeMap<String, &RawObjectRef>,
+    observed_at_utc: &str,
 ) -> Result<G0RepositoryInventory> {
+    if repository.source_invalidated {
+        bail!(
+            "repository {} changed during live collection",
+            repository.repository
+        );
+    }
     let rulesets = repository
         .rulesets
         .iter()
-        .map(|ruleset| G0RulesetInventory {
-            ruleset_id: ruleset.ruleset_id,
-            name: ruleset.name.clone(),
-            // The API object is captured in raw refs; this page is the
-            // repository settings projection required by the checker.
-            source_url: format!(
-                "https://github.com/{}/settings/rules",
-                repository.repository
-            ),
-            complete: ruleset.complete,
-            required_checks: ruleset
-                .required_checks
-                .iter()
-                .map(|check| G0RequiredCheckPolicy {
-                    context: check.context.clone(),
-                    app_id: check.app_id.clone(),
-                    ruleset_id: check.ruleset_id,
-                    raw_object_refs: check.raw_object_refs.clone(),
-                })
-                .collect(),
-            raw_object_refs: ruleset.raw_object_refs.clone(),
+        .map(|ruleset| -> Result<G0RulesetInventory> {
+            if !ruleset.complete {
+                bail!("ruleset {} is incomplete", ruleset.ruleset_id);
+            }
+            Ok(G0RulesetInventory {
+                ruleset_id: ruleset.ruleset_id,
+                name: ruleset.name.clone(),
+                // The API object is captured in raw refs; this page is the
+                // repository settings projection required by the checker.
+                source_url: format!(
+                    "https://github.com/{}/settings/rules",
+                    repository.repository
+                ),
+                complete: ruleset.complete,
+                required_checks: ruleset
+                    .required_checks
+                    .iter()
+                    .map(|check| {
+                        Ok(G0RequiredCheckPolicy {
+                            context: check.context.clone(),
+                            app_id: check.app_id.clone().ok_or_else(|| {
+                                anyhow!(
+                                    "ruleset {} check {} lacks app identity",
+                                    check.ruleset_id,
+                                    check.context
+                                )
+                            })?,
+                            ruleset_id: check.ruleset_id,
+                            raw_object_refs: check.raw_object_refs.clone(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+                raw_object_refs: ruleset.raw_object_refs.clone(),
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     let workflows = repository
         .workflows
         .iter()
-        .map(|workflow| map_workflow(workflow, repository, raw_by_id))
+        .map(|workflow| map_workflow(workflow, repository, raw_by_id, observed_at_utc))
         .collect::<Result<Vec<_>>>()?;
     let open_prs = repository
         .open_prs
@@ -518,11 +543,17 @@ fn map_workflow(
     workflow: &LiveWorkflow,
     repository: &LiveRepository,
     raw_by_id: &BTreeMap<String, &RawObjectRef>,
+    observed_at_utc: &str,
 ) -> Result<G0WorkflowInventory> {
     let source_raw = workflow
         .raw_object_refs
-        .first()
-        .and_then(|raw_id| raw_by_id.get(raw_id).copied())
+        .iter()
+        .find_map(|raw_id| {
+            raw_by_id
+                .get(raw_id)
+                .copied()
+                .filter(|raw| raw.object_kind == "workflow.source")
+        })
         .ok_or_else(|| anyhow!("workflow {} lacks source raw object", workflow.path))?;
     let generated_state = G0ArtifactReference {
         name: workflow.path.clone(),
@@ -532,7 +563,7 @@ fn map_workflow(
             repository.repository, workflow.source_sha, workflow.path
         ),
         sha256: source_raw.sha256.clone(),
-        observed_at_utc: utc_now(),
+        observed_at_utc: observed_at_utc.to_owned(),
         raw_object_refs: workflow.raw_object_refs.clone(),
     };
     Ok(G0WorkflowInventory {
@@ -630,18 +661,39 @@ fn map_pull_request(
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    let expected = manifest
+        .required_check_contexts_and_apps
+        .iter()
+        .map(|required| (required.context.clone(), required.app_id.clone()))
+        .collect::<BTreeSet<_>>();
+    let mut observed = BTreeSet::new();
+    for check in &pull_request.checks {
+        let app_id = check
+            .app_id
+            .clone()
+            .ok_or_else(|| anyhow!("check {} lacks provider App identity", check.context))?;
+        let key = (check.context.clone(), app_id);
+        if !expected.contains(&key) {
+            bail!(
+                "PR #{} contains unexpected check {}",
+                identity.number,
+                check.context
+            );
+        }
+        if !observed.insert(key) {
+            bail!("PR #{} repeats check {}", identity.number, check.context);
+        }
+    }
+    if observed != expected {
+        let missing = expected.difference(&observed).collect::<Vec<_>>();
+        bail!(
+            "PR #{} is missing required checks: {missing:?}",
+            identity.number
+        );
+    }
     let required_check_producers = pull_request
         .checks
         .iter()
-        .filter(|check| {
-            manifest
-                .required_check_contexts_and_apps
-                .iter()
-                .any(|required| {
-                    required.context == check.context
-                        && check.app_id.as_deref() == Some(required.app_id.as_str())
-                })
-        })
         .map(|check| map_check(check, &repository.workflows, Some(&pull_request.executions)))
         .collect::<Result<Vec<_>>>()?;
     Ok(G0PullRequestInventory {
@@ -678,26 +730,49 @@ fn map_check(
             check.context
         )
     })?;
-    let execution =
-        executions.and_then(|runs| runs.iter().find(|run| run.run_id == workflow_run_id));
+    let execution = executions
+        .and_then(|runs| runs.iter().find(|run| run.run_id == workflow_run_id))
+        .ok_or_else(|| anyhow!("check {} lacks concrete workflow execution", check.context))?;
+    if execution.source_sha != check.source_sha {
+        bail!(
+            "check {} source SHA differs from workflow execution",
+            check.context
+        );
+    }
     let job_id = check
         .job_id
-        .or_else(|| execution.and_then(unique_job_id))
+        .or_else(|| unique_job_id(execution))
         .ok_or_else(|| anyhow!("check {} lacks concrete job identity", check.context))?;
+    if !execution.jobs.iter().any(|job| job.job_id == job_id) {
+        bail!(
+            "check {} job is not bound to workflow execution",
+            check.context
+        );
+    }
     let _actual_checkout_sha = check
         .actual_checkout_sha
         .clone()
-        .or_else(|| execution.and_then(|run| run.actual_checkout_sha.clone()))
+        .or_else(|| execution.actual_checkout_sha.clone())
         .ok_or_else(|| anyhow!("check {} lacks checkout identity", check.context))?;
     let run_attempt = check
         .run_attempt
-        .or_else(|| execution.map(|run| run.run_attempt))
+        .or(Some(execution.run_attempt))
         .ok_or_else(|| anyhow!("check {} lacks run attempt", check.context))?;
-    let event = check
-        .event
-        .clone()
-        .or_else(|| execution.map(|run| run.event.clone()))
-        .ok_or_else(|| anyhow!("check {} lacks execution event", check.context))?;
+    if run_attempt != execution.run_attempt {
+        bail!(
+            "check {} attempt differs from workflow execution",
+            check.context
+        );
+    }
+    let event = execution.event.clone();
+    if let Some(check_event) = &check.event {
+        if check_event != &event {
+            bail!(
+                "check {} event differs from workflow execution",
+                check.context
+            );
+        }
+    }
     Ok(G0CheckProducer {
         context: check.context.clone(),
         app_id,
@@ -712,10 +787,7 @@ fn map_check(
         event,
         status: check.status.clone(),
         conclusion: check.conclusion.clone().unwrap_or_else(|| "".to_owned()),
-        source_url: check
-            .source_url
-            .clone()
-            .replace("https://api.github.com/repos/", "https://github.com/"),
+        source_url: check.source_url.clone(),
         raw_object_refs: check.raw_object_refs.clone(),
     })
 }
@@ -730,20 +802,19 @@ fn map_access(
     live: &LiveCollection,
     _raw_by_id: &BTreeMap<String, &RawObjectRef>,
 ) -> Result<Vec<G0AccessObservation>> {
-    let refs = live
-        .raw_objects
-        .first()
-        .map(|raw| vec![raw.raw_id.clone()])
-        .ok_or_else(|| anyhow!("live collection has no raw refs for access census"))?;
     Ok(live
         .repositories
         .iter()
         .map(|repository| G0AccessObservation {
             repository: repository.repository.clone(),
-            state: "complete".to_owned(),
+            state: if repository.access_state == "observed" && repository.access_gaps.is_empty() {
+                "complete".to_owned()
+            } else {
+                "unknown".to_owned()
+            },
             scopes: live.auth.safe_scopes.iter().cloned().collect(),
-            gaps: Vec::new(),
-            raw_object_refs: refs.clone(),
+            gaps: repository.access_gaps.clone(),
+            raw_object_refs: repository.raw_object_refs.clone(),
         })
         .collect())
 }

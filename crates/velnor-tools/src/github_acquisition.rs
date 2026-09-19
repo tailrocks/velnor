@@ -712,18 +712,17 @@ pub fn github_workflow_jobs_request(
     .with_query("filter", "all")
 }
 
-pub fn github_workflow_attempts_request(
+pub fn github_workflow_attempt_request(
     collection_id: impl Into<String>,
     repository: &str,
     run_id: u64,
+    attempt: u64,
 ) -> RestCollectionRequest {
-    RestCollectionRequest::new(
+    github_single_object_request(
         collection_id,
-        format!("/repos/{repository}/actions/runs/{run_id}/attempts"),
-        Some("workflow_runs"),
-        "workflow_attempts",
+        format!("/repos/{repository}/actions/runs/{run_id}/attempts/{attempt}"),
+        "workflow_attempt",
     )
-    .with_query("per_page", "100")
 }
 
 pub fn github_workflow_attempt_jobs_request(
@@ -739,7 +738,6 @@ pub fn github_workflow_attempt_jobs_request(
         "workflow_attempt_jobs",
     )
     .with_query("per_page", "100")
-    .with_query("filter", "all")
 }
 
 pub fn github_workflow_artifacts_request(
