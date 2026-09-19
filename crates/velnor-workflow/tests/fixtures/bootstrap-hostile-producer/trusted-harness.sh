@@ -28,15 +28,14 @@ is_commit() {
   [[ "$1" =~ ^[0-9a-f]{40}$ ]]
 }
 
-for command in docker jq sha256sum timeout find df awk realpath mktemp cp chmod file python3 tr wc sed grep rm; do
-  need_command "$command"
-done
-
 [[ "${G1_HOSTED_CANARY:-}" == 1 ]] || die "hosted canary opt-in required"
 [[ "${RUNNER_OS:-}" == Linux ]] || die "Linux hosted runner required"
 [[ "${RUNNER_ARCH:-}" == X64 ]] || die "x64 hosted runner required"
 [[ "$(uname -s)" == Linux ]] || die "Linux kernel required"
 [[ "$(uname -m)" == x86_64 ]] || die "x86_64 runner required"
+for command in docker jq sha256sum timeout find df awk realpath mktemp cp chmod file python3 tr wc sed grep rm; do
+  need_command "$command"
+done
 docker info >/dev/null 2>&1 || die "Docker daemon unavailable"
 [[ "$(docker info --format '{{.OSType}}')" == linux ]] || die "Linux Docker daemon required"
 docker buildx version >/dev/null 2>&1 || die "Docker buildx unavailable"
@@ -49,10 +48,19 @@ base_inputs=(
   G1_FIXTURE_CONTRACT_PATH G1_FIXTURE_CONTRACT_SHA256
   G1_TRUSTED_SCHEMA_PATH G1_TRUSTED_SCHEMA_SHA256
   G1_ARCHIVE_CHECK_PATH G1_ARCHIVE_CHECK_SHA256 G1_HARNESS_SHA256
+  G1_EXPECTED_WORKFLOW_PATH G1_EXPECTED_EVENT
+  G1_EXPECTED_TARGET_REPOSITORY G1_EXPECTED_TARGET_REPOSITORY_ID
+  G1_EXPECTED_HEAD_REPOSITORY G1_EXPECTED_HEAD_REPOSITORY_ID
+  G1_EXPECTED_PRODUCER_RUN_ID G1_EXPECTED_PRODUCER_JOB_ID
+  G1_EXPECTED_PRODUCER_JOB_NAME G1_EXPECTED_PRODUCER_ARTIFACT_ID
+  G1_EXPECTED_PRODUCER_ARTIFACT_NAME G1_EXPECTED_PRODUCER_SERVICE_DIGEST
+  G1_PRODUCER_ARCHIVE_PATH G1_PRODUCER_BINARY_MEMBER
   G1_EXPECTED_SOURCE_HEAD_SHA G1_EXPECTED_TREE_DIGEST G1_SOURCE_REPOSITORY
   G1_EXPECTED_SOURCE_CLOSURE G1_SANDBOX_IMAGE G1_SANDBOX_BASE_REF
   G1_SANDBOX_SOURCE_REVISION G1_SANDBOX_INDEX_DIGEST
   G1_SANDBOX_PLATFORM_DIGEST G1_SANDBOX_CONFIG_DIGEST
+  G1_EXPECTED_CACHE_PATH_COUNT G1_EXPECTED_CACHE_PRESENT_MASK
+  G1_EXPECTED_CACHE_READABLE_MASK
 )
 for name in "${base_inputs[@]}"; do
   require_value "$name"
@@ -67,9 +75,29 @@ done
 for name in G1_SANDBOX_INDEX_DIGEST G1_SANDBOX_PLATFORM_DIGEST G1_SANDBOX_CONFIG_DIGEST; do
   is_digest "${!name}" || die "bad image digest input"
 done
+for name in G1_EXPECTED_TARGET_REPOSITORY_ID G1_EXPECTED_HEAD_REPOSITORY_ID \
+  G1_EXPECTED_PRODUCER_RUN_ID G1_EXPECTED_PRODUCER_JOB_ID G1_EXPECTED_PRODUCER_ARTIFACT_ID; do
+  [[ "${!name}" =~ ^[1-9][0-9]*$ ]] || die "bad numeric API/cache input"
+done
+for name in G1_EXPECTED_CACHE_PATH_COUNT G1_EXPECTED_CACHE_PRESENT_MASK G1_EXPECTED_CACHE_READABLE_MASK; do
+  [[ "${!name}" =~ ^[0-9]+$ ]] || die "bad numeric cache input"
+done
+(( G1_EXPECTED_CACHE_PRESENT_MASK <= 31 )) || die "bad cache presence mask"
+(( G1_EXPECTED_CACHE_READABLE_MASK <= 31 )) || die "bad cache readable mask"
+(( G1_EXPECTED_CACHE_PATH_COUNT <= 5 )) || die "bad cache path count"
 is_commit "$G1_EXPECTED_SOURCE_HEAD_SHA" || die "bad source head input"
 is_commit "$G1_SANDBOX_SOURCE_REVISION" || die "bad image source revision"
-[[ "$G1_SOURCE_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "bad source repository"
+for name in G1_EXPECTED_TARGET_REPOSITORY G1_EXPECTED_HEAD_REPOSITORY G1_SOURCE_REPOSITORY; do
+  [[ "${!name}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "bad repository input"
+done
+[[ "$G1_EXPECTED_WORKFLOW_PATH" == .github/workflows/ci-pr.yml ]] || die "bad workflow path"
+[[ "$G1_EXPECTED_EVENT" == pull_request ]] || die "bad workflow event"
+[[ "$G1_EXPECTED_HEAD_REPOSITORY" == "$G1_SOURCE_REPOSITORY" ]] || die "head repository mismatch"
+for name in G1_EXPECTED_PRODUCER_JOB_NAME G1_EXPECTED_PRODUCER_ARTIFACT_NAME G1_PRODUCER_BINARY_MEMBER; do
+  [[ -n "${!name}" && "${!name}" != *$'\n'* && "${!name}" != *$'\r'* ]] || die "bad producer string input"
+done
+[[ "$G1_PRODUCER_BINARY_MEMBER" != /* && "$G1_PRODUCER_BINARY_MEMBER" != *..* && "$G1_PRODUCER_BINARY_MEMBER" != *\\* ]] || die "bad producer member path"
+is_digest "$G1_EXPECTED_PRODUCER_SERVICE_DIGEST" || die "bad producer service digest"
 [[ "$G1_SANDBOX_BASE_REF" == ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b ]] || die "unapproved sandbox base"
 [[ "$G1_SANDBOX_IMAGE" =~ ^[a-z0-9./_-]+$ ]] || die "bad sandbox image name"
 
@@ -100,6 +128,7 @@ trusted_file() {
 
 trusted_file "$G1_HANDOFF_PATH" "$G1_HANDOFF_SHA256"
 trusted_file "$G1_SOURCE_ARCHIVE" "$G1_SOURCE_ARCHIVE_SHA256"
+trusted_file "$G1_PRODUCER_ARCHIVE_PATH" "$G1_PRODUCER_ARCHIVE_SHA256"
 trusted_file "$G1_PROBE_PATH" "$G1_PROBE_SHA256"
 trusted_file "$G1_BUILD_PATH" "$G1_BUILD_SHA256"
 trusted_file "$G1_BINARY_PATH" "$G1_BINARY_SHA256"
@@ -109,19 +138,42 @@ trusted_file "$G1_ARCHIVE_CHECK_PATH" "$G1_ARCHIVE_CHECK_SHA256"
 script_path="$(realpath -e -- "$0")" || die "harness path unavailable"
 trusted_file "$script_path" "$G1_HARNESS_SHA256"
 
+runner_temp="$(realpath -e -- "${RUNNER_TEMP:-}")" || die "runner temp unavailable"
+[[ -d "$runner_temp" ]] || die "runner temp is not a directory"
+path_under_root "$runner_temp" || die "runner temp is outside trusted root"
+available_kib="$(df -Pk -- "$runner_temp" | awk 'NR == 2 { print $4 }')"
+[[ "$available_kib" =~ ^[0-9]+$ ]] || die "runner free-space check failed"
+(( available_kib >= 524288 )) || die "runner staging budget unavailable"
+
+evidence_root="$(realpath -e -- "$G1_EVIDENCE_DIR")" || die "evidence root unavailable"
+[[ -d "$evidence_root" ]] || die "evidence root is not a directory"
+path_under_root "$evidence_root" || die "evidence root outside trusted root"
+evidence="$evidence_root/bootstrap-hostile-$G1_EXPECTED_SOURCE_HEAD_SHA"
+test ! -e "$evidence" || die "evidence directory already exists"
+mkdir -m 0700 -- "$evidence"
+
 jq empty "$G1_HANDOFF_PATH" >/dev/null || die "handoff is not JSON"
 jq empty "$G1_FIXTURE_CONTRACT_PATH" >/dev/null || die "fixture contract is not JSON"
 jq empty "$G1_TRUSTED_SCHEMA_PATH" >/dev/null || die "trusted schema is not JSON"
+python3 -B "$G1_ARCHIVE_CHECK_PATH" --validate-handoff \
+  "$G1_TRUSTED_SCHEMA_PATH" "$G1_HANDOFF_PATH" >"$evidence/handoff-schema.json" || die "handoff schema validation failed"
+jq -e '.schema == "velnor.bootstrap-handoff-validation.v1" and .status == "valid"' \
+  "$evidence/handoff-schema.json" >/dev/null || die "handoff schema record invalid"
 jq -e \
+  --arg workflow "$G1_EXPECTED_WORKFLOW_PATH" \
+  --arg event "$G1_EXPECTED_EVENT" \
+  --arg target "$G1_EXPECTED_TARGET_REPOSITORY" \
+  --arg head_repo "$G1_EXPECTED_HEAD_REPOSITORY" \
+  --arg source_repo "$G1_SOURCE_REPOSITORY" \
   --arg head "$G1_EXPECTED_SOURCE_HEAD_SHA" \
   --arg tree "$G1_EXPECTED_TREE_DIGEST" \
-  --arg repo "$G1_SOURCE_REPOSITORY" \
   --arg closure "$G1_EXPECTED_SOURCE_CLOSURE" \
   --arg archive "$G1_SOURCE_ARCHIVE_SHA256" \
   --arg producer_archive "$G1_PRODUCER_ARCHIVE_SHA256" \
   --arg probe "$G1_PROBE_SHA256" \
   --arg build "$G1_BUILD_SHA256" \
   --arg binary "$G1_BINARY_SHA256" \
+  --arg binary_member "$G1_PRODUCER_BINARY_MEMBER" \
   --arg contract "$G1_FIXTURE_CONTRACT_SHA256" \
   --arg schema "$G1_TRUSTED_SCHEMA_SHA256" \
   --arg checker "$G1_ARCHIVE_CHECK_SHA256" \
@@ -131,24 +183,38 @@ jq -e \
   --arg revision "$G1_SANDBOX_SOURCE_REVISION" \
   --arg index "$G1_SANDBOX_INDEX_DIGEST" \
   --arg platform "$G1_SANDBOX_PLATFORM_DIGEST" \
-  --arg config "$G1_SANDBOX_CONFIG_DIGEST" '
+  --arg config "$G1_SANDBOX_CONFIG_DIGEST" \
+  --arg job_name "$G1_EXPECTED_PRODUCER_JOB_NAME" \
+  --arg artifact_name "$G1_EXPECTED_PRODUCER_ARTIFACT_NAME" \
+  --arg service_digest "$G1_EXPECTED_PRODUCER_SERVICE_DIGEST" \
+  --argjson target_id "$G1_EXPECTED_TARGET_REPOSITORY_ID" \
+  --argjson head_repo_id "$G1_EXPECTED_HEAD_REPOSITORY_ID" \
+  --argjson run_id "$G1_EXPECTED_PRODUCER_RUN_ID" \
+  --argjson job_id "$G1_EXPECTED_PRODUCER_JOB_ID" \
+  --argjson artifact_id "$G1_EXPECTED_PRODUCER_ARTIFACT_ID" '
     .schema == "velnor.bootstrap.handoff.v1" and
-    .workflow_path == ".github/workflows/ci-pr.yml" and
-    .event == "pull_request" and
+    .workflow_path == $workflow and
+    .event == $event and
+    .target_repository == $target and
+    .target_repository_id == $target_id and
+    .head_repository == $head_repo and
+    .head_repository_id == $head_repo_id and
     .head_sha == $head and
-    .source_repository == $repo and
+    .source_repository == $source_repo and
     .source_closure == $closure and
     .profile == "debug" and
     .features == [] and
     .platform == "linux-amd64" and
-    (.producer.run_id | type == "number" and . > 0) and
-    (.producer.job_id | type == "number" and . > 0) and
-    (.producer.artifact_id | type == "number" and . > 0) and
-    (.producer.job_name | type == "string" and length > 0) and
-    (.producer.artifact_name | type == "string" and length > 0) and
-    (.producer.artifact_service_digest | test("^sha256:[0-9a-f]{64}$")) and
+    .producer.run_id == $run_id and
+    .producer.job_id == $job_id and
+    .producer.artifact_id == $artifact_id and
+    .producer.job_name == $job_name and
+    .producer.artifact_name == $artifact_name and
+    .producer.artifact_service_digest == $service_digest and
     .producer.archive_sha256 == $producer_archive and
+    .producer.binary_member == $binary_member and
     .binary.sha256 == $binary and
+    .binary.member == $binary_member and
     .source_archive.sha256 == $archive and
     .source_archive.head_sha == $head and
     .source_archive.tree_digest == $tree and
@@ -164,7 +230,7 @@ jq -e \
     .sandbox.index_digest == $index and
     .sandbox.platform_digest == $platform and
     .sandbox.config_digest == $config
-  ' "$G1_HANDOFF_PATH" >/dev/null || die "handoff contract mismatch"
+  ' "$G1_HANDOFF_PATH" >/dev/null || die "handoff identity mismatch"
 jq -e \
   --arg base "$G1_SANDBOX_BASE_REF" '
     .schema == "velnor.bootstrap-hostile-probe.v1" and
@@ -172,24 +238,11 @@ jq -e \
     .sandbox_base_image == $base and
     .sandbox_image_ref_policy == "final-platform-manifest-digest-only" and
     .authority == "diagnostic-only; trusted wrapper and verifier decide" and
+    ([.engine_default_mounts[]] | sort) == ["/etc/hosts", "/etc/hostname", "/etc/resolv.conf"] and
     ([.required_isolation[]] | index("network-none") != null) and
     ([.required_isolation[]] | index("bounded-output-tmp") != null) and
     ([.required_isolation[]] | index("numeric-non-root") != null)
   ' "$G1_FIXTURE_CONTRACT_PATH" >/dev/null || die "fixture contract mismatch"
-
-runner_temp="$(realpath -e -- "${RUNNER_TEMP:-}")" || die "runner temp unavailable"
-[[ -d "$runner_temp" ]] || die "runner temp is not a directory"
-path_under_root "$runner_temp" || die "runner temp is outside trusted root"
-available_kib="$(df -Pk -- "$runner_temp" | awk 'NR == 2 { print $4 }')"
-[[ "$available_kib" =~ ^[0-9]+$ ]] || die "runner free-space check failed"
-(( available_kib >= 524288 )) || die "runner staging budget unavailable"
-
-evidence_root="$(realpath -e -- "$G1_EVIDENCE_DIR")" || die "evidence root unavailable"
-[[ -d "$evidence_root" ]] || die "evidence root is not a directory"
-path_under_root "$evidence_root" || die "evidence root outside trusted root"
-evidence="$evidence_root/bootstrap-hostile-$G1_EXPECTED_SOURCE_HEAD_SHA"
-test ! -e "$evidence" || die "evidence directory already exists"
-mkdir -m 0700 -- "$evidence"
 
 stage=""
 cid=""
@@ -217,6 +270,12 @@ mkdir -m 0755 -- "$candidate"
 mkdir -m 0700 -- "$hostout"
 
 python3 -B "$G1_ARCHIVE_CHECK_PATH" "$G1_SOURCE_ARCHIVE" >"$evidence/archive-summary.json"
+python3 -B "$G1_ARCHIVE_CHECK_PATH" "$G1_PRODUCER_ARCHIVE_PATH" >"$evidence/producer-archive-summary.json"
+python3 -B "$G1_ARCHIVE_CHECK_PATH" --member-sha256 "$G1_PRODUCER_BINARY_MEMBER" \
+  "$G1_PRODUCER_ARCHIVE_PATH" >"$evidence/producer-member-summary.json" || die "producer member validation failed"
+jq -e --arg binary "$G1_BINARY_SHA256" \
+  '.schema == "velnor.bootstrap-member.v1" and .status == "valid" and .sha256 == $binary' \
+  "$evidence/producer-member-summary.json" >/dev/null || die "producer binary member mismatch"
 python3 -B "$G1_ARCHIVE_CHECK_PATH" --extract "$input" "$G1_SOURCE_ARCHIVE" >"$evidence/archive-extract-summary.json"
 find -P "$input" -name .git -print -quit | grep -q . && die "source archive contains git metadata" || :
 find -P "$input" -type l -print -quit | grep -q . && die "source archive extracted a link" || :
@@ -339,6 +398,10 @@ jq -e \
   .HostConfig.LogConfig.Config["max-file"] == "1" and
   ((.HostConfig.Binds // []) | length == 0) and
   ((.HostConfig.Devices // []) | length == 0) and
+  ((.HostConfig.PortBindings // {}) | length == 0) and
+  (.HostConfig.PublishAllPorts == false) and
+  ((.HostConfig.Links // []) | length == 0) and
+  ((.HostConfig.VolumesFrom // []) | length == 0) and
   .Config.User == $user and
   .Config.WorkingDir == "/input" and
   .Config.Entrypoint == ["/candidate/velnor-hostile-producer"] and
@@ -356,8 +419,10 @@ jq -e \
     ] | sort)) and
   ((.Mounts // []) | map(select(.Type == "bind" and .Destination == "/input" and .Source == $input and .RW == false)) | length == 1) and
   ((.Mounts // []) | map(select(.Type == "bind" and .Destination == "/candidate" and .Source == $candidate and .RW == false)) | length == 1) and
-  ((.Mounts // []) | map(select(.Type == "bind" and (.Destination != "/input" and .Destination != "/candidate" and .Destination != "/etc/hosts" and .Destination != "/etc/hostname" and .Destination != "/etc/resolv.conf"))) | length == 0) and
+  ((.Mounts // []) | map(.Destination) | sort == ["/candidate", "/etc/hosts", "/etc/hostname", "/etc/resolv.conf", "/input", "/output", "/tmp"]) and
+  ((.Mounts // []) | map(select(.Type == "bind" and (.Destination == "/etc/hosts" or .Destination == "/etc/hostname" or .Destination == "/etc/resolv.conf"))) | length == 3) and
   ((.Mounts // []) | map(select(.Type == "tmpfs" and (.Destination == "/tmp" or .Destination == "/output") and .RW == true)) | length == 2) and
+  ((.Mounts // []) | map(select(.Type == "bind" and (.Destination == "/input" or .Destination == "/candidate") and .Propagation == "rprivate")) | length == 2) and
   ((.HostConfig.Tmpfs // {} | keys | sort) == ["/output", "/tmp"])
 ' "$evidence/container-before.json" >/dev/null || die "container preflight failed"
 for mount in /tmp /output; do
@@ -396,42 +461,96 @@ awk '
 ' "$stage/log" >"$stage/result-line" || die "hostile result record missing"
 result_json="$stage/result.json"
 sed 's/^VELNOR_HOSTILE_RESULT //' "$stage/result-line" >"$result_json"
-jq -e '
+jq -e \
+  --argjson cache_count "$G1_EXPECTED_CACHE_PATH_COUNT" \
+  --argjson cache_present_mask "$G1_EXPECTED_CACHE_PRESENT_MASK" \
+  --argjson cache_readable_mask "$G1_EXPECTED_CACHE_READABLE_MASK" '
+  def one_of($value; $values): ($values | index($value)) != null;
+  def uint_field($name):
+    .[$name] as $value |
+    (($value | type) == "number" and ($value | floor) == $value and $value >= 0);
+  def bool_field($name): (.[$name] | type) == "boolean";
+  def text_field($name): (.[$name] | type) == "string";
+  def has_all($names):
+    . as $root | ($names | all(.[] as $name | $root | has($name)));
   .schema == "velnor.bootstrap-hostile-probe.v1" and
   .fixture == "bootstrap-hostile-producer" and
   .authority == "diagnostic-only" and
-  ([
-    "h1_env_forbidden_names", "h1_proc1_forbidden_names", "h1_proc_scan_status",
-    "h2_fixed_command_paths_present", "h2_fixed_command_paths_guarded",
+  has_all([
+    "h1_env_forbidden_names", "h1_proc1_status", "h1_proc1_forbidden_names",
+    "h1_proc_self_status", "h1_proc_self_forbidden_names", "h1_proc_scan_status",
+    "h1_proc_scanned", "h1_proc_forbidden_names", "h1_visible_pid_count",
+    "h2_github_env", "h2_github_path", "h2_github_output", "h2_github_state",
+    "h2_step_summary", "h2_fixed_command_paths_present", "h2_fixed_command_paths_guarded",
     "h3_endpoint_present", "h3_token_name_present", "h3_upload_status",
-    "h3_sent_without_auth", "h3_sent_with_synthetic_auth", "h4_input_write",
-    "h4_candidate_write", "h4_workspace_write", "h4_runner_workspace_write",
-    "h4_docker_socket", "h4_docker_socket_run",
+    "h3_sent_without_auth", "h3_sent_with_synthetic_auth", "h4_github_workspace",
+    "h4_runner_temp", "h4_workspace_fixed", "h4_runner_workspace_fixed",
+    "h4_input_write", "h4_candidate_write", "h4_workspace_write",
+    "h4_runner_workspace_write", "h4_docker_socket", "h4_docker_socket_run",
     "h5_dns", "h5_loopback_v4", "h5_loopback_v6", "h5_metadata", "h5_proxy",
-    "h5_unix_socket",
-    "h6_symlink", "h6_hardlink", "h7_sparse_80m", "h7_files_created",
-    "h7_file_error", "h7_traversal", "h7_fake_contract", "h7_fake_manifest", "h8_pid_is_one",
-    "h8_uid_nonzero", "h8_capabilities_zero", "h8_no_new_privileges",
-    "h8_seccomp_two", "h8_children_spawned", "h8_child_error", "h9_source_write",
-    "h9_source_rewrite", "h9_source_delete", "h9_cache_paths_wrote", "h9_contract_minting"
-  ] | all(has)) and
-  .h3_sent_without_auth == false and
-  .h3_sent_with_synthetic_auth == false and
-  .h1_proc_scan_status == "read" and
-  .h2_fixed_command_paths_present == 0 and
-  .h2_fixed_command_paths_guarded == 0 and
-  .h4_input_write != "wrote" and .h4_candidate_write != "wrote" and
-  .h4_workspace_write != "wrote" and .h4_runner_workspace_write != "wrote" and
-  .h4_docker_socket != "connected" and .h4_docker_socket_run != "connected" and
-  .h5_dns != "connected" and .h5_loopback_v4 != "connected" and
-  .h5_loopback_v6 != "connected" and .h5_metadata != "connected" and
-  .h5_unix_socket != "connected" and
-  .h7_fake_manifest != "wrote" and
-  .h9_source_write != "wrote" and .h9_source_rewrite != "wrote" and
-  .h9_source_delete != "deleted" and .h9_cache_paths_wrote == 0 and
-  .h8_pid_is_one == true and .h8_uid_nonzero == true and
-  .h8_capabilities_zero == true and .h8_no_new_privileges == true and
-  .h8_seccomp_two == true
+    "h5_unix_socket", "h6_symlink", "h6_hardlink", "h7_sparse_80m",
+    "h7_file_attempts", "h7_files_created", "h7_file_error", "h7_traversal",
+    "h7_fake_contract", "h7_fake_manifest", "h8_proc1_status", "h8_pid_is_one",
+    "h8_uid_nonzero", "h8_capabilities_zero", "h8_no_new_privileges", "h8_seccomp_two",
+    "h8_child_attempts", "h8_children_spawned", "h8_child_error", "h9_source_write",
+    "h9_source_rewrite", "h9_source_delete", "h9_cache_paths_present",
+    "h9_cache_paths_present_mask", "h9_cache_paths_readable_mask", "h9_cache_paths_wrote",
+    "h9_contract_minting"
+  ]) and
+  uint_field("h1_env_forbidden_names") and .h1_env_forbidden_names == 0 and
+  text_field("h1_proc1_status") and .h1_proc1_status == "read" and
+  uint_field("h1_proc1_forbidden_names") and .h1_proc1_forbidden_names == 0 and
+  text_field("h1_proc_self_status") and .h1_proc_self_status == "read" and
+  uint_field("h1_proc_self_forbidden_names") and .h1_proc_self_forbidden_names == 0 and
+  text_field("h1_proc_scan_status") and .h1_proc_scan_status == "read" and
+  uint_field("h1_proc_scanned") and .h1_proc_scanned >= 1 and .h1_proc_scanned <= 128 and
+  uint_field("h1_proc_forbidden_names") and .h1_proc_forbidden_names == 0 and
+  uint_field("h1_visible_pid_count") and .h1_visible_pid_count >= 1 and .h1_visible_pid_count <= 128 and
+  .h2_github_env == "absent" and .h2_github_path == "absent" and
+  .h2_github_output == "absent" and .h2_github_state == "absent" and
+  .h2_step_summary == "absent" and
+  uint_field("h2_fixed_command_paths_present") and .h2_fixed_command_paths_present == 0 and
+  uint_field("h2_fixed_command_paths_guarded") and .h2_fixed_command_paths_guarded == 0 and
+  bool_field("h3_endpoint_present") and .h3_endpoint_present == false and
+  bool_field("h3_token_name_present") and .h3_token_name_present == false and
+  text_field("h3_upload_status") and .h3_upload_status == "absent" and
+  bool_field("h3_sent_without_auth") and .h3_sent_without_auth == false and
+  bool_field("h3_sent_with_synthetic_auth") and .h3_sent_with_synthetic_auth == false and
+  .h4_github_workspace == "absent" and .h4_runner_temp == "absent" and
+  .h4_workspace_fixed == "missing" and .h4_runner_workspace_fixed == "missing" and
+  one_of(.h4_input_write; ["denied", "missing"]) and
+  one_of(.h4_candidate_write; ["denied", "missing"]) and
+  one_of(.h4_workspace_write; ["denied", "missing"]) and
+  one_of(.h4_runner_workspace_write; ["denied", "missing"]) and
+  .h4_docker_socket == "missing" and .h4_docker_socket_run == "missing" and
+  text_field("h5_dns") and .h5_dns != "connected" and
+  text_field("h5_loopback_v4") and .h5_loopback_v4 != "connected" and
+  text_field("h5_loopback_v6") and .h5_loopback_v6 != "connected" and
+  text_field("h5_metadata") and .h5_metadata != "connected" and
+  .h5_proxy == "absent" and text_field("h5_unix_socket") and .h5_unix_socket != "connected" and
+  .h6_symlink == "created" and .h6_hardlink == "created" and
+  one_of(.h7_sparse_80m; ["created", "error", "denied", "exists"]) and
+  uint_field("h7_file_attempts") and .h7_file_attempts == 4096 and
+  uint_field("h7_files_created") and .h7_files_created <= .h7_file_attempts and
+  one_of(.h7_file_error; ["none", "error", "denied", "exists", "blocked"]) and
+  .h7_traversal == "denied" and .h7_fake_contract == "wrote" and
+  .h7_fake_manifest == "wrote" and .h8_proc1_status == "read" and
+  bool_field("h8_pid_is_one") and .h8_pid_is_one == true and
+  bool_field("h8_uid_nonzero") and .h8_uid_nonzero == true and
+  bool_field("h8_capabilities_zero") and .h8_capabilities_zero == true and
+  bool_field("h8_no_new_privileges") and .h8_no_new_privileges == true and
+  bool_field("h8_seccomp_two") and .h8_seccomp_two == true and
+  uint_field("h8_child_attempts") and .h8_child_attempts == 160 and
+  uint_field("h8_children_spawned") and .h8_children_spawned < .h8_child_attempts and
+  .h8_children_spawned <= 127 and text_field("h8_child_error") and .h8_child_error != "none" and
+  one_of(.h9_source_write; ["missing", "denied"]) and
+  one_of(.h9_source_rewrite; ["missing", "denied"]) and
+  one_of(.h9_source_delete; ["missing", "denied"]) and
+  uint_field("h9_cache_paths_present") and .h9_cache_paths_present == $cache_count and
+  uint_field("h9_cache_paths_present_mask") and .h9_cache_paths_present_mask == $cache_present_mask and
+  uint_field("h9_cache_paths_readable_mask") and .h9_cache_paths_readable_mask == $cache_readable_mask and
+  uint_field("h9_cache_paths_wrote") and .h9_cache_paths_wrote == 0 and
+  .h9_contract_minting == "wrote"
 ' "$result_json" >/dev/null || die "hostile result containment assertions failed"
 cp -- "$result_json" "$evidence/hostile-result.json"
 
@@ -441,7 +560,13 @@ python3 -B "$G1_ARCHIVE_CHECK_PATH" --check-tree "$hostout" >"$evidence/output-c
 output_check_status=$?
 set -e
 [[ "$output_check_status" == 2 ]] || die "hostile output was not rejected"
-jq -e '.schema == "velnor.bootstrap-hostile-tree.v1" and .status == "rejected"' "$evidence/output-check.json" >/dev/null || die "output rejection record invalid"
+jq -e '
+  .schema == "velnor.bootstrap-hostile-tree.v1" and
+  .status == "rejected" and
+  (.read_errors | type == "number" and . == 0) and
+  (.unexpected | type == "number" and . >= 2) and
+  (.violations | type == "number" and . > 0)
+' "$evidence/output-check.json" >/dev/null || die "output rejection record invalid"
 
 docker rm -f "$cid" >/dev/null || die "container cleanup failed"
 test -z "$(docker ps -aq --filter "id=$cid")" || die "container remains after cleanup"

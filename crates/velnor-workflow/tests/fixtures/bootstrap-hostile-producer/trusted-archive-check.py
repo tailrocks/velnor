@@ -11,8 +11,10 @@ checker error.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import stat
 import sys
 import tarfile
@@ -26,6 +28,7 @@ MAX_MEMBERS = 4096
 MAX_UNPACKED_BYTES = 256 * 1024 * 1024
 MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 MAX_OUTPUT_ENTRIES = 4096
+MAX_JSON_BYTES = 4 * 1024 * 1024
 
 
 class Entry(NamedTuple):
@@ -35,6 +38,16 @@ class Entry(NamedTuple):
     source: object
 
 
+class TreeAudit(NamedTuple):
+    status: str
+    entries: int
+    bytes: int
+    read_errors: int
+    unexpected: int
+    missing: int
+    violations: int
+
+
 class CheckError(Exception):
     pass
 
@@ -42,6 +55,89 @@ class CheckError(Exception):
 def fail(code: str, exit_code: int = 1) -> None:
     print(f"trusted-archive-check:{code}", file=sys.stderr)
     raise SystemExit(exit_code)
+
+
+def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise CheckError("duplicate-key")
+        result[key] = value
+    return result
+
+
+def load_json(path: Path) -> object:
+    try:
+        if path.stat().st_size > MAX_JSON_BYTES or not path.is_file() or path.is_symlink():
+            raise CheckError("json-limit")
+        with path.open("r", encoding="utf-8") as stream:
+            return json.load(stream, object_pairs_hook=reject_duplicate_keys)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise CheckError("json-invalid") from exc
+
+
+def validate_schema(value: object, schema: dict[str, object]) -> None:
+    if "const" in schema and value != schema["const"]:
+        raise CheckError("schema-const")
+    schema_type = schema.get("type")
+    if schema_type == "object":
+        if not isinstance(value, dict):
+            raise CheckError("schema-object")
+        properties = schema.get("properties", {})
+        if not isinstance(properties, dict):
+            raise CheckError("schema-properties")
+        required = schema.get("required", [])
+        if not isinstance(required, list) or any(
+            not isinstance(name, str) for name in required
+        ):
+            raise CheckError("schema-required")
+        if any(name not in value for name in required):
+            raise CheckError("schema-missing")
+        if schema.get("additionalProperties") is False:
+            if any(name not in properties for name in value):
+                raise CheckError("schema-extra")
+        for name, child_schema in properties.items():
+            if name in value:
+                if not isinstance(child_schema, dict):
+                    raise CheckError("schema-child")
+                validate_schema(value[name], child_schema)
+    elif schema_type == "array":
+        if not isinstance(value, list):
+            raise CheckError("schema-array")
+        item_schema = schema.get("items")
+        if item_schema is not None:
+            if not isinstance(item_schema, dict):
+                raise CheckError("schema-items")
+            for item in value:
+                validate_schema(item, item_schema)
+    elif schema_type == "string":
+        if not isinstance(value, str):
+            raise CheckError("schema-string")
+        minimum = schema.get("minLength")
+        if isinstance(minimum, int) and len(value) < minimum:
+            raise CheckError("schema-string-length")
+        pattern = schema.get("pattern")
+        if isinstance(pattern, str) and re.fullmatch(pattern, value) is None:
+            raise CheckError("schema-string-pattern")
+    elif schema_type == "integer":
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise CheckError("schema-integer")
+        minimum = schema.get("minimum")
+        if isinstance(minimum, int) and value < minimum:
+            raise CheckError("schema-integer-minimum")
+    elif schema_type == "number":
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise CheckError("schema-number")
+    elif schema_type is not None:
+        raise CheckError("schema-type")
+
+
+def validate_handoff(schema_path: Path, handoff_path: Path) -> None:
+    schema = load_json(schema_path)
+    handoff = load_json(handoff_path)
+    if not isinstance(schema, dict) or not isinstance(handoff, dict):
+        raise CheckError("schema-root")
+    validate_schema(handoff, schema)
 
 
 def normalize_name(raw: str) -> str:
@@ -209,72 +305,201 @@ def extract_entries(kind: str, entries: list[Entry], handle: object, destination
             source.close()
 
 
-def check_tree(root: Path) -> tuple[str, int, int]:
+def open_entry(kind: str, entry: Entry, handle: object) -> BinaryIO:
+    if kind == "tar":
+        assert isinstance(handle, tarfile.TarFile)
+        source = handle.extractfile(entry.source)
+    else:
+        assert isinstance(handle, zipfile.ZipFile)
+        source = handle.open(entry.source, mode="r")
+    if source is None:
+        raise CheckError("member-source")
+    return source
+
+
+def member_sha256(kind: str, entries: list[Entry], handle: object, name: str) -> tuple[str, int]:
+    normalized = normalize_name(name)
+    matches = [entry for entry in entries if entry.name == normalized and not entry.directory]
+    if len(matches) != 1:
+        raise CheckError("member-missing")
+    digest = hashlib.sha256()
+    source = open_entry(kind, matches[0], handle)
+    copied = 0
+    try:
+        while True:
+            block = source.read(1024 * 1024)
+            if not block:
+                break
+            copied += len(block)
+            if copied > matches[0].size:
+                raise CheckError("member-size")
+            digest.update(block)
+    finally:
+        source.close()
+    if copied != matches[0].size:
+        raise CheckError("member-short")
+    return digest.hexdigest(), copied
+
+
+def check_tree(
+    root: Path,
+    allowed_files: set[str],
+    allowed_directories: set[str],
+    required_names: set[str],
+) -> TreeAudit:
     if not root.is_dir() or root.is_symlink():
-        raise CheckError("tree-root")
+        return TreeAudit("rejected", 0, 0, 1, 0, len(required_names), 1)
     entries = 0
     bytes_total = 0
+    read_errors = 0
+    unexpected = 0
+    violations = 0
+    seen: set[str] = set()
     inodes: set[tuple[int, int]] = set()
-    for current, directories, files in os.walk(root, topdown=True, followlinks=False):
-        current_path = Path(current)
-        for name in directories + files:
-            relative = (current_path / name).relative_to(root).as_posix()
-            normalize_name(relative)
-            target = current_path / name
-            info = target.lstat()
+    pending: list[tuple[Path, str]] = [(root, "")]
+    while pending:
+        current, prefix = pending.pop()
+        try:
+            with os.scandir(current) as iterator:
+                children = list(iterator)
+        except OSError:
+            read_errors += 1
+            violations += 1
+            continue
+        for child in children:
+            relative = f"{prefix}/{child.name}" if prefix else child.name
+            try:
+                relative = normalize_name(relative)
+            except CheckError:
+                violations += 1
+                continue
+            seen.add(relative)
             entries += 1
             if entries > MAX_OUTPUT_ENTRIES:
-                raise CheckError("tree-entry-limit")
-            if stat.S_ISLNK(info.st_mode) or not (
-                stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)
-            ):
-                raise CheckError("tree-file-type")
-            if stat.S_ISREG(info.st_mode):
+                violations += 1
+                continue
+            try:
+                info = child.stat(follow_symlinks=False)
+            except OSError:
+                read_errors += 1
+                violations += 1
+                continue
+            is_directory = stat.S_ISDIR(info.st_mode)
+            is_file = stat.S_ISREG(info.st_mode)
+            is_link_or_special = stat.S_ISLNK(info.st_mode) or not (is_directory or is_file)
+            if is_directory:
+                pending.append((Path(child.path), relative))
+            if is_directory and relative not in allowed_directories:
+                unexpected += 1
+            if is_file and relative not in allowed_files:
+                unexpected += 1
+            if not is_directory and not is_file:
+                violations += 1
+            if is_link_or_special:
+                violations += 1
+                continue
+            if is_file:
+                if info.st_nlink > 1:
+                    violations += 1
                 bytes_total += info.st_size
                 if bytes_total > MAX_OUTPUT_BYTES:
-                    raise CheckError("tree-byte-limit")
+                    violations += 1
                 inode = (info.st_dev, info.st_ino)
-                if info.st_nlink > 1 or inode in inodes:
-                    raise CheckError("tree-hardlink")
+                if inode in inodes:
+                    violations += 1
                 inodes.add(inode)
-        directories[:] = [name for name in directories if not (current_path / name).is_symlink()]
-    return "accepted", entries, bytes_total
+    missing = len(required_names - seen)
+    violations += missing + unexpected + read_errors
+    status = "accepted" if violations == 0 else "rejected"
+    return TreeAudit(status, entries, bytes_total, read_errors, unexpected, missing, violations)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(add_help=True)
     parser.add_argument("--extract", metavar="DEST")
     parser.add_argument("--check-tree", metavar="ROOT")
+    parser.add_argument("--allow-file", action="append", default=[], metavar="NAME")
+    parser.add_argument("--allow-dir", action="append", default=[], metavar="NAME")
+    parser.add_argument("--require-name", action="append", default=[], metavar="NAME")
+    parser.add_argument("--validate-handoff", nargs=2, metavar=("SCHEMA", "HANDOFF"))
+    parser.add_argument("--member-sha256", metavar="NAME")
     parser.add_argument("archive", nargs="?")
     args = parser.parse_args()
-    if args.extract and args.check_tree or (args.check_tree and args.archive):
+    mode_count = sum(
+        value is not None
+        for value in (args.extract, args.check_tree, args.validate_handoff, args.member_sha256)
+    )
+    if mode_count > 1:
         fail("arguments")
-    if args.check_tree:
+    if args.validate_handoff:
+        if args.archive or args.allow_file or args.allow_dir or args.require_name:
+            fail("arguments")
         try:
-            status, entries, total = check_tree(Path(args.check_tree))
+            validate_handoff(Path(args.validate_handoff[0]), Path(args.validate_handoff[1]))
         except (CheckError, OSError, ValueError):
-            print(
-                json.dumps(
-                    {
-                        "schema": "velnor.bootstrap-hostile-tree.v1",
-                        "status": "rejected",
-                    },
-                    separators=(",", ":"),
-                )
+            fail("handoff-invalid")
+        print(
+            json.dumps(
+                {"schema": "velnor.bootstrap-handoff-validation.v1", "status": "valid"},
+                separators=(",", ":"),
             )
-            return 2
+        )
+        return 0
+    if args.check_tree:
+        if args.archive:
+            fail("arguments")
+        try:
+            allowed_files = {normalize_name(name) for name in args.allow_file}
+            allowed_directories = {normalize_name(name) for name in args.allow_dir}
+            required_names = {normalize_name(name) for name in args.require_name}
+            if allowed_files & allowed_directories:
+                raise CheckError("tree-type-duplicate")
+            audit = check_tree(
+                Path(args.check_tree), allowed_files, allowed_directories, required_names
+            )
+        except (CheckError, OSError, ValueError):
+            fail("tree-invalid")
         print(
             json.dumps(
                 {
                     "schema": "velnor.bootstrap-hostile-tree.v1",
-                    "status": status,
-                    "entries": entries,
-                    "bytes": total,
+                    "status": audit.status,
+                    "entries": audit.entries,
+                    "bytes": audit.bytes,
+                    "read_errors": audit.read_errors,
+                    "unexpected": audit.unexpected,
+                    "missing": audit.missing,
+                    "violations": audit.violations,
+                },
+                separators=(",", ":"),
+            )
+        )
+        return 0 if audit.status == "accepted" else 2
+    if args.member_sha256 and not args.archive:
+        fail("archive-required")
+    if args.member_sha256:
+        try:
+            kind, entries, handle = archive_entries(Path(args.archive))
+            digest, size = member_sha256(kind, entries, handle, args.member_sha256)
+        except (CheckError, OSError, ValueError, tarfile.TarError, zipfile.BadZipFile):
+            fail("member-invalid")
+        finally:
+            if "handle" in locals():
+                handle.close()
+        print(
+            json.dumps(
+                {
+                    "schema": "velnor.bootstrap-member.v1",
+                    "status": "valid",
+                    "sha256": digest,
+                    "bytes": size,
                 },
                 separators=(",", ":"),
             )
         )
         return 0
+    if args.allow_file or args.allow_dir or args.require_name:
+        fail("arguments")
     if not args.archive:
         fail("archive-required")
     try:

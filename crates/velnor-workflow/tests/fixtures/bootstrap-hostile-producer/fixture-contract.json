@@ -12,7 +12,8 @@
     "fixture-contract.json",
     "trusted-contract.schema.json",
     "trusted-archive-check.py",
-    "trusted-harness.sh"
+    "trusted-harness.sh",
+    "trusted-harness-negative-tests.sh"
   ],
   "binary_source": "probe.rs",
   "probe_entrypoint": [
@@ -32,6 +33,11 @@
     "default-seccomp",
     "bounded-output-tmp",
     "bounded-timeout"
+  ],
+  "engine_default_mounts": [
+    "/etc/hosts",
+    "/etc/hostname",
+    "/etc/resolv.conf"
   ],
   "hostile_surfaces": [
     "H1-env-proc",
@@ -53,6 +59,20 @@
     "container_pids": 128,
     "container_memory_bytes": 536870912,
     "container_timeout_seconds": 300
+  },
+  "cache_probe_paths": [
+    "/cache",
+    "/root/.cache",
+    "/opt/mise",
+    "/mbx",
+    "/var/cache"
+  ],
+  "diagnostic_output_contract": {
+    "allowed_files": [],
+    "allowed_directories": [],
+    "required_files": [],
+    "safe_write_statuses": ["missing", "denied"],
+    "unexpected_or_unreadable_is_failure": true
   },
   "authority": "diagnostic-only; trusted wrapper and verifier decide"
 }

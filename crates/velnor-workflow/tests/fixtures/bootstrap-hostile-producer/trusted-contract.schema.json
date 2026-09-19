@@ -8,6 +8,10 @@
     "schema",
     "workflow_path",
     "event",
+    "target_repository",
+    "target_repository_id",
+    "head_repository",
+    "head_repository_id",
     "head_sha",
     "source_repository",
     "source_closure",
@@ -24,6 +28,16 @@
     "schema": { "const": "velnor.bootstrap.handoff.v1" },
     "workflow_path": { "const": ".github/workflows/ci-pr.yml" },
     "event": { "const": "pull_request" },
+    "target_repository": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "target_repository_id": { "type": "integer", "minimum": 1 },
+    "head_repository": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "head_repository_id": { "type": "integer", "minimum": 1 },
     "head_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
     "source_repository": {
       "type": "string",
@@ -43,7 +57,8 @@
         "artifact_id",
         "artifact_name",
         "artifact_service_digest",
-        "archive_sha256"
+        "archive_sha256",
+        "binary_member"
       ],
       "properties": {
         "run_id": { "type": "integer", "minimum": 1 },
@@ -55,15 +70,17 @@
           "type": "string",
           "pattern": "^sha256:[0-9a-f]{64}$"
         },
-        "archive_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        "archive_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "binary_member": { "type": "string", "minLength": 1 }
       }
     },
     "binary": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sha256"],
+      "required": ["sha256", "member"],
       "properties": {
-        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "member": { "type": "string", "minLength": 1 }
       }
     },
     "source_archive": {
@@ -83,6 +100,7 @@
         "probe_sha256",
         "build_sha256",
         "contract_sha256",
+        "schema_sha256",
         "archive_checker_sha256",
         "harness_sha256"
       ],
@@ -90,6 +108,7 @@
         "probe_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "build_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "contract_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "schema_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "archive_checker_sha256": {
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
