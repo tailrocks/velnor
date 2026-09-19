@@ -17,7 +17,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
 struct Generated {
     output: PathBuf,
@@ -104,6 +104,119 @@ fn write_config(root: &Path, body: &str) {
     fs::write(
         root.join(".github-gen/velnor-workflow.toml"),
         format!("schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n{body}"),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+fn write_s2_config(root: &Path, body: &str) {
+    fs::create_dir_all(root.join(".github-gen")).unwrap();
+    fs::write(
+        root.join(".github-gen/velnor-workflow.toml"),
+        format!("schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n{body}"),
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+fn generate_s2(root: &Path) -> Generated {
+    let output = root.parent().unwrap().join(format!(
+        "{}-s2-out",
+        root.file_name().and_then(|name| name.to_str()).unwrap()
+    ));
+    let _ = fs::remove_dir_all(&output);
+    let outcome = Command::new(env!("CARGO_BIN_EXE_velnor-workflow"))
+        .args([
+            "--plain",
+            "--default-branch",
+            "main",
+            "--output",
+            output.to_str().unwrap(),
+            root.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run velnor-workflow");
+    assert!(
+        outcome.status.success(),
+        "schema-2 generation failed:\n{}",
+        String::from_utf8_lossy(&outcome.stderr)
+    );
+    Generated { output }
+}
+
+#[cfg(unix)]
+fn workflow_step_script(workflow: &str, name: &str) -> String {
+    let marker = format!("      - name: {name}\n");
+    let start = workflow
+        .find(marker.as_str())
+        .unwrap_or_else(|| panic!("workflow step is absent: {name}"));
+    let step = &workflow[start..];
+    let run = step
+        .find("        run: |\n")
+        .unwrap_or_else(|| panic!("workflow step has no run body: {name}"));
+    let body = &step[run + "        run: |\n".len()..];
+    let mut script = String::new();
+    for line in body.lines() {
+        if line.starts_with("      - name:") || line.starts_with("    - name:") {
+            break;
+        }
+        if let Some(line) = line.strip_prefix("          ") {
+            script.push_str(line);
+            script.push('\n');
+        } else if line.trim().is_empty() {
+            script.push('\n');
+        } else {
+            break;
+        }
+    }
+    script
+}
+
+#[cfg(unix)]
+fn run_workflow_step(
+    script: &str,
+    workspace: &Path,
+    runner_temp: &Path,
+    unit: &str,
+    head_sha: &str,
+) -> Output {
+    let script_path = runner_temp.join(format!("{unit}.sh"));
+    fs::write(&script_path, script).unwrap();
+    Command::new("bash")
+        .arg(&script_path)
+        .env("GITHUB_WORKSPACE", workspace)
+        .env("RUNNER_TEMP", runner_temp)
+        .env("CI_UNIT_ID", unit)
+        .env("HEAD_SHA", head_sha)
+        .output()
+        .unwrap()
+}
+
+#[cfg(unix)]
+fn sha256(path: &Path) -> String {
+    let output = Command::new("shasum")
+        .args(["-a", "256"])
+        .arg(path)
+        .output()
+        .or_else(|_| Command::new("sha256sum").arg(path).output())
+        .unwrap();
+    assert!(output.status.success(), "sha256 failed: {output:?}");
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned()
+}
+
+#[cfg(unix)]
+fn write_artifact_manifest(root: &Path, archive: &Path, source_sha: &str) {
+    fs::create_dir_all(root).unwrap();
+    fs::write(
+        root.join("manifest.json"),
+        format!(
+            "{{\"schema\":1,\"producer\":\"rust-ffi\",\"product\":\"xcframework\",\"source_sha\":\"{source_sha}\",\"path\":\"target/xcframework/App.xcframework\",\"kind\":\"xcframework\",\"archive_sha256\":\"{}\"}}\n",
+            sha256(archive)
+        ),
     )
     .unwrap();
 }
@@ -346,6 +459,256 @@ fn artifact_prerequisite_builds_once_and_crosses_hosted_jobs() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn artifact_shell_materializes_real_bytes_and_rejects_hostile_symlinks() {
+    let root = unique_dir("artifact-shell");
+    write_ffi_fixture(&root);
+    write_config(
+        &root,
+        r#"[workflow]
+runners = "github"
+github_runner = "ubuntu-24.04"
+
+[[units]]
+id = "rust-ffi"
+os = "macos"
+
+[[units.products]]
+name = "xcframework"
+task = "build-xcframework"
+artifact_path = "target/xcframework/App.xcframework"
+artifact_kind = "xcframework"
+
+[[units]]
+id = "swift-package-app"
+capabilities = ["xcframework"]
+
+[[units.prerequisites]]
+producer = "rust-ffi"
+product = "xcframework"
+"#,
+    );
+    let source_product = root.join("target/xcframework/App.xcframework");
+    fs::create_dir_all(&source_product).unwrap();
+    fs::write(source_product.join("Info.plist"), "fixture\n").unwrap();
+    fs::create_dir_all(source_product.join("Versions/A")).unwrap();
+    fs::write(source_product.join("Versions/A/marker"), "linked\n").unwrap();
+    std::os::unix::fs::symlink("A", source_product.join("Versions/Current")).unwrap();
+    let generated = generate(&root);
+    let producer_script = workflow_step_script(
+        &generated.workflow("ci-unit-rust.yml"),
+        "Stage hosted product artifacts",
+    );
+    let consumer_script = workflow_step_script(
+        &generated.workflow("ci-unit-swift.yml"),
+        "Materialize hosted product artifacts",
+    );
+    assert!(producer_script.contains("product_dir=\"$stage/$product_name\""));
+    assert!(consumer_script.contains("destination=\"$GITHUB_WORKSPACE/$path\""));
+    let runner_temp = unique_dir("artifact-shell-temp");
+    let head_sha = "0123456789012345678901234567890123456789";
+    let producer = run_workflow_step(&producer_script, &root, &runner_temp, "rust-ffi", head_sha);
+    assert!(
+        producer.status.success(),
+        "producer failed:\n{}\n{}",
+        String::from_utf8_lossy(&producer.stdout),
+        String::from_utf8_lossy(&producer.stderr)
+    );
+    let incoming = runner_temp.join("velnor-product-inputs/download");
+    let staged = runner_temp.join("velnor-products/xcframework");
+    fs::create_dir_all(&incoming).unwrap();
+    fs::copy(staged.join("archive.tar"), incoming.join("archive.tar")).unwrap();
+    fs::copy(staged.join("manifest.json"), incoming.join("manifest.json")).unwrap();
+    let consumer_root = unique_dir("artifact-shell-consumer");
+    fs::create_dir_all(consumer_root.join("target/xcframework")).unwrap();
+    let consumer = run_workflow_step(
+        &consumer_script,
+        &consumer_root,
+        &runner_temp,
+        "swift-package-app",
+        head_sha,
+    );
+    assert!(
+        consumer.status.success(),
+        "consumer failed:\n{}\n{}",
+        String::from_utf8_lossy(&consumer.stdout),
+        String::from_utf8_lossy(&consumer.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(consumer_root.join("target/xcframework/App.xcframework/Info.plist"))
+            .unwrap(),
+        "fixture\n"
+    );
+    assert_eq!(
+        fs::read_to_string(
+            consumer_root.join("target/xcframework/App.xcframework/Versions/Current/marker")
+        )
+        .unwrap(),
+        "linked\n"
+    );
+
+    let hostile_source = unique_dir("artifact-hostile-source");
+    fs::create_dir_all(hostile_source.join("target/xcframework")).unwrap();
+    let outside = unique_dir("artifact-hostile-outside");
+    std::os::unix::fs::symlink(
+        &outside,
+        hostile_source.join("target/xcframework/App.xcframework"),
+    )
+    .unwrap();
+    let hostile_archive = unique_dir("artifact-hostile-archive").join("archive.tar");
+    let tar = Command::new("tar")
+        .args([
+            "-C",
+            hostile_source.to_str().unwrap(),
+            "-cf",
+            hostile_archive.to_str().unwrap(),
+            "--",
+            "target/xcframework/App.xcframework",
+        ])
+        .output()
+        .unwrap();
+    assert!(tar.status.success(), "hostile tar failed: {tar:?}");
+    let hostile_temp = unique_dir("artifact-hostile-temp");
+    let hostile_incoming = hostile_temp.join("velnor-product-inputs/download");
+    fs::create_dir_all(&hostile_incoming).unwrap();
+    fs::copy(&hostile_archive, hostile_incoming.join("archive.tar")).unwrap();
+    write_artifact_manifest(&hostile_incoming, &hostile_archive, head_sha);
+    let hostile_consumer = unique_dir("artifact-hostile-consumer");
+    fs::create_dir_all(hostile_consumer.join("target/xcframework")).unwrap();
+    let hostile_run = run_workflow_step(
+        &consumer_script,
+        &hostile_consumer,
+        &hostile_temp,
+        "swift-package-app",
+        head_sha,
+    );
+    assert!(
+        !hostile_run.status.success(),
+        "root symlink archive was accepted"
+    );
+    assert!(
+        String::from_utf8_lossy(&hostile_run.stderr).contains("symlink")
+            || String::from_utf8_lossy(&hostile_run.stdout).contains("symlink"),
+        "hostile archive error should name the symlink: {hostile_run:?}"
+    );
+
+    let hardlink_source = unique_dir("artifact-hardlink-source");
+    let hardlink_product = hardlink_source.join("target/xcframework/App.xcframework");
+    fs::create_dir_all(&hardlink_product).unwrap();
+    fs::write(hardlink_product.join("one"), "same\n").unwrap();
+    fs::hard_link(hardlink_product.join("one"), hardlink_product.join("two")).unwrap();
+    let hardlink_archive = unique_dir("artifact-hardlink-archive").join("archive.tar");
+    let tar = Command::new("tar")
+        .args([
+            "-C",
+            hardlink_source.to_str().unwrap(),
+            "-cf",
+            hardlink_archive.to_str().unwrap(),
+            "--",
+            "target/xcframework/App.xcframework",
+        ])
+        .output()
+        .unwrap();
+    assert!(tar.status.success(), "hardlink tar failed: {tar:?}");
+    let hardlink_temp = unique_dir("artifact-hardlink-temp");
+    let hardlink_incoming = hardlink_temp.join("velnor-product-inputs/download");
+    fs::create_dir_all(&hardlink_incoming).unwrap();
+    fs::copy(&hardlink_archive, hardlink_incoming.join("archive.tar")).unwrap();
+    write_artifact_manifest(&hardlink_incoming, &hardlink_archive, head_sha);
+    let hardlink_consumer = unique_dir("artifact-hardlink-consumer");
+    fs::create_dir_all(hardlink_consumer.join("target/xcframework")).unwrap();
+    let hardlink_run = run_workflow_step(
+        &consumer_script,
+        &hardlink_consumer,
+        &hardlink_temp,
+        "swift-package-app",
+        head_sha,
+    );
+    assert!(
+        !hardlink_run.status.success(),
+        "hardlink archive was accepted"
+    );
+    assert!(
+        String::from_utf8_lossy(&hardlink_run.stderr).contains("hardlink")
+            || String::from_utf8_lossy(&hardlink_run.stdout).contains("hardlink"),
+        "hardlink rejection should name the member type: {hardlink_run:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn schema_two_artifact_renderer_materializes_a_real_file() {
+    let root = unique_dir("artifact-s2-shell");
+    write_ffi_fixture(&root);
+    write_s2_config(
+        &root,
+        r#"[workflow]
+providers = ["github-hosted"]
+automatic_providers = ["github-hosted"]
+default_dispatch_providers = ["github-hosted"]
+
+[workflow.selectors.github-hosted]
+runs_on = ["ubuntu-24.04"]
+
+[[units]]
+id = "rust-base"
+
+[[units.products]]
+name = "base-artifact"
+task = "build-base"
+artifact_path = "target/base.bin"
+artifact_kind = "file"
+
+[[units]]
+id = "rust-ffi"
+
+[[units.prerequisites]]
+producer = "rust-base"
+product = "base-artifact"
+"#,
+    );
+    fs::create_dir_all(root.join("target")).unwrap();
+    fs::write(root.join("target/base.bin"), "s2 fixture\n").unwrap();
+    let generated = generate_s2(&root);
+    let workflow = generated.workflow("ci-unit-rust.yml");
+    let producer_script = workflow_step_script(&workflow, "Stage hosted product artifacts");
+    let consumer_script = workflow_step_script(&workflow, "Materialize hosted product artifacts");
+    let runner_temp = unique_dir("artifact-s2-shell-temp");
+    let head_sha = "0123456789012345678901234567890123456789";
+    let producer = run_workflow_step(&producer_script, &root, &runner_temp, "rust-base", head_sha);
+    assert!(
+        producer.status.success(),
+        "schema-2 producer failed:\n{}\n{}",
+        String::from_utf8_lossy(&producer.stdout),
+        String::from_utf8_lossy(&producer.stderr)
+    );
+    let staged = runner_temp.join("velnor-products/base-artifact");
+    let incoming = runner_temp.join("velnor-product-inputs/download");
+    fs::create_dir_all(&incoming).unwrap();
+    fs::copy(staged.join("archive.tar"), incoming.join("archive.tar")).unwrap();
+    fs::copy(staged.join("manifest.json"), incoming.join("manifest.json")).unwrap();
+    let consumer_root = unique_dir("artifact-s2-shell-consumer");
+    fs::create_dir_all(consumer_root.join("target")).unwrap();
+    let consumer = run_workflow_step(
+        &consumer_script,
+        &consumer_root,
+        &runner_temp,
+        "rust-ffi",
+        head_sha,
+    );
+    assert!(
+        consumer.status.success(),
+        "schema-2 consumer failed:\n{}\n{}",
+        String::from_utf8_lossy(&consumer.stdout),
+        String::from_utf8_lossy(&consumer.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(consumer_root.join("target/base.bin")).unwrap(),
+        "s2 fixture\n"
+    );
+}
+
 #[test]
 fn artifact_contract_requires_both_typed_fields_and_a_task() {
     let root = unique_dir("artifact-contract");
@@ -360,6 +723,85 @@ fn artifact_contract_requires_both_typed_fields_and_a_task() {
     assert!(
         error.contains("must declare both `artifact_path` and `artifact_kind`"),
         "partial artifact metadata fails before rendering: {error}"
+    );
+}
+
+#[test]
+fn artifact_contract_rejects_local_lanes_and_prerequisite_cycles() {
+    let dual_lane = unique_dir("artifact-dual-lane");
+    write_ffi_fixture(&dual_lane);
+    write_config(
+        &dual_lane,
+        r#"[workflow]
+runners = "both"
+github_runner = "ubuntu-24.04"
+velnor_labels = ["self-hosted", "example-runner"]
+
+[[units]]
+id = "rust-ffi"
+
+[[units.products]]
+name = "xcframework"
+task = "build-xcframework"
+artifact_path = "target/xcframework/App.xcframework"
+artifact_kind = "xcframework"
+
+[[units]]
+id = "swift-package-app"
+capabilities = ["xcframework"]
+
+[[units.prerequisites]]
+producer = "rust-ffi"
+product = "xcframework"
+"#,
+    );
+    let error = generate_fail(&dual_lane);
+    assert!(
+        error.contains("GitHub-only") && error.contains("no artifact transport"),
+        "dual-lane artifact transfer must fail closed: {error}"
+    );
+
+    let cycle = unique_dir("artifact-cycle");
+    write_ffi_fixture(&cycle);
+    write_config(
+        &cycle,
+        r#"[workflow]
+runners = "github"
+github_runner = "ubuntu-24.04"
+
+[[units]]
+id = "rust-base"
+
+[[units.products]]
+name = "base-artifact"
+task = "build-base"
+artifact_path = "target/base.bin"
+artifact_kind = "file"
+
+[[units.prerequisites]]
+producer = "rust-ffi"
+product = "ffi-artifact"
+
+[[units]]
+id = "rust-ffi"
+
+[[units.products]]
+name = "ffi-artifact"
+task = "build-ffi"
+artifact_path = "target/ffi.bin"
+artifact_kind = "file"
+
+[[units.prerequisites]]
+producer = "rust-base"
+product = "base-artifact"
+"#,
+    );
+    let error = generate_fail(&cycle);
+    assert!(
+        error.contains("prerequisite graph contains a cycle")
+            && error.contains("rust-base")
+            && error.contains("rust-ffi"),
+        "prerequisite cycles must fail closed: {error}"
     );
 }
 

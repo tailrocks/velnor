@@ -432,6 +432,151 @@ pub(crate) fn valid_artifact_path(value: &str) -> bool {
             .all(|component| matches!(component, Component::Normal(segment) if !segment.is_empty()))
 }
 
+/// Shell preflight shared by the producer and consumer artifact steps.
+///
+/// Tar's name listing is not enough: a link can escape after extraction, a
+/// hardlink can alias an unexpected file, and duplicate names make the
+/// archive's meaning order-dependent. Keep this validator in the generated
+/// bash step so the consumer rechecks the bytes received from Actions.
+pub(crate) fn artifact_archive_validation_script() -> &'static str {
+    r#"          artifact_parents_are_safe() {
+            local relative="$1" current="$GITHUB_WORKSPACE" component index last
+            local -a parts
+            IFS='/' read -r -a parts <<<"$relative"
+            last=$((${#parts[@]} - 1))
+            for ((index = 0; index < last; index++)); do
+              component="${parts[index]}"
+              current="$current/$component"
+              if [[ -L "$current" || ( -e "$current" && ! -d "$current" ) ]]; then
+                echo "::error::artifact path parent is an existing symlink or non-directory: $current" >&2
+                return 1
+              fi
+            done
+          }
+
+          artifact_link_target() {
+            local link_name="$1" target="$2" entries="$3" symlinks="$4"
+            local candidate normalized
+            if [[ -z "$target" || "$target" == /* || "$target" == *$'\n'* || "$target" == *$'\r'* || "$target" == *$'\t'* ]]; then
+              return 1
+            fi
+            if [[ "$link_name" == */* ]]; then
+              candidate="${link_name%/*}/$target"
+            else
+              candidate="$target"
+            fi
+            normalized="$(awk -v value="$candidate" '
+              BEGIN {
+                count = split(value, parts, "/")
+                output = ""
+                for (part_index = 1; part_index <= count; part_index++) {
+                  if (parts[part_index] == "" || parts[part_index] == ".") continue
+                  if (parts[part_index] == "..") {
+                    if (output == "") exit 1
+                    sub(/\/[^\/]*$/, "", output)
+                    continue
+                  }
+                  output = output (output == "" ? "" : "/") parts[part_index]
+                }
+                if (output == "") exit 1
+                print output
+              }
+            ')" || return 1
+            grep -F -x -q -- "$normalized" "$entries" || grep -F -x -q -- "$normalized/" "$entries" || return 1
+            grep -F -x -q -- "$normalized" "$symlinks" || grep -F -x -q -- "$normalized/" "$symlinks" && return 1
+            printf '%s\t%s\n' "$link_name" "$normalized"
+          }
+
+          validate_artifact_archive() {
+            local archive="$1" expected_root="$2" expected_kind="$3"
+            local entries="$archive.entries" symlinks="$archive.symlinks" links="$archive.links"
+            local entry detail type link_prefix link_name link_target root_type parent
+            rm -f "$entries" "$symlinks" "$links"
+            : >"$symlinks"
+            : >"$links"
+            tar -tf "$archive" >"$entries"
+            if [[ ! -s "$entries" ]]; then
+              echo "::error::artifact archive is empty" >&2
+              return 1
+            fi
+            if ! awk '{ name = $0; sub(/\/+$/, "", name); if (seen[name]++) exit 1 }' "$entries"; then
+              echo "::error::artifact archive contains duplicate member names" >&2
+              return 1
+            fi
+            while IFS= read -r entry; do
+              case "$entry" in
+                "$expected_root"|"$expected_root/"|"$expected_root/"*) ;;
+                *) echo "::error::artifact archive contains unexpected path $entry" >&2; return 1 ;;
+              esac
+              case "$entry" in
+                /*|../*|*/../*|*/..|.) echo "::error::artifact archive traversal entry $entry" >&2; return 1 ;;
+              esac
+            done <"$entries"
+            while IFS= read -r detail; do
+              type="${detail:0:1}"
+              case "$type" in
+                d|-)
+                  if [[ "$detail" == *" $expected_root" || "$detail" == *" $expected_root/" ]]; then
+                    root_type="$type"
+                  fi
+                  ;;
+                l)
+                  link_target="${detail##* -> }"
+                  link_prefix="${detail% -> *}"
+                  link_name=""
+                  while IFS= read -r entry; do
+                    if [[ "$link_prefix" == *" $entry" ]]; then
+                      link_name="$entry"
+                      break
+                    fi
+                  done <"$entries"
+                  if [[ -z "$link_name" ]]; then
+                    echo "::error::artifact archive symlink has no member name" >&2
+                    return 1
+                  fi
+                  printf '%s\n' "$link_name" >>"$symlinks"
+                  if ! artifact_link_target "$link_name" "$link_target" "$entries" "$symlinks" >>"$links"; then
+                    echo "::error::artifact archive symlink escapes its bundle: $link_name -> $link_target" >&2
+                    return 1
+                  fi
+                  ;;
+                h|b|c|p|s)
+                  echo "::error::artifact archive contains unsupported hardlink or special member type: $detail" >&2
+                  return 1
+                  ;;
+                *)
+                  echo "::error::artifact archive contains unknown member type: $detail" >&2
+                  return 1
+                  ;;
+              esac
+            done < <(tar -tvf "$archive")
+            case "$expected_kind:$root_type" in
+              file:-|directory:d|xcframework:d) ;;
+              *) echo "::error::artifact root type does not match its declared kind" >&2; return 1 ;;
+            esac
+            while IFS=$'\t' read -r link_name link_target; do
+              if grep -F -x -q -- "$link_target" "$symlinks" || grep -F -x -q -- "$link_target/" "$symlinks"; then
+                echo "::error::artifact archive symlink chain is not allowed: $link_name -> $link_target" >&2
+                return 1
+              fi
+            done <"$links"
+            while IFS= read -r entry; do
+              if grep -F -x -q -- "$entry" "$symlinks"; then
+                continue
+              fi
+              parent="$entry"
+              while [[ "$parent" == */* ]]; do
+                parent="${parent%/*}"
+                if grep -F -x -q -- "$parent" "$symlinks"; then
+                  echo "::error::artifact archive contains a member below a symlink: $entry" >&2
+                  return 1
+                fi
+              done
+            done <"$entries"
+          }
+"#
+}
+
 /// An environment variable name for unit and task env.
 pub(crate) fn valid_env_name(value: &str) -> bool {
     !value.is_empty()
@@ -554,9 +699,9 @@ fn validate_artifact_prerequisite(
             unit.id, prerequisite.producer, prerequisite.product
         )));
     }
-    if config.runners == RunnerMode::Velnor {
+    if config.runners != RunnerMode::Github {
         return Err(GeneratorError::usage(format!(
-            "artifact product `{}:{}` requires the GitHub-hosted lane, but this project enables only Velnor; keep the producer/consumer handoff on hosted jobs",
+            "artifact product `{}:{}` requires the GitHub-only lane because Velnor has no artifact transport; set workflow runners = \"github\"",
             prerequisite.producer, prerequisite.product
         )));
     }
@@ -647,6 +792,64 @@ fn validate_prerequisite_edges(config: &ProjectConfig) -> Result<(), GeneratorEr
                 }
             }
         }
+    }
+    validate_prerequisite_dag(config)?;
+    Ok(())
+}
+
+fn validate_prerequisite_dag(config: &ProjectConfig) -> Result<(), GeneratorError> {
+    let ids = config
+        .units
+        .iter()
+        .map(|unit| unit.id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut indegree = ids
+        .iter()
+        .map(|id| (id.clone(), 0usize))
+        .collect::<BTreeMap<_, _>>();
+    let mut outgoing = ids
+        .iter()
+        .map(|id| (id.clone(), BTreeSet::new()))
+        .collect::<BTreeMap<String, BTreeSet<String>>>();
+    for unit in &config.units {
+        for prerequisite in &unit.prerequisites {
+            if outgoing
+                .entry(prerequisite.producer.clone())
+                .or_default()
+                .insert(unit.id.clone())
+            {
+                *indegree.entry(unit.id.clone()).or_default() += 1;
+            }
+        }
+    }
+    let mut ready = indegree
+        .iter()
+        .filter_map(|(id, degree)| (*degree == 0).then_some(id.clone()))
+        .collect::<BTreeSet<_>>();
+    let mut visited = 0usize;
+    while let Some(id) = ready.pop_first() {
+        visited += 1;
+        if let Some(children) = outgoing.get(&id) {
+            for child in children {
+                let degree = indegree
+                    .get_mut(child)
+                    .expect("prerequisite child is a declared unit");
+                *degree -= 1;
+                if *degree == 0 {
+                    ready.insert(child.clone());
+                }
+            }
+        }
+    }
+    if visited != ids.len() {
+        let involved = indegree
+            .into_iter()
+            .filter_map(|(id, degree)| (degree != 0).then_some(id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(GeneratorError::usage(format!(
+            "prerequisite graph contains a cycle; producer/consumer edges must be a DAG (involved units: {involved})"
+        )));
     }
     Ok(())
 }
