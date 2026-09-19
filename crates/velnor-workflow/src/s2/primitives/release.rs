@@ -38,9 +38,6 @@ pub(crate) const RELEASE_SIDE_FILES: &[(&str, &str)] = &[
 /// The canonical file a declared release-side family renders, when the family
 /// is pinned to one name.
 pub(crate) fn canonical_release_side_file(primitive: &str) -> Option<&'static str> {
-    if primitive == PACKAGE_RELEASE {
-        return Some("preview.yml");
-    }
     RELEASE_SIDE_FILES
         .iter()
         .find(|(_, family)| *family == primitive)
@@ -49,7 +46,9 @@ pub(crate) fn canonical_release_side_file(primitive: &str) -> Option<&'static st
 
 /// Whether the primitive renders one of the release-side workflow files.
 pub(crate) fn is_release_side(primitive: &str) -> bool {
-    canonical_release_side_file(primitive).is_some() || primitive == STATIC_WORKFLOW
+    canonical_release_side_file(primitive).is_some()
+        || primitive == PACKAGE_RELEASE
+        || primitive == STATIC_WORKFLOW
 }
 
 /// The release-record schema the stable publisher assembles. The record tool
@@ -4829,6 +4828,12 @@ mod tests {
 
     /// The digest of a rendered workflow, as the hex the `sha256sum` output
     /// spells: the pin the legacy-render test compares against.
+    #[test]
+    fn package_release_owns_declared_workflow_file() {
+        assert_eq!(canonical_release_side_file(PACKAGE_RELEASE), None);
+        assert!(is_release_side(PACKAGE_RELEASE));
+    }
+
     fn digest_of(content: &str) -> String {
         Sha256::digest(content.as_bytes()).iter().fold(
             String::with_capacity(64),

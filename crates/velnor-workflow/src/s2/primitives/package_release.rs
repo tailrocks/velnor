@@ -200,7 +200,9 @@ fn validate_workflow_file(file: Option<&str>) -> Result<String, GeneratorError> 
     if path.is_absolute()
         || file.contains(['\\', ':', '\n', '\r'])
         || file.split('/').any(|segment| !valid_segment(segment))
-        || !(file.ends_with(".yml") || file.ends_with(".yaml"))
+        || !path.extension().is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("yml") || extension.eq_ignore_ascii_case("yaml")
+        })
     {
         return Err(GeneratorError::usage(
             "package-release file must be a safe relative .yml/.yaml workflow path",
@@ -1307,7 +1309,7 @@ export VELNOR_VERIFIED_PACKAGE_DIR="$transaction_dir/rolling-published"
 /// byte, then make the complete asset set public in one visibility transition.
 /// Existing public releases are read-only: a partial or divergent one fails
 /// closed instead of being repaired with an overwrite.
-fn render_immutable_publish_script(spec: &PackageReleaseSpec) -> String {
+fn render_immutable_publish_script_setup(spec: &PackageReleaseSpec) -> String {
     let mut script = String::from(
         r#"set -euo pipefail
 tag="$RELEASE_TAG-$EXPECTED_SOURCE_COMMIT"
@@ -1368,7 +1370,15 @@ verify_asset_bytes() {
     script.push_str(
         r#"} | LC_ALL=C sort > "$expected_assets"
 
-tag_sha="$(remote_tag_sha "$tag")"
+"#,
+    );
+    script
+}
+
+fn render_immutable_publish_script(spec: &PackageReleaseSpec) -> String {
+    let mut script = render_immutable_publish_script_setup(spec);
+    script.push_str(
+        r#"tag_sha="$(remote_tag_sha "$tag")"
 if [ -n "$tag_sha" ] && [ "$tag_sha" != "$EXPECTED_SOURCE_COMMIT" ]; then
   echo "::error::immutable release tag resolves to an unexpected source commit" >&2
   exit 1
@@ -2018,6 +2028,7 @@ concurrency_group = "package-release-preview"
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn rendered_workflow_rechecks_published_dir_and_attests_declared_assets() {
         let spec = parse_spec(&Args(&args())).expect("valid fixture");
         let workflow = render_workflow(&render_config(), &spec, "preview.yml");

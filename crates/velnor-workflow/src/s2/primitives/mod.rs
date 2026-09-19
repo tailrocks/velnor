@@ -1311,8 +1311,9 @@ fn validate(
             .or_else(|| renovate::canonical_renovate_side_file(&row.primitive))
             .or_else(|| docs_site::canonical_docs_site_side_file(&row.primitive))
             .or_else(|| runtime_products::canonical_runtime_products_side_file(&row.primitive));
-        // Only a main-branch-driven release row renders outside `release.yml`;
-        // tag-triggered kinds stay pinned to the canonical file.
+        // Main-branch-driven release rows and package publishers own their
+        // declared file; other tag-driven families stay pinned to a canonical
+        // file.
         let main_branch_driven = row.primitive == RELEASE
             && Args(&row.args)
                 .string("kind")
