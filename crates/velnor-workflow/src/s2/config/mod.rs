@@ -2133,9 +2133,11 @@ pub(crate) fn normalize_repository_relative_path(path: &str) -> Option<PathBuf> 
         return None;
     }
     let mut normalized = PathBuf::new();
-    for segment in path.split('/') {
+    for segment in path
+        .split('/')
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+    {
         match segment {
-            "" | "." => continue,
             ".." => return None,
             segment if segment.chars().any(char::is_control) => return None,
             segment => normalized.push(segment),
