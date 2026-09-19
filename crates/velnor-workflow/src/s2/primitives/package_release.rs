@@ -197,16 +197,20 @@ fn validate_workflow_file(file: Option<&str>) -> Result<String, GeneratorError> 
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
     };
-    let valid_extension = path.extension().is_some_and(|extension| {
-        extension.eq_ignore_ascii_case("yml") || extension.eq_ignore_ascii_case("yaml")
-    });
+    let valid_extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            !extension.bytes().any(|byte| byte.is_ascii_uppercase())
+                && extension.eq_ignore_ascii_case("yml")
+        });
     if path.is_absolute()
         || file.contains(['\\', ':', '\n', '\r'])
         || file.split('/').any(|segment| !valid_segment(segment))
         || !valid_extension
     {
         return Err(GeneratorError::usage(
-            "package-release file must be a safe relative .yml/.yaml workflow path",
+            "package-release file must be a safe relative lowercase .yml workflow path",
         ));
     }
     Ok(file.to_owned())
@@ -1793,8 +1797,8 @@ concurrency_group = "package-release-preview"
             Path::new(".github/workflows").join(&workflow_file),
             Path::new(".github/workflows/release.yml")
         );
-        assert!(validate_workflow_file(Some("release.YmL")).is_ok());
-        assert!(validate_workflow_file(Some("release.YaMl")).is_ok());
+        assert!(validate_workflow_file(Some("release.YmL")).is_err());
+        assert!(validate_workflow_file(Some("release.yaml")).is_err());
         assert!(validate_workflow_file(Some("../release.yml")).is_err());
         assert!(validate_workflow_file(Some("release.txt")).is_err());
     }
