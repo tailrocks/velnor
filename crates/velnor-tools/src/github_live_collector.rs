@@ -2032,10 +2032,12 @@ fn safe_id(value: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::new();
     for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-') {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-') {
             encoded.push(byte as char);
+        } else if byte == b'_' {
+            encoded.push_str("__");
         } else {
-            encoded.push('~');
+            encoded.push('_');
             encoded.push(HEX[(byte >> 4) as usize] as char);
             encoded.push(HEX[(byte & 0x0f) as usize] as char);
         }
