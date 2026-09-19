@@ -217,6 +217,7 @@ impl Finding {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct EstateManifest {
     version: u32,
     scope: EstateScope,
@@ -226,6 +227,7 @@ struct EstateManifest {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct EstateScope {
     role: String,
     authority: String,
@@ -235,6 +237,7 @@ struct EstateScope {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct EstateRepository {
     name: String,
     #[serde(default)]
@@ -284,6 +287,7 @@ enum ConcernClassification {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct ConcernContract {
     classification: ConcernClassification,
     evidence: String,
@@ -292,6 +296,7 @@ struct ConcernContract {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ConcernImplementation {
     workflow: String,
     #[serde(default)]
@@ -4362,6 +4367,16 @@ jobs:
         .unwrap();
         assert_eq!(manifest.repositories.len(), 1);
         assert_eq!(manifest.repositories[0].name, "one");
+    }
+
+    #[test]
+    fn estate_manifest_rejects_unknown_admission_fields() {
+        let error = serde_json::from_str::<EstateManifest>(
+            r#"{"version":2,"scope":{"role":"auxiliary-concern-projection","authority":"velnor-github-first-dual-lane-goal.md","authority_section":"2. Fixed repository manifest","expected_repository_count":32,"contract_sha256":"34e4f06de9d5b7c88549328c9365feae3b8927844f3645922883f15a4a8a00b0"},"defaults":{},"repositories":[],"hostile":"ignored?"}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("unknown field"), "{error}");
     }
 
     fn reviewed_auxiliary_manifest() -> EstateManifest {
