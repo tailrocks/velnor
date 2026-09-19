@@ -17,6 +17,10 @@ pub(crate) fn repository_files(
     root: &Path,
     exclude: &[String],
 ) -> Result<Vec<String>, GeneratorError> {
+    // Ownership comes from the generator's recorded output sidecar, not from
+    // bytes inside a file claiming to be generated. A forged header must stay
+    // a scan input until the generator can independently prove ownership.
+    let generator_owned = crate::s2::generator_owned_output_paths(root)?;
     if !root.is_dir() {
         return Err(GeneratorError::usage(format!(
             "not a repository directory: {}",
@@ -38,7 +42,9 @@ pub(crate) fn repository_files(
     };
     let excludes = exclude_set(exclude)?;
     files.retain(|file| {
-        !excludes.is_match(file) && !GENERATOR_OWNED_SCAN_FILES.contains(&file.as_str())
+        !excludes.is_match(file)
+            && !GENERATOR_OWNED_SCAN_FILES.contains(&file.as_str())
+            && !generator_owned.contains(Path::new(file))
     });
     files.sort();
     Ok(files)
@@ -107,8 +113,7 @@ fn tracked_files(root: &Path) -> Result<Option<Vec<String>>, GeneratorError> {
         let Some(Component::Normal(leading)) = relative.components().next() else {
             return Ok(None);
         };
-        // Generated `.github` content is output, not project input, and the
-        // remaining directories are tool or package-manager output.
+        // Tool and package-manager output is not project input.
         if is_excluded_directory(&leading.to_string_lossy()) {
             continue;
         }
@@ -131,13 +136,12 @@ fn tracked_files(root: &Path) -> Result<Option<Vec<String>>, GeneratorError> {
     Ok(Some(files))
 }
 
-/// Generated `.github` content is output, not project input; the remaining
-/// directories are tool or package-manager output.
+/// Tool and package-manager output is not project input. `.github` is
+/// intentionally absent: handwritten workflows/actions are real scan inputs.
 fn is_excluded_directory(name: &str) -> bool {
     matches!(
         name,
         ".git"
-            | ".github"
             | ".output"
             | "target"
             | "node_modules"
@@ -309,6 +313,7 @@ pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
 #[cfg(test)]
 mod tests {
     use super::repository_files;
+    use crate::s2::{FLEET_CALLER_HEADER, GENERATED_HEADER};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -441,5 +446,134 @@ mod tests {
             files,
             vec!["nested/deep.txt".to_owned(), "present.txt".to_owned()]
         );
+    }
+
+    #[test]
+    fn github_inputs_are_kept_and_header_claims_are_not_authority() {
+        let root = scratch("github-provenance");
+        git(&root, &["init", "-q"]);
+        must(
+            fs::create_dir_all(root.join(".github/workflows")),
+            "create workflow directory",
+        );
+        must(
+            fs::create_dir_all(root.join(".github/actions/handwritten")),
+            "create action directory",
+        );
+        must(
+            fs::create_dir_all(root.join("config/fleet")),
+            "create fleet directory",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/handwritten.yml"),
+                "name: handwritten\n",
+            ),
+            "write handwritten workflow",
+        );
+        must(
+            fs::write(
+                root.join(".github/actions/handwritten/action.yml"),
+                "name: handwritten\nruns:\n  using: composite\n  steps: []\n",
+            ),
+            "write handwritten action",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/generated.yml"),
+                GENERATED_HEADER,
+            ),
+            "write generated workflow",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/fleet.yml"),
+                FLEET_CALLER_HEADER,
+            ),
+            "write fleet-generated workflow",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/static.yml"),
+                "name: owned static\n",
+            ),
+            "write static output",
+        );
+        must(
+            fs::write(
+                root.join("config/fleet/velnor-host.env"),
+                "VELNOR_CACHE=1\n",
+            ),
+            "write fleet output",
+        );
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "fixture"]);
+
+        let files = must(
+            repository_files(&root, &[]),
+            "scan GitHub provenance fixture",
+        );
+        assert!(files.contains(&".github/workflows/handwritten.yml".to_owned()));
+        assert!(files.contains(&".github/actions/handwritten/action.yml".to_owned()));
+        for output in [
+            ".github/workflows/generated.yml",
+            ".github/workflows/fleet.yml",
+            ".github/workflows/static.yml",
+        ] {
+            assert!(
+                files.contains(&output.to_owned()),
+                "header or config claim hid scan input: {output}"
+            );
+        }
+        assert!(!files.contains(&"config/fleet/velnor-host.env".to_owned()));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shallow_checkout_keeps_the_same_provenance_boundary() {
+        let root = scratch("shallow-source");
+        git(&root, &["init", "-q"]);
+        must(
+            fs::create_dir_all(root.join(".github/workflows")),
+            "create shallow workflow directory",
+        );
+        must(
+            fs::write(root.join("README.md"), "# shallow\n"),
+            "write shallow README",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/handwritten.yml"),
+                "name: handwritten\n",
+            ),
+            "write shallow handwritten workflow",
+        );
+        must(
+            fs::write(
+                root.join(".github/workflows/generated.yml"),
+                GENERATED_HEADER,
+            ),
+            "write shallow generated workflow",
+        );
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "shallow fixture"]);
+
+        let clone = scratch("shallow-clone");
+        must(fs::remove_dir_all(&clone), "remove empty clone target");
+        let source = format!("file://{}", root.display());
+        let status = must(
+            Command::new("git")
+                .args(["clone", "--depth=1", &source])
+                .arg(&clone)
+                .status(),
+            "clone shallow fixture",
+        );
+        assert!(status.success(), "shallow clone failed: {status}");
+        let files = must(repository_files(&clone, &[]), "scan shallow clone");
+        assert!(files.contains(&".github/workflows/handwritten.yml".to_owned()));
+        assert!(files.contains(&".github/workflows/generated.yml".to_owned()));
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(clone);
     }
 }
