@@ -747,6 +747,25 @@ pub(crate) fn generate(
     }
     let mut resolved = config.clone();
     resolved.units.clone_from(&units);
+    // A declared side workflow can be rendered alongside the publisher that
+    // consumes it. Make those declarations visible to every side renderer
+    // before any file is emitted; otherwise release.yml is rendered without
+    // seeing a newly declared native-product.yml and silently omits the
+    // producer job it must await.
+    for row in rows.iter().filter(|row| {
+        release::is_release_side(&row.primitive)
+            || renovate::is_renovate_side(&row.primitive)
+            || docs_site::is_docs_site_side(&row.primitive)
+            || check_profiles::is_scheduled_checks_side(&row.primitive)
+            || runtime_products::is_runtime_products_side(&row.primitive)
+            || native_product::is_native_product_side(&row.primitive)
+    }) {
+        if let Some(file) = &row.file
+            && !resolved.workflow_files.iter().any(|owned| owned == file)
+        {
+            resolved.workflow_files.push(file.clone());
+        }
+    }
     let providers = providers::resolve(&resolved, &rows)?;
 
     // Per-unit pipelines, then the plan, then the aggregates that compose both.

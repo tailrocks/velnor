@@ -175,7 +175,7 @@ impl ApplicationManifest {
         if !safe_slug(&self.product_id)
             || !repository_slug(&self.source_repository)
             || !safe_ref(&self.source_ref)
-            || !safe_release_id(&self.release_id)
+            || !provider_release_id(&self.release_id)
         {
             return Err(ApplicationManifestError::Field("identity"));
         }
@@ -237,6 +237,7 @@ impl ApplicationManifest {
             if !safe_slug(&component.name)
                 || !safe_slug(&component.crate_name)
                 || !safe_version(&component.version)
+                || matches!(component.version.as_str(), "development" | "unknown")
                 || !safe_basename(&component.binary)
                 || component.targets.is_empty()
             {
@@ -438,14 +439,12 @@ fn safe_slug(value: &str) -> bool {
         })
 }
 
-fn safe_release_id(value: &str) -> bool {
-    value
-        .as_bytes()
-        .first()
-        .is_some_and(u8::is_ascii_alphanumeric)
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b'/' | b':')
-        })
+/// The provider's numeric release id is the only release identity accepted by
+/// package projections.  A producer tag, repository slug, or locally invented
+/// coordinate is not an API release id and cannot safely join an external
+/// archive record to this manifest.
+fn provider_release_id(value: &str) -> bool {
+    !value.is_empty() && !value.starts_with('0') && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn safe_version(value: &str) -> bool {
@@ -520,8 +519,15 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn x86_elf() -> Vec<u8> {
+        let mut bytes = vec![0; 32];
+        bytes[..6].copy_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1]);
+        bytes[18..20].copy_from_slice(&[0x3e, 0x00]);
+        bytes
+    }
+
     fn manifest() -> ApplicationManifest {
-        let binary = b"runner";
+        let binary = x86_elf();
         ApplicationManifest {
             schema: PRODUCT_MANIFEST_SCHEMA.to_owned(),
             product_id: "example".to_owned(),
@@ -531,20 +537,29 @@ mod tests {
             source_ref: "refs/tags/v1.2.3".to_owned(),
             source_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
             release_tag: "v1.2.3".to_owned(),
-            release_id: "owner/example/v1.2.3".to_owned(),
-            artifacts: vec![ApplicationArtifact {
-                name: "runner".to_owned(),
-                target: "aarch64-apple-darwin".to_owned(),
-                kind: "binary".to_owned(),
-                sha256: hex_lower(&Sha256::digest(binary)),
-                size: binary.len() as u64,
-            }],
+            release_id: "123456789".to_owned(),
+            artifacts: vec![
+                ApplicationArtifact {
+                    name: "runner".to_owned(),
+                    target: "x86_64-unknown-linux-gnu".to_owned(),
+                    kind: "binary".to_owned(),
+                    sha256: hex_lower(&Sha256::digest(&binary)),
+                    size: binary.len() as u64,
+                },
+                ApplicationArtifact {
+                    name: "runner-x86_64-unknown-linux-gnu.tar.gz".to_owned(),
+                    target: "x86_64-unknown-linux-gnu".to_owned(),
+                    kind: "archive".to_owned(),
+                    sha256: hex_lower(&Sha256::digest(b"archive")),
+                    size: 7,
+                },
+            ],
             components: vec![ApplicationComponent {
                 name: "runner".to_owned(),
                 crate_name: "runner".to_owned(),
                 version: "0.1.0".to_owned(),
                 binary: "runner".to_owned(),
-                targets: vec!["aarch64-apple-darwin".to_owned()],
+                targets: vec!["x86_64-unknown-linux-gnu".to_owned()],
             }],
         }
     }
@@ -559,11 +574,60 @@ mod tests {
     }
 
     #[test]
+    fn provider_release_id_rejects_local_aliases_and_leading_zeroes() {
+        let mut value = manifest();
+        value.release_id = "owner/example/v1.2.3".to_owned();
+        assert_eq!(
+            value.verify(),
+            Err(ApplicationManifestError::Field("identity"))
+        );
+        value.release_id = "000123".to_owned();
+        assert_eq!(
+            value.verify(),
+            Err(ApplicationManifestError::Field("identity"))
+        );
+        value.release_id = "123".to_owned();
+        assert!(value.verify().is_ok());
+    }
+
+    #[test]
+    fn binary_architecture_mismatch_is_rejected_without_execution() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let root = std::env::temp_dir().join(format!(
+            "velnor-product-architecture-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        assert!(fs::create_dir_all(&root).is_ok());
+        let mut elf_x86 = vec![0; 32];
+        elf_x86[..6].copy_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1]);
+        elf_x86[18..20].copy_from_slice(&[0x3e, 0x00]);
+        assert!(fs::write(root.join("runner"), elf_x86).is_ok());
+        assert_eq!(
+            verify_binary_architecture(&root.join("runner"), "aarch64-unknown-linux-gnu"),
+            Err(ApplicationManifestError::Architecture)
+        );
+        assert!(fs::remove_dir_all(root).is_ok());
+    }
+
+    #[test]
+    fn development_component_version_is_rejected() {
+        let mut value = manifest();
+        value.components[0].version = "development".to_owned();
+        assert_eq!(
+            value.verify(),
+            Err(ApplicationManifestError::Field("components"))
+        );
+    }
+
+    #[test]
     fn incomplete_sibling_inventory_is_rejected() {
         let mut value = manifest();
         value.components[0]
             .targets
-            .push("x86_64-unknown-linux-gnu".to_owned());
+            .push("aarch64-unknown-linux-gnu".to_owned());
         assert_eq!(
             value.verify(),
             Err(ApplicationManifestError::ComponentArtifact)
@@ -592,7 +656,12 @@ mod tests {
             nanos
         ));
         assert!(fs::create_dir_all(&root).is_ok());
-        assert!(fs::write(root.join("runner"), b"runner").is_ok());
+        assert!(fs::write(root.join("runner"), x86_elf()).is_ok());
+        assert!(fs::write(
+            root.join("runner-x86_64-unknown-linux-gnu.tar.gz"),
+            b"archive"
+        )
+        .is_ok());
         assert!(value.verify_artifacts(&root).is_ok());
         assert!(fs::write(root.join("runner"), b"changed").is_ok());
         assert_eq!(

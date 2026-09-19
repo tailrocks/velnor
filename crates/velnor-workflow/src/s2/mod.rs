@@ -5745,6 +5745,13 @@ fn render_actionlint_config(config: &ProjectConfig) -> String {
         .any(|unit| unit.platform == provider::Platform::MacosArm64)
         || apple_release)
         .then_some(MACOS_HOSTED_RUNS_ON.to_owned());
+    let native_product = config.workflow_files.iter().any(|file| {
+        file.starts_with("native-product")
+            && !file.contains("preview")
+            && Path::new(file)
+                .extension()
+                .is_some_and(|extension| extension == "yml")
+    });
     // Universe-scoped: scan defaults seed selectors for providers outside
     // the repo's universe, but only universe routing can reach a `runs-on`.
     let labels = config
@@ -5754,6 +5761,7 @@ fn render_actionlint_config(config: &ProjectConfig) -> String {
         .flat_map(|selector| selector.runs_on.iter())
         .cloned()
         .chain(macos)
+        .chain(native_product.then_some(primitives::native_product::MACOS_ARM64_RUNNER.to_owned()))
         .filter(|label| !label.is_empty())
         .collect::<BTreeSet<_>>();
     let mut output = String::from(GENERATED_HEADER);
@@ -14707,6 +14715,13 @@ lockfile = true
             actionlint.contains("    - macos-15\n"),
             "an apple release target needs the macos label: {actionlint}"
         );
+        config.workflow_files.push("native-product.yml".to_owned());
+        let native_product_actionlint = render_actionlint_config(&config);
+        assert!(
+            native_product_actionlint.contains("    - macos-27\n"),
+            "the native product lane needs its current arm64 macos label: {native_product_actionlint}"
+        );
+        config.workflow_files.pop();
         if let Some(release) = config.release.as_mut() {
             release.targets.pop();
         }
