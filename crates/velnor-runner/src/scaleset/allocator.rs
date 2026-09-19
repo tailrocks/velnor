@@ -70,6 +70,10 @@ impl ScaleSetAllocator {
     ///   that moved twice under one acquire (retry the poll).
     pub fn acquire(&self, holder: &str) -> Result<Option<ScaleSetPermitGuard>, AllocatorError> {
         let mut ledger = PermitLedger::open(&self.ledger_path).map_err(AllocatorError::Storage)?;
+        let observed = crate::native_demand::now_unix();
+        ledger
+            .observe_demand(holder, PermitLane::ScaleSet, "", observed, observed)
+            .map_err(AllocatorError::Storage)?;
         for _ in 0..3 {
             let generation = ledger.generation().map_err(AllocatorError::Storage)?;
             match ledger
@@ -95,7 +99,9 @@ impl ScaleSetAllocator {
                         holder,
                     )));
                 }
-                AcquireOutcome::Full => return Ok(None),
+                AcquireOutcome::Full | AcquireOutcome::Deferred | AcquireOutcome::Closed => {
+                    return Ok(None)
+                }
                 AcquireOutcome::StaleGeneration => continue,
                 AcquireOutcome::NotConfigured => return Err(AllocatorError::NotConfigured),
             }
@@ -263,7 +269,26 @@ impl ScaleSetPermitGuard {
         if !self.owns_permit {
             return;
         }
-        self.transition_best_effort(PermitState::Uncertain);
+        match PermitLedger::open(&self.ledger_path) {
+            Ok(mut ledger) => match ledger.generation() {
+                Ok(generation) => {
+                    if let Err(error) = ledger.retain_uncertain(&self.holder, generation) {
+                        eprintln!(
+                            "Warning: uncertain scale-set permit retention failed for {}: {error}",
+                            self.holder
+                        );
+                    }
+                }
+                Err(error) => eprintln!(
+                    "Warning: permit ledger generation read failed for {}: {error}",
+                    self.holder
+                ),
+            },
+            Err(error) => eprintln!(
+                "Warning: permit ledger open failed for {}: {error}",
+                self.holder
+            ),
+        }
     }
 }
 
@@ -272,9 +297,10 @@ impl Drop for ScaleSetPermitGuard {
         if self.disarmed || !self.owns_permit {
             return;
         }
-        // Every non-terminal return frees what this attempt spent. Never
-        // panics: drop runs on unwind paths too.
-        if let Err(error) = release_permit(&self.ledger_path, &self.holder) {
+        // Every non-terminal return makes this demand regrantable with its
+        // original age. The permit and demand transition share one
+        // transaction. Callers retain uncertain holds after cleanup fails.
+        if let Err(error) = release_permit_to_eligible(&self.ledger_path, &self.holder) {
             eprintln!(
                 "Warning: permit ledger release failed for {}: {error}",
                 self.holder
@@ -284,8 +310,13 @@ impl Drop for ScaleSetPermitGuard {
 }
 
 fn release_permit(ledger_path: &Path, holder: &str) -> Result<bool, LedgerError> {
-    let ledger = PermitLedger::open(ledger_path)?;
+    let mut ledger = PermitLedger::open(ledger_path)?;
     ledger.release(holder)
+}
+
+fn release_permit_to_eligible(ledger_path: &Path, holder: &str) -> Result<bool, LedgerError> {
+    let mut ledger = PermitLedger::open(ledger_path)?;
+    ledger.release_to_eligible(holder)
 }
 
 /// Release one holder's permit from outside the acquiring attempt

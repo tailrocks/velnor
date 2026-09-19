@@ -20,8 +20,9 @@
 use std::path::Path;
 
 use velnor_control::permit_ledger::{
-    AcquireOutcome as ControlAcquire, LedgerError as ControlError, PermitLane as ControlLane,
-    PermitLedger, PermitState as ControlState, ReconcileReport as ControlReport,
+    AcquireOutcome as ControlAcquire, LedgerError as ControlError, PermitDemand,
+    PermitLane as ControlLane, PermitLedger, PermitState as ControlState,
+    ReconcileReport as ControlReport,
 };
 
 use crate::scaleset::capacity::{
@@ -70,7 +71,9 @@ fn from_control_outcome(outcome: ControlAcquire) -> AcquireOutcome {
     match outcome {
         ControlAcquire::Acquired => AcquireOutcome::Acquired,
         ControlAcquire::AlreadyHeld => AcquireOutcome::AlreadyHeld,
-        ControlAcquire::Full => AcquireOutcome::Full,
+        ControlAcquire::Full | ControlAcquire::Deferred | ControlAcquire::Closed => {
+            AcquireOutcome::Full
+        }
         ControlAcquire::StaleGeneration => AcquireOutcome::StaleGeneration,
         ControlAcquire::NotConfigured => AcquireOutcome::NotConfigured,
     }
@@ -107,6 +110,50 @@ impl SharedLedger {
     #[must_use]
     pub fn path(&self) -> &Path {
         self.inner.path()
+    }
+
+    /// Record a Scale Set offer in the host-wide demand queue. Pass the
+    /// durable first-seen time from the lane's offer record; redelivery
+    /// refreshes liveness without changing queue age or global sequence.
+    pub fn observe_demand(
+        &mut self,
+        holder: &str,
+        lane: LedgerLane,
+        scope: &str,
+        first_seen_unix: u64,
+        observed_unix: u64,
+    ) -> Result<PermitDemand, ControlError> {
+        self.inner.observe_demand(
+            holder,
+            to_control_lane(lane),
+            scope,
+            first_seen_unix,
+            observed_unix,
+        )
+    }
+
+    /// Stop an upstream offer from blocking later work after the lane has
+    /// confirmed it is no longer eligible. Held permits must first pass
+    /// through the cleanup release API.
+    pub fn cancel_demand(&mut self, holder: &str) -> Result<bool, ControlError> {
+        self.inner.cancel_demand(holder)
+    }
+
+    /// Release after confirmed retry/handoff cleanup while preserving the
+    /// demand's original position in the global queue.
+    pub fn release_to_eligible(&mut self, holder: &str) -> Result<bool, ControlError> {
+        self.inner.release_to_eligible(holder)
+    }
+
+    /// Release after confirmed upstream cancellation.
+    pub fn release_cancelled(&mut self, holder: &str) -> Result<bool, ControlError> {
+        self.inner.release_cancelled(holder)
+    }
+
+    /// Keep occupancy after cleanup uncertainty and close the served demand
+    /// in the same transaction.
+    pub fn retain_uncertain(&mut self, holder: &str, generation: u64) -> Result<(), ControlError> {
+        self.inner.retain_uncertain(holder, generation)
     }
 }
 
@@ -284,6 +331,70 @@ mod tests {
         let holders = ledger.holders().unwrap();
         assert_eq!(holders.len(), 1);
         assert_eq!(holders[0].lane, LedgerLane::Native);
+    }
+
+    #[test]
+    fn shared_demand_api_orders_native_and_scaleset_before_acquire() {
+        let path = temp_ledger_path("global-demand");
+        let mut ledger = configured(&path, 2);
+        let generation = ledger.generation().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        ledger
+            .observe_demand("native/older", LedgerLane::Native, "scope-a", now, now)
+            .unwrap();
+        ledger
+            .observe_demand(
+                "scaleset/7/younger",
+                LedgerLane::ScaleSet,
+                "set-7",
+                now + 1,
+                now + 1,
+            )
+            .unwrap();
+
+        assert_eq!(
+            ledger
+                .acquire(
+                    "scaleset/7/younger",
+                    LedgerLane::ScaleSet,
+                    LedgerPermitState::Reserved,
+                    generation,
+                )
+                .unwrap(),
+            AcquireOutcome::Full
+        );
+        let raw = PermitLedger::open(&path).unwrap();
+        assert_eq!(
+            raw.demand("scaleset/7/younger").unwrap().unwrap().state,
+            velnor_control::permit_ledger::DemandState::Eligible
+        );
+        drop(raw);
+
+        assert_eq!(
+            ledger
+                .acquire(
+                    "native/older",
+                    LedgerLane::Native,
+                    LedgerPermitState::Running,
+                    generation,
+                )
+                .unwrap(),
+            AcquireOutcome::Acquired
+        );
+        assert_eq!(
+            ledger
+                .acquire(
+                    "scaleset/7/younger",
+                    LedgerLane::ScaleSet,
+                    LedgerPermitState::Reserved,
+                    generation,
+                )
+                .unwrap(),
+            AcquireOutcome::Acquired
+        );
     }
 
     #[test]
