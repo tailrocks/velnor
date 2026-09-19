@@ -4929,12 +4929,17 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
               if len(members) > 200000:
                   raise SystemExit("source archive has too many members")
               for member in members:
-                  parts = member.name.split("/")
-                  if member.name.startswith("/") or "\\" in member.name or any(part in ("", ".", "..") for part in parts):
+                  name = member.name
+                  if name.endswith("/"):
+                      name = name[:-1]
+                      if not member.isdir():
+                          raise SystemExit("non-directory has directory suffix")
+                  parts = name.split("/")
+                  if not name or member.name.startswith("/") or "\\" in member.name or any(part in ("", ".", "..") for part in parts):
                       raise SystemExit("unsafe source archive member")
-                  if member.name in names or member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
+                  if name in names or member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
                       raise SystemExit("unsafe or duplicate source archive member")
-                  names.add(member.name)
+                  names.add(name)
                   total_bytes += member.size
                   if total_bytes > 536870912:
                       raise SystemExit("source archive is too large")

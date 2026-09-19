@@ -677,6 +677,9 @@ fn owner_entrypoint_renders_the_isolated_candidate_transport() {
     );
     assert!(job.contains("SANDBOX_IMAGE_DIGEST"), "{job}");
     assert!(job.contains("test -n \"$SANDBOX_IMAGE_DIGEST\""), "{job}");
+    assert!(job.contains("if name.endswith(\"/\")"), "{job}");
+    assert!(job.contains("if not member.isdir()"), "{job}");
+    assert!(job.contains("unsafe source archive member"), "{job}");
     assert!(!job.contains("gh run download"), "{job}");
     assert!(
         !job.contains("--candidate-manifest"),
