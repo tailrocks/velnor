@@ -655,6 +655,10 @@ fn owner_entrypoint_renders_the_isolated_candidate_transport() {
     assert!(job.contains("--read-only"), "{job}");
     assert!(job.contains("--pid=private"), "{job}");
     assert!(job.contains("--cap-drop=ALL"), "{job}");
+    assert!(job.contains("uid=65532; gid=65532"), "{job}");
+    assert!(job.contains("SOURCE_CLOSURE"), "{job}");
+    assert!(!job.contains("--hostname=velnor-sandbox"), "{job}");
+    assert!(!job.contains("--env HOSTNAME=velnor-sandbox"), "{job}");
     assert!(
         job.contains("--tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m"),
         "{job}"

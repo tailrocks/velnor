@@ -4953,8 +4953,7 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
           PY
           chmod -R a-w "$input"
           install -m 0555 "$HANDOFF/velnor-workflow" "$candidate/velnor-workflow"
-          uid="$(id -u)"; gid="$(id -g)"; test "$uid" -ne 0
-          test "$gid" -ge 0
+          uid=65532; gid=65532
           head_sha="$(jq -er .head_sha "$HANDOFF/handoff.json")"
           head_tree_sha="$(jq -er .head_tree_sha "$HANDOFF/handoff.json")"
           head_repository="$(jq -er .head_repository "$HANDOFF/handoff.json")"
@@ -4962,7 +4961,7 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
           for value in "$head_sha" "$head_tree_sha" "$head_repository" "$source_closure"; do
             case "$value" in *$'\\n'*|*$'\\r'*|*' '*|*'"'*) exit 1 ;; esac
           done
-          cid="$(docker create --name "velnor-sandbox-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --platform linux/amd64 --pull=never --network=none --read-only --pid=private --cap-drop=ALL --security-opt no-new-privileges=true --pids-limit=128 --memory=512m --memory-swap=512m --cpus=1 --ulimit fsize=67108864:67108864 --ulimit nofile=1024:1024 --ulimit core=0 --shm-size=16m --stop-timeout=5 --log-driver=none --user "$uid:$gid" --workdir /input --hostname=velnor-sandbox --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m,nr_inodes=4096,mode=700,uid=$uid,gid=$gid --tmpfs /output:rw,noexec,nosuid,nodev,size=64m,nr_inodes=4096,mode=700,uid=$uid,gid=$gid --mount "type=bind,src=$input,dst=/input,readonly,bind-propagation=rprivate" --mount "type=bind,src=$candidate,dst=/candidate,readonly,bind-propagation=rprivate" --env "SOURCE_HEAD_SHA=$head_sha" --env "SOURCE_TREE_SHA=$head_tree_sha" --env "SOURCE_REPOSITORY=$head_repository" --env "SOURCE_CLOSURE=$source_closure" --env HOSTNAME=velnor-sandbox --env HOME=/tmp/home --env PATH=/usr/bin:/bin --entrypoint /candidate/velnor-workflow "$platform_image" /input --output /output --plain --force --default-branch "$DEFAULT_BRANCH")"
+          cid="$(docker create --name "velnor-sandbox-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --platform linux/amd64 --pull=never --network=none --read-only --pid=private --cap-drop=ALL --security-opt no-new-privileges=true --pids-limit=128 --memory=512m --memory-swap=512m --cpus=1 --ulimit fsize=67108864:67108864 --ulimit nofile=1024:1024 --ulimit core=0 --shm-size=16m --stop-timeout=5 --log-driver=none --user "$uid:$gid" --workdir /input --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m,nr_inodes=4096,mode=700,uid=$uid,gid=$gid --tmpfs /output:rw,noexec,nosuid,nodev,size=64m,nr_inodes=4096,mode=700,uid=$uid,gid=$gid --mount "type=bind,src=$input,dst=/input,readonly,bind-propagation=rprivate" --mount "type=bind,src=$candidate,dst=/candidate,readonly,bind-propagation=rprivate" --env "SOURCE_HEAD_SHA=$head_sha" --env "SOURCE_TREE_SHA=$head_tree_sha" --env "SOURCE_REPOSITORY=$head_repository" --env "SOURCE_CLOSURE=$source_closure" --env HOME=/tmp/home --env PATH=/usr/bin:/bin --entrypoint /candidate/velnor-workflow "$platform_image" /input --output /output --plain --force --default-branch "$DEFAULT_BRANCH")"
           cleanup() {{
             status=$?
             if [[ -n "${{cid:-}}" ]]; then docker rm -f "$cid" >/dev/null 2>&1 || status=1; fi
@@ -4991,9 +4990,8 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
             .[0].HostConfig.LogConfig.Type == "none" and
             .[0].Config.User == $user and
             .[0].Config.WorkingDir == "/input" and
-            .[0].Config.Hostname == "velnor-sandbox" and
             .[0].Config.Entrypoint == ["/candidate/velnor-workflow"] and
-            ((.[0].Config.Env | map(split("=")[0]) | sort) == ["HOME","HOSTNAME","PATH","SOURCE_CLOSURE","SOURCE_HEAD_SHA","SOURCE_REPOSITORY","SOURCE_TREE_SHA"]) and
+            ((.[0].Config.Env | map(split("=")[0]) | sort) == ["HOME","PATH","SOURCE_CLOSURE","SOURCE_HEAD_SHA","SOURCE_REPOSITORY","SOURCE_TREE_SHA"]) and
             ((.[0].HostConfig.Binds // []) | length == 0) and
             ((.[0].HostConfig.Devices // []) | length == 0) and
             ((.[0].HostConfig.DeviceRequests // []) | length == 0) and
