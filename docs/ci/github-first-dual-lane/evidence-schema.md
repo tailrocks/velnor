@@ -179,6 +179,46 @@ check-suite, job, artifact/log, workflow-graph, merge-group, and child-lineage
 objects. The checker therefore emits `authoritative-collector-required` for
 execution stages; this schema is not a claim that live collection is complete.
 
+### Typed G0 collector handoff
+
+`evidence.g0_inventory` accepts one strict `G0InventoryEvidence` object from
+`crates/velnor-tools/src/g0_contract.rs`. This is a collector handoff, not a
+result-record summary. Every contract type denies unknown fields; legacy
+scalar inventory fields, aliases, and opaque success booleans are rejected.
+The outer `collector_snapshot_sha256` is the SHA-256 of canonical JSON for
+`collector_snapshot` (sorted object keys; the digest stays outside the object
+to avoid a hash cycle).
+
+The snapshot carries collector revision, read-only GitHub API identity, safe
+viewer scopes, rate-limit observation, complete request/page state, and
+request-bound raw-object hashes. It then carries exact fixed-32 repository
+rows with independently observed default branch/SHA, complete ruleset
+contexts/apps, workflow/reusable-action/scanner inventory, generated-state
+artifact reference, every current open PR (including draft/fork/bot rows),
+workflow bindings, required-check producers, and immutable raw references.
+It also carries unchanged pre/post branch/PR reconciliation, a source-bound
+workload/child/release/package/check dependency graph, effective Astra/low and
+Luna/max model-session settings, complete gap-free repository access
+observations, and a hashed workload artifact reference.
+
+Each request must be a successful complete page with query/variables digests,
+API request identity, the canonical `collector.auth` and
+`collector.rate_limit` references, page metadata, and a raw response object.
+`has_next_page` requires the next captured page; forbidden,
+rate-limited, malformed, truncated, unknown, or missing pages fail closed.
+Every nested reference must resolve to a raw object from the same snapshot.
+PR check producers bind positive check-suite/check-run/workflow-run/job IDs,
+attempt, source SHA, event, completed-success status/conclusion, and a
+repository-bound GitHub URL. The checker independently compares collector
+default branches and PR heads/bases/tested merges with the regular snapshot
+and reviewed manifest, and compares required context/app identities with the
+manifest rather than trusting collector claims.
+
+The live API collector is not yet wired to this contract. The checker retains
+`g0-authoritative-proof-missing` for structurally valid typed fixtures;
+offline fixtures prove schema/rejection behavior only and cannot declare G0 or
+G7 completion.
+
 The envelope also has optional `reviewer_attestation`; G7 requires
 `{reviewer, report_digest, manifest_id, snapshot_id, attested_at_utc, artifact}`
 with an external artifact binding source repository/revision, source tree and

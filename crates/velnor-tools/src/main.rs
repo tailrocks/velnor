@@ -3,6 +3,7 @@ mod evidence_check;
 mod evidence_live;
 mod fleet_policy;
 mod fleet_policy_client;
+mod g0_contract;
 mod lane_compare;
 mod workflow_monitor;
 
