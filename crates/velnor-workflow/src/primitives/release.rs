@@ -1540,10 +1540,16 @@ fn release_metadata_in_temp_dir(steps: &str) -> String {
         "        run: |\n          set -euo pipefail\n          test -s $metadata_dir/",
         "        run: |\n          set -euo pipefail\n          metadata_dir=\"$RUNNER_TEMP/release-metadata\"\n          test -s $metadata_dir/",
     );
-    steps.replace(
+    let mut steps = steps.replace(
         "      - name: Stage the deb's own package record\n        run: |\n          set -euo pipefail\n",
         "      - name: Stage the deb's own package record\n        run: |\n          set -euo pipefail\n          metadata_dir=\"$RUNNER_TEMP/release-metadata\"\n",
-    )
+    );
+    for file in ["build-identity.json", "manifest.json"] {
+        let path = format!("$metadata_dir/{file}");
+        let quoted = format!("\"$metadata_dir/{file}\"");
+        steps = steps.replace(&path, &quoted);
+    }
+    steps
 }
 
 /// Stage the pinned Firecracker, jailer, and guest agent into the deb
@@ -5194,6 +5200,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
 
     use sha2::{Digest as _, Sha256};
 
@@ -5935,11 +5942,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "fe9bed99fbac907ff180bba7eef2ae082832e64297768eec2b398fbf61dd862a",
+                "17729b3742832e4dc5107915961a127290a0ef9fa0093b5d3202014b41f4bf9a",
             ),
             (
                 "preview.yml",
-                "c186037ec2d45e099f8fbc572b651692a4d516d578bb27c73655340b6c3e1ad6",
+                "a446448c1499dcc1a3bffbcb51911631ad800ee07105e0c0903e748eb1708cee",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -5958,6 +5965,88 @@ mod tests {
             "pinned identity renders diverged:\n  {}",
             divergent.join("\n  ")
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_identity_metadata_paths_survive_hostile_runner_temp() {
+        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract")
+        };
+        let preview = super::render_preview(&config, Some(release));
+        let debian = yaml_job(&preview, "debian");
+        for marker in [
+            "metadata_dir=\"$RUNNER_TEMP/release-metadata\"",
+            "test -s \"$metadata_dir/build-identity.json\"",
+            "test -s \"$metadata_dir/manifest.json\"",
+            "sha256sum \"$metadata_dir/manifest.json\"",
+        ] {
+            assert!(
+                debian.contains(marker),
+                "quoted metadata path missing: {marker}\n{debian}"
+            );
+        }
+        assert!(
+            !debian.contains(" $metadata_dir/"),
+            "unquoted metadata path: {debian}"
+        );
+        let test_build = must_some(
+            debian
+                .lines()
+                .find(|line| line.contains("test -s \"$metadata_dir/build-identity.json\""))
+                .map(str::trim),
+            "generated build-identity check",
+        );
+        let test_manifest = must_some(
+            debian
+                .lines()
+                .find(|line| line.contains("test -s \"$metadata_dir/manifest.json\""))
+                .map(str::trim),
+            "generated manifest check",
+        );
+        let checksum = must_some(
+            debian
+                .lines()
+                .find(|line| line.contains("sha256sum \"$metadata_dir/manifest.json\""))
+                .map(str::trim),
+            "generated manifest checksum",
+        );
+        let root = std::env::temp_dir().join(format!(
+            "velnor runner temp [glob] {}",
+            crate::unique_suffix()
+        ));
+        let metadata = root.join("release-metadata");
+        let output = root.join("out");
+        must(
+            fs::create_dir_all(&metadata),
+            "create hostile metadata fixture",
+        );
+        must(fs::create_dir_all(&output), "create hostile output fixture");
+        must(
+            fs::write(metadata.join("build-identity.json"), "{}"),
+            "write hostile build identity",
+        );
+        must(
+            fs::write(metadata.join("manifest.json"), "{}"),
+            "write hostile manifest",
+        );
+        let script = format!(
+            "set -euo pipefail\nmetadata_dir=\"$RUNNER_TEMP/release-metadata\"\n{test_build}\n{test_manifest}\ncp \"$metadata_dir/build-identity.json\" \"$RUNNER_TEMP/out/\"\n{checksum}\n"
+        );
+        let status = must(
+            Command::new("bash")
+                .arg("-euc")
+                .arg(script)
+                .env("RUNNER_TEMP", &root)
+                .status(),
+            "run hostile runner-temp shell fixture",
+        );
+        assert!(
+            status.success(),
+            "hostile runner-temp fixture failed: {status}"
+        );
+        assert!(output.join("build-identity.json").is_file());
         let _ = fs::remove_dir_all(root);
     }
 

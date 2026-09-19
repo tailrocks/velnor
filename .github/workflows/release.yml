@@ -3872,12 +3872,12 @@ jobs:
         run: |
           set -euo pipefail
           metadata_dir="$RUNNER_TEMP/release-metadata"
-          test -s $metadata_dir/build-identity.json || { echo "::error::release metadata missing build-identity.json" >&2; exit 1; }
-          test -s $metadata_dir/manifest.json || { echo "::error::release metadata missing manifest.json" >&2; exit 1; }
-          jq -e '.source_sha and .crate_version' $metadata_dir/build-identity.json >/dev/null
-          jq -e 'type == "object"' $metadata_dir/manifest.json >/dev/null
+          test -s "$metadata_dir/build-identity.json" || { echo "::error::release metadata missing build-identity.json" >&2; exit 1; }
+          test -s "$metadata_dir/manifest.json" || { echo "::error::release metadata missing manifest.json" >&2; exit 1; }
+          jq -e '.source_sha and .crate_version' "$metadata_dir/build-identity.json" >/dev/null
+          jq -e 'type == "object"' "$metadata_dir/manifest.json" >/dev/null
           mkdir -p 'crates/velnor-runner/release'
-          cp $metadata_dir/build-identity.json $metadata_dir/manifest.json 'crates/velnor-runner/release'/
+          cp "$metadata_dir/build-identity.json" "$metadata_dir/manifest.json" 'crates/velnor-runner/release'/
       - name: Stage the deb's own package record
         run: |
           set -euo pipefail
@@ -3886,8 +3886,8 @@ jobs:
           binary="target/$TARGET/release/velnor-runner"
           test -s "$binary" || { echo "::error::missing cross-built runner binary" >&2; exit 1; }
           binary_sha256="$(sha256sum "$binary" | awk '{print $1}')"
-          manifest_sha256="$(sha256sum $metadata_dir/manifest.json | awk '{print $1}')"
-          manifest_version="$(jq -er '.version | numbers' $metadata_dir/manifest.json)"
+          manifest_sha256="$(sha256sum "$metadata_dir/manifest.json" | awk '{print $1}')"
+          manifest_version="$(jq -er '.version | numbers' "$metadata_dir/manifest.json")"
           source_sha=$(jq -er '.source_sha' "$metadata_dir/build-identity.json")
           jq -n \
             --arg schema "velnor.package-record/v1" \

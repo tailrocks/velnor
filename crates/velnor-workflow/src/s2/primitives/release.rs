@@ -1427,14 +1427,14 @@ fn debian_identity_steps(
     // observes only the checked-out source, never its input artifacts.
     let tool = format!("\"$metadata_dir/{binary}-release-tool\"");
     let source_check = if preview {
-        "          jq -e --arg sha \"$SOURCE_COMMIT\" '.source_sha == $sha' \"$metadata_dir/build-identity.json\" >/dev/null \\\n            || { echo \"::error::build identity source_sha != preview source commit $SOURCE_COMMIT\" >&2; exit 1; }\n"
+        "          jq -e --arg sha \"$SOURCE_COMMIT\" '.source_sha == $sha' metadata/build-identity.json >/dev/null \\\n            || { echo \"::error::build identity source_sha != preview source commit $SOURCE_COMMIT\" >&2; exit 1; }\n"
     } else {
         ""
     };
     let commit_value = if preview {
         "\"$SOURCE_COMMIT\"".to_owned()
     } else {
-        "$(jq -er '.source_sha' \"$metadata_dir/build-identity.json\")".to_owned()
+        "$(jq -er '.source_sha' metadata/build-identity.json)".to_owned()
     };
     let record_check = if preview {
         format!(
@@ -1469,10 +1469,16 @@ fn release_metadata_in_temp_dir(steps: &str) -> String {
         "        run: |\n          set -euo pipefail\n          test -s $metadata_dir/",
         "        run: |\n          set -euo pipefail\n          metadata_dir=\"$RUNNER_TEMP/release-metadata\"\n          test -s $metadata_dir/",
     );
-    steps.replace(
+    let mut steps = steps.replace(
         "      - name: Stage the deb's own package record\n        run: |\n          set -euo pipefail\n",
         "      - name: Stage the deb's own package record\n        run: |\n          set -euo pipefail\n          metadata_dir=\"$RUNNER_TEMP/release-metadata\"\n",
-    )
+    );
+    for file in ["build-identity.json", "manifest.json"] {
+        let path = format!("$metadata_dir/{file}");
+        let quoted = format!("\"$metadata_dir/{file}\"");
+        steps = steps.replace(&path, &quoted);
+    }
+    steps
 }
 
 /// Stage the pinned Firecracker, jailer, and guest agent into the deb
@@ -4829,6 +4835,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
 
     use sha2::{Digest as _, Sha256};
 
@@ -5519,11 +5526,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "18fcc15b40274901e95d3c82365f19e6e5cd2e041760daf7484f4e30cfeecfc3",
+                "b24a2a0467c3e1e6c9405a13a5a4591e7d06a9fe9015ff0a29191b22b90b09ca",
             ),
             (
                 "preview.yml",
-                "509c914560a5101b4dc526a2919afe4fb57ae21726eef50e32501bb97352ac55",
+                "310361c6c2868ae9e039fca375dfd2c6acea5801ec0e8d1a869619fd61d6bb94",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -5542,6 +5549,88 @@ mod tests {
             "pinned identity renders diverged:\n  {}",
             divergent.join("\n  ")
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_identity_metadata_paths_survive_hostile_runner_temp() {
+        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract")
+        };
+        let preview = super::render_preview(&config, Some(release));
+        let debian = yaml_job(&preview, "debian");
+        for marker in [
+            "metadata_dir=\"$RUNNER_TEMP/release-metadata\"",
+            "test -s \"$metadata_dir/build-identity.json\"",
+            "test -s \"$metadata_dir/manifest.json\"",
+            "sha256sum \"$metadata_dir/manifest.json\"",
+        ] {
+            assert!(
+                debian.contains(marker),
+                "quoted metadata path missing: {marker}\n{debian}"
+            );
+        }
+        assert!(
+            !debian.contains(" $metadata_dir/"),
+            "unquoted metadata path: {debian}"
+        );
+        let test_build = must_some(
+            debian
+                .lines()
+                .find(|line| line.contains("test -s \"$metadata_dir/build-identity.json\""))
+                .map(str::trim),
+            "generated build-identity check",
+        );
+        let test_manifest = must_some(
+            debian
+                .lines()
+                .find(|line| line.contains("test -s \"$metadata_dir/manifest.json\""))
+                .map(str::trim),
+            "generated manifest check",
+        );
+        let checksum = must_some(
+            debian
+                .lines()
+                .find(|line| line.contains("sha256sum \"$metadata_dir/manifest.json\""))
+                .map(str::trim),
+            "generated manifest checksum",
+        );
+        let root = std::env::temp_dir().join(format!(
+            "velnor runner temp [glob] {}",
+            crate::unique_suffix()
+        ));
+        let metadata = root.join("release-metadata");
+        let output = root.join("out");
+        must(
+            fs::create_dir_all(&metadata),
+            "create hostile metadata fixture",
+        );
+        must(fs::create_dir_all(&output), "create hostile output fixture");
+        must(
+            fs::write(metadata.join("build-identity.json"), "{}"),
+            "write hostile build identity",
+        );
+        must(
+            fs::write(metadata.join("manifest.json"), "{}"),
+            "write hostile manifest",
+        );
+        let script = format!(
+            "set -euo pipefail\nmetadata_dir=\"$RUNNER_TEMP/release-metadata\"\n{test_build}\n{test_manifest}\ncp \"$metadata_dir/build-identity.json\" \"$RUNNER_TEMP/out/\"\n{checksum}\n"
+        );
+        let status = must(
+            Command::new("bash")
+                .arg("-euc")
+                .arg(script)
+                .env("RUNNER_TEMP", &root)
+                .status(),
+            "run hostile runner-temp shell fixture",
+        );
+        assert!(
+            status.success(),
+            "hostile runner-temp fixture failed: {status}"
+        );
+        assert!(output.join("build-identity.json").is_file());
         let _ = fs::remove_dir_all(root);
     }
 
