@@ -840,11 +840,8 @@ fn validate_run_evidence(
         .iter()
         .map(|(_, velnor, _)| velnor.id)
         .collect();
-    let velnor_content = fetch_velnor_job_log_artifacts(repo, run_id, &expected_velnor_job_ids)?;
-    let velnor_stats = analyze_lane_log(&velnor_content);
-    if velnor_stats.lines == 0 {
-        bail!("run {run_id} Velnor job-log artifacts were present but empty");
-    }
+    let velnor_logs = fetch_velnor_job_log_artifacts(repo, run_id, &expected_velnor_job_ids)?;
+    let velnor_content = aggregate_velnor_job_logs(&velnor_logs, run_id)?;
 
     let mut pair_evidence = BTreeMap::new();
     for (github, velnor, _) in &census.matched {
@@ -873,6 +870,7 @@ fn validate_run_evidence(
                 github.id
             );
         }
+        let velnor_content = velnor_job_log_stats(&velnor_logs, velnor.id, run_id)?;
         pair_evidence.insert(
             (github.id, velnor.id),
             PairEvidence {
@@ -880,7 +878,7 @@ fn validate_run_evidence(
                 velnor_html,
                 github_log,
                 github_content,
-                velnor_content: velnor_stats,
+                velnor_content,
             },
         );
     }
@@ -1082,12 +1080,14 @@ fn collect_job_log_artifacts(
 
 /// Download every expected per-job `job-log-<job-id>` artifact across all
 /// paginated API pages. Missing, empty, duplicate, or truncated evidence is a
-/// hard error; it is never converted into an empty log or warning.
+/// hard error; it is never converted into an empty log or warning. The result
+/// remains keyed by job so one Velnor pair cannot inherit another pair's log
+/// affordances.
 fn fetch_velnor_job_log_artifacts(
     repo: &str,
     run_id: u64,
     expected_job_ids: &[u64],
-) -> Result<String> {
+) -> Result<BTreeMap<u64, String>> {
     let mut pages = Vec::new();
     let mut page_number = 1u32;
     let mut observed = 0u64;
@@ -1118,7 +1118,7 @@ fn fetch_velnor_job_log_artifacts(
         page_number += 1;
     }
     let artifacts = collect_job_log_artifacts(pages, expected_job_ids)?;
-    let mut content = String::new();
+    let mut content_by_job = BTreeMap::new();
     for job_id in expected_job_ids {
         let name = format!("job-log-{job_id}");
         let artifact = artifacts
@@ -1146,13 +1146,45 @@ fn fetch_velnor_job_log_artifacts(
             artifact_content.push('\n');
         }
         require_nonempty_evidence(&format!("Velnor artifact {name}"), &artifact_content)?;
-        content.push_str(&artifact_content);
+        if content_by_job.insert(*job_id, artifact_content).is_some() {
+            bail!("duplicate Velnor job-log artifact target for job {job_id}");
+        }
+    }
+    if content_by_job.is_empty() {
+        bail!("Velnor job-log artifacts for run {run_id} were not requested");
+    }
+    Ok(content_by_job)
+}
+
+fn aggregate_velnor_job_logs(
+    content_by_job: &BTreeMap<u64, String>,
+    run_id: u64,
+) -> Result<String> {
+    let mut content = String::new();
+    for artifact_content in content_by_job.values() {
+        content.push_str(artifact_content);
     }
     require_nonempty_evidence(
         &format!("Velnor job-log artifacts for run {run_id}"),
         &content,
     )?;
     Ok(content)
+}
+
+fn velnor_job_log_stats(
+    content_by_job: &BTreeMap<u64, String>,
+    job_id: u64,
+    run_id: u64,
+) -> Result<LaneLogStats> {
+    let content = content_by_job.get(&job_id).with_context(|| {
+        format!("missing Velnor job-log content for job {job_id} in run {run_id}")
+    })?;
+    require_nonempty_evidence(&format!("Velnor job {job_id} log"), content)?;
+    let stats = analyze_lane_log(content);
+    if stats.lines == 0 {
+        bail!("run {run_id} Velnor job {job_id} log evidence was empty");
+    }
+    Ok(stats)
 }
 
 /// Test-only view of [`classify_job_name`]: the lane of a comparison job.
@@ -2843,6 +2875,25 @@ mod tests {
         assert_eq!(stats.timestamped_lines, 3);
         assert_eq!(stats.group_markers, 1);
         assert!(stats.ansi);
+    }
+
+    #[test]
+    fn velnor_log_stats_stay_scoped_to_the_paired_job() {
+        let logs = BTreeMap::from([
+            (
+                101,
+                "2026-06-11T07:34:33.1187693Z ##[group]job one\n".to_owned(),
+            ),
+            (202, "plain job two\n".to_owned()),
+        ]);
+        let job_one = velnor_job_log_stats(&logs, 101, 42).unwrap();
+        let job_two = velnor_job_log_stats(&logs, 202, 42).unwrap();
+        assert_eq!(job_one.lines, 1);
+        assert_eq!(job_one.timestamped_lines, 1);
+        assert_eq!(job_one.group_markers, 1);
+        assert_eq!(job_two.lines, 1);
+        assert_eq!(job_two.timestamped_lines, 0);
+        assert_eq!(job_two.group_markers, 0);
     }
 
     #[test]
