@@ -3142,7 +3142,7 @@ impl WorkflowIr {
           CANDIDATE_BUILD_IMAGE_DIGEST: {build_image_digest}
         run: |
           set -euo pipefail
-          test -n "$CANDIDATE_HEAD_SHA"
+          case "$CANDIDATE_HEAD_SHA" in [0-9a-f]{{40}}) ;; *) exit 1 ;; esac
           test "$CANDIDATE_ARTIFACT_NAME" = "{artifact}"
           test "$CANDIDATE_BUILD_IMAGE_REPOSITORY" = "{build_image_repository}"
           case "$CANDIDATE_BUILD_IMAGE_DIGEST" in sha256:[0-9a-f]{{64}}) ;; *) echo "::error::candidate builder image is not pinned" >&2; exit 1 ;; esac
@@ -3207,6 +3207,7 @@ impl WorkflowIr {
           jq -e '.[0].State.Status == "exited" and .[0].State.ExitCode == 0 and .[0].State.OOMKilled == false and .[0].State.Error == ""' "$stage/after.json" >/dev/null
           docker cp "$cid:/output/velnor-workflow" "$stage/velnor-workflow"
           test -f "$stage/velnor-workflow"
+          test ! -L "$stage/velnor-workflow"
           chmod 0555 "$stage/velnor-workflow"
           binary_sha256="$(sha256sum "$stage/velnor-workflow" | awk '{{print $1}}')"
           jq -n \

@@ -4610,8 +4610,8 @@ fn policy_candidate_step(revision: &str) -> String {
           set -euo pipefail
           test "$HEAD_REPOSITORY" = "$GITHUB_REPOSITORY" || {{ echo "::error::fork producer artifacts are not eligible" >&2; exit 1; }}
           test "$HEAD_REPOSITORY_ID" = "$TARGET_REPOSITORY_ID" || {{ echo "::error::head repository id is not the target repository id" >&2; exit 1; }}
-          test -n "$HEAD_SHA"
-          test -n "$BASE_SHA"
+          case "$HEAD_SHA" in [0-9a-f]{{40}}) ;; *) exit 1 ;; esac
+          case "$BASE_SHA" in [0-9a-f]{{40}}) ;; *) exit 1 ;; esac
           head_tree_sha="$(git rev-parse "$HEAD_SHA^{{tree}}")"
           base_tree_sha="$(git rev-parse "$BASE_SHA^{{tree}}")"
 
@@ -4891,6 +4891,7 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
             --arg name "$(jq -er .artifact_name "$HANDOFF/handoff.json")" \
             '.role == "producer" and .workflow_path == ".github/workflows/ci-pr.yml" and .job_name == "candidate_producer" and .event == "pull_request" and .repository == $repo and .head_sha == $head and .artifact_name == $name and .profile == "debug" and .platform == "linux/amd64" and .features == "tui" and (.build_image_repository == "{build_image_repository}") and (.build_image_digest == "{build_image_digest}") and (.build_image_platform_digest | strings | test("^sha256:[0-9a-f]{{64}}$")) and (.binary_sha256 | strings | test("^[0-9a-f]{{64}}$"))' \
             "$HANDOFF/candidate-manifest.json" >/dev/null
+          test ! -L "$HANDOFF/velnor-workflow"
           binary_sha256="$(sha256sum "$HANDOFF/velnor-workflow" | awk '{{print $1}}')"
           test "$binary_sha256" = "$(jq -er .binary_sha256 "$HANDOFF/candidate-manifest.json")"
           source_archive_sha256="$(sha256sum "$HANDOFF/source.tar" | awk '{{print $1}}')"
@@ -5015,7 +5016,7 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
           result="$RUNNER_TEMP/candidate-result"
           rm -rf "$result"; mkdir -m 0700 "$result"
           cp -a "$output/." "$result/render"
-          render_sha256="$(find "$result/render" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{{print $1}}')"
+          render_sha256="$(cd "$result/render" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{{print $1}}')"
           handoff_json="$HANDOFF/handoff.json"
           jq -n \
             --arg role result \
@@ -5282,6 +5283,14 @@ fn policy_candidate_result_verification_step() -> String {
           PY
           producer_manifest="$producer_dir/candidate-manifest.json"
           producer_binary="$producer_dir/velnor-workflow"
+          jq -e --slurpfile handoff "$handoff_json" '
+            .role == "producer" and .workflow_path == ".github/workflows/ci-pr.yml" and .job_name == "candidate_producer" and
+            .event == "pull_request" and .repository == $handoff[0].head_repository and .head_sha == $handoff[0].head_sha and
+            .artifact_name == $handoff[0].artifact_name and .profile == $handoff[0].profile and .platform == $handoff[0].platform and
+            .features == $handoff[0].features and .build_image_repository == $handoff[0].build_image_repository and
+            .build_image_digest == $handoff[0].build_image_digest and .build_image_platform_digest == $handoff[0].build_image_platform_digest and
+            (.binary_sha256 | strings | test("^[0-9a-f]{{64}}$"))
+          ' "$producer_manifest" >/dev/null
           test "$(sha256sum "$producer_binary" | awk '{{print $1}}')" = "$(jq -er .binary_sha256 "$producer_manifest")"
           workflow_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml")"
           jq -e --argjson id "$(jq -er .workflow_id "$handoff_json")" '.path == ".github/workflows/ci-pr.yml" and .id == $id' <<<"$workflow_api" >/dev/null
@@ -5310,7 +5319,7 @@ fn policy_candidate_result_verification_step() -> String {
           git ls-tree -r "$HEAD_SHA" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo | LC_ALL=C sort > "$closure_file"
           printf 'closure-version:1\\nfeatures:tui\\nprofile:debug\\n' >> "$closure_file"
           test "$(sha256sum "$closure_file" | awk '{{print $1}}')" = "$(jq -er .candidate_closure "$handoff_json")"
-          render_sha256="$(find "$RUNNER_TEMP/candidate-result/render" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{{print $1}}')"
+          render_sha256="$(cd "$RUNNER_TEMP/candidate-result/render" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{{print $1}}')"
           test "$render_sha256" = "$(jq -er .render_sha256 "$result_json")"
           echo "result_raw_zip_sha256=$result_raw_zip_sha256" >> "$GITHUB_OUTPUT"
           echo "handoff_raw_zip_sha256=$handoff_raw_zip_sha256" >> "$GITHUB_OUTPUT"
