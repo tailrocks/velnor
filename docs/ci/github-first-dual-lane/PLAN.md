@@ -89,6 +89,34 @@ stay external and are linked by path/SHA/digest. Label WIP explicitly. A commit
 or push is not review approval, merge, publication, or gate success; merge and
 other remote mutations remain separately authorized.
 
+## G0 acceptance-matrix handoff
+
+The exact user acceptance matrix is canonical in
+[`SPEC.md`](./SPEC.md#exact-g0-acceptance-matrix) and is mirrored in the
+external session record. Its baseline is Velnor
+`abe9ad82a2d4d01b706bbc6122ab6ccb150faad9`; later integration
+`12cc87b629802c294da9840325cb21087c020df6` and every candidate SHA are
+separate current evidence. The fixed scope is the exact 32-row goal manifest,
+not the stale 28-row `audit_ci` estate.
+
+G0 requires fresh, independently bound default/PR/workflow/run/provider,
+workload, dependency/access, source/revision/digest, and child-job evidence.
+Missing, stale, queued, canceled, timed-out, skipped, failed, manual-only,
+wrong-provider/source, empty-expected, stale-SHA, missing-repository, absent
+child-log, or artifact-mismatch evidence fails closed. `N/A` is exclusion-only.
+Release/tag/feed/tap/install identity and functional results are stage-aware
+G2+ evidence, not a G0 prerequisite. `audit_ci` and `lane_compare` are
+diagnostic helpers only; neither can close G0 or G7.
+
+The bounded external follow-ups are `/root/g0_fleet` in a new isolated tree
+for baseline scope reconciliation, `/root/g1_run_operations` in a new
+isolated tree for lane census/step/artifact-log red/green proof,
+`/root/g1_cache_semantics` as independent lane review, and `/root/g0_checker`
+in the existing checker tree for authoritative v2 correction. Exact unknown
+worktree paths remain unknown until observed. Current checker and independent
+review links, rejected candidates, and incomplete statuses remain external;
+none is a gate result.
+
 ## Bounded initial task queue
 
 Every task has one owner, one input revision, explicit evidence, and a separate

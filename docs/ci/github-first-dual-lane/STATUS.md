@@ -98,6 +98,11 @@ package delivery, fleet migration, Mac operation, or any gate exit.
 | G1 runtime-product audit | Old pin/release, current-main distinction, and candidate closure/promotion sequence | External evidence written; no candidate publication or pin adoption |
 | G0 workload matrix | 32 unique rows aligned to current main revisions; observed duties, native/unsupported/trust obligations, and missing execution retained | External `G0/workload-matrix.json`; inventory projection only |
 | G0 checker review | Initial b3b6 unit hygiene passed, but semantic and G2 hostile reviews rejected false-green paths | v2 architecture required; no checker completion or gate proof |
+| G0 acceptance matrix | Exact 32/no-extras scope, live default/PR/workflow/run/provider/workload/dependency/source/digest/child evidence, and fail-closed stale/missing/manual-only rules | Canonical [`SPEC.md` matrix](./SPEC.md#exact-g0-acceptance-matrix), external `session.json`, checker and independent-review reports; unknown/incomplete |
+| G0 baseline-versus-current | Independent findings baseline is `abe9ad82`; integration `12cc87b6` and later candidate SHAs remain separate | External `session.json`; no baseline result promoted to current or gate evidence |
+| G0 helper boundary | `audit_ci` is auxiliary; `lane_compare` pair/census/step/artifact-log behavior is diagnostic and has recorded false-green paths | External checker review and lane assignment; complete paginated artifact/log proof pending |
+| G0 review checkpoint | Scan `3c46b9e`, checker `017c92e`, preview `5f2b0d3`, and APT `8c19fab` reviews remain rejected/blocked; Homebrew `c772971` is conditional source-contract only | External exact reports; no approval, publication, or gate claim |
+| Baseline test chronology | Clean `abe9ad82` `velnor-tools` test reported 207 passed in 11.42s; later 206-pass/one-failure output was contaminated by concurrent parent edits | External `session.json`; preserve both observations, do not call the full baseline green or assume flakiness |
 
 ## Model and runtime evidence
 

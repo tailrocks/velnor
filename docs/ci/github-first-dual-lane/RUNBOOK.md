@@ -317,6 +317,29 @@ stale/missing/queued/canceled/timed-out/skipped/failed required work. Fixtures
 must cover stale SHA, skipped job, missing row, wrong provider, failed child,
 and mismatched artifact.
 
+The exact user G0 acceptance matrix is in
+[`SPEC.md`](./SPEC.md#exact-g0-acceptance-matrix). Before invoking the
+authoritative checker, bind the exact 32-row manifest (goal lines 21–58), live
+default-branch SHA/UTC, every open PR including drafts/bots/forks and tested
+merge or merge-group identity, complete workflow/reusable-action/scanner/state/
+trigger inventory, nonempty expected workloads, dependency/access gaps,
+source/revision/digest records, and run/provider/host/checkout/job/child
+identity. Every required expected job must have an independently verified
+terminal-success conclusion and complete child links/logs. A fresh default/PR snapshot is required; newest-run, overall-green,
+or `github.sha` shortcuts are invalid. `N/A` is exclusion-only.
+
+Release/tag/feed/tap/install identity and functional results are G2+ stage
+evidence, not a G0 prerequisite. `audit_ci` remains auxiliary default-SHA and
+static-surface diagnostics. `lane_compare` remains diagnostic until the
+assigned `/root/g1_run_operations` implementation and independent
+`/root/g1_cache_semantics` review prove the full pair census, step alignment,
+and complete paginated artifact/log inventory. Explicit job arguments, empty
+census, skipped/unconcluded jobs, missing/empty logs, one-page `per_page=100`
+artifact fetches, and watch-mode orphan/duplicate handling must all fail closed
+in the authoritative checker, including unmatched pairs; helper output or self-attested records cannot
+close G0/G7. Keep current unknowns and rejected exact candidates linked in the
+external session record.
+
 ## Recovery and rollback rules
 
 1. Stop at the first invalidated dependency; record exact source/run/release

@@ -455,6 +455,64 @@ must bind canonical scope, live snapshots, required work, run/provider identity,
 phase coverage, package/install applicability, strict canonical fields, and
 external reviewer attestation before any checker result can support a gate.
 
+### Exact G0 acceptance matrix
+
+This matrix preserves the latest user acceptance requirements without turning
+unknown observations into success. The canonical scope is the exact 32-row
+manifest in the goal document's lines 21–58; the stale 28-row `audit_ci` estate
+is wrong scope and may include ChainArgos, fixtures, and skills. The independent
+baseline for the findings below is Velnor revision
+`abe9ad82a2d4d01b706bbc6122ab6ccb150faad9`; later integration and candidate
+revisions remain separate evidence.
+
+G0 must prove, from independently captured and revision-bound evidence:
+
+- exactly 32 unique repositories with no extras, each live default-branch SHA
+  and UTC observation;
+- every open PR, including drafts, bots, and forks, with head/base SHA, tested
+  merge or merge-group SHA, trust/applicability, required checks, and producing
+  Apps;
+- the full workflow, reusable-action, scanner, generated-state, and trigger
+  inventory;
+- nonempty expected workloads with platform, architecture, provider eligibility,
+  and explicit exclusions;
+- the durable dependency graph and access gaps;
+- generator source/revision/artifact digest, runtime-product source/image digest,
+  configuration digest, generated-scan digest, and related pin identity;
+- run event source, actual checkout SHA, provider, runner/host identity,
+  expected versus actual jobs, terminal-success conclusions, and complete child
+  links/child logs.
+
+Release, tag, asset, feed, tap, install identity, and functional-result evidence
+is stage-aware G2+ delivery evidence. It is not a G0 prerequisite, but must be
+retained and checked by the later applicable gates. G0 cannot pass from helper
+output or self-attested records alone.
+
+Fail closed on missing or stale evidence; queued, canceled, timed-out, skipped,
+or failed work; absent child logs; wrong provider or source/event; empty expected
+workloads; stale SHA; missing repository; artifact mismatch; or manual-only
+evidence. `N/A` is exclusion-only and never-executed is never success. Every
+default and PR snapshot must be fresh: no newest-run, overall-green, or
+`github.sha` shortcut is authority.
+
+`audit_ci` is auxiliary only for default-SHA and static-surface observations;
+it is not canonical G0 scope or runtime evidence. `lane_compare` is diagnostic
+only: explicit job arguments can skip census, an empty census can pass with zero
+pairs, completed status can omit successful conclusion, skipped jobs can pass,
+missing/empty artifacts or logs can degrade to warnings, Velnor-only steps are
+informational, unmatched/orphan pairs can be omitted or downgraded, watch mode
+can ignore census orphans/duplicates, and one-page artifact discovery can hide
+logs. Required artifact and log inventory must be complete and paginated before
+independent checker use.
+
+The checker and independent review links are the external
+[`session.json`](/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/session.json),
+[`G0/checker-v2-review/report.md`](/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-v2-review/report.md),
+[`G0/checker-review/report.md`](/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-review/report.md),
+and the lane-comparison assignment recorded there. Current results are
+unknown/incomplete: candidate `017c92e0bf608d42675a0b8e495f0486c7296041` was
+not approved, helper diagnostics are not gate authority, and no gate has passed.
+
 ## 11. Final completion checklist
 
 The final report may say complete only if every applicable item passes:
