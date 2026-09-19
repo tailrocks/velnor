@@ -9299,7 +9299,7 @@ mod tests {
         must(
             fs::write(
                 project.join("project.pbxproj"),
-                "SDKROOT = iphoneos;\nIPHONEOS_DEPLOYMENT_TARGET = 17.0;\n",
+                "SDKROOT = macosx;\nMACOSX_DEPLOYMENT_TARGET = 26.0;\n",
             ),
             "write project",
         );
@@ -9353,7 +9353,7 @@ mod tests {
         assert!(xcode
             .pr_commands
             .iter()
-            .any(|command| command.contains("platform=iOS Simulator")));
+            .all(|command| command.contains("xcodebuild") && !command.contains("iOS Simulator")));
         let ir = WorkflowIr::from_config(&config);
         let swift_kind = must_some(
             must(
@@ -9363,7 +9363,7 @@ mod tests {
             "swift kind has members",
         )
         .1;
-        assert!(swift_kind.contains("runs-on: macos-15"));
+        assert!(swift_kind.contains("runs-on: macos-26"));
         assert!(swift_kind.contains("CI_UNIT_ID: ${{ inputs.unit }}"));
         let both_workflow = generated_ci_pr(&WorkflowIr::from_config(&ProjectConfig {
             providers: crate::s2::provider::ProviderId::ALL.into_iter().collect(),
@@ -9433,7 +9433,7 @@ mod tests {
         )
         .1;
         assert!(
-            swift_kind.contains("runs-on: macos-15"),
+            swift_kind.contains("runs-on: macos-26"),
             "macos-platform units use the fixed GitHub-owned image: {swift_kind}"
         );
         assert!(
@@ -9632,7 +9632,7 @@ mod tests {
         )
         .1;
         assert!(
-            swift_kind.contains("runs-on: macos-15"),
+            swift_kind.contains("runs-on: macos-26"),
             "xcode units use the fixed GitHub-owned image: {swift_kind}"
         );
         let _ = fs::remove_dir_all(root);
@@ -12020,7 +12020,7 @@ lockfile = true
         )
         .1;
         assert!(
-            swift_kind.contains("runs-on: macos-15"),
+            swift_kind.contains("runs-on: macos-26"),
             "Apple jobs run on the fixed GitHub-owned image: {swift_kind}"
         );
         assert!(
@@ -14890,7 +14890,7 @@ lockfile = true
         });
         let actionlint = render_actionlint_config(&config);
         assert!(
-            actionlint.contains("    - macos-15\n"),
+            actionlint.contains("    - macos-26\n"),
             "an apple release target needs the macos label: {actionlint}"
         );
         if let Some(release) = config.release.as_mut() {
@@ -14898,7 +14898,7 @@ lockfile = true
         }
         let linux_only = render_actionlint_config(&config);
         assert!(
-            !linux_only.contains("macos-15"),
+            !linux_only.contains("macos-26"),
             "linux-only releases must not allowlist the macos label: {linux_only}"
         );
     }
