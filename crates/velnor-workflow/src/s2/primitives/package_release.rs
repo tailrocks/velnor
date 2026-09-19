@@ -68,6 +68,12 @@ impl Primitive for PackageRelease {
 
     fn render(&self, ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<Rendered, GeneratorError> {
         let spec = parse_spec(args)?;
+        if !ctx.config.repository.is_empty() && ctx.config.repository != spec.source_repository {
+            return Err(GeneratorError::usage(format!(
+                "package-release source_repository {} must match scanned repository {}",
+                spec.source_repository, ctx.config.repository
+            )));
+        }
         let content = render_workflow(ctx.config, &spec);
         let file = ctx.file.filter(|file| !file.is_empty()).ok_or_else(|| {
             GeneratorError::usage(
@@ -230,8 +236,14 @@ fn parse_spec(args: &Args<'_>) -> Result<PackageReleaseSpec, GeneratorError> {
     for payload in &payloads {
         validate_asset_name("payloads", payload)?;
     }
-    let mut names = BTreeSet::new();
-    if payloads.iter().any(|payload| !names.insert(payload)) {
+    let mut names = BTreeSet::from([
+        "release-manifest.json".to_owned(),
+        "identity.json".to_owned(),
+    ]);
+    if payloads
+        .iter()
+        .any(|payload| !names.insert(payload.clone()))
+    {
         return Err(GeneratorError::usage(
             "package-release payloads must contain unique names",
         ));
@@ -245,7 +257,12 @@ fn parse_spec(args: &Args<'_>) -> Result<PackageReleaseSpec, GeneratorError> {
     }
     for asset in &supporting_assets {
         validate_asset_name("supporting_assets", asset)?;
-        if !names.insert(asset) {
+        if !names.insert(asset.clone()) {
+            if matches!(asset.as_str(), "release-manifest.json" | "identity.json") {
+                return Err(GeneratorError::usage(format!(
+                    "package-release supporting_assets contains reserved metadata name {asset}"
+                )));
+            }
             return Err(GeneratorError::usage(format!(
                 "package-release asset {asset} is declared as both payload and supporting asset"
             )));
@@ -686,6 +703,17 @@ updater_token_secret = "TAP_TOKEN"
         );
         let error = parse_spec(&Args(&values)).expect_err("collision must fail");
         assert!(error.to_string().contains("both payload and supporting"));
+    }
+
+    #[test]
+    fn package_release_rejects_reserved_metadata_names() {
+        let mut values = args();
+        values.insert(
+            "supporting_assets".to_owned(),
+            toml::Value::Array(vec![toml::Value::String("identity.json".to_owned())]),
+        );
+        let error = parse_spec(&Args(&values)).expect_err("metadata collision must fail");
+        assert!(error.to_string().contains("reserved metadata"));
     }
 
     #[test]
