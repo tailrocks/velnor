@@ -44,12 +44,17 @@ fn has_truthful_both_lane_contract(text: &str) -> bool {
 const SHA_LEN: usize = 40;
 const ESTATE_MANIFEST_FILE: &str = "config/estate-repositories.json";
 const LEGACY_RUNNER_GROUP_DOCTOR: &str = "scripts/runner_group_doctor.sh";
+const ESTATE_PLAN_DIGEST_DOMAIN: &[u8] = b"velnor.audit-ci.estate-plan.v1\0";
+const GOAL_SCOPE_DIGEST_DOMAIN: &[u8] = b"velnor.audit-ci.fixed-goal-scope.v1\0";
+// Pinned over the sorted compiled scope names, each followed by `\n`, after the domain.
+const GOAL_SCOPE_SHA256: &str = "e9c02609e2aa442272225039b79984a0cd618ead1317374cf2d7c3828b1ea268";
+// Updated with reviewed canonical plan changes; excludes checkout paths and contract_sha256.
+const ESTATE_PLAN_SHA256: &str = "fe764409c774a54b77f89191f30d2cd854b33b908c3d34b8fc4fa5a90a90edae";
 
-// The goal's §2 fixed manifest is the scope authority.  This compiled list is
-// only an exact-name projection for this auxiliary static audit: it prevents a
-// stale or substituted estate concern entry from passing by count alone.  It
-// is not G0 evidence and must stay synchronized with the external goal before
-// changing the fleet scope.
+// Compiled exact copy of the goal's §2 fixed repository authority. The
+// auxiliary concern projection cannot add, remove, or alias this scope. Keep
+// both digests synchronized with reviewed goal changes; this list is not G0
+// evidence.
 const GOAL_FLEET_REPOSITORIES: [&str; 32] = [
     "tailrocks/velnor",
     "tailrocks/velnor-apt",
@@ -87,10 +92,6 @@ const GOAL_FLEET_REPOSITORIES: [&str; 32] = [
 const ESTATE_SCOPE_ROLE: &str = "auxiliary-concern-projection";
 const ESTATE_SCOPE_AUTHORITY: &str = "velnor-github-first-dual-lane-goal.md";
 const ESTATE_SCOPE_AUTHORITY_SECTION: &str = "2. Fixed repository manifest";
-// This digest binds the concern/default projection to the reviewed auxiliary
-// source.  The goal manifest remains the independent scope authority above.
-const ACCEPTED_AUXILIARY_CONTRACT_SHA256: &str =
-    "34e4f06de9d5b7c88549328c9365feae3b8927844f3645922883f15a4a8a00b0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -257,6 +258,8 @@ struct EstateAuditResult {
 #[derive(Debug, Serialize)]
 struct EstateAuditOutput {
     schema_version: &'static str,
+    scope_sha256: String,
+    plan_sha256: String,
     repositories: BTreeMap<String, EstateAuditResult>,
 }
 
@@ -312,42 +315,8 @@ struct WorkflowAuditProfile {
     expected_generated_class: Option<GeneratedCallerClass>,
 }
 
-fn canonical_fleet_map(root: &Path) -> Result<BTreeMap<String, GeneratedCallerClass>> {
-    let _ = canonical_auxiliary_manifest(root)?;
-    fixed_goal_classes()
-}
-
-#[derive(Serialize)]
-struct AuxiliaryEstateContract<'a> {
-    defaults: &'a BTreeMap<String, ConcernContract>,
-    repositories: &'a [EstateRepository],
-}
-
-fn auxiliary_contract_digest(manifest: &EstateManifest) -> Result<String> {
-    let payload = AuxiliaryEstateContract {
-        defaults: &manifest.defaults,
-        repositories: &manifest.repositories,
-    };
-    let bytes = serde_json::to_vec(&payload).context("serialize auxiliary estate contract")?;
-    Ok(Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
-}
-
-fn canonical_auxiliary_manifest(root: &Path) -> Result<EstateManifest> {
-    let path = root.join(ESTATE_MANIFEST_FILE);
-    let text = fs::read_to_string(&path)
-        .with_context(|| format!("read estate manifest {}", path.display()))?;
-    let manifest: EstateManifest = serde_json::from_str(&text)
-        .with_context(|| format!("parse estate manifest {}", path.display()))?;
-    validate_estate_scope_metadata(&manifest.scope)?;
-    validate_auxiliary_repository_scope(&manifest.repositories)?;
-    validate_accepted_auxiliary_contract(&manifest, "canonical estate manifest")?;
-    Ok(manifest)
-}
-
-fn fixed_goal_classes() -> Result<BTreeMap<String, GeneratedCallerClass>> {
+fn canonical_fleet_map() -> Result<BTreeMap<String, GeneratedCallerClass>> {
+    validate_compiled_goal_scope()?;
     let mut map = BTreeMap::new();
     for repository in GOAL_FLEET_REPOSITORIES {
         let class = generated_class_for_repository(repository);
@@ -359,6 +328,16 @@ fn fixed_goal_classes() -> Result<BTreeMap<String, GeneratedCallerClass>> {
         }
     }
     Ok(map)
+}
+
+fn canonical_auxiliary_manifest(root: &Path) -> Result<EstateManifest> {
+    let path = root.join(ESTATE_MANIFEST_FILE);
+    let text = fs::read_to_string(&path)
+        .with_context(|| format!("read estate manifest {}", path.display()))?;
+    let manifest: EstateManifest = serde_json::from_str(&text)
+        .with_context(|| format!("parse estate manifest {}", path.display()))?;
+    validate_estate_plan(&manifest)?;
+    Ok(manifest)
 }
 
 fn generated_class_for_repository(repository: &str) -> GeneratedCallerClass {
@@ -379,47 +358,114 @@ fn goal_fleet_repository_names() -> BTreeSet<&'static str> {
     GOAL_FLEET_REPOSITORIES.into_iter().collect()
 }
 
-fn validate_accepted_auxiliary_contract(manifest: &EstateManifest, context: &str) -> Result<()> {
-    let observed = auxiliary_contract_digest(manifest)?;
-    if observed != ACCEPTED_AUXILIARY_CONTRACT_SHA256 {
-        bail!(
-            "{context} auxiliary contract digest mismatch: expected {ACCEPTED_AUXILIARY_CONTRACT_SHA256}, observed {observed}; concern classifications/defaults are source-bound"
-        );
+fn goal_fleet_scope_sha256() -> String {
+    let mut names = GOAL_FLEET_REPOSITORIES.to_vec();
+    names.sort_unstable();
+    let mut digest = Sha256::new();
+    digest.update(GOAL_SCOPE_DIGEST_DOMAIN);
+    for name in names {
+        digest.update(name.as_bytes());
+        digest.update(b"\n");
     }
-    Ok(())
-}
-
-fn validate_auxiliary_contract_binding(
-    observed: &EstateManifest,
-    accepted: &EstateManifest,
-) -> Result<()> {
-    let observed_digest = auxiliary_contract_digest(observed)?;
-    let accepted_digest = auxiliary_contract_digest(accepted)?;
-    if observed_digest != accepted_digest {
-        bail!(
-            "estate manifest auxiliary contract digest mismatch: accepted {accepted_digest}, observed {observed_digest}; external concern rewrites cannot downgrade required concerns"
-        );
-    }
-    Ok(())
-}
-
-fn validate_auxiliary_repository_scope(repositories: &[EstateRepository]) -> Result<()> {
-    let names = repositories
+    digest
+        .finalize()
         .iter()
-        .map(|repository| repository.name.as_str())
-        .collect::<Vec<_>>();
-    let observed = names.iter().copied().collect::<BTreeSet<_>>();
-    if observed.len() != names.len() {
-        bail!("auxiliary estate manifest contains duplicate repository names");
-    }
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn validate_compiled_goal_scope() -> Result<()> {
     let expected = goal_fleet_repository_names();
-    let extra = observed.difference(&expected).copied().collect::<Vec<_>>();
-    if !extra.is_empty() {
+    if expected.len() != GOAL_FLEET_REPOSITORIES.len() {
+        bail!("compiled fixed goal scope contains duplicate repository names");
+    }
+    let scope_sha256 = goal_fleet_scope_sha256();
+    if scope_sha256 != GOAL_SCOPE_SHA256 {
         bail!(
-            "auxiliary estate manifest contains out-of-scope repositories: {extra:?}; fixed goal scope remains authoritative"
+            "compiled fixed goal scope digest mismatch: expected {GOAL_SCOPE_SHA256}, observed {scope_sha256}"
         );
     }
     Ok(())
+}
+
+#[derive(Serialize)]
+struct EstatePlanScope<'a> {
+    role: &'a str,
+    authority: &'a str,
+    authority_section: &'a str,
+    expected_repository_count: usize,
+}
+
+#[derive(Serialize)]
+struct EstatePlanRepository<'a> {
+    name: &'a str,
+    concerns: &'a BTreeMap<String, ConcernContract>,
+}
+
+#[derive(Serialize)]
+struct EstatePlan<'a> {
+    version: u32,
+    scope: EstatePlanScope<'a>,
+    defaults: &'a BTreeMap<String, ConcernContract>,
+    repositories: Vec<EstatePlanRepository<'a>>,
+}
+
+fn estate_plan_sha256(estate: &EstateManifest) -> Result<String> {
+    let mut repositories = estate
+        .repositories
+        .iter()
+        .map(|repository| EstatePlanRepository {
+            name: &repository.name,
+            concerns: &repository.concerns,
+        })
+        .collect::<Vec<_>>();
+    repositories.sort_by(|left, right| left.name.cmp(right.name));
+    let plan = EstatePlan {
+        version: estate.version,
+        scope: EstatePlanScope {
+            role: &estate.scope.role,
+            authority: &estate.scope.authority,
+            authority_section: &estate.scope.authority_section,
+            expected_repository_count: estate.scope.expected_repository_count,
+        },
+        defaults: &estate.defaults,
+        repositories,
+    };
+    let bytes = serde_json::to_vec(&plan).context("serialize canonical estate audit plan")?;
+    let mut digest = Sha256::new();
+    digest.update(ESTATE_PLAN_DIGEST_DOMAIN);
+    digest.update(bytes);
+    Ok(digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+#[derive(Debug, Clone)]
+struct EstatePlanDigests {
+    scope_sha256: String,
+    plan_sha256: String,
+}
+
+fn validate_estate_plan(estate: &EstateManifest) -> Result<EstatePlanDigests> {
+    if estate.version != 2 {
+        bail!(
+            "unsupported estate manifest version {} (expected 2)",
+            estate.version
+        );
+    }
+    validate_estate_scope(estate)?;
+    let observed = estate_plan_sha256(estate)?;
+    if observed != ESTATE_PLAN_SHA256 {
+        bail!(
+            "estate audit plan digest mismatch: expected {ESTATE_PLAN_SHA256}, observed {observed}"
+        );
+    }
+    Ok(EstatePlanDigests {
+        scope_sha256: goal_fleet_scope_sha256(),
+        plan_sha256: observed,
+    })
 }
 
 fn validate_estate_scope_metadata(scope: &EstateScope) -> Result<()> {
@@ -448,9 +494,9 @@ fn validate_estate_scope_metadata(scope: &EstateScope) -> Result<()> {
             GOAL_FLEET_REPOSITORIES.len()
         );
     }
-    if scope.contract_sha256 != ACCEPTED_AUXILIARY_CONTRACT_SHA256 {
+    if scope.contract_sha256 != ESTATE_PLAN_SHA256 {
         bail!(
-            "estate manifest scope contract digest must be {ACCEPTED_AUXILIARY_CONTRACT_SHA256}, got {}",
+            "estate manifest scope contract digest must be {ESTATE_PLAN_SHA256}, got {}",
             scope.contract_sha256
         );
     }
@@ -466,6 +512,7 @@ fn validate_fixed_repository_scope(context: &str, repositories: &[EstateReposito
     if observed.len() != names.len() {
         bail!("{context} contains duplicate repository names");
     }
+    validate_compiled_goal_scope()?;
     let expected = goal_fleet_repository_names();
     if observed != expected {
         let missing = expected.difference(&observed).copied().collect::<Vec<_>>();
@@ -556,7 +603,7 @@ fn generated_class_equality_findings(
 
 pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
     let canonical_classes = if args.estate.is_some() || args.repository_name.is_some() {
-        canonical_fleet_map(&args.repo_path)?
+        canonical_fleet_map()?
     } else {
         BTreeMap::new()
     };
@@ -575,21 +622,14 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
     } else {
         None
     };
+    let estate_plan_digests = estate.as_ref().map(validate_estate_plan).transpose()?;
     let mut estate_results = BTreeMap::new();
     let mut generated_samples = Vec::new();
     let mut all = BTreeMap::new();
     if let Some(estate) = &estate {
-        if estate.version != 2 {
-            bail!(
-                "unsupported estate manifest version {} (expected 2)",
-                estate.version
-            );
-        }
-        validate_estate_scope(estate, &canonical_classes)?;
         let accepted_auxiliary = accepted_auxiliary
             .as_ref()
             .context("estate audit has no accepted auxiliary contract")?;
-        validate_auxiliary_contract_binding(estate, accepted_auxiliary)?;
         if args.offline {
             bail!("estate audit cannot skip delivered-default freshness checks");
         }
@@ -751,7 +791,17 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&EstateAuditOutput {
-                    schema_version: "velnor.audit-ci.estate.v2",
+                    schema_version: "velnor.audit-ci.estate.v3",
+                    scope_sha256: estate_plan_digests
+                        .as_ref()
+                        .context("validated estate plan has no digests")?
+                        .scope_sha256
+                        .clone(),
+                    plan_sha256: estate_plan_digests
+                        .as_ref()
+                        .context("validated estate plan has no digests")?
+                        .plan_sha256
+                        .clone(),
                     repositories: estate_results,
                 })?
             );
@@ -759,6 +809,12 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&all)?);
         }
     } else {
+        if let Some(digests) = &estate_plan_digests {
+            println!(
+                "audit-ci: estate scope sha256 {}; plan sha256 {}",
+                digests.scope_sha256, digests.plan_sha256
+            );
+        }
         for (repo, result) in &estate_results {
             println!(
                 "audit-ci: {repo} ({} {}; class {}; ci sha256 {})",
@@ -796,22 +852,9 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
     Ok(())
 }
 
-fn validate_estate_scope(
-    estate: &EstateManifest,
-    canonical_classes: &BTreeMap<String, GeneratedCallerClass>,
-) -> Result<()> {
+fn validate_estate_scope(estate: &EstateManifest) -> Result<()> {
     validate_estate_scope_metadata(&estate.scope)?;
     validate_fixed_repository_scope("estate manifest", &estate.repositories)?;
-    let canonical_repositories = canonical_classes
-        .keys()
-        .cloned()
-        .map(|name| EstateRepository {
-            name,
-            path: None,
-            concerns: BTreeMap::new(),
-        })
-        .collect::<Vec<_>>();
-    validate_fixed_repository_scope("canonical fleet map", &canonical_repositories)?;
     Ok(())
 }
 
@@ -3483,7 +3526,7 @@ mod tests {
             authority: ESTATE_SCOPE_AUTHORITY.to_string(),
             authority_section: ESTATE_SCOPE_AUTHORITY_SECTION.to_string(),
             expected_repository_count: GOAL_FLEET_REPOSITORIES.len(),
-            contract_sha256: ACCEPTED_AUXILIARY_CONTRACT_SHA256.to_string(),
+            contract_sha256: ESTATE_PLAN_SHA256.to_string(),
         }
     }
 
@@ -3503,13 +3546,6 @@ mod tests {
         }
     }
 
-    fn canonical_goal_classes() -> BTreeMap<String, GeneratedCallerClass> {
-        GOAL_FLEET_REPOSITORIES
-            .into_iter()
-            .map(|name| (name.to_string(), generated_class_for_repository(name)))
-            .collect()
-    }
-
     #[test]
     fn fixed_scope_rejects_wrong_repository_substitution() {
         let mut names = GOAL_FLEET_REPOSITORIES
@@ -3518,7 +3554,7 @@ mod tests {
             .collect::<Vec<_>>();
         names[0] = "tailrocks/not-in-fixed-goal".to_string();
 
-        let error = validate_estate_scope(&scope_manifest(names), &canonical_goal_classes())
+        let error = validate_estate_scope(&scope_manifest(names))
             .unwrap_err()
             .to_string();
 
@@ -3533,7 +3569,7 @@ mod tests {
             .map(|name| (*name).to_string())
             .collect();
 
-        let error = validate_estate_scope(&scope_manifest(names), &canonical_goal_classes())
+        let error = validate_estate_scope(&scope_manifest(names))
             .unwrap_err()
             .to_string();
 
@@ -3552,7 +3588,7 @@ mod tests {
             .collect::<Vec<_>>();
         names.push(names[0].clone());
 
-        let error = validate_estate_scope(&scope_manifest(names), &canonical_goal_classes())
+        let error = validate_estate_scope(&scope_manifest(names))
             .unwrap_err()
             .to_string();
 
@@ -3567,12 +3603,107 @@ mod tests {
             .collect::<Vec<_>>();
         names.push("tailrocks/out-of-scope".to_string());
 
-        let error = validate_estate_scope(&scope_manifest(names), &canonical_goal_classes())
+        let error = validate_estate_scope(&scope_manifest(names))
             .unwrap_err()
             .to_string();
 
         assert!(error.contains("observed 33"), "{error}");
         assert!(error.contains("tailrocks/out-of-scope"), "{error}");
+    }
+
+    #[test]
+    fn fixed_scope_rejects_repository_alias_without_normalizing_it() {
+        let mut names = GOAL_FLEET_REPOSITORIES
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        names[0] = "Tailrocks/velnor".to_string();
+
+        let error = validate_estate_scope(&scope_manifest(names))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("tailrocks/velnor"), "{error}");
+        assert!(error.contains("Tailrocks/velnor"), "{error}");
+    }
+
+    #[test]
+    fn compiled_fixed_scope_has_no_duplicate_names() {
+        assert_eq!(
+            goal_fleet_repository_names().len(),
+            GOAL_FLEET_REPOSITORIES.len()
+        );
+        assert_eq!(
+            canonical_fleet_map().unwrap().len(),
+            GOAL_FLEET_REPOSITORIES.len()
+        );
+        assert_eq!(goal_fleet_scope_sha256(), GOAL_SCOPE_SHA256);
+    }
+
+    #[test]
+    fn auxiliary_plan_digest_is_stable_across_row_order_and_checkout_paths() {
+        let mut estate = reviewed_auxiliary_manifest();
+        let digest = estate_plan_sha256(&estate).unwrap();
+        estate.repositories.reverse();
+        estate.repositories[0].path = Some(PathBuf::from("/different/checkout"));
+
+        assert_eq!(estate_plan_sha256(&estate).unwrap(), digest);
+    }
+
+    #[test]
+    fn omitted_or_out_of_scope_auxiliary_repository_rows_fail_closed() {
+        let mut missing = reviewed_auxiliary_manifest();
+        missing.repositories.pop();
+        let missing_error = validate_estate_scope(&missing).unwrap_err().to_string();
+        assert!(missing_error.contains("scope mismatch"), "{missing_error}");
+
+        let mut extra = reviewed_auxiliary_manifest();
+        extra.repositories.push(EstateRepository {
+            name: "tailrocks/out-of-scope".to_string(),
+            path: None,
+            concerns: BTreeMap::new(),
+        });
+        let extra_error = validate_estate_scope(&extra).unwrap_err().to_string();
+        assert!(
+            extra_error.contains("tailrocks/out-of-scope"),
+            "{extra_error}"
+        );
+    }
+
+    #[test]
+    fn omitted_or_extra_auxiliary_concern_rows_fail_digest_validation() {
+        let mut omitted = reviewed_auxiliary_manifest();
+        omitted.defaults.remove("docker-build");
+        let omitted_error = validate_estate_plan(&omitted).unwrap_err().to_string();
+        assert!(omitted_error.contains("digest mismatch"), "{omitted_error}");
+
+        let mut extra = reviewed_auxiliary_manifest();
+        extra.defaults.insert(
+            "caller-added".to_string(),
+            ConcernContract {
+                classification: ConcernClassification::NonApplicable,
+                evidence: "caller override".to_string(),
+                implementations: Vec::new(),
+            },
+        );
+        let extra_error = validate_estate_plan(&extra).unwrap_err().to_string();
+        assert!(extra_error.contains("digest mismatch"), "{extra_error}");
+    }
+
+    #[test]
+    fn estate_audit_output_carries_validated_scope_and_plan_digests() {
+        let estate = reviewed_auxiliary_manifest();
+        let digests = validate_estate_plan(&estate).unwrap();
+        let output = EstateAuditOutput {
+            schema_version: "velnor.audit-ci.estate.v3",
+            scope_sha256: digests.scope_sha256.clone(),
+            plan_sha256: digests.plan_sha256.clone(),
+            repositories: BTreeMap::new(),
+        };
+        let serialized = serde_json::to_value(output).unwrap();
+
+        assert_eq!(serialized["scope_sha256"], digests.scope_sha256);
+        assert_eq!(serialized["plan_sha256"], digests.plan_sha256);
     }
 
     #[test]
@@ -4362,7 +4493,7 @@ jobs:
     #[test]
     fn estate_manifest_parses_classified_repository() {
         let manifest: EstateManifest = serde_json::from_str(
-            r#"{"version":2,"scope":{"role":"auxiliary-concern-projection","authority":"velnor-github-first-dual-lane-goal.md","authority_section":"2. Fixed repository manifest","expected_repository_count":32,"contract_sha256":"34e4f06de9d5b7c88549328c9365feae3b8927844f3645922883f15a4a8a00b0"},"defaults":{},"repositories":[{"name":"one","path":"/one","concerns":{}}]}"#,
+            r#"{"version":2,"scope":{"role":"auxiliary-concern-projection","authority":"velnor-github-first-dual-lane-goal.md","authority_section":"2. Fixed repository manifest","expected_repository_count":32,"contract_sha256":"fe764409c774a54b77f89191f30d2cd854b33b908c3d34b8fc4fa5a90a90edae"},"defaults":{},"repositories":[{"name":"one","path":"/one","concerns":{}}]}"#,
         )
         .unwrap();
         assert_eq!(manifest.repositories.len(), 1);
@@ -4372,7 +4503,7 @@ jobs:
     #[test]
     fn estate_manifest_rejects_unknown_admission_fields() {
         let error = serde_json::from_str::<EstateManifest>(
-            r#"{"version":2,"scope":{"role":"auxiliary-concern-projection","authority":"velnor-github-first-dual-lane-goal.md","authority_section":"2. Fixed repository manifest","expected_repository_count":32,"contract_sha256":"34e4f06de9d5b7c88549328c9365feae3b8927844f3645922883f15a4a8a00b0"},"defaults":{},"repositories":[],"hostile":"ignored?"}"#,
+            r#"{"version":2,"scope":{"role":"auxiliary-concern-projection","authority":"velnor-github-first-dual-lane-goal.md","authority_section":"2. Fixed repository manifest","expected_repository_count":32,"contract_sha256":"fe764409c774a54b77f89191f30d2cd854b33b908c3d34b8fc4fa5a90a90edae"},"defaults":{},"repositories":[],"hostile":"ignored?"}"#,
         )
         .unwrap_err()
         .to_string();
@@ -4402,17 +4533,8 @@ jobs:
             },
         );
 
-        let error = validate_auxiliary_contract_binding(&hostile, &accepted)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("auxiliary contract digest mismatch"),
-            "{error}"
-        );
-        assert!(
-            error.contains("cannot downgrade required concerns"),
-            "{error}"
-        );
+        let error = validate_estate_plan(&hostile).unwrap_err().to_string();
+        assert!(error.contains("plan digest mismatch"), "{error}");
     }
 
     #[test]
@@ -4426,14 +4548,43 @@ jobs:
             .evidence
             .push_str(" hostile drift");
 
-        let accepted_digest = auxiliary_contract_digest(&accepted).unwrap();
-        let drifted_digest = auxiliary_contract_digest(&drifted).unwrap();
-        assert_eq!(accepted_digest, ACCEPTED_AUXILIARY_CONTRACT_SHA256);
+        let accepted_digest = estate_plan_sha256(&accepted).unwrap();
+        let drifted_digest = estate_plan_sha256(&drifted).unwrap();
+        assert_eq!(accepted_digest, ESTATE_PLAN_SHA256);
         assert_ne!(drifted_digest, accepted_digest);
-        let error = validate_accepted_auxiliary_contract(&drifted, "drifted source")
-            .unwrap_err()
-            .to_string();
+        let error = validate_estate_plan(&drifted).unwrap_err().to_string();
         assert!(error.contains("digest mismatch"), "{error}");
+    }
+
+    #[test]
+    fn caller_cannot_remove_required_repository_markers() {
+        let mut hostile = reviewed_auxiliary_manifest();
+        let checkout = hostile
+            .repositories
+            .iter_mut()
+            .find(|repository| repository.name == "jackin-project/jackin")
+            .unwrap()
+            .concerns
+            .get_mut("checkout")
+            .unwrap();
+        for implementation in &mut checkout.implementations {
+            implementation.canonical_markers.clear();
+        }
+
+        let error = validate_estate_plan(&hostile).unwrap_err().to_string();
+        assert!(error.contains("plan digest mismatch"), "{error}");
+    }
+
+    #[test]
+    fn caller_cannot_downgrade_default_lane_plan() {
+        let mut hostile = reviewed_auxiliary_manifest();
+        let lane_selection = hostile.defaults.get_mut("lane-selection").unwrap();
+        lane_selection.classification = ConcernClassification::NonApplicable;
+        lane_selection.evidence = "hostile caller rewrite".to_string();
+        lane_selection.implementations.clear();
+
+        let error = validate_estate_plan(&hostile).unwrap_err().to_string();
+        assert!(error.contains("plan digest mismatch"), "{error}");
     }
 
     #[test]
