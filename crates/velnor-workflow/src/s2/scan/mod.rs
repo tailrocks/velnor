@@ -34,13 +34,28 @@ use crate::s2::{
 ///
 /// # Errors
 /// Returns filesystem errors with the affected path.
+#[cfg(test)]
 pub(crate) fn scan_shape(
     root: &Path,
     providers: &ProviderSet,
     default_branch: &str,
     exclude: &[String],
 ) -> Result<RepositoryShape, GeneratorError> {
-    let files = file_walk::repository_files(root, exclude)?;
+    scan_shape_with_owned(root, providers, default_branch, exclude, &[])
+}
+
+/// Run the detector pipeline with the repository's declared generator-owned
+/// output paths. Header-marked generated files are filtered by the file walk;
+/// this explicit set covers verbatim static outputs, whose body intentionally
+/// remains the repository source without a generated header.
+pub(crate) fn scan_shape_with_owned(
+    root: &Path,
+    providers: &ProviderSet,
+    default_branch: &str,
+    exclude: &[String],
+    generator_owned: &[String],
+) -> Result<RepositoryShape, GeneratorError> {
+    let files = file_walk::repository_files_with_owned(root, exclude, generator_owned)?;
     let file_set: BTreeSet<String> = files.iter().cloned().collect();
     let context = ScanContext {
         root,
