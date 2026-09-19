@@ -2983,8 +2983,11 @@ fn validate_unit_capabilities(config: &ProjectConfig) -> Result<(), GeneratorErr
 /// accepted only through the verified host-offer table; provider selectors do
 /// not turn a Linux label into an Apple capability.
 fn validate_native_host_contract(config: &mut ProjectConfig) -> Result<(), GeneratorError> {
-    let offer = crate::native_contract::hosted_apple_offer(MACOS_HOSTED_RUNS_ON)
-        .expect("MACOS_HOSTED_RUNS_ON must remain a verified host offer");
+    let Some(offer) = crate::native_contract::hosted_apple_offer(MACOS_HOSTED_RUNS_ON) else {
+        return Err(GeneratorError::usage(format!(
+            "native hosted selector {MACOS_HOSTED_RUNS_ON} has no verified Apple capability offer; update the generator's verified hosted image table"
+        )));
+    };
     let hosted_enabled = config
         .providers
         .contains(&provider::ProviderId::GithubHosted);

@@ -4567,10 +4567,18 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 .iter()
                 .filter_map(|unit| unit.apple_native.as_ref())
                 .collect::<Vec<_>>();
-            if !contracts.is_empty() && contracts.iter().any(|contract| *contract != contracts[0]) {
-                return Err(disagreement("the Apple native host contract"));
-            }
-            contracts.into_iter().next().cloned()
+            contracts
+                .into_iter()
+                .try_fold(
+                    None::<crate::native_contract::AppleNativeContract>,
+                    |merged, contract| {
+                        merged.map_or_else(
+                            || Ok(Some(contract.clone())),
+                            |left| left.merge(contract).map(Some),
+                        )
+                    },
+                )
+                .map_err(|_| disagreement("an incompatible Apple native host contract"))?
         };
         let gated = |block: String, coverage: FeatureCoverage, input: &str| -> String {
             prefix_step_block_with_if(&block, coverage.gate(input).as_deref())
