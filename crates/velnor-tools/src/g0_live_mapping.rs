@@ -798,13 +798,13 @@ fn map_check(
         );
     }
     let event = execution.event.clone();
-    if let Some(check_event) = &check.event {
-        if check_event != &event {
-            bail!(
-                "check {} event differs from workflow execution",
-                check.context
-            );
-        }
+    if let Some(check_event) = &check.event
+        && check_event != &event
+    {
+        bail!(
+            "check {} event differs from workflow execution",
+            check.context
+        );
     }
     Ok(G0CheckProducer {
         context: check.context.clone(),

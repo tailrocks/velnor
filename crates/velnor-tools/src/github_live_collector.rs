@@ -713,7 +713,7 @@ where
         github_single_object_request(
             collection_id(&manifest.repository, &format!("{phase}-repository")),
             format!("/repos/{}", manifest.repository),
-            &format!("{phase}.repository"),
+            format!("{phase}.repository"),
         ),
     )
     .await?;
@@ -734,7 +734,7 @@ where
         github_single_object_request(
             collection_id(&manifest.repository, &format!("{phase}-default-commit")),
             format!("/repos/{}/commits/{default_branch}", manifest.repository),
-            &format!("{phase}.default_branch.commit"),
+            format!("{phase}.default_branch.commit"),
         ),
     )
     .await?;
