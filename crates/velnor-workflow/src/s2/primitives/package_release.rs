@@ -14,8 +14,9 @@ use std::path::Path;
 use super::{Args, Primitive, RenderCtx, Rendered, PACKAGE_RELEASE};
 use crate::s2::provider::ProviderId;
 use crate::s2::{
-    github_expression, selector_runs_on_yaml, shell_quote, workflow_runtime_setup, ActionPin,
-    GeneratorError, ProjectConfig, GENERATED_HEADER,
+    github_expression, selector_runs_on_yaml, shell_quote, workflow_runtime_setup,
+    workflow_runtime_setup_at_checkout_path, ActionPin, GeneratorError, ProjectConfig,
+    GENERATED_HEADER,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -788,6 +789,16 @@ fn render_workflow(
     } else {
         String::new()
     };
+    let publish_runtime_setup = if provider == ProviderId::GithubHosted {
+        workflow_runtime_setup_at_checkout_path(
+            ProviderId::GithubHosted,
+            &config.repository,
+            &config.workflow_revision,
+            "source",
+        )
+    } else {
+        String::new()
+    };
     let checkout = ActionPin::Checkout.reference();
     let upload = ActionPin::UploadArtifact.reference();
     let download = ActionPin::DownloadArtifact.reference();
@@ -916,7 +927,7 @@ fn render_workflow(
         checkout,
         download,
         &publish_verify,
-        &runtime_setup,
+        &publish_runtime_setup,
         mise,
         &spec.verify_tasks,
         &publish_attestation_targets,

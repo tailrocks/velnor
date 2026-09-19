@@ -5128,12 +5128,48 @@ fn workflow_runtime_setup(
     workflow_runtime_setup_with_install_rev(provider, repository, revision, revision)
 }
 
+/// Hosted runtime setup when the owner's composite action is inside a
+/// checkout at `checkout_path`. Consumers still resolve the immutable remote
+/// action; only the owner-local action path is rooted at the named checkout.
+pub(crate) fn workflow_runtime_setup_at_checkout_path(
+    provider: provider::ProviderId,
+    repository: &str,
+    revision: &str,
+    checkout_path: &str,
+) -> String {
+    workflow_runtime_setup_with_install_rev_at_checkout_path(
+        provider,
+        repository,
+        revision,
+        revision,
+        Some(checkout_path),
+    )
+}
+
 /// The `uses:` reference for `setup-velnor-workflow`: the owner's checkout
 /// (`./…`, no version) for the repository that ships the action, the
 /// published `revision` pin for every consumer.
 pub(crate) fn workflow_setup_action_uses(repository: &str, revision: &str) -> String {
+    workflow_setup_action_uses_at_checkout_path(repository, revision, None)
+}
+
+fn workflow_setup_action_uses_at_checkout_path(
+    repository: &str,
+    revision: &str,
+    checkout_path: Option<&str>,
+) -> String {
     if !repository.is_empty() && repository == workflow_setup_action_repository() {
-        VELNOR_WORKFLOW_LOCAL_SETUP_ACTION.to_owned()
+        checkout_path.map_or_else(
+            || VELNOR_WORKFLOW_LOCAL_SETUP_ACTION.to_owned(),
+            |path| {
+                format!(
+                    "./{path}/{}",
+                    VELNOR_WORKFLOW_LOCAL_SETUP_ACTION
+                        .strip_prefix("./")
+                        .unwrap_or(VELNOR_WORKFLOW_LOCAL_SETUP_ACTION)
+                )
+            },
+        )
     } else {
         format!("{VELNOR_WORKFLOW_SETUP_ACTION}@{revision}")
     }
@@ -5184,12 +5220,28 @@ fn workflow_runtime_setup_with_install_rev(
     revision: &str,
     install_rev: &str,
 ) -> String {
+    workflow_runtime_setup_with_install_rev_at_checkout_path(
+        provider,
+        repository,
+        revision,
+        install_rev,
+        None,
+    )
+}
+
+fn workflow_runtime_setup_with_install_rev_at_checkout_path(
+    provider: provider::ProviderId,
+    repository: &str,
+    revision: &str,
+    install_rev: &str,
+    checkout_path: Option<&str>,
+) -> String {
     if provider != provider::ProviderId::GithubHosted {
         return String::new();
     }
     format!(
         "      - name: Set up Velnor workflow runtime\n        id: runtime\n        uses: {}\n        with:\n          rev: {install_rev}\n      - name: Set trusted workflow policy revision\n        run: echo \"{VELNOR_POLICY_REVISION_ENV}={revision}\" >> \"$GITHUB_ENV\"\n",
-        workflow_setup_action_uses(repository, revision)
+        workflow_setup_action_uses_at_checkout_path(repository, revision, checkout_path)
     )
 }
 

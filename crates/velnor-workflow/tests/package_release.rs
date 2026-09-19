@@ -45,11 +45,15 @@ fn fixture_root(destination: &Path) -> PathBuf {
 }
 
 fn package_config(verify_task: &str) -> String {
+    package_config_for_repository("example/synthetic-release", verify_task)
+}
+
+fn package_config_for_repository(repository: &str, verify_task: &str) -> String {
     format!(
         r#"schema = 2
 
 [generator]
-repository = "example/synthetic-release"
+repository = "{repository}"
 
 [workflow]
 providers = ["github-hosted"]
@@ -69,7 +73,7 @@ build_tasks = ["build-release"]
 verify_tasks = ["{verify_task}"]
 package_dir = "dist"
 manifest_schema = "example.consumer-manifest-v1"
-source_repository = "example/synthetic-release"
+source_repository = "{repository}"
 source_ref = "refs/heads/main"
 payloads = ["a.tar.gz"]
 supporting_assets = ["SHA256SUMS"]
@@ -154,6 +158,42 @@ fn package_release_hook_renders_and_passes_policy() {
         "policy failed:\n{}{}",
         String::from_utf8_lossy(&policy.stdout),
         String::from_utf8_lossy(&policy.stderr)
+    );
+    let _ = fs::remove_dir_all(workspace);
+}
+
+#[test]
+fn package_release_owner_publish_uses_source_checkout_for_runtime_action() {
+    let workspace = temporary_root("owner-runtime");
+    let root = fixture_root(&workspace.join("repo"));
+    write_inputs(
+        &root,
+        &package_config_for_repository("tailrocks/velnor", "verify-release"),
+        true,
+    );
+    let generated = generate_in_place(&root);
+    assert!(
+        generated.status.success(),
+        "generation failed:\n{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+
+    let workflow = fs::read_to_string(root.join(".github/workflows/preview.yml")).unwrap();
+    let publish = workflow
+        .split_once("  publish:\n")
+        .map(|(_, job)| job)
+        .expect("publish job");
+    assert!(
+        publish.contains("uses: ./source/.github/actions/setup-velnor-workflow\n"),
+        "owner publish must resolve its action from the source checkout: {publish}"
+    );
+    assert!(
+        !publish.contains("uses: ./.github/actions/setup-velnor-workflow\n"),
+        "owner publish must not resolve its action from the empty workspace root: {publish}"
+    );
+    assert!(
+        publish.contains("rev: ") && !publish.contains("rev: ${{"),
+        "owner publish must retain a literal runtime pin: {publish}"
     );
     let _ = fs::remove_dir_all(workspace);
 }
