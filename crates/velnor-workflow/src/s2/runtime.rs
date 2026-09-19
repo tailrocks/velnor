@@ -3052,7 +3052,7 @@ fn collect_manifests(
 fn release(arguments: &[OsString]) -> Result<(), GeneratorError> {
     let Some(command) = arguments.first().and_then(|value| value.to_str()) else {
         return Err(GeneratorError::usage(
-            "usage: release verify-tag | release package-binary | release package-deb | release package-guest | release verify-feed | release update-feed | release verify-digests | release resolve-mode | release resolve-source | release admit-producer | release assemble-manifest",
+            "usage: release verify-tag | release package-binary | release package-deb | release package-guest | release apt-fetch | release apt-verify | release apt-publish | release apt-previous-pointer | release apt-channel-update | release apt-deploy-guard | release verify-feed | release update-feed | release verify-digests | release resolve-mode | release resolve-source | release admit-producer | release assemble-manifest",
         ));
     };
     match command {
@@ -3060,6 +3060,12 @@ fn release(arguments: &[OsString]) -> Result<(), GeneratorError> {
         "package-binary" => package_binary(&arguments[1..]),
         "package-deb" => package_deb(&arguments[1..]),
         "package-guest" => package_guest(&arguments[1..]),
+        "apt-fetch" => apt_fetch(&arguments[1..]),
+        "apt-verify" => apt_verify(&arguments[1..]),
+        "apt-publish" => apt_publish(&arguments[1..]),
+        "apt-previous-pointer" => apt_previous_pointer(&arguments[1..]),
+        "apt-channel-update" => apt_channel_update(&arguments[1..]),
+        "apt-deploy-guard" => apt_deploy_guard(&arguments[1..]),
         "verify-feed" => verify_feed(&arguments[1..]),
         "update-feed" => update_feed(&arguments[1..]),
         "verify-digests" => verify_digests(&arguments[1..]),
@@ -3709,6 +3715,380 @@ fn valid_arch(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+}
+
+fn selection_context(
+    options: &BTreeMap<String, String>,
+    selection: &crate::apt::DiscoverySelection,
+) -> Result<crate::apt::Suite, GeneratorError> {
+    let suite = crate::apt::Suite::parse(required_option(options, "suite")?)?;
+    if selection.suite()? != suite {
+        return Err(GeneratorError::usage(
+            "APT suite differs from immutable discovery channel",
+        ));
+    }
+    for (name, expected) in [
+        ("source-repo", selection.source_repository.as_str()),
+        ("package", selection.package.as_str()),
+        ("version", selection.version.as_str()),
+        ("source-ref", selection.source_ref.as_str()),
+        ("release-tag", selection.release_tag.as_str()),
+        ("commit", selection.source_commit.as_str()),
+    ] {
+        if let Some(actual) = options.get(name)
+            && actual != expected
+        {
+            return Err(GeneratorError::usage(format!(
+                "--{name} differs from immutable discovery"
+            )));
+        }
+    }
+    Ok(suite)
+}
+
+fn parse_apt_arches(
+    options: &BTreeMap<String, String>,
+) -> Result<Vec<String>, GeneratorError> {
+    options
+        .get("apt-arches")
+        .map_or_else(
+            || Ok(Vec::new()),
+            |value| {
+                let arches = value
+                    .split(',')
+                    .filter(|arch| !arch.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                if arches.is_empty() {
+                    Err(GeneratorError::usage(
+                        "--apt-arches must contain at least one architecture",
+                    ))
+                } else {
+                    Ok(arches)
+                }
+            },
+        )
+}
+
+fn parse_retention(options: &BTreeMap<String, String>) -> Result<u32, GeneratorError> {
+    options
+        .get("retention")
+        .map_or(Ok(0), |value| {
+            value.parse::<u32>().map_err(|_| {
+                GeneratorError::usage("--retention must be a non-negative integer")
+            })
+        })
+}
+
+fn s2_apt_spec(
+    options: &BTreeMap<String, String>,
+    selection: &crate::apt::DiscoverySelection,
+) -> Result<crate::s2::ReleaseSpec, GeneratorError> {
+    let binary = required_option(options, "binary")?;
+    let consumer = required_option(options, "consumer-repo")?;
+    let manifest_schema = required_option(options, "manifest-schema")?;
+    let discovery_script = required_option(options, "discovery-script")?;
+    let canonical_asset = required_option(options, "canonical-manifest-asset")?;
+    let canonical_schema = required_option(options, "canonical-manifest-schema")?;
+    let signer = required_option(options, "signer")?;
+    let passphrase = required_option(options, "passphrase-env")?;
+    let signing_key = required_option(options, "key-env")?;
+    let keyring = required_option(options, "keyring")?;
+    let origin = required_option(options, "origin")?;
+    let identity = required_option(options, "identity-dir")?;
+    let feed_url = required_option(options, "feed-url")?;
+    let description = required_option(options, "description")?;
+    let mut spec = crate::s2::ReleaseSpec::default();
+    spec.kind = "apt".to_owned();
+    spec.package = selection.package.clone();
+    spec.binary = binary.to_owned();
+    spec.source_repository = selection.source_repository.clone();
+    spec.consumer_repository = consumer.to_owned();
+    spec.description = description.to_owned();
+    spec.manifest_schema = manifest_schema.to_owned();
+    spec.discovery_script = discovery_script.to_owned();
+    spec.canonical_manifest_asset = canonical_asset.to_owned();
+    spec.canonical_manifest_schema = canonical_schema.to_owned();
+    spec.apt_arches = parse_apt_arches(options)?;
+    spec.signer_fingerprint = signer.to_owned();
+    spec.passphrase_secret = passphrase.to_owned();
+    spec.signing_key_secret = signing_key.to_owned();
+    spec.keyring_path = keyring.to_owned();
+    spec.apt_origin = origin.to_owned();
+    spec.apt_identity_dir = identity.to_owned();
+    spec.apt_feed_url = feed_url.to_owned();
+    spec.retention = parse_retention(options)?;
+    Ok(spec)
+}
+
+fn selection_path(options: &BTreeMap<String, String>) -> Result<&Path, GeneratorError> {
+    Ok(Path::new(required_option(options, "selection")?))
+}
+
+fn assert_selection_contract(
+    selection: &crate::apt::DiscoverySelection,
+    spec: &crate::s2::ReleaseSpec,
+) -> Result<(), GeneratorError> {
+    if spec.source_repository != selection.source_repository
+        || spec.package != selection.package
+        || spec.canonical_manifest_asset != selection.manifest_asset
+        || spec.canonical_manifest_schema != selection.manifest_schema
+    {
+        return Err(GeneratorError::usage(
+            "typed APT contract differs from immutable discovery",
+        ));
+    }
+    Ok(())
+}
+
+fn apt_fetch(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["selection", "dir"])?;
+    let selection = crate::apt::run_fetch_selection(
+        selection_path(&options)?,
+        Path::new(required_option(&options, "dir")?),
+        None,
+    )?;
+    println!(
+        "fetched {} immutable release assets for {}",
+        selection.release_assets.len(),
+        selection.version
+    );
+    Ok(())
+}
+
+fn apt_verify(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "selection",
+            "suite",
+            "source-repo",
+            "package",
+            "binary",
+            "identity-dir",
+            "manifest-schema",
+            "version",
+            "source-ref",
+            "release-tag",
+            "incoming",
+            "commit",
+            "signer",
+            "expect-signer",
+            "verify-oci",
+        ],
+    )?;
+    let selection = crate::apt::read_discovery_selection(selection_path(&options)?)?;
+    let suite = selection_context(&options, &selection)?;
+    let incoming = Path::new(required_option(&options, "incoming")?);
+    crate::apt::verify_discovery_incoming(selection_path(&options)?, incoming)?;
+    let inputs = crate::apt::VerifyInputs {
+        suite,
+        source_repo: selection.source_repository.clone(),
+        package: selection.package.clone(),
+        binary: required_option(&options, "binary")?.to_owned(),
+        manifest_schema: required_option(&options, "manifest-schema")?.to_owned(),
+        identity_dir: required_option(&options, "identity-dir")?.to_owned(),
+        version: selection.apt_version()?,
+        commit: Some(selection.source_commit.clone()),
+        incoming,
+        signer_live: required_option(&options, "signer")?.to_owned(),
+        signer_pinned: required_option(&options, "expect-signer")?.to_owned(),
+        verify_oci: flag_bool(&options, "verify-oci")?,
+        backend: crate::apt::DebBackend::Auto,
+        path_overlay: None,
+    };
+    crate::apt::verify_suite(&inputs)?;
+    println!("{} feed inputs are coherent", inputs.suite.as_str());
+    Ok(())
+}
+
+fn apt_publish(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "selection",
+            "suite",
+            "source-repo",
+            "package",
+            "binary",
+            "consumer-repo",
+            "manifest-schema",
+            "discovery-script",
+            "canonical-manifest-asset",
+            "canonical-manifest-schema",
+            "apt-arches",
+            "signer",
+            "passphrase-env",
+            "key-env",
+            "keyring",
+            "origin",
+            "identity-dir",
+            "feed-url",
+            "description",
+            "retention",
+            "version",
+            "incoming",
+            "prev-dir",
+            "previous-pointer",
+            "staging",
+            "bootstrap",
+        ],
+    )?;
+    let selection_path = selection_path(&options)?;
+    let selection = crate::apt::read_discovery_selection(selection_path)?;
+    let suite = selection_context(&options, &selection)?;
+    let incoming = Path::new(required_option(&options, "incoming")?);
+    crate::apt::verify_discovery_incoming(selection_path, incoming)?;
+    let spec = s2_apt_spec(&options, &selection)?;
+    assert_selection_contract(&selection, &spec)?;
+    let contract = crate::apt::AptContract::resolve_s2(&spec)?;
+    let passphrase_env = required_option(&options, "passphrase-env")?.to_owned();
+    let passphrase = std::env::var(&passphrase_env).ok();
+    let key_env = required_option(&options, "key-env")?.to_owned();
+    let key_material = std::env::var(&key_env).ok();
+    let empty_prev;
+    let prev_dir = match options.get("prev-dir") {
+        Some(dir) if !dir.is_empty() => {
+            empty_prev = PathBuf::from(dir);
+            Some(empty_prev.as_path())
+        }
+        _ => None,
+    };
+    let inputs = crate::apt::PublishInputs {
+        suite,
+        contract,
+        version: selection.apt_version()?,
+        incoming,
+        prev_dir,
+        previous_pointer: Path::new(required_option(&options, "previous-pointer")?),
+        staging: Path::new(required_option(&options, "staging")?),
+        bootstrap: flag_bool(&options, "bootstrap")?,
+        passphrase_env,
+        passphrase,
+        key_env,
+        key_material,
+        backend: crate::apt::DebBackend::Auto,
+        path_overlay: None,
+        selection: Some(&selection),
+    };
+    crate::apt::publish_suite(&inputs)?;
+    println!("{} suite staged", inputs.suite.as_str());
+    Ok(())
+}
+
+fn apt_previous_pointer(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "selection",
+            "suite",
+            "published",
+            "prior",
+            "candidate",
+            "candidate-sha",
+            "bootstrap",
+        ],
+    )?;
+    let selection = crate::apt::read_discovery_selection(selection_path(&options)?)?;
+    let suite = selection_context(&options, &selection)?;
+    let bootstrap = flag_bool(&options, "bootstrap")?;
+    let pointer = match suite {
+        crate::apt::Suite::Stable => {
+            if bootstrap {
+                return Err(GeneratorError::usage(
+                    "previous pointer: bootstrap applies only to preview",
+                ));
+            }
+            let candidate = selection.apt_version()?;
+            if let Some(expected) = options.get("candidate")
+                && expected != &candidate
+            {
+                return Err(GeneratorError::usage(
+                    "previous pointer candidate differs from immutable discovery",
+                ));
+            }
+            let bytes = fs::read(required_option(&options, "published")?).map_err(|error| {
+                GeneratorError::io(
+                    "read published record",
+                    Path::new(required_option(&options, "published")?),
+                    &error,
+                )
+            })?;
+            let document: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+                GeneratorError::usage(format!("published record is not valid JSON: {error}"))
+            })?;
+            crate::apt::derive_previous_pointer(
+                &document,
+                required_option(&options, "prior")?,
+                &candidate,
+                required_option(&options, "candidate-sha")?,
+            )?
+        }
+        crate::apt::Suite::Preview => {
+            if bootstrap {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(crate::apt::PREVIEW_TAG.to_owned())
+            }
+        }
+    };
+    println!("{pointer}");
+    Ok(())
+}
+
+fn apt_channel_update(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "selection",
+            "suite",
+            "source-repo",
+            "source-ref",
+            "commit",
+            "version",
+            "package",
+            "incoming",
+            "manifest",
+            "staging",
+        ],
+    )?;
+    let selection_path = selection_path(&options)?;
+    let selection = crate::apt::read_discovery_selection(selection_path)?;
+    let suite = selection_context(&options, &selection)?;
+    let incoming = Path::new(required_option(&options, "incoming")?);
+    crate::apt::verify_discovery_incoming(selection_path, incoming)?;
+    let inputs = crate::apt::ChannelUpdateInputs {
+        suite,
+        source_repo: selection.source_repository.clone(),
+        source_ref: selection.source_ref.clone(),
+        commit: selection.source_commit.clone(),
+        version: selection.apt_version()?,
+        package: selection.package.clone(),
+        manifest: Path::new(required_option(&options, "manifest")?),
+        staging: Path::new(required_option(&options, "staging")?),
+    };
+    crate::apt::run_channel_update(&inputs)?;
+    crate::apt::bind_selection_channel_state(&selection, inputs.staging)?;
+    println!("{} channel state updated", inputs.suite.as_str());
+    Ok(())
+}
+
+fn apt_deploy_guard(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["suite", "staged", "live-version"])?;
+    let suite = crate::apt::Suite::parse(required_option(&options, "suite")?)?;
+    let staged = required_option(&options, "staged")?;
+    let staged_text = fs::read_to_string(Path::new(staged).join(suite.last_publish_file()))
+        .map_err(|error| {
+            GeneratorError::io("read staged last-publish", Path::new(staged), &error)
+        })?;
+    let live = required_option(&options, "live-version")?;
+    let live = match live.trim() {
+        "" | "unknown" => None,
+        version => Some(version),
+    };
+    crate::apt::check_deploy_guard(suite, &staged_text, live)?;
+    println!("{} deploy guard passed", suite.as_str());
+    Ok(())
 }
 
 fn verify_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {

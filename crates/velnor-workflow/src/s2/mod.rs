@@ -4633,7 +4633,7 @@ fn policy_candidate_step(revision: &str) -> String {
             # the diagnosis, on a match it is one line.
             if velnor-workflow --plain --check; then
               echo "pin $pin shares the base closure and renders the tree; the Stage-0 validator renders"
-              echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=" >> "$GITHUB_ENV"
+              echo "needed=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
             echo "pin $pin shares the base closure but the tree differs from its render; falling through to the candidate path"
@@ -4704,36 +4704,386 @@ fn policy_candidate_step(revision: &str) -> String {
           [[ "$actual" == "$expected" ]] || {{ echo "::error::candidate digest mismatch" >&2; exit 1; }}
           manifest_closure="$(jq -er .closure "$candidate/candidate-manifest.json")"
           [[ "$manifest_closure" == "$head_candidate" ]] || {{ echo "::error::candidate manifest closure $manifest_closure is not the head's candidate $head_candidate" >&2; exit 1; }}
-          echo "path=$candidate" >> "$GITHUB_OUTPUT"
-          echo "closure=$manifest_closure" >> "$GITHUB_OUTPUT"
-          echo "revision=$HEAD_SHA" >> "$GITHUB_OUTPUT"
-          echo "VELNOR_WORKFLOW_CANDIDATE_RUN_ID=$run_id" >> "$GITHUB_ENV"
-          echo "VELNOR_WORKFLOW_CANDIDATE_JOB_ID=candidate-bootstrap" >> "$GITHUB_ENV"
-          echo "{VELNOR_WORKFLOW_PINNED_BINARY_ENV}=$candidate/velnor-workflow" >> "$GITHUB_ENV"
-          echo "VELNOR_WORKFLOW_CANDIDATE_MANIFEST=$candidate/candidate-manifest.json" >> "$GITHUB_ENV"
-      - name: Probe candidate metadata in an isolated process
+          {{
+            echo "needed=true"
+            echo "path=$candidate"
+            echo "closure=$manifest_closure"
+            echo "revision=$HEAD_SHA"
+            echo "run=$run_id"
+          }} >> "$GITHUB_OUTPUT"
+      - name: Seal trusted candidate handoff
+        id: seal
+        if: steps.candidate.outputs.needed == 'true'
         working-directory: policy-checkout
         env:
           CANDIDATE_DIR: ${{{{ steps.candidate.outputs.path }}}}
           EXPECTED_CLOSURE: ${{{{ steps.candidate.outputs.closure }}}}
           EXPECTED_REVISION: ${{{{ steps.candidate.outputs.revision }}}}
+          PRODUCER_RUN: ${{{{ steps.candidate.outputs.run }}}}
         run: |
           set -euo pipefail
-          candidate="$CANDIDATE_DIR/velnor-workflow"
-          chmod 0755 "$candidate"
-          candidate_home="$RUNNER_TEMP/velnor-workflow-candidate-home"
-          rm -rf "$candidate_home"
-          mkdir -p "$candidate_home"
-          # Candidate bytes run only through a token/command-file-free env.
-          # The API/download shell above is a separate process boundary; no
-          # GitHub channel or credential is inherited by this probe.
-          reported="$(env -i HOME="$candidate_home" PATH="/usr/bin:/bin" "$candidate" --closure)"
-          [[ "$reported" == "$EXPECTED_CLOSURE" ]] || {{ echo "::error::candidate reports closure $reported, manifest claims $EXPECTED_CLOSURE" >&2; exit 1; }}
-          reported_revision="$(env -i HOME="$candidate_home" PATH="/usr/bin:/bin" "$candidate" --revision)"
-          [[ "$reported_revision" == "$EXPECTED_REVISION" ]] || {{ echo "::error::candidate reports revision $reported_revision, expected $EXPECTED_REVISION" >&2; exit 1; }}
+          handoff="$RUNNER_TEMP/velnor-workflow-candidate-handoff"
+          rm -rf "$handoff"
+          mkdir -p "$handoff"
+          install -m 0644 "$CANDIDATE_DIR/velnor-workflow" "$handoff/velnor-workflow"
+          install -m 0644 "$CANDIDATE_DIR/candidate-manifest.json" "$handoff/candidate-manifest.json"
+          git archive --format=tar HEAD > "$handoff/source.tar"
+          binary_sha256="$(sha256sum "$handoff/velnor-workflow" | awk '{{print $1}}')"
+          manifest_sha256="$(sha256sum "$handoff/candidate-manifest.json" | awk '{{print $1}}')"
+          source_sha256="$(sha256sum "$handoff/source.tar" | awk '{{print $1}}')"
+          handoff_digest="$(printf '%s\n' "$binary_sha256" "$manifest_sha256" "$source_sha256" | sha256sum | awk '{{print $1}}')"
+          jq -n \
+            --arg head "$EXPECTED_REVISION" \
+            --arg closure "$EXPECTED_CLOSURE" \
+            --arg run "$PRODUCER_RUN" \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg repository_id "$REPOSITORY_ID" \
+            --arg head_repository "$HEAD_REPOSITORY" \
+            --arg head_repository_id "$HEAD_REPOSITORY_ID" \
+            --arg binary_sha256 "$binary_sha256" \
+            --arg manifest_sha256 "$manifest_sha256" \
+            --arg source_sha256 "$source_sha256" \
+            '{{schema: 1, revision: $head, closure: $closure, run_id: $run, repository: $repository, repository_id: $repository_id, head_repository: $head_repository, head_repository_id: $head_repository_id, binary_sha256: $binary_sha256, manifest_sha256: $manifest_sha256, source_sha256: $source_sha256}}' \
+            > "$handoff/handoff.json"
+          echo "handoff_digest=$handoff_digest" >> "$GITHUB_OUTPUT"
+      - name: Publish trusted candidate handoff
+        id: handoff
+        if: steps.candidate.outputs.needed == 'true'
+        uses: {upload_artifact}
+        with:
+          name: velnor-workflow-candidate-handoff
+          path: ${{{{ runner.temp }}}}/velnor-workflow-candidate-handoff
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
 "#,
         pin_script = audited_pin_script(),
+        upload_artifact = ActionPin::UploadArtifact.reference(),
     )
+}
+
+/// Hosted owner policy trust split.
+fn hosted_owner_policy_jobs(
+    name: &str,
+    revision: &str,
+    runner: &str,
+    trusted_gate: &str,
+    default_branch: &str,
+    setup_checkout: &str,
+    validator: &str,
+    ruleset_step: &str,
+    actionlint_setup: &str,
+) -> String {
+    let acquire = String::from(
+        r#"  policy_acquire:
+    name: "__NAME__ / Acquire candidate"
+__TRUSTED_GATE__    runs-on: __RUNNER__
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      candidate_needed: ${{ steps.candidate.outputs.needed || 'false' }}
+      candidate_closure: ${{ steps.candidate.outputs.closure || '' }}
+      handoff_digest: ${{ steps.seal.outputs.handoff_digest || '' }}
+      handoff_artifact_id: ${{ steps.handoff.outputs['artifact-id'] || '' }}
+      handoff_artifact_digest: ${{ steps.handoff.outputs['artifact-digest'] || '' }}
+    steps:
+      - name: Checkout repository history
+        uses: __CHECKOUT__
+        with:
+          path: policy-checkout
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check out audited head
+        working-directory: policy-checkout
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+        run: |
+          set -euo pipefail
+          if ! git cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null; then
+            git fetch --no-tags "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$HEAD_SHA"
+          fi
+          git checkout --quiet --detach "$HEAD_SHA"
+__SETUP_CHECKOUT____VALIDATOR____CANDIDATE_STEPS__"#,
+    )
+    .replace("__NAME__", name)
+    .replace("__TRUSTED_GATE__", trusted_gate)
+    .replace("__RUNNER__", runner)
+    .replace("__CHECKOUT__", ActionPin::Checkout.reference())
+    .replace("__SETUP_CHECKOUT__", setup_checkout)
+    .replace("__VALIDATOR__", validator)
+    .replace("__CANDIDATE_STEPS__", &policy_candidate_step(revision))
+    .replace("$", "$");
+
+    let mut execute = String::from(
+        r#"  candidate_execute:
+    name: "Candidate execute (isolated)"
+    needs: policy_acquire
+    if: ${{ needs.policy_acquire.outputs.candidate_needed == 'true' }}
+    runs-on: __RUNNER__
+    timeout-minutes: 20
+    permissions:
+      actions: read
+    outputs:
+      render_digest: ${{ steps.execute.outputs.render_digest || '' }}
+      render_artifact_id: ${{ steps.render.outputs['artifact-id'] || '' }}
+      render_artifact_digest: ${{ steps.render.outputs['artifact-digest'] || '' }}
+    steps:
+      - name: Download trusted candidate handoff
+        uses: __DOWNLOAD__
+        with:
+          name: velnor-workflow-candidate-handoff
+          path: candidate-handoff
+      - name: Verify handoff and prepare disposable source
+        id: prepare
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          EXPECTED_REPOSITORY_ID: ${{ github.repository_id }}
+          EXPECTED_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          EXPECTED_HEAD_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
+          EXPECTED_CLOSURE: ${{ needs.policy_acquire.outputs.candidate_closure }}
+          EXPECTED_HANDOFF_DIGEST: ${{ needs.policy_acquire.outputs.handoff_digest }}
+        run: |
+          set -euo pipefail
+          handoff="$GITHUB_WORKSPACE/candidate-handoff"
+          work="$RUNNER_TEMP/velnor-candidate-execution"
+          rm -rf "$work"
+          mkdir -p "$work/source" "$work/render" "$work/commands" "$work/home"
+          test -f "$handoff/handoff.json"
+          test -f "$handoff/velnor-workflow"
+          test -f "$handoff/candidate-manifest.json"
+          test -f "$handoff/source.tar"
+          jq -e --arg head "$EXPECTED_HEAD" --arg closure "$EXPECTED_CLOSURE" --arg repo "$EXPECTED_REPOSITORY" --arg repo_id "$EXPECTED_REPOSITORY_ID" --arg head_repo "$EXPECTED_HEAD_REPOSITORY" --arg head_repo_id "$EXPECTED_HEAD_REPOSITORY_ID" '.schema == 1 and .revision == $head and .closure == $closure and .repository == $repo and .repository_id == $repo_id and .head_repository == $head_repo and .head_repository_id == $head_repo_id and (.run_id | test("^[0-9]+$")) and (.binary_sha256 | test("^[0-9a-f]{64}$")) and (.manifest_sha256 | test("^[0-9a-f]{64}$")) and (.source_sha256 | test("^[0-9a-f]{64}$"))' "$handoff/handoff.json" >/dev/null
+          manifest_sha256="$(sha256sum "$handoff/candidate-manifest.json" | awk '{print $1}')"
+          binary_sha256="$(sha256sum "$handoff/velnor-workflow" | awk '{print $1}')"
+          source_sha256="$(sha256sum "$handoff/source.tar" | awk '{print $1}')"
+          expected_manifest_sha256="$(jq -er .manifest_sha256 "$handoff/handoff.json")"
+          expected_binary_sha256="$(jq -er .binary_sha256 "$handoff/handoff.json")"
+          expected_source_sha256="$(jq -er .source_sha256 "$handoff/handoff.json")"
+          [[ "$manifest_sha256" == "$expected_manifest_sha256" ]]
+          [[ "$binary_sha256" == "$expected_binary_sha256" ]]
+          [[ "$source_sha256" == "$expected_source_sha256" ]]
+          handoff_digest="$(printf '%s\n' "$binary_sha256" "$manifest_sha256" "$source_sha256" | sha256sum | awk '{print $1}')"
+          [[ "$handoff_digest" == "$EXPECTED_HANDOFF_DIGEST" ]]
+          jq -e --arg head "$EXPECTED_HEAD" --arg closure "$EXPECTED_CLOSURE" --arg repo "$EXPECTED_REPOSITORY" --arg repo_id "$EXPECTED_REPOSITORY_ID" --arg head_repo "$EXPECTED_HEAD_REPOSITORY" --arg head_repo_id "$EXPECTED_HEAD_REPOSITORY_ID" --arg run "$(jq -er .run_id "$handoff/handoff.json")" '.revision == $head and .build_revision == $head and .closure == $closure and .repository == $repo and .repository_id == $repo_id and .head_repository == $head_repo and .head_repository_id == $head_repo_id and .run_id == $run and .job_id == "candidate-bootstrap" and .profile == "debug" and .features == "tui"' "$handoff/candidate-manifest.json" >/dev/null
+          if tar -tf "$handoff/source.tar" | grep -E '(^/|(^|/)\.\.(/|$))' >/dev/null; then
+            echo "::error::candidate source archive contains traversal" >&2
+            exit 1
+          fi
+          tar -xf "$handoff/source.tar" -C "$work/source"
+          {
+            printf 'source=%s\n' "$work/source"
+            printf 'work=%s\n' "$work"
+          } >> "$GITHUB_OUTPUT"
+"#,
+    )
+    .replace("$", "$")
+    .replace("__RUNNER__", runner)
+    .replace("__DOWNLOAD__", ActionPin::DownloadArtifact.reference());
+    execute.push_str(
+        &String::from(
+            r#"      - name: Execute candidate with inert channels
+        id: execute
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          EXPECTED_CLOSURE: ${{ needs.policy_acquire.outputs.candidate_closure }}
+          CANDIDATE_SOURCE: ${{ steps.prepare.outputs.source }}
+          CANDIDATE_WORK: ${{ steps.prepare.outputs.work }}
+        run: |
+          set -euo pipefail
+          trusted_output="$GITHUB_OUTPUT"
+          candidate="$GITHUB_WORKSPACE/candidate-handoff/velnor-workflow"
+          render="$CANDIDATE_WORK/render"
+          sinks="$CANDIDATE_WORK/commands"
+          mkdir -p "$render" "$sinks"
+          : > "$sinks/env"
+          : > "$sinks/path"
+          : > "$sinks/output"
+          : > "$sinks/state"
+          : > "$sinks/summary"
+          unset GH_TOKEN GITHUB_TOKEN ACTIONS_RUNTIME_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN RUNNER_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AZURE_CLIENT_SECRET GOOGLE_APPLICATION_CREDENTIALS NPM_TOKEN CARGO_REGISTRIES_CRATES_IO_TOKEN || true
+          network_prefix=()
+          if command -v unshare >/dev/null 2>&1 && unshare --net true >/dev/null 2>&1; then network_prefix=(unshare --net); fi
+          "${network_prefix[@]}" /usr/bin/env -i HOME="$CANDIDATE_WORK/home" PATH="/usr/bin:/bin" SOURCE_HEAD_SHA="$EXPECTED_HEAD" SOURCE_REPOSITORY="$EXPECTED_REPOSITORY" SOURCE_CLOSURE="$EXPECTED_CLOSURE" GITHUB_ENV="$sinks/env" GITHUB_PATH="$sinks/path" GITHUB_OUTPUT="$sinks/output" GITHUB_STATE="$sinks/state" GITHUB_STEP_SUMMARY="$sinks/summary" GH_TOKEN="" GITHUB_TOKEN="" ACTIONS_RUNTIME_TOKEN="" ACTIONS_ID_TOKEN_REQUEST_TOKEN="" RUNNER_TOKEN="" "$candidate" "$CANDIDATE_SOURCE" --output "$render" --plain --force --default-branch "__DEFAULT_BRANCH__"
+          jq -n --arg head "$EXPECTED_HEAD" --arg repository "$EXPECTED_REPOSITORY" --arg closure "$EXPECTED_CLOSURE" --arg run "$GITHUB_RUN_ID" --arg job "$GITHUB_JOB" '{schema: 1, revision: $head, repository: $repository, closure: $closure, run_id: $run, job_id: $job}' > "$render/render-metadata.json"
+          render_digest="$(find "$render" -type f -print | LC_ALL=C sort | while IFS= read -r file; do sha256sum "$file"; done | sha256sum | awk '{print $1}')"
+          printf 'render_digest=%s\n' "$render_digest" >> "$trusted_output"
+"#,
+        )
+        .replace("$", "$")
+        .replace("__DEFAULT_BRANCH__", default_branch),
+    );
+    execute.push_str(
+        &String::from(
+            r#"      - name: Publish untrusted candidate render
+        id: render
+        uses: __UPLOAD__
+        with:
+          name: velnor-workflow-candidate-render
+          path: __DOLLAR__{{ runner.temp }}/velnor-candidate-execution/render
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+"#,
+        )
+        .replace("__DOLLAR__", "$")
+        .replace("__UPLOAD__", ActionPin::UploadArtifact.reference()),
+    );
+    let mut verify = String::from(
+        r#"  policy:
+    name: __NAME__
+    needs: [policy_acquire, candidate_execute]
+    if: ${{ always() && needs.policy_acquire.result == 'success' && (needs.policy_acquire.outputs.candidate_needed != 'true' || needs.candidate_execute.result == 'success') }}
+__TRUSTED_GATE__    runs-on: __RUNNER__
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout repository history
+        uses: __CHECKOUT__
+        with:
+          path: policy-checkout
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check out audited head
+        working-directory: policy-checkout
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+        run: |
+          set -euo pipefail
+          if ! git cat-file -e "$HEAD_SHA^{commit}" 2>/dev/null; then
+            git fetch --no-tags "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$HEAD_SHA"
+          fi
+          git checkout --quiet --detach "$HEAD_SHA"
+__SETUP_CHECKOUT____VALIDATOR__      - name: Download trusted candidate handoff
+        if: ${{ needs.policy_acquire.outputs.candidate_needed == 'true' }}
+        uses: __DOWNLOAD__
+        with:
+          name: velnor-workflow-candidate-handoff
+          path: candidate-handoff
+      - name: Download candidate render
+        if: ${{ needs.policy_acquire.outputs.candidate_needed == 'true' }}
+        uses: __DOWNLOAD__
+        with:
+          name: velnor-workflow-candidate-render
+          path: candidate-render
+"#,
+    )
+    .replace("$", "$")
+    .replace("__NAME__", name)
+    .replace("__TRUSTED_GATE__", trusted_gate)
+    .replace("__RUNNER__", runner)
+    .replace("__CHECKOUT__", ActionPin::Checkout.reference())
+    .replace("__DOWNLOAD__", ActionPin::DownloadArtifact.reference())
+    .replace("__SETUP_CHECKOUT__", setup_checkout)
+    .replace("__VALIDATOR__", validator);
+    verify.push_str(
+        &String::from(
+            r#"      - name: Verify trusted handoff and untrusted render
+        if: ${{ needs.policy_acquire.outputs.candidate_needed == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          EXPECTED_REPOSITORY_ID: ${{ github.repository_id }}
+          EXPECTED_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          EXPECTED_HEAD_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
+          EXPECTED_CLOSURE: ${{ needs.policy_acquire.outputs.candidate_closure }}
+          EXPECTED_HANDOFF_DIGEST: ${{ needs.policy_acquire.outputs.handoff_digest }}
+          HANDOFF_ARTIFACT_ID: ${{ needs.policy_acquire.outputs.handoff_artifact_id }}
+          HANDOFF_ARTIFACT_DIGEST: ${{ needs.policy_acquire.outputs.handoff_artifact_digest }}
+          RENDER_ARTIFACT_ID: ${{ needs.candidate_execute.outputs.render_artifact_id }}
+          RENDER_ARTIFACT_DIGEST: ${{ needs.candidate_execute.outputs.render_artifact_digest }}
+          EXPECTED_RENDER_DIGEST: ${{ needs.candidate_execute.outputs.render_digest }}
+        run: |
+          set -euo pipefail
+          test "$HANDOFF_ARTIFACT_ID" != ""
+          test "$RENDER_ARTIFACT_ID" != ""
+          artifacts="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100")"
+          jq -e --arg id "$HANDOFF_ARTIFACT_ID" --arg digest "$HANDOFF_ARTIFACT_DIGEST" '[.artifacts[] | select(.name == "velnor-workflow-candidate-handoff" and (.id | tostring) == $id and .expired == false and ($digest == "" or .digest == $digest))] | length == 1' <<<"$artifacts" >/dev/null
+          jq -e --arg id "$RENDER_ARTIFACT_ID" --arg digest "$RENDER_ARTIFACT_DIGEST" '[.artifacts[] | select(.name == "velnor-workflow-candidate-render" and (.id | tostring) == $id and .expired == false and ($digest == "" or .digest == $digest))] | length == 1' <<<"$artifacts" >/dev/null
+          handoff="$GITHUB_WORKSPACE/candidate-handoff"
+          jq -e --arg head "$EXPECTED_HEAD" --arg closure "$EXPECTED_CLOSURE" --arg repo "$EXPECTED_REPOSITORY" --arg repo_id "$EXPECTED_REPOSITORY_ID" --arg head_repo "$EXPECTED_HEAD_REPOSITORY" --arg head_repo_id "$EXPECTED_HEAD_REPOSITORY_ID" '.schema == 1 and .revision == $head and .closure == $closure and .repository == $repo and .repository_id == $repo_id and .head_repository == $head_repo and .head_repository_id == $head_repo_id' "$handoff/handoff.json" >/dev/null
+          manifest_sha256="$(sha256sum "$handoff/candidate-manifest.json" | awk '{print $1}')"
+          binary_sha256="$(sha256sum "$handoff/velnor-workflow" | awk '{print $1}')"
+          source_sha256="$(sha256sum "$handoff/source.tar" | awk '{print $1}')"
+          [[ "$manifest_sha256" == "$(jq -er .manifest_sha256 "$handoff/handoff.json")" ]]
+          [[ "$binary_sha256" == "$(jq -er .binary_sha256 "$handoff/handoff.json")" ]]
+          [[ "$source_sha256" == "$(jq -er .source_sha256 "$handoff/handoff.json")" ]]
+          handoff_digest="$(printf '%s\n' "$binary_sha256" "$manifest_sha256" "$source_sha256" | sha256sum | awk '{print $1}')"
+          [[ "$handoff_digest" == "$EXPECTED_HANDOFF_DIGEST" ]]
+          trusted_source="$RUNNER_TEMP/trusted-source"
+          handoff_source="$RUNNER_TEMP/handoff-source"
+          rm -rf "$trusted_source" "$handoff_source"
+          mkdir -p "$trusted_source" "$handoff_source"
+          git -C policy-checkout archive --format=tar HEAD | tar -xf - -C "$trusted_source"
+          if tar -tf "$handoff/source.tar" | grep -E '(^/|(^|/)\.\.(/|$))' >/dev/null; then
+            echo "::error::trusted source archive contains traversal" >&2
+            exit 1
+          fi
+          tar -xf "$handoff/source.tar" -C "$handoff_source"
+          diff -ruN --no-dereference "$trusted_source" "$handoff_source"
+          if find "$GITHUB_WORKSPACE/candidate-render" -type l -print -quit | grep -q .; then
+            echo "::error::candidate render contains symlink" >&2
+            exit 1
+          fi
+          render_digest="$(find "$GITHUB_WORKSPACE/candidate-render" -type f -print | LC_ALL=C sort | while IFS= read -r file; do sha256sum "$file"; done | sha256sum | awk '{print $1}')"
+          [[ "$render_digest" == "$EXPECTED_RENDER_DIGEST" ]]
+          jq -e --arg head "$EXPECTED_HEAD" --arg closure "$EXPECTED_CLOSURE" --arg run "$GITHUB_RUN_ID" --arg job "candidate_execute" '.schema == 1 and .revision == $head and .closure == $closure and .run_id == $run and .job_id == $job' "$GITHUB_WORKSPACE/candidate-render/render-metadata.json" >/dev/null
+__RULESET_STEP__      - name: Enforce workflow policy
+        env:
+          WORKFLOW_ROOT: __DOLLAR__{{ github.workspace }}/policy-checkout
+          HEAD_SHA: __DOLLAR__{{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: __DOLLAR__{{ github.event.pull_request.base.sha || github.sha }}
+          __POLICY_ENV__: __REVISION__
+          CANDIDATE_NEEDED: __DOLLAR__{{ needs.policy_acquire.outputs.candidate_needed }}
+        run: |
+          set -euo pipefail
+          if [[ "$CANDIDATE_NEEDED" == "true" ]]; then
+            velnor-workflow policy \
+              --workflow-root "$WORKFLOW_ROOT" \
+              --head-sha "$HEAD_SHA" \
+              --base-sha "$BASE_SHA" \
+              --candidate-manifest "" \
+              --candidate-render "$GITHUB_WORKSPACE/candidate-render" \
+              --ruleset-contexts "$RULESET_CONTEXTS"
+          else
+            velnor-workflow policy \
+              --workflow-root "$WORKFLOW_ROOT" \
+              --head-sha "$HEAD_SHA" \
+              --base-sha "$BASE_SHA" \
+              --candidate-manifest "" \
+              --ruleset-contexts "$RULESET_CONTEXTS"
+          fi
+__ACTIONLINT_SETUP__      - name: Lint caller workflows
+        working-directory: policy-checkout
+        env:
+          MISE_NO_CONFIG: "1"
+        run: mise exec actionlint@__ACTIONLINT_VERSION__ -- actionlint
+"#,
+        )
+        .replace("__DOLLAR__", "$")
+        .replace("__RULESET_STEP__", ruleset_step)
+        .replace("__POLICY_ENV__", VELNOR_POLICY_REVISION_ENV)
+        .replace("__REVISION__", revision)
+        .replace(
+            "__POLICY_ARGUMENTS__",
+            if ruleset_step.is_empty() {
+                ""
+            } else {
+                "            --ruleset-contexts \"$RULESET_CONTEXTS\"\n"
+            },
+        )
+        .replace("__ACTIONLINT_SETUP__", actionlint_setup)
+        .replace("__ACTIONLINT_VERSION__", ACTIONLINT_VERSION),
+    );
+    format!("{acquire}{execute}{verify}")
 }
 
 /// Consumer policy steps acquiring the audited tree's declared generator as
@@ -4846,6 +5196,19 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
     } else {
         String::new()
     };
+    if hosted && owner {
+        return hosted_owner_policy_jobs(
+            name,
+            revision,
+            runner,
+            trusted_gate,
+            default_branch,
+            &setup_checkout,
+            &validator,
+            &ruleset_step,
+            &actionlint_setup_step(cache_backend),
+        );
+    }
     let renderer = if hosted {
         if owner {
             policy_candidate_step(revision)

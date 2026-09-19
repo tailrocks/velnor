@@ -3059,6 +3059,7 @@ fn apt_verify(arguments: &[OsString]) -> Result<(), GeneratorError> {
         verify_oci: flag_bool(&options, "verify-oci")?,
         backend: crate::apt::DebBackend::Auto,
         path_overlay: None,
+        selection: None,
     };
     crate::apt::verify_suite(&inputs)?;
     println!("{} feed inputs are coherent", inputs.suite.as_str());

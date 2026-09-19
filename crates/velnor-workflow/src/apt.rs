@@ -36,6 +36,14 @@ pub(crate) const RELEASE_RECORD_SCHEMA: &str = "velnor.release-record/v1";
 pub(crate) const PUBLICATION_RECORD_SCHEMA: &str = "velnor.publication-record/v1";
 /// The channel-state schema channel updates emit.
 pub(crate) const PACKAGE_STATE_SCHEMA: &str = "velnor.apt-package-state.v1";
+/// The producer-owned application manifest schema consumed by every
+/// distribution projection.  This is deliberately distinct from the
+/// subordinate package-release schema carried by `ReleaseSpec::manifest_schema`.
+pub(crate) const PRODUCT_MANIFEST_SCHEMA: &str = "velnor.product-manifest/v1";
+/// The one canonical application manifest asset selected by discovery.
+pub(crate) const PRODUCT_MANIFEST_ASSET: &str = "product-manifest.json";
+/// The persisted discovery result copied into the incoming artifact set.
+pub(crate) const DISCOVERY_SELECTION_FILE: &str = "discovery.json";
 /// The rolling release tag that carries preview coherence inputs.
 pub(crate) const PREVIEW_TAG: &str = "preview";
 /// The only source ref a preview manifest may name.
@@ -697,12 +705,22 @@ impl AptContract {
                 "apt canonical_manifest_asset must be a safe asset file name",
             ));
         }
+        if spec.canonical_manifest_asset != PRODUCT_MANIFEST_ASSET {
+            return Err(GeneratorError::usage(format!(
+                "apt canonical_manifest_asset must be {PRODUCT_MANIFEST_ASSET}"
+            )));
+        }
         if spec.canonical_manifest_schema.is_empty()
             || spec.canonical_manifest_schema.contains(char::is_whitespace)
         {
             return Err(GeneratorError::usage(
                 "apt canonical_manifest_schema must be a non-empty schema URN without whitespace",
             ));
+        }
+        if spec.canonical_manifest_schema != PRODUCT_MANIFEST_SCHEMA {
+            return Err(GeneratorError::usage(format!(
+                "apt canonical_manifest_schema must be {PRODUCT_MANIFEST_SCHEMA}"
+            )));
         }
         contract.discovery_script = spec.discovery_script.clone();
         contract.canonical_manifest_asset = spec.canonical_manifest_asset.clone();
@@ -1135,9 +1153,650 @@ pub(crate) fn run_fetch(
     Ok(())
 }
 
+/// One immutable GitHub release asset carried by the discovery result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DiscoveryAsset {
+    pub(crate) id: u64,
+    pub(crate) name: String,
+    pub(crate) size: u64,
+    pub(crate) state: String,
+    pub(crate) browser_download_url: String,
+}
+
+/// The persisted application-release selection. This is a consumer of the
+/// source-owned discovery script, never another release selector: every
+/// source/ref/version and asset identity used by the S2 runtime comes from
+/// this value and is validated before any download or feed mutation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DiscoverySelection {
+    pub(crate) channel: String,
+    pub(crate) product_id: String,
+    pub(crate) source_repository: String,
+    pub(crate) package: String,
+    pub(crate) tag: String,
+    pub(crate) release_tag: String,
+    pub(crate) version: String,
+    pub(crate) source_ref: String,
+    pub(crate) source_commit: String,
+    pub(crate) manifest_asset: String,
+    pub(crate) manifest_schema: String,
+    pub(crate) manifest_sha256: String,
+    pub(crate) release_id: String,
+    pub(crate) provider_release_id: u64,
+    pub(crate) release_url: String,
+    pub(crate) release_assets: Vec<DiscoveryAsset>,
+    pub(crate) manifest: serde_json::Value,
+}
+
+impl DiscoverySelection {
+    /// The suite identity carried by the canonical product channel.
+    pub(crate) fn suite(&self) -> Result<Suite, GeneratorError> {
+        Suite::parse(&self.channel)
+    }
+
+    /// Convert the producer's canonical product version into the Debian
+    /// version consumed by the shared APT verifier. Stable product versions
+    /// are bare X.Y.Z; APT tags them as vX.Y.Z. Product preview versions use
+    /// the canonical -preview. separator while Debian uses ~preview. for
+    /// ordering. No current release or mutable pointer is consulted.
+    pub(crate) fn apt_version(&self) -> Result<String, GeneratorError> {
+        match self.channel.as_str() {
+            "stable" => {
+                let tag = parse_stable_tag(&self.tag)?;
+                if self.version != tag.version || self.release_tag != self.tag {
+                    return Err(GeneratorError::usage(
+                        "discovery stable tag and product version disagree",
+                    ));
+                }
+                Ok(tag.tag)
+            }
+            "preview" => {
+                let (apt, _) = parse_product_preview_version(&self.version)?;
+                Ok(apt)
+            }
+            _ => Err(GeneratorError::usage(format!(
+                "discovery channel is unsupported: {}",
+                self.channel
+            ))),
+        }
+    }
+}
+
+/// Producer release IDs are opaque, but must remain portable and may not
+/// carry shell or URL syntax outside the shared grammar.
+pub(crate) fn valid_release_id(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'/' | b'-')
+        })
+}
+
+fn valid_discovery_asset_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'~' | b'-')
+        })
+}
+
+fn exact_object_keys(
+    document: &serde_json::Value,
+    expected: &[&str],
+    label: &str,
+) -> Result<(), GeneratorError> {
+    let object = document
+        .as_object()
+        .ok_or_else(|| GeneratorError::usage(format!("{label} is not an object")))?;
+    let actual = object.keys().cloned().collect::<BTreeSet<_>>();
+    let expected = expected
+        .iter()
+        .map(|key| (*key).to_owned())
+        .collect::<BTreeSet<_>>();
+    if actual != expected {
+        return Err(GeneratorError::usage(format!(
+            "{label} has an unexpected field set"
+        )));
+    }
+    Ok(())
+}
+
+fn parse_product_preview_version(value: &str) -> Result<(String, String), GeneratorError> {
+    let error = || {
+        GeneratorError::usage(format!(
+            "discovery preview version is not X.Y.Z-preview.N+<7-hex>: {value}"
+        ))
+    };
+    let (base, rest) = value.split_once("-preview.").ok_or_else(error)?;
+    if !is_bare_version(base) {
+        return Err(error());
+    }
+    let (sequence, sha) = rest.split_once('+').ok_or_else(error)?;
+    if sequence.is_empty()
+        || !sequence.bytes().all(|byte| byte.is_ascii_digit())
+        || !is_lower_hex(sha, 7)
+    {
+        return Err(error());
+    }
+    Ok((format!("{base}~preview.{sequence}+{sha}"), sha.to_owned()))
+}
+
+fn validate_product_manifest_selection(
+    manifest: &serde_json::Value,
+    selection: &serde_json::Value,
+) -> Result<(), GeneratorError> {
+    exact_object_keys(
+        manifest,
+        &[
+            "artifacts",
+            "channel",
+            "components",
+            "product_id",
+            "release_id",
+            "release_tag",
+            "schema",
+            "source_commit",
+            "source_ref",
+            "source_repository",
+            "version",
+        ],
+        "discovery product manifest",
+    )?;
+    let channel = field(selection, "channel")?;
+    if field(manifest, "schema")? != PRODUCT_MANIFEST_SCHEMA
+        || field(manifest, "product_id")? != field(selection, "product_id")?
+        || field(manifest, "channel")? != channel
+        || field(manifest, "source_repository")? != field(selection, "source_repository")?
+        || field(manifest, "source_ref")? != field(selection, "source_ref")?
+        || field(manifest, "source_commit")? != field(selection, "source_commit")?
+        || field(manifest, "release_tag")? != field(selection, "release_tag")?
+        || field(manifest, "version")? != field(selection, "version")?
+        || field(manifest, "release_id")? != field(selection, "release_id")?
+    {
+        return Err(GeneratorError::usage(
+            "discovery product manifest identity does not match selection",
+        ));
+    }
+    if manifest
+        .get("components")
+        .and_then(serde_json::Value::as_array)
+        .is_none_or(|components| components.is_empty())
+        || manifest
+            .get("artifacts")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|artifacts| artifacts.is_empty())
+    {
+        return Err(GeneratorError::usage(
+            "discovery product manifest has no component or artifact inventory",
+        ));
+    }
+    let artifacts = manifest
+        .get("artifacts")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| GeneratorError::usage("discovery artifacts are not an array"))?;
+    for artifact in artifacts {
+        let name = field(artifact, "name")?;
+        if !valid_discovery_asset_name(name) {
+            return Err(GeneratorError::usage(
+                "discovery product artifact has an unsafe name",
+            ));
+        }
+        let size = positive_field(artifact, "size")?;
+        if size == 0 || !valid_digest(field(artifact, "sha256")?) {
+            return Err(GeneratorError::usage(
+                "discovery product artifact has an invalid size or digest",
+            ));
+        }
+        let kind = field(artifact, "kind")?;
+        let target = field(artifact, "target")?;
+        if kind.is_empty() || target.is_empty() {
+            return Err(GeneratorError::usage(
+                "discovery product artifact identity is empty",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_source_ref_resolution(
+    document: &serde_json::Value,
+    channel: &str,
+    tag: &str,
+    commit: &str,
+) -> Result<(), GeneratorError> {
+    let resolution = document
+        .get("source_ref_resolution")
+        .ok_or_else(|| GeneratorError::usage("discovery source-ref proof is missing"))?;
+    let expected = if channel == "preview" {
+        [
+            "declared_ref_provenance",
+            "method",
+            "proof_ref",
+            "resolved_commit",
+        ]
+        .as_slice()
+    } else {
+        ["method", "proof_ref", "resolved_commit"].as_slice()
+    };
+    exact_object_keys(resolution, expected, "discovery source-ref proof")?;
+    if field(resolution, "proof_ref")? != format!("refs/tags/{tag}")
+        || field(resolution, "resolved_commit")? != commit
+        || field(resolution, "method")? != "github-git-ref"
+    {
+        return Err(GeneratorError::usage(
+            "discovery source-ref proof does not bind the selected tag",
+        ));
+    }
+    if channel == "preview" {
+        let declared = resolution
+            .get("declared_ref_provenance")
+            .ok_or_else(|| GeneratorError::usage("preview branch provenance is missing"))?;
+        exact_object_keys(
+            declared,
+            &[
+                "base_commit",
+                "head_commit",
+                "merge_base_commit",
+                "method",
+                "ref",
+                "relation",
+                "status",
+            ],
+            "preview branch provenance",
+        )?;
+        if field(declared, "ref")? != PREVIEW_SOURCE_REF
+            || field(declared, "method")? != "github-compare-ancestry"
+            || field(declared, "head_commit")? != commit
+            || field(declared, "merge_base_commit")? != commit
+            || !valid_commit(field(declared, "base_commit")?)
+            || !matches!(field(declared, "relation")?, "ancestor" | "tip")
+            || !matches!(field(declared, "status")?, "behind" | "identical")
+        {
+            return Err(GeneratorError::usage(
+                "preview branch provenance does not prove main ancestry",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The `.deb` read backend. `Auto` prefers `dpkg-deb` and falls back to
 /// portable `ar` + `tar` so verification also runs where `dpkg` is absent;
 /// `ArTar` forces the fallback. Both paths take fixed arguments only.
+/// Parse and validate one source-owned discovery result. The exact top-level
+/// shape is intentional: accepting a subset would let a later consumer omit
+/// the provenance fields that make an immutable selection auditable.
+pub(crate) fn read_discovery_selection(path: &Path) -> Result<DiscoverySelection, GeneratorError> {
+    let document = read_json(path)?;
+    exact_object_keys(
+        &document,
+        &[
+            "channel",
+            "manifest",
+            "manifest_asset",
+            "manifest_schema",
+            "manifest_sha256",
+            "package",
+            "product_id",
+            "provider_release_id",
+            "published_at",
+            "release_assets",
+            "release_id",
+            "release_tag",
+            "release_url",
+            "source_commit",
+            "source_ref",
+            "source_ref_resolution",
+            "source_repository",
+            "tag",
+            "target_commitish",
+            "version",
+        ],
+        "discovery selection",
+    )?;
+    let channel = field(&document, "channel")?.to_owned();
+    if !matches!(channel.as_str(), "stable" | "preview") {
+        return Err(GeneratorError::usage(
+            "discovery channel must be stable or preview",
+        ));
+    }
+    let product_id = field(&document, "product_id")?.to_owned();
+    if product_id.is_empty() {
+        return Err(GeneratorError::usage(
+            "discovery product_id must be non-empty",
+        ));
+    }
+    let source_repository = field(&document, "source_repository")?.to_owned();
+    if !valid_repository_slug(&source_repository) {
+        return Err(GeneratorError::usage(
+            "discovery source repository is not an owner/name slug",
+        ));
+    }
+    let package = field(&document, "package")?.to_owned();
+    if !valid_package_name(&package) {
+        return Err(GeneratorError::usage(
+            "discovery package is not a safe package name",
+        ));
+    }
+    let tag = field(&document, "tag")?.to_owned();
+    let release_tag = field(&document, "release_tag")?.to_owned();
+    if tag != release_tag {
+        return Err(GeneratorError::usage(
+            "discovery tag and release_tag differ",
+        ));
+    }
+    let version = field(&document, "version")?.to_owned();
+    let source_ref = field(&document, "source_ref")?.to_owned();
+    let source_commit = field(&document, "source_commit")?.to_owned();
+    if !valid_commit(&source_commit) {
+        return Err(GeneratorError::usage(
+            "discovery source_commit is not 40 lowercase hex characters",
+        ));
+    }
+    match channel.as_str() {
+        "stable" => {
+            let stable = parse_stable_tag(&tag)?;
+            if stable.version != version || source_ref != format!("refs/tags/{tag}") {
+                return Err(GeneratorError::usage(
+                    "discovery stable version or source ref is inconsistent",
+                ));
+            }
+        }
+        "preview" => {
+            let (_, preview_sha) = parse_product_preview_version(&version)?;
+            if !tag
+                .strip_prefix("preview-")
+                .is_some_and(|commit| commit == source_commit)
+                || preview_sha != source_commit[..7]
+                || source_ref != PREVIEW_SOURCE_REF
+            {
+                return Err(GeneratorError::usage(
+                    "discovery preview tag, version, or source ref is inconsistent",
+                ));
+            }
+        }
+        _ => unreachable!("channel checked above"),
+    }
+    validate_source_ref_resolution(&document, &channel, &tag, &source_commit)?;
+    let manifest_asset = field(&document, "manifest_asset")?.to_owned();
+    if manifest_asset != PRODUCT_MANIFEST_ASSET {
+        return Err(GeneratorError::usage(format!(
+            "discovery manifest asset must be {PRODUCT_MANIFEST_ASSET}"
+        )));
+    }
+    let manifest_schema = field(&document, "manifest_schema")?.to_owned();
+    if manifest_schema != PRODUCT_MANIFEST_SCHEMA {
+        return Err(GeneratorError::usage(format!(
+            "discovery manifest schema must be {PRODUCT_MANIFEST_SCHEMA}"
+        )));
+    }
+    let manifest_sha256 = field(&document, "manifest_sha256")?.to_owned();
+    if !valid_digest(&manifest_sha256) {
+        return Err(GeneratorError::usage(
+            "discovery manifest_sha256 is not a lowercase SHA-256 digest",
+        ));
+    }
+    let release_id = field(&document, "release_id")?.to_owned();
+    if !valid_release_id(&release_id) {
+        return Err(GeneratorError::usage(
+            "discovery release_id has an invalid shared grammar",
+        ));
+    }
+    let provider_release_id = positive_field(&document, "provider_release_id")?;
+    let expected_release_url = format!("https://github.com/{source_repository}/releases/tag/{tag}");
+    if field(&document, "release_url")? != expected_release_url {
+        return Err(GeneratorError::usage(
+            "discovery release_url is not the canonical GitHub release URL",
+        ));
+    }
+    let _ = field(&document, "target_commitish")?;
+    let _ = field(&document, "published_at")?;
+    let manifest = document
+        .get("manifest")
+        .cloned()
+        .ok_or_else(|| GeneratorError::usage("discovery product manifest is missing"))?;
+    validate_product_manifest_selection(&manifest, &document)?;
+    let assets = document
+        .get("release_assets")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| GeneratorError::usage("discovery release_assets is not an array"))?;
+    if assets.is_empty() {
+        return Err(GeneratorError::usage("discovery release_assets is empty"));
+    }
+    let mut seen_names = BTreeSet::new();
+    let mut seen_ids = BTreeSet::new();
+    let mut release_assets = Vec::with_capacity(assets.len());
+    for asset in assets {
+        exact_object_keys(
+            asset,
+            &["browser_download_url", "id", "name", "size", "state"],
+            "discovery release asset",
+        )?;
+        let id = positive_field(asset, "id")?;
+        let name = field(asset, "name")?.to_owned();
+        if !valid_discovery_asset_name(&name)
+            || name == DISCOVERY_SELECTION_FILE
+            || !seen_names.insert(name.clone())
+            || !seen_ids.insert(id)
+        {
+            return Err(GeneratorError::usage(
+                "discovery release asset names and IDs must be unique and safe",
+            ));
+        }
+        let size = positive_field(asset, "size")?;
+        let state = field(asset, "state")?.to_owned();
+        if state != "uploaded" {
+            return Err(GeneratorError::usage(
+                "discovery release asset is not uploaded",
+            ));
+        }
+        let expected_url =
+            format!("https://github.com/{source_repository}/releases/download/{tag}/{name}");
+        let browser_download_url = field(asset, "browser_download_url")?.to_owned();
+        if browser_download_url != expected_url {
+            return Err(GeneratorError::usage(
+                "discovery release asset URL is not canonical",
+            ));
+        }
+        release_assets.push(DiscoveryAsset {
+            id,
+            name,
+            size,
+            state,
+            browser_download_url,
+        });
+    }
+    for required in [
+        PRODUCT_MANIFEST_ASSET,
+        "product-manifest.json.sha256",
+        RECORD_FILE,
+        RECORD_SIDECAR,
+        MANIFEST_FILE,
+        MANIFEST_SIDECAR,
+        PREVIEW_MANIFEST_FILE,
+        SHA256SUMS_FILE,
+    ] {
+        if !seen_names.contains(required) {
+            return Err(GeneratorError::usage(format!(
+                "discovery release asset inventory lacks {required}"
+            )));
+        }
+    }
+    Ok(DiscoverySelection {
+        channel,
+        product_id,
+        source_repository,
+        package,
+        tag,
+        release_tag,
+        version,
+        source_ref,
+        source_commit,
+        manifest_asset,
+        manifest_schema,
+        manifest_sha256,
+        release_id,
+        provider_release_id,
+        release_url: expected_release_url,
+        release_assets,
+        manifest,
+    })
+}
+
+/// Download precisely the assets named by a validated discovery result. The
+/// old tag/pointer download selector is intentionally not reachable here:
+/// every request is keyed by the immutable provider asset ID.
+pub(crate) fn run_fetch_selection(
+    selection_path: &Path,
+    dir: &Path,
+    path_overlay: Option<&Path>,
+) -> Result<DiscoverySelection, GeneratorError> {
+    let selection = read_discovery_selection(selection_path)?;
+    let selected_document = read_json(selection_path)?;
+    if dir.exists() {
+        let existing = dir_names(dir)?;
+        if existing.iter().any(|name| name != DISCOVERY_SELECTION_FILE) {
+            return Err(GeneratorError::usage(
+                "selection fetch requires an empty incoming directory",
+            ));
+        }
+        if dir.join(DISCOVERY_SELECTION_FILE).is_file()
+            && read_json(&dir.join(DISCOVERY_SELECTION_FILE))? != selected_document
+        {
+            return Err(GeneratorError::usage(
+                "incoming discovery.json differs from the selected release",
+            ));
+        }
+    } else {
+        std::fs::create_dir_all(dir)
+            .map_err(|error| GeneratorError::io("create incoming directory", dir, &error))?;
+    }
+    for asset in &selection.release_assets {
+        let endpoint = format!(
+            "repos/{}/releases/assets/{}",
+            selection.source_repository, asset.id
+        );
+        let bytes = run_fixed(
+            "gh",
+            &[
+                "api".to_owned(),
+                "--header".to_owned(),
+                "Accept: application/octet-stream".to_owned(),
+                endpoint,
+            ],
+            None,
+            path_overlay,
+        )?;
+        if bytes.len() as u64 != asset.size {
+            return Err(GeneratorError::usage(format!(
+                "downloaded asset {} size differs from discovery",
+                asset.name
+            )));
+        }
+        let temporary = dir.join(format!(".{}.part", asset.id));
+        std::fs::write(&temporary, &bytes)
+            .map_err(|error| GeneratorError::io("write downloaded asset", &temporary, &error))?;
+        std::fs::rename(&temporary, dir.join(&asset.name)).map_err(|error| {
+            GeneratorError::io("install downloaded asset", &dir.join(&asset.name), &error)
+        })?;
+    }
+    let persisted = serde_json::to_vec(&selected_document).map_err(|error| {
+        GeneratorError::usage(format!("serialize discovery selection: {error}"))
+    })?;
+    std::fs::write(dir.join(DISCOVERY_SELECTION_FILE), persisted).map_err(|error| {
+        GeneratorError::io(
+            "persist discovery selection",
+            &dir.join(DISCOVERY_SELECTION_FILE),
+            &error,
+        )
+    })?;
+    Ok(selection)
+}
+
+/// Verify that incoming bytes still represent the exact immutable selection.
+/// This runs immediately before the existing APT verifier and again before
+/// publication; mutation of IDs, names, sizes, canonical bytes, or selected
+/// artifacts cannot cross either boundary.
+pub(crate) fn verify_discovery_incoming(
+    selection_path: &Path,
+    incoming: &Path,
+) -> Result<DiscoverySelection, GeneratorError> {
+    let selection_document = read_json(selection_path)?;
+    let selection = read_discovery_selection(selection_path)?;
+    let persisted = incoming.join(DISCOVERY_SELECTION_FILE);
+    if read_json(&persisted)? != selection_document {
+        return Err(GeneratorError::usage(
+            "incoming discovery.json differs from the selected release",
+        ));
+    }
+    let mut expected = selection
+        .release_assets
+        .iter()
+        .map(|asset| asset.name.clone())
+        .collect::<BTreeSet<_>>();
+    expected.insert(DISCOVERY_SELECTION_FILE.to_owned());
+    expected.insert(SENTINEL_FILE.to_owned());
+    for name in dir_names(incoming)? {
+        if !expected.contains(&name) {
+            return Err(GeneratorError::usage(format!(
+                "incoming contains an asset absent from discovery: {name}"
+            )));
+        }
+    }
+    for asset in &selection.release_assets {
+        let path = incoming.join(&asset.name);
+        require_file(&path)?;
+        let observed = std::fs::metadata(&path)
+            .map_err(|error| GeneratorError::io("stat selected asset", &path, &error))?
+            .len();
+        if observed != asset.size {
+            return Err(GeneratorError::usage(format!(
+                "incoming asset {} size differs from discovery",
+                asset.name
+            )));
+        }
+    }
+    let manifest_path = incoming.join(&selection.manifest_asset);
+    if sha256_file(&manifest_path)? != selection.manifest_sha256 {
+        return Err(GeneratorError::usage(
+            "incoming canonical product manifest digest differs from discovery",
+        ));
+    }
+    if read_json(&manifest_path)? != selection.manifest {
+        return Err(GeneratorError::usage(
+            "incoming canonical product manifest differs from discovery",
+        ));
+    }
+    let manifest_sidecar = incoming.join(format!("{}.sha256", selection.manifest_asset));
+    if sidecar_digest(&manifest_sidecar)? != selection.manifest_sha256 {
+        return Err(GeneratorError::usage(
+            "canonical product manifest sidecar differs from discovery",
+        ));
+    }
+    let artifacts = selection
+        .manifest
+        .get("artifacts")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| GeneratorError::usage("discovery product artifact inventory is missing"))?;
+    for artifact in artifacts {
+        let name = field(artifact, "name")?;
+        let path = incoming.join(name);
+        require_file(&path)?;
+        let expected_size = positive_field(artifact, "size")?;
+        let observed_size = std::fs::metadata(&path)
+            .map_err(|error| GeneratorError::io("stat product artifact", &path, &error))?
+            .len();
+        if observed_size != expected_size || sha256_file(&path)? != field(artifact, "sha256")? {
+            return Err(GeneratorError::usage(format!(
+                "incoming product artifact {name} differs from canonical inventory"
+            )));
+        }
+    }
+    Ok(selection)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DebBackend {
     Auto,
@@ -2942,6 +3601,7 @@ fn publish_stable(
         inputs.path_overlay,
         passphrase,
         homedir,
+        inputs.selection,
     )?;
     std::fs::write(
         inputs.staging.join("last-publish"),
@@ -3036,6 +3696,7 @@ fn publish_preview(
         inputs.path_overlay,
         passphrase,
         homedir,
+        inputs.selection,
     )?;
     std::fs::write(
         inputs.staging.join(Suite::Preview.last_publish_file()),
@@ -3390,6 +4051,12 @@ pub(crate) struct PublicationRecord {
     pub(crate) signer_fingerprint: String,
     /// The previous pointer document.
     pub(crate) previous: serde_json::Value,
+    /// The canonical product-manifest digest, when emitted by schema 2.
+    pub(crate) canonical_manifest_sha256: Option<String>,
+    /// The canonical producer release identity, when emitted by schema 2.
+    pub(crate) release_id: Option<String>,
+    /// The provider numeric release identity, when emitted by schema 2.
+    pub(crate) provider_release_id: Option<u64>,
 }
 
 /// Parse a publication record, failing closed on any malformed shape.
@@ -3445,6 +4112,40 @@ pub(crate) fn parse_publication_record(
         .get("previous")
         .cloned()
         .ok_or_else(|| GeneratorError::usage("publication record has no previous pointer"))?;
+    let canonical_manifest_sha256 = match document.get("canonical_manifest_sha256") {
+        None => None,
+        Some(value) => {
+            let digest = value.as_str().ok_or_else(|| {
+                GeneratorError::usage("publication canonical manifest digest is not a string")
+            })?;
+            if !valid_digest(digest) {
+                return Err(GeneratorError::usage(
+                    "publication canonical manifest digest is not valid",
+                ));
+            }
+            Some(digest.to_owned())
+        }
+    };
+    let release_id = match document.get("release_id") {
+        None => None,
+        Some(value) => {
+            let release_id = value.as_str().ok_or_else(|| {
+                GeneratorError::usage("publication release ID is not a string")
+            })?;
+            if !valid_release_id(release_id) {
+                return Err(GeneratorError::usage(
+                    "publication release ID has an invalid grammar",
+                ));
+            }
+            Some(release_id.to_owned())
+        }
+    };
+    let provider_release_id = match document.get("provider_release_id") {
+        None => None,
+        Some(value) => Some(value.as_u64().filter(|id| *id > 0).ok_or_else(|| {
+            GeneratorError::usage("publication provider release ID is not positive")
+        })?),
+    };
     Ok(PublicationRecord {
         schema: PUBLICATION_RECORD_SCHEMA.to_owned(),
         source_record_sha256: source_record_sha256.to_owned(),
@@ -3458,6 +4159,9 @@ pub(crate) fn parse_publication_record(
         packages: entries,
         signer_fingerprint: field(document, "signer_fingerprint")?.to_owned(),
         previous,
+        canonical_manifest_sha256,
+        release_id,
+        provider_release_id,
     })
 }
 
@@ -3474,6 +4178,7 @@ fn emit_publication_record(
     path_overlay: Option<&Path>,
     passphrase: &str,
     homedir: &str,
+    selection: Option<&DiscoverySelection>,
 ) -> Result<(), GeneratorError> {
     let inrelease = sha256_file(&staging.join(format!("dists/{}/InRelease", suite.as_str())))?;
     let mut packages = Vec::new();
@@ -3516,6 +4221,29 @@ fn emit_publication_record(
         record.insert(
             "suite".to_owned(),
             serde_json::Value::String(PREVIEW_SUITE.to_owned()),
+        );
+    }
+    if let Some(selection) = selection {
+        if selection.suite()? != suite {
+            return Err(GeneratorError::usage(
+                "publication selection channel does not match suite",
+            ));
+        }
+        record.insert(
+            "canonical_manifest_sha256".to_owned(),
+            serde_json::Value::String(selection.manifest_sha256.clone()),
+        );
+        record.insert(
+            "provider_release_id".to_owned(),
+            serde_json::Value::from(selection.provider_release_id),
+        );
+        record.insert(
+            "release_id".to_owned(),
+            serde_json::Value::String(selection.release_id.clone()),
+        );
+        record.insert(
+            "release_tag".to_owned(),
+            serde_json::Value::String(selection.release_tag.clone()),
         );
     }
     record.insert("tag".to_owned(), serde_json::Value::String(tag.to_owned()));
@@ -3693,6 +4421,58 @@ pub(crate) fn run_channel_update(inputs: &ChannelUpdateInputs<'_>) -> Result<(),
         format!("{text}\n"),
     )
     .map_err(|error| GeneratorError::io("write", inputs.staging, &error))?;
+    Ok(())
+}
+
+/// Bind the canonical application identity to channel state after the shared
+/// package-state checks pass. Existing feed fields remain unchanged; these
+/// fields make the state joinable with the exact discovery/publication record
+/// without replacing the retained stable or preview pair.
+pub(crate) fn bind_selection_channel_state(
+    selection: &DiscoverySelection,
+    staging: &Path,
+) -> Result<(), GeneratorError> {
+    let suite = selection.suite()?;
+    let path = staging.join(suite.channel_state_file());
+    let mut document = read_json(&path)?;
+    let object = document
+        .as_object_mut()
+        .ok_or_else(|| GeneratorError::usage("channel state is not an object"))?;
+    let values = [
+        (
+            "canonical_manifest_sha256",
+            serde_json::Value::String(selection.manifest_sha256.clone()),
+        ),
+        (
+            "product_version",
+            serde_json::Value::String(selection.version.clone()),
+        ),
+        (
+            "release_id",
+            serde_json::Value::String(selection.release_id.clone()),
+        ),
+        (
+            "release_tag",
+            serde_json::Value::String(selection.release_tag.clone()),
+        ),
+        (
+            "provider_release_id",
+            serde_json::Value::from(selection.provider_release_id),
+        ),
+    ];
+    for (key, value) in values {
+        if object.get(key).is_some_and(|existing| existing != &value) {
+            return Err(GeneratorError::usage(format!(
+                "channel state {key} differs from immutable discovery"
+            )));
+        }
+        object.insert(key.to_owned(), value);
+    }
+    let text = serde_json::to_string_pretty(&document).map_err(|error| {
+        GeneratorError::usage(format!("channel state is not serializable: {error}"))
+    })?;
+    std::fs::write(&path, format!("{text}\n"))
+        .map_err(|error| GeneratorError::io("bind channel state", &path, &error))?;
     Ok(())
 }
 
@@ -5846,6 +6626,7 @@ mod tests {
             key_material: Some("fixture-key-material".to_owned()),
             backend: DebBackend::Auto,
             path_overlay,
+            selection: None,
         }
     }
 
