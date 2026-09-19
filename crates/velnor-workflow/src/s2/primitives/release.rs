@@ -13,8 +13,8 @@ use std::fmt::Write as _;
 use super::{
     checks_env, docker_build_token_env_for_members, render_cargo_source_preparation,
     render_pinned_toolchain_steps, render_retained_output_cache_note, Args, CacheBackend,
-    Primitive, RenderCtx, Rendered, WorkflowIr, MAINTENANCE, PREVIEW, RELEASE, RELEASE_SIGNER,
-    STATIC_WORKFLOW,
+    Primitive, RenderCtx, Rendered, WorkflowIr, MAINTENANCE, PACKAGE_RELEASE, PREVIEW, RELEASE,
+    RELEASE_SIGNER, STATIC_WORKFLOW,
 };
 use crate::s2::provider::{runs_on_for, ProviderId};
 use crate::s2::{
@@ -38,6 +38,9 @@ pub(crate) const RELEASE_SIDE_FILES: &[(&str, &str)] = &[
 /// The canonical file a declared release-side family renders, when the family
 /// is pinned to one name.
 pub(crate) fn canonical_release_side_file(primitive: &str) -> Option<&'static str> {
+    if primitive == PACKAGE_RELEASE {
+        return Some("preview.yml");
+    }
     RELEASE_SIDE_FILES
         .iter()
         .find(|(_, family)| *family == primitive)

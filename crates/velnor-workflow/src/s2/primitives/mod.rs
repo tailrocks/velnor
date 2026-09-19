@@ -15,6 +15,7 @@ mod cache;
 pub(crate) mod check_profiles;
 pub(crate) mod docs_site;
 mod ir;
+mod package_release;
 mod pipeline;
 mod plan;
 pub(crate) mod prepared_tools;
@@ -75,6 +76,8 @@ pub(crate) const DOCS_SITE: &str = "docs-site";
 pub(crate) const RELEASE: &str = "release";
 /// The `preview.yml` rolling artifact lane.
 pub(crate) const PREVIEW: &str = "preview";
+/// The typed six-payload rolling package release and consumer handoff.
+pub(crate) const PACKAGE_RELEASE: &str = "package-release";
 /// The `maintenance.yml` cache-hygiene workflow.
 pub(crate) const MAINTENANCE: &str = "maintenance";
 /// The release artifact provenance signer.
@@ -606,6 +609,7 @@ pub(crate) fn registry() -> Vec<Box<dyn Primitive>> {
         Box::new(pipeline::DocsLint),
         Box::new(release::Release),
         Box::new(release::Preview),
+        Box::new(package_release::PackageRelease),
         Box::new(release::Maintenance),
         Box::new(release::ReleaseSigner),
         Box::new(release::StaticWorkflow),
@@ -1434,6 +1438,7 @@ mod tests {
             REGEN_GATE,
             RELEASE,
             PREVIEW,
+            PACKAGE_RELEASE,
             MAINTENANCE,
             RELEASE_SIGNER,
             STATIC_WORKFLOW,
