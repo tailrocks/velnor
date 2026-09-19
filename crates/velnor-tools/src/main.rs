@@ -2,6 +2,7 @@ mod audit_ci;
 mod fleet_policy;
 mod fleet_policy_client;
 mod lane_compare;
+mod strict_json;
 mod workflow_monitor;
 
 use anyhow::{bail, Context, Result};
