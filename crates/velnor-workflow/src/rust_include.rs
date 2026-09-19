@@ -1,86 +1,97 @@
+use std::collections::BTreeSet;
+use std::ffi::OsString;
+use std::fs;
+use std::io;
+use std::path::{Component, Path, PathBuf};
+use std::str::FromStr;
+
+use proc_macro2::{TokenStream, TokenTree};
+use syn::parse::Parser;
+use syn::punctuated::Punctuated;
+use syn::token::Comma;
+use syn::{Expr, ExprMacro, Lit};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum IncludeString {
     Relative(String),
-    ManifestDir(String),
+    ManifestDir(Vec<ManifestPart>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ManifestPart {
+    Literal(String),
+    ManifestDir,
 }
 
 impl IncludeString {
     fn from_static(expression: StaticString) -> Self {
-        if expression.manifest_dir {
-            Self::ManifestDir(expression.value)
+        if expression
+            .parts
+            .iter()
+            .any(|part| matches!(part, ManifestPart::ManifestDir))
+        {
+            Self::ManifestDir(expression.parts)
         } else {
-            Self::Relative(expression.value)
+            Self::Relative(
+                expression
+                    .parts
+                    .into_iter()
+                    .filter_map(|part| match part {
+                        ManifestPart::Literal(value) => Some(value),
+                        ManifestPart::ManifestDir => None,
+                    })
+                    .collect(),
+            )
         }
     }
 
-    pub(crate) fn display(&self) -> &str {
+    pub(crate) fn display(&self) -> String {
         match self {
-            Self::Relative(value) | Self::ManifestDir(value) => value,
+            Self::Relative(value) => value.clone(),
+            Self::ManifestDir(parts) => parts
+                .iter()
+                .map(|part| match part {
+                    ManifestPart::Literal(value) => value.as_str(),
+                    ManifestPart::ManifestDir => "<CARGO_MANIFEST_DIR>",
+                })
+                .collect(),
         }
     }
 }
 
 #[derive(Default)]
 struct StaticString {
-    manifest_dir: bool,
-    value: String,
+    parts: Vec<ManifestPart>,
 }
 
-/// Parse static path expressions accepted by Rust include macros. This
-/// handles only literals, concat!, and `env!("CARGO_MANIFEST_DIR")`.
-pub(crate) fn parse_include_paths(source: &str) -> Result<Vec<IncludeString>, String> {
-    const MACROS: &[&str] = &["include_str!", "include_bytes!"];
-    let bytes = source.as_bytes();
-    let mut cursor = 0;
-    let mut included = Vec::new();
-    while cursor < bytes.len() {
-        if bytes[cursor] == b'/' && bytes.get(cursor + 1) == Some(&b'/') {
-            cursor = skip_line_comment(bytes, cursor + 2);
-            continue;
+impl StaticString {
+    fn literal(value: String) -> Self {
+        Self {
+            parts: vec![ManifestPart::Literal(value)],
         }
-        if bytes[cursor] == b'/' && bytes.get(cursor + 1) == Some(&b'*') {
-            cursor = skip_block_comment(bytes, cursor + 2)?;
-            continue;
-        }
-        if let Some(end) = skip_raw_string(bytes, cursor)? {
-            cursor = end;
-            continue;
-        }
-        if bytes[cursor] == b'"' {
-            cursor = skip_quoted_literal(bytes, cursor, b'"')
-                .map_err(|error| format!("{error} at byte {cursor}"))?;
-            continue;
-        }
-        if bytes[cursor] == b'\'' && is_char_literal_start(bytes, cursor) {
-            cursor = skip_quoted_literal(bytes, cursor, b'\'')
-                .map_err(|error| format!("{error} at byte {cursor}"))?;
-            continue;
-        }
-
-        let Some(macro_name) = MACROS.iter().find(|name| {
-            bytes[cursor..].starts_with(name.as_bytes())
-                && (cursor == 0 || !is_rust_identifier_byte(bytes[cursor - 1]))
-        }) else {
-            cursor += 1;
-            continue;
-        };
-        let mut argument = cursor + macro_name.len();
-        argument = skip_expression_trivia(bytes, argument)?;
-        if bytes.get(argument) != Some(&b'(') {
-            cursor += macro_name.len();
-            continue;
-        }
-        argument += 1;
-        let (expression, mut close) =
-            parse_static_string_expression(source, bytes, argument, macro_name)?;
-        close = skip_expression_trivia(bytes, close)?;
-        if bytes.get(close) != Some(&b')') {
-            return Err(format!("unterminated {macro_name}"));
-        }
-        included.push(IncludeString::from_static(expression));
-        cursor = close + 1;
     }
-    Ok(included)
+
+    fn manifest_dir() -> Self {
+        Self {
+            parts: vec![ManifestPart::ManifestDir],
+        }
+    }
+
+    fn append(&mut self, mut other: Self) {
+        self.parts.append(&mut other.parts);
+    }
+}
+
+/// Parse static path expressions accepted by Rust include macros. Rust token
+/// parsing is deliberately used here instead of scanning bytes: comments,
+/// raw/cooked literals, macro trivia, and every macro delimiter are handled by
+/// the Rust lexer, while only the static expression subset is evaluated.
+pub(crate) fn parse_include_paths(source: &str) -> Result<Vec<IncludeString>, String> {
+    let tokens = TokenStream::from_str(source)
+        .map_err(|error| format!("invalid Rust source while scanning includes: {error}"))?;
+    let mut scanner = IncludeScanner::default();
+    scanner.scan_stream(tokens)?;
+    Ok(scanner.includes)
 }
 
 #[cfg(test)]
@@ -96,369 +107,268 @@ pub(crate) fn parse_include_str_literals(source: &str) -> Result<Vec<String>, St
         .collect()
 }
 
-fn parse_static_string_expression(
-    source: &str,
-    bytes: &[u8],
-    mut cursor: usize,
-    macro_name: &str,
-) -> Result<(StaticString, usize), String> {
-    cursor = skip_expression_trivia(bytes, cursor)?;
-    match bytes.get(cursor) {
-        Some(b'"') => {
-            let end = skip_quoted_literal(bytes, cursor, b'"')
-                .map_err(|error| format!("{error} at byte {cursor}"))?;
-            let value = decode_rust_string_literal(source, cursor, end).map_err(|error| {
-                format!("{macro_name} must use a static string expression: {error}")
-            })?;
-            Ok((
-                StaticString {
-                    value,
-                    ..Default::default()
-                },
-                end,
-            ))
+#[derive(Default)]
+struct IncludeScanner {
+    includes: Vec<IncludeString>,
+}
+
+impl IncludeScanner {
+    fn scan_stream(&mut self, stream: TokenStream) -> Result<(), String> {
+        let tokens = stream.into_iter().collect::<Vec<_>>();
+        let mut index = 0;
+        while index < tokens.len() {
+            if let Some((macro_name, group)) = include_invocation(&tokens, index)? {
+                let expression = parse_static_string_expression(group.stream(), macro_name)?;
+                self.includes.push(IncludeString::from_static(expression));
+                // An include argument may itself contain a macro group. The
+                // evaluator has already rejected a dynamic include argument;
+                // recurse only to discover includes in arbitrary macro bodies.
+                self.scan_stream(group.stream())?;
+                index += 3;
+                continue;
+            }
+            if let TokenTree::Group(group) = &tokens[index] {
+                self.scan_stream(group.stream())?;
+            }
+            index += 1;
         }
-        Some(b'r') => parse_raw_string_expression(source, bytes, cursor)?
-            .ok_or_else(|| format!("{macro_name} must use a static string expression")),
-        Some(byte) if is_rust_identifier_byte(*byte) && !byte.is_ascii_digit() => {
-            let name_start = cursor;
-            cursor += 1;
-            while bytes
-                .get(cursor)
-                .is_some_and(|byte| is_rust_identifier_byte(*byte))
-            {
-                cursor += 1;
+        Ok(())
+    }
+}
+
+fn include_invocation<'a>(
+    tokens: &'a [TokenTree],
+    index: usize,
+) -> Result<Option<(&'static str, &'a proc_macro2::Group)>, String> {
+    let TokenTree::Ident(identifier) = &tokens[index] else {
+        return Ok(None);
+    };
+    let macro_name = match identifier.to_string().as_str() {
+        "include_str" => "include_str!",
+        "include_bytes" => "include_bytes!",
+        _ => return Ok(None),
+    };
+    // `foo::include_str!` is a user macro path, not the built-in include
+    // macro. A direct include invocation can still have comments/whitespace
+    // between its name, bang, and delimiter because tokens discard trivia.
+    if index > 0 && is_colon(&tokens[index - 1]) {
+        return Ok(None);
+    }
+    if !tokens
+        .get(index + 1)
+        .is_some_and(|token| is_punct(token, '!'))
+    {
+        return Ok(None);
+    }
+    let Some(TokenTree::Group(group)) = tokens.get(index + 2) else {
+        return Err(format!("{macro_name} must have a delimited argument"));
+    };
+    Ok(Some((macro_name, group)))
+}
+
+fn parse_static_string_expression(
+    tokens: TokenStream,
+    macro_name: &str,
+) -> Result<StaticString, String> {
+    let expression = syn::parse2::<Expr>(tokens).map_err(|error| {
+        format!("{macro_name} must use a static string expression: {error}")
+    })?;
+    evaluate_static_expression(&expression, macro_name)
+}
+
+fn evaluate_static_expression(expression: &Expr, macro_name: &str) -> Result<StaticString, String> {
+    match expression {
+        Expr::Lit(literal) => match &literal.lit {
+            Lit::Str(value) => Ok(StaticString::literal(value.value())),
+            _ => Err(format!(
+                "{macro_name} must use a static string expression"
+            )),
+        },
+        Expr::Macro(expression) => evaluate_static_macro(expression, macro_name),
+        _ => Err(format!(
+            "{macro_name} must use a static string expression"
+        )),
+    }
+}
+
+fn evaluate_static_macro(
+    expression: &ExprMacro,
+    include_macro: &str,
+) -> Result<StaticString, String> {
+    let path = &expression.mac.path;
+    let name = path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+        .unwrap_or_default();
+    if path.segments.len() != 1 {
+        return Err(format!(
+            "{include_macro} macro {name}! is not a supported static expression"
+        ));
+    }
+    let arguments = Punctuated::<Expr, Comma>::parse_terminated
+        .parse2(expression.mac.tokens.clone())
+        .map_err(|error| format!("{include_macro} {name}! has invalid arguments: {error}"))?;
+    match name.as_str() {
+        "concat" => {
+            let mut combined = StaticString::default();
+            for argument in arguments {
+                combined.append(evaluate_static_expression(&argument, include_macro)?);
             }
-            let name = &source[name_start..cursor];
-            cursor = skip_expression_trivia(bytes, cursor)?;
-            if bytes.get(cursor) != Some(&b'!') {
-                return Err(format!("{macro_name} must use a static string expression"));
+            Ok(combined)
+        }
+        "env" => {
+            if arguments.len() != 1 {
+                return Err(format!(
+                    "{include_macro} env! must use exactly one string literal argument"
+                ));
             }
-            cursor = skip_expression_trivia(bytes, cursor + 1)?;
-            if bytes.get(cursor) != Some(&b'(') {
-                return Err(format!("{name}! must have a parenthesized argument"));
-            }
-            cursor += 1;
-            match name {
-                "concat" => parse_concat_expression(source, bytes, cursor, macro_name),
-                "env" => parse_env_expression(source, bytes, cursor, macro_name),
+            match arguments.first() {
+                Some(Expr::Lit(literal)) => match &literal.lit {
+                    Lit::Str(value) if value.value() == "CARGO_MANIFEST_DIR" => {
+                        Ok(StaticString::manifest_dir())
+                    }
+                    _ => Err(format!(
+                        "{include_macro} only resolves env!(\"CARGO_MANIFEST_DIR\")"
+                    )),
+                },
                 _ => Err(format!(
-                    "{macro_name} macro {name}! is not a supported static expression"
+                    "{include_macro} only resolves env!(\"CARGO_MANIFEST_DIR\")"
                 )),
             }
         }
-        _ => Err(format!("{macro_name} must use a static string expression")),
+        _ => Err(format!(
+            "{include_macro} macro {name}! is not a supported static expression"
+        )),
     }
 }
 
-fn parse_raw_string_expression(
-    source: &str,
-    bytes: &[u8],
-    cursor: usize,
-) -> Result<Option<(StaticString, usize)>, String> {
-    let Some((hash_start, content_start)) = raw_string_opening(bytes, cursor) else {
-        return Ok(None);
+fn is_punct(token: &TokenTree, expected: char) -> bool {
+    matches!(token, TokenTree::Punct(punct) if punct.as_char() == expected)
+}
+
+fn is_colon(token: &TokenTree) -> bool {
+    is_punct(token, ':')
+}
+
+/// Path resolution errors stay structured so both schema scanners can render
+/// the same diagnostics without carrying a second copy of boundary logic.
+#[derive(Debug)]
+pub(crate) enum IncludePathError {
+    Escapes,
+    Missing,
+    Io {
+        operation: &'static str,
+        path: PathBuf,
+        source: io::Error,
+    },
+}
+
+/// Resolve one include with exact `concat!` semantics, then canonicalize the
+/// complete path. Canonicalizing the parent chain before accepting `.github`
+/// inputs closes the external-symlink bypass while still allowing tracked
+/// symlinked include directories whose final canonical file is in the repo.
+pub(crate) fn resolve_include_path(
+    root: &Path,
+    source_parent: &str,
+    package_root: &str,
+    included: &IncludeString,
+    file_set: &BTreeSet<String>,
+) -> Result<String, IncludePathError> {
+    let canonical_root = fs::canonicalize(root).map_err(|source| IncludePathError::Io {
+        operation: "canonicalize repository root",
+        path: root.to_owned(),
+        source,
+    })?;
+    let candidate = match included {
+        IncludeString::Relative(value) => {
+            let logical = resolve_repo_path(source_parent, value).ok_or(IncludePathError::Escapes)?;
+            root.join(logical)
+        }
+        IncludeString::ManifestDir(parts) => {
+            let manifest_dir = fs::canonicalize(root.join(package_root)).map_err(|source| {
+                IncludePathError::Io {
+                    operation: "resolve Cargo manifest directory",
+                    path: root.join(package_root),
+                    source,
+                }
+            })?;
+            let mut exact = OsString::new();
+            for part in parts {
+                match part {
+                    ManifestPart::Literal(value) => exact.push(value),
+                    ManifestPart::ManifestDir => exact.push(manifest_dir.as_os_str()),
+                }
+            }
+            PathBuf::from(exact)
+        }
     };
-    let hashes = content_start - hash_start;
-    let Some(end) = find_raw_string_end(bytes, content_start, hashes) else {
-        return Err("unterminated raw string literal".to_owned());
-    };
-    let value = source[content_start + 1..end - hashes - 1].to_owned();
-    Ok(Some((
-        StaticString {
-            value,
-            ..Default::default()
-        },
-        end,
-    )))
-}
-
-fn parse_concat_expression(
-    source: &str,
-    bytes: &[u8],
-    mut cursor: usize,
-    macro_name: &str,
-) -> Result<(StaticString, usize), String> {
-    let mut combined = StaticString::default();
-    cursor = skip_expression_trivia(bytes, cursor)?;
-    if bytes.get(cursor) == Some(&b')') {
-        return Ok((combined, cursor + 1));
-    }
-    loop {
-        let (part, next) = parse_static_string_expression(source, bytes, cursor, macro_name)?;
-        combine_static_strings(&mut combined, &part, macro_name)?;
-        cursor = skip_expression_trivia(bytes, next)?;
-        match bytes.get(cursor) {
-            Some(b',') => {
-                cursor = skip_expression_trivia(bytes, cursor + 1)?;
-                if bytes.get(cursor) == Some(&b')') {
-                    return Ok((combined, cursor + 1));
-                }
-            }
-            Some(b')') => return Ok((combined, cursor + 1)),
-            _ => return Err(format!("unterminated concat! expression in {macro_name}")),
-        }
-    }
-}
-
-fn parse_env_expression(
-    source: &str,
-    bytes: &[u8],
-    mut cursor: usize,
-    macro_name: &str,
-) -> Result<(StaticString, usize), String> {
-    let (name, next) = parse_static_string_expression(source, bytes, cursor, macro_name)?;
-    cursor = skip_expression_trivia(bytes, next)?;
-    if bytes.get(cursor) != Some(&b')') {
-        return Err("env! must use exactly one string literal argument".to_owned());
-    }
-    if name.manifest_dir || name.value != "CARGO_MANIFEST_DIR" {
-        return Err(format!(
-            "{macro_name} only resolves env!(\"CARGO_MANIFEST_DIR\")"
-        ));
-    }
-    Ok((
-        StaticString {
-            manifest_dir: true,
-            value: String::new(),
-        },
-        cursor + 1,
-    ))
-}
-
-fn combine_static_strings(
-    left: &mut StaticString,
-    right: &StaticString,
-    macro_name: &str,
-) -> Result<(), String> {
-    if right.manifest_dir {
-        if left.manifest_dir || !left.value.is_empty() {
-            return Err(format!(
-                "{macro_name} CARGO_MANIFEST_DIR must be the first concat! expression"
-            ));
-        }
-        left.manifest_dir = true;
-    }
-    left.value.push_str(&right.value);
-    Ok(())
-}
-
-fn decode_rust_string_literal(source: &str, start: usize, end: usize) -> Result<String, String> {
-    let bytes = source.as_bytes();
-    let content_end = end
-        .checked_sub(1)
-        .ok_or_else(|| "invalid string literal bounds".to_owned())?;
-    let mut cursor = start + 1;
-    let mut value = String::new();
-    while cursor < content_end {
-        if bytes[cursor] != b'\\' {
-            let character = source[cursor..content_end]
-                .chars()
-                .next()
-                .ok_or_else(|| "invalid UTF-8 string literal".to_owned())?;
-            value.push(character);
-            cursor += character.len_utf8();
-            continue;
-        }
-        cursor += 1;
-        let escape = *bytes
-            .get(cursor)
-            .ok_or_else(|| "unterminated string escape".to_owned())?;
-        cursor += 1;
-        match escape {
-            b'\\' => value.push('\\'),
-            b'"' => value.push('"'),
-            b'\'' => value.push('\''),
-            b'n' => value.push('\n'),
-            b'r' => value.push('\r'),
-            b't' => value.push('\t'),
-            b'0' => value.push('\0'),
-            b'x' => {
-                let first =
-                    hex_value(*bytes.get(cursor).ok_or_else(|| {
-                        "\\x escape must contain two hexadecimal digits".to_owned()
-                    })?)?;
-                let second =
-                    hex_value(*bytes.get(cursor + 1).ok_or_else(|| {
-                        "\\x escape must contain two hexadecimal digits".to_owned()
-                    })?)?;
-                let byte = first * 16 + second;
-                if byte > 0x7f {
-                    return Err("\\x escapes must be ASCII".to_owned());
-                }
-                value.push(char::from(byte));
-                cursor += 2;
-            }
-            b'u' => {
-                let (character, next) = decode_unicode_escape(bytes, cursor)?;
-                value.push(character);
-                cursor = next;
-            }
-            b'\n' => {
-                while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
-                    cursor += 1;
-                }
-            }
-            b'\r' => {
-                if bytes.get(cursor) == Some(&b'\n') {
-                    cursor += 1;
-                }
-                while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
-                    cursor += 1;
-                }
-            }
-            _ => return Err(format!("unsupported Rust string escape \\{escape}")),
-        }
-    }
-    Ok(value)
-}
-
-fn decode_unicode_escape(bytes: &[u8], mut cursor: usize) -> Result<(char, usize), String> {
-    if bytes.get(cursor) != Some(&b'{') {
-        return Err("\\u escape must use braces".to_owned());
-    }
-    cursor += 1;
-    let start = cursor;
-    let mut value = 0_u32;
-    while let Some(byte) = bytes.get(cursor) {
-        if *byte == b'}' {
-            let digits = cursor - start;
-            if !(1..=6).contains(&digits) {
-                return Err("\\u escape must contain one to six hexadecimal digits".to_owned());
-            }
-            let character = char::from_u32(value)
-                .ok_or_else(|| "\\u escape is not a Unicode scalar value".to_owned())?;
-            return Ok((character, cursor + 1));
-        }
-        value = value
-            .checked_mul(16)
-            .and_then(|value| hex_value(*byte).ok().map(|digit| value + u32::from(digit)))
-            .ok_or_else(|| "\\u escape must contain hexadecimal digits".to_owned())?;
-        cursor += 1;
-    }
-    Err("unterminated \\u escape".to_owned())
-}
-
-fn hex_value(byte: u8) -> Result<u8, String> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err("expected hexadecimal digit".to_owned()),
-    }
-}
-
-fn skip_expression_trivia(bytes: &[u8], mut cursor: usize) -> Result<usize, String> {
-    loop {
-        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
-            cursor += 1;
-        }
-        if bytes.get(cursor) == Some(&b'/') && bytes.get(cursor + 1) == Some(&b'/') {
-            cursor = skip_line_comment(bytes, cursor + 2);
-        } else if bytes.get(cursor) == Some(&b'/') && bytes.get(cursor + 1) == Some(&b'*') {
-            cursor = skip_block_comment(bytes, cursor + 2)?;
+    let canonical_target = fs::canonicalize(&candidate).map_err(|source| {
+        if source.kind() == io::ErrorKind::NotFound {
+            IncludePathError::Missing
         } else {
-            return Ok(cursor);
-        }
-    }
-}
-
-fn is_rust_identifier_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
-}
-
-fn skip_line_comment(bytes: &[u8], mut cursor: usize) -> usize {
-    while cursor < bytes.len() && bytes[cursor] != b'\n' {
-        cursor += 1;
-    }
-    cursor
-}
-
-fn skip_block_comment(bytes: &[u8], mut cursor: usize) -> Result<usize, String> {
-    let mut depth = 1;
-    while cursor + 1 < bytes.len() {
-        if bytes[cursor] == b'/' && bytes[cursor + 1] == b'*' {
-            depth += 1;
-            cursor += 2;
-        } else if bytes[cursor] == b'*' && bytes[cursor + 1] == b'/' {
-            depth -= 1;
-            cursor += 2;
-            if depth == 0 {
-                return Ok(cursor);
+            IncludePathError::Io {
+                operation: "resolve include target",
+                path: candidate.clone(),
+                source,
             }
-        } else {
-            cursor += 1;
+        }
+    })?;
+    let Ok(relative) = canonical_target.strip_prefix(&canonical_root) else {
+        return Err(IncludePathError::Escapes);
+    };
+    let relative = relative
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    if file_set.contains(&relative) {
+        return Ok(relative);
+    }
+    if is_static_github_input(&relative) {
+        let metadata = fs::symlink_metadata(&candidate).map_err(|source| IncludePathError::Io {
+            operation: "inspect include target",
+            path: candidate.clone(),
+            source,
+        })?;
+        if metadata.is_file() && !metadata.file_type().is_symlink() {
+            return Ok(relative);
         }
     }
-    Err("unterminated block comment".to_owned())
+    Err(IncludePathError::Missing)
 }
 
-fn raw_string_opening(bytes: &[u8], cursor: usize) -> Option<(usize, usize)> {
-    let (hash_start, content_start) = match bytes.get(cursor..) {
-        Some([b'r', rest @ ..]) => (
-            cursor + 1,
-            cursor + 1 + rest.iter().take_while(|byte| **byte == b'#').count(),
-        ),
-        Some([b'b', b'r', rest @ ..]) => (
-            cursor + 2,
-            cursor + 2 + rest.iter().take_while(|byte| **byte == b'#').count(),
-        ),
-        _ => return None,
+fn is_static_github_input(target: &str) -> bool {
+    target.starts_with(".github/")
+        && target != ".github/UNIFIED-ACTIONS.md"
+        && !target.starts_with(".github/ci/")
+        && !target.starts_with(".github/workflows/")
+}
+
+fn resolve_repo_path(root: &str, relative: &str) -> Option<String> {
+    let mut parts = if root == "." {
+        Vec::new()
+    } else {
+        root.split('/').map(str::to_owned).collect::<Vec<_>>()
     };
-    (bytes.get(content_start) == Some(&b'"')).then_some((hash_start, content_start))
-}
-
-fn find_raw_string_end(bytes: &[u8], content_start: usize, hashes: usize) -> Option<usize> {
-    let mut end = content_start + 1;
-    while end < bytes.len() {
-        if bytes[end] == b'"'
-            && bytes
-                .get(end + 1..end + 1 + hashes)
-                .is_some_and(|suffix| suffix.iter().all(|byte| *byte == b'#'))
-        {
-            return Some(end + 1 + hashes);
-        }
-        end += 1;
-    }
-    None
-}
-
-fn skip_raw_string(bytes: &[u8], cursor: usize) -> Result<Option<usize>, String> {
-    let Some((hash_start, content_start)) = raw_string_opening(bytes, cursor) else {
-        return Ok(None);
-    };
-    let hashes = content_start - hash_start;
-    find_raw_string_end(bytes, content_start, hashes)
-        .map(Some)
-        .ok_or_else(|| "unterminated raw string literal".to_owned())
-}
-
-fn is_char_literal_start(bytes: &[u8], cursor: usize) -> bool {
-    match bytes.get(cursor + 1) {
-        Some(b'\\') => true,
-        Some(byte) if *byte != b'\'' && *byte != b'\n' => bytes.get(cursor + 2) == Some(&b'\''),
-        _ => false,
-    }
-}
-
-fn skip_quoted_literal(bytes: &[u8], mut cursor: usize, delimiter: u8) -> Result<usize, String> {
-    cursor += 1;
-    while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'\\' => cursor = cursor.saturating_add(2),
-            character if character == delimiter => return Ok(cursor + 1),
-            b'\n' if delimiter == b'\'' => {
-                return Err(format!("unterminated quoted literal at byte {cursor}"));
+    for component in Path::new(relative).components() {
+        match component {
+            Component::Normal(component) => parts.push(component.to_string_lossy().into_owned()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                parts.pop()?;
             }
-            _ => cursor += 1,
+            Component::RootDir | Component::Prefix(_) => return None,
         }
     }
-    Err(format!("unterminated quoted literal at byte {cursor}"))
+    Some(if parts.is_empty() {
+        ".".to_owned()
+    } else {
+        parts.join("/")
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_include_paths, IncludeString};
+    use super::{parse_include_paths, IncludeString, ManifestPart};
 
     #[test]
     fn parses_manifest_dir_concat_with_suffix() {
@@ -467,7 +377,10 @@ mod tests {
                 "include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/lib.rs\"));"
             )
             .ok(),
-            Some(vec![IncludeString::ManifestDir("/src/lib.rs".to_owned())])
+            Some(vec![IncludeString::ManifestDir(vec![
+                ManifestPart::ManifestDir,
+                ManifestPart::Literal("/src/lib.rs".to_owned()),
+            ])])
         );
     }
 
@@ -480,11 +393,38 @@ mod tests {
     }
 
     #[test]
+    fn accepts_comments_and_all_macro_delimiters() {
+        assert_eq!(
+            parse_include_paths(
+                "include_str /* trivia */ ! { concat /* trivia */ ! [ r#\"a\"#, \"/b\" ] }"
+            )
+            .ok(),
+            Some(vec![IncludeString::Relative("a/b".to_owned())])
+        );
+    }
+
+    #[test]
+    fn preserves_manifest_dir_concat_boundaries() {
+        assert_eq!(
+            parse_include_paths(
+                "include_str!(concat!(\"prefix\", env!(\"CARGO_MANIFEST_DIR\"), \"/suffix\"));"
+            )
+            .ok(),
+            Some(vec![IncludeString::ManifestDir(vec![
+                ManifestPart::Literal("prefix".to_owned()),
+                ManifestPart::ManifestDir,
+                ManifestPart::Literal("/suffix".to_owned()),
+            ])])
+        );
+    }
+
+    #[test]
     fn rejects_dynamic_and_unterminated_input() {
         for source in [
             "include_str!(PATH);",
             "/* include_str!(\"x\")",
             "include_str!(r#\"x);",
+            "include_str! { \"x\"",
         ] {
             let result = parse_include_paths(source);
             assert!(result.is_err(), "invalid source was accepted: {source}");
