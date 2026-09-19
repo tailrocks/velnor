@@ -13329,7 +13329,11 @@ lockfile = true
         assert!(preview.contains("cp dist/microvm/vmlinux"), "{preview}");
         assert!(preview.contains("sha256sum --check --strict"), "{preview}");
         assert!(preview.contains("mmdebstrap"), "{preview}");
-        assert!(preview.contains("gcc-aarch64-linux-gnu"), "{preview}");
+        assert!(
+            !preview.contains("gcc-aarch64-linux-gnu")
+                && preview.contains("Verify native arm64 C and OpenSSL toolchain"),
+            "native arm64 guest payload must probe its runner toolchain instead of installing a cross compiler: {preview}"
+        );
         assert!(preview.contains("flex bison bc"), "{preview}");
         assert!(preview.contains("--bin example-guest-agent"), "{preview}");
         assert!(preview.contains("--bin example-guest-image"), "{preview}");

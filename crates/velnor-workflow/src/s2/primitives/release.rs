@@ -64,8 +64,12 @@ const ARM64_HOSTED_RUNS_ON: &str = "ubuntu-24.04-arm";
 /// makes the exact compiler/linker contract visible in the job log.
 fn native_arm64_toolchain_steps(target_expr: &str) -> String {
     let condition = format!("${{{{ {target_expr} == '{ARM64_LINUX_TARGET}' }}}}");
-    format!(
+    let script = format!(
         "      - name: Verify native arm64 C and OpenSSL toolchain\n        if: {condition}\n        shell: bash\n        run: |\n          set -euo pipefail\n          test \"$(uname -m)\" = aarch64 || {{ echo \"::error::aarch64 target requires an arm64 runner\" >&2; exit 1; }}\n          cc=\"$(command -v cc)\"\n          cxx=\"$(command -v c++)\"\n          ar=\"$(command -v ar)\"\n          machine=\"$(\"$cc\" -dumpmachine)\"\n          case \"$machine\" in\n            aarch64-*|arm64-*) ;;\n            *) echo \"::error::native arm64 compiler reports unsupported target $machine\" >&2; exit 1 ;;\n          esac\n          \"$cc\" -x c -o \"$RUNNER_TEMP/velnor-arm64-c-probe\" - <<'EOF'\n          int main(void) {{ return 0; }}\n          EOF\n          \"$RUNNER_TEMP/velnor-arm64-c-probe\"\n          \"$cxx\" --version >/dev/null\n          \"$ar\" --version >/dev/null\n          printf 'CC_aarch64_unknown_linux_gnu=%s\\n' \"$cc\" >> \"$GITHUB_ENV\"\n          printf 'CXX_aarch64_unknown_linux_gnu=%s\\n' \"$cxx\" >> \"$GITHUB_ENV\"\n          printf 'AR_aarch64_unknown_linux_gnu=%s\\n' \"$ar\" >> \"$GITHUB_ENV\"\n          printf 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=%s\\n' \"$cc\" >> \"$GITHUB_ENV\"\n          printf 'CROSS_COMPILE=\\n' >> \"$GITHUB_ENV\"\n          if command -v openssl >/dev/null 2>&1; then\n            openssl version\n          else\n            echo 'host openssl CLI absent; vendored OpenSSL/aws-lc will use the verified native compiler'\n          fi\n          echo \"native arm64 compiler=$cc linker=$cc; vendored OpenSSL/aws-lc target builds use these settings\"\n",
+    );
+    script.replace(
+        "          printf 'CC_aarch64_unknown_linux_gnu=%s\\n' \"$cc\" >> \"$GITHUB_ENV\"\n          printf 'CXX_aarch64_unknown_linux_gnu=%s\\n' \"$cxx\" >> \"$GITHUB_ENV\"\n          printf 'AR_aarch64_unknown_linux_gnu=%s\\n' \"$ar\" >> \"$GITHUB_ENV\"\n          printf 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=%s\\n' \"$cc\" >> \"$GITHUB_ENV\"\n          printf 'CROSS_COMPILE=\\n' >> \"$GITHUB_ENV\"\n",
+        "          {\n            printf 'CC_aarch64_unknown_linux_gnu=%s\\n' \"$cc\"\n            printf 'CXX_aarch64_unknown_linux_gnu=%s\\n' \"$cxx\"\n            printf 'AR_aarch64_unknown_linux_gnu=%s\\n' \"$ar\"\n            printf 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=%s\\n' \"$cc\"\n            printf 'CROSS_COMPILE=\\n'\n          } >> \"$GITHUB_ENV\"\n",
     )
 }
 
@@ -5910,11 +5914,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "8d7225f37ba806409985b98d3d04b4cee5b32e01aa9288d26b7577c2850329b6",
+                "bc14f7b518009625704c1337ce20ea29c2820fe504e4c838785ab2c54f9c0db4",
             ),
             (
                 "preview.yml",
-                "b6b1d73bb3be07ef5fb5b3402a2ec97b40f49e36e73eb247b1ebd81ba255f0d4",
+                "6e4a76ce717efa5ae2b5450bced6468b87a363c00de68dee0abaf579694d7205",
             ),
             (
                 "maintenance.yml",
@@ -6031,11 +6035,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "068d8de3218713b1a25922806f2873079a44f1b076bf6029502bce804108d203",
+                "1f9645efd37f42f61ccda56baa0d9ed38310addf06ce398b01ab3d916c395e78",
             ),
             (
                 "preview.yml",
-                "fcf17f3142303268786874bc9f2b7b43caaa0c00d0b081c425e96c5867f61f59",
+                "2fb8b2dbdf3b603d797ec1644a6450f9f83ebea8bba7aa2adb87d2a7ce547547",
             ),
         ];
         let root = scanned_root("identity-pinned");
