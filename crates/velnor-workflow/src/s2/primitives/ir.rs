@@ -820,6 +820,32 @@ mod tests {
         let producer_end = rendered[producer_start..].find("\n  ci-required:").unwrap();
         let producer = &rendered[producer_start..producer_start + producer_end];
         assert!(!producer.contains("needs:"), "{producer}");
+        assert!(
+            producer.contains("CANDIDATE_BUILD_IMAGE_DIGEST"),
+            "{producer}"
+        );
+        assert!(
+            producer.contains("test -z \"${GITHUB_TOKEN:-}\""),
+            "{producer}"
+        );
+        assert!(producer.contains("--network=none"), "{producer}");
+        assert!(producer.contains("--pid=private"), "{producer}");
+        assert!(producer.contains("--cap-drop=ALL"), "{producer}");
+        assert!(producer.contains("--pull=never"), "{producer}");
+        assert!(
+            producer.contains("--mount \"type=bind,src=$source,dst=/src,readonly"),
+            "{producer}"
+        );
+        assert!(producer.contains("CARGO_NET_OFFLINE=true"), "{producer}");
+        assert!(producer.contains("profile: $profile"), "{producer}");
+        assert!(
+            producer.contains("build_image_platform_digest"),
+            "{producer}"
+        );
+        assert!(
+            !producer.contains("command -v cargo"),
+            "host cargo must not build PR code: {producer}"
+        );
     }
 
     #[test]
@@ -3112,34 +3138,89 @@ impl WorkflowIr {
         env:
           CANDIDATE_ARTIFACT_NAME: {artifact}
           CANDIDATE_HEAD_SHA: ${{{{ github.event.pull_request.head.sha }}}}
+          CANDIDATE_BUILD_IMAGE_REPOSITORY: {build_image_repository}
+          CANDIDATE_BUILD_IMAGE_DIGEST: {build_image_digest}
         run: |
           set -euo pipefail
           test -n "$CANDIDATE_HEAD_SHA"
           test "$CANDIDATE_ARTIFACT_NAME" = "{artifact}"
+          test "$CANDIDATE_BUILD_IMAGE_REPOSITORY" = "{build_image_repository}"
+          case "$CANDIDATE_BUILD_IMAGE_DIGEST" in sha256:[0-9a-f]{{64}}) ;; *) echo "::error::candidate builder image is not pinned" >&2; exit 1 ;; esac
           test -z "${{GITHUB_TOKEN:-}}"
           test -z "${{ACTIONS_RUNTIME_TOKEN:-}}"
           test -z "${{ACTIONS_RUNTIME_URL:-}}"
           test -z "${{ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}}"
+          command -v docker >/dev/null
+          command -v jq >/dev/null
+          command -v sha256sum >/dev/null
+          command -v timeout >/dev/null
+          docker info >/dev/null
+          test "$(docker info --format '{{{{.OSType}}}}')" = linux
+          builder_image="$CANDIDATE_BUILD_IMAGE_REPOSITORY@$CANDIDATE_BUILD_IMAGE_DIGEST"
+          docker buildx imagetools inspect --raw "$builder_image" > "$RUNNER_TEMP/candidate-builder-index.json"
+          jq -e '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64") | select((.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest")] | length == 1' "$RUNNER_TEMP/candidate-builder-index.json" >/dev/null
+          builder_platform_digest="$(jq -er '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64") | select((.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest") | .digest] | if length == 1 then .[0] else error("builder platform digest is not unique") end' "$RUNNER_TEMP/candidate-builder-index.json")"
+          case "$builder_platform_digest" in sha256:[0-9a-f]{{64}}) ;; *) exit 1 ;; esac
+          builder_platform_image="$CANDIDATE_BUILD_IMAGE_REPOSITORY@$builder_platform_digest"
+          docker pull --quiet --platform linux/amd64 "$builder_platform_image"
+          docker image inspect "$builder_platform_image" --format '{{{{json .}}}}' > "$RUNNER_TEMP/candidate-builder-local.json"
+          jq -e --arg ref "$builder_platform_image" '.[0].RepoDigests | index($ref) != null' "$RUNNER_TEMP/candidate-builder-local.json" >/dev/null
+          jq -e '.[0].Os == "linux" and .[0].Architecture == "amd64" and ((.[0].Config.Env // []) | all(test("^(GITHUB_|ACTIONS_|RUNNER_|GH_TOKEN|AWS_|AZURE_|GOOGLE_|CARGO_REGISTRIES_).*" ) | not))' "$RUNNER_TEMP/candidate-builder-local.json" >/dev/null
           stage="$RUNNER_TEMP/velnor-workflow-candidate"
           rm -rf "$stage"
-          mkdir -p "$stage"
-          cargo_bin="$(command -v cargo)"
-          cargo_dir="$(dirname "$cargo_bin")"
-          env -i \
-            HOME="$HOME" \
-            PATH="$cargo_dir:/usr/local/bin:/usr/bin:/bin" \
-            CARGO_HOME="$RUNNER_TEMP/candidate-cargo" \
-            CARGO_TERM_COLOR=never \
-            CANDIDATE_HEAD_SHA="$CANDIDATE_HEAD_SHA" \
-            "$cargo_bin" build --locked -p velnor-workflow
-          install -m 0755 target/debug/velnor-workflow "$stage/velnor-workflow"
+          mkdir -m 0700 "$stage"
+          source="$GITHUB_WORKSPACE"
+          test -d "$source"
+          test -z "$(find -P "$source" -type l -print -quit)"
+          test -z "$(find -P "$source" ! -type f ! -type d ! -type l -print -quit)"
+          uid="$(id -u)"; gid="$(id -g)"; test "$uid" -ne 0; test "$gid" -ge 0
+          cid="$(docker create --name "velnor-candidate-build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --platform linux/amd64 --pull=never --network=none --read-only --pid=private --cap-drop=ALL --security-opt no-new-privileges=true --pids-limit=256 --memory=4096m --memory-swap=4096m --cpus=2 --ulimit fsize=268435456:268435456 --ulimit nofile=2048:2048 --ulimit core=0 --shm-size=64m --stop-timeout=10 --log-driver=none --user "$uid:$gid" --workdir /src --tmpfs /tmp:rw,noexec,nosuid,nodev,size=256m,nr_inodes=8192,mode=700,uid=$uid,gid=$gid --tmpfs /target:rw,nosuid,nodev,size=2048m,nr_inodes=200000,mode=700,uid=$uid,gid=$gid --tmpfs /output:rw,noexec,nosuid,nodev,size=64m,nr_inodes=4096,mode=700,uid=$uid,gid=$gid --mount "type=bind,src=$source,dst=/src,readonly,bind-propagation=rprivate" --env CANDIDATE_HEAD_SHA="$CANDIDATE_HEAD_SHA" --env CARGO_HOME=/tmp/cargo --env CARGO_NET_OFFLINE=true --env CARGO_TERM_COLOR=never --env HOME=/tmp/home --env PATH=/usr/local/cargo/bin:/usr/local/rustup/toolchain/stable-x86_64-unknown-linux-gnu/bin:/usr/bin:/bin --entrypoint /bin/sh "$builder_platform_image" -ceu 'cargo build --locked --offline -p velnor-workflow && install -m 0555 target/debug/velnor-workflow /output/velnor-workflow')"
+          cleanup() {{
+            status=$?
+            if [[ -n "${{cid:-}}" ]]; then docker rm -f "$cid" >/dev/null 2>&1 || status=1; fi
+            rm -rf "$stage" || status=1
+            trap - EXIT
+            exit "$status"
+          }}
+          trap cleanup EXIT
+          docker inspect "$cid" > "$stage/container.json"
+          jq -e --arg user "$uid:$gid" --arg source "$source" '
+            .[0].HostConfig.NetworkMode == "none" and .[0].HostConfig.ReadonlyRootfs == true and
+            .[0].HostConfig.Privileged == false and ((.[0].HostConfig.CapDrop // []) | index("ALL") != null) and
+            ((.[0].HostConfig.CapAdd // []) | length == 0) and ((.[0].HostConfig.PidMode // "") == "private") and
+            ((.[0].HostConfig.IpcMode // "") == "private") and ((.[0].HostConfig.SecurityOpt // []) | index("no-new-privileges=true") != null) and
+            ((.[0].HostConfig.SecurityOpt // []) | all(. != "seccomp=unconfined")) and .[0].HostConfig.PidsLimit == 256 and
+            .[0].HostConfig.Memory == 4294967296 and .[0].HostConfig.MemorySwap == 4294967296 and .[0].HostConfig.NanoCpus == 2000000000 and
+            .[0].HostConfig.LogConfig.Type == "none" and .[0].Config.User == $user and .[0].Config.WorkingDir == "/src" and
+            .[0].Config.Entrypoint == ["/bin/sh"] and ((.[0].Config.Env | map(split("=")[0]) | sort) == ["CANDIDATE_HEAD_SHA","CARGO_HOME","CARGO_NET_OFFLINE","CARGO_TERM_COLOR","HOME","PATH"]) and
+            ((.[0].HostConfig.Binds // []) | length == 0) and ((.[0].HostConfig.Devices // []) | length == 0) and
+            ([.[0].Mounts[] | select(.Type == "bind" and .Destination == "/src" and .Source == $source and .RW == false and .Propagation == "rprivate")] | length == 1) and
+            ([.[0].Mounts[] | select(.Type == "bind")] | length == 1) and
+            ([.[0].Mounts[] | select(.Type == "tmpfs" and (.Destination == "/tmp" or .Destination == "/target" or .Destination == "/output"))] | length == 3)
+          ' "$stage/container.json" >/dev/null
+          docker start "$cid" >/dev/null
+          if ! timeout --foreground --kill-after=10s 900s docker wait "$cid" > "$stage/exit"; then
+            docker kill "$cid" >/dev/null 2>&1 || true
+            exit 1
+          fi
+          docker inspect "$cid" > "$stage/after.json"
+          jq -e '.[0].State.Status == "exited" and .[0].State.ExitCode == 0 and .[0].State.OOMKilled == false and .[0].State.Error == ""' "$stage/after.json" >/dev/null
+          docker cp "$cid:/output/velnor-workflow" "$stage/velnor-workflow"
+          test -f "$stage/velnor-workflow"
+          chmod 0555 "$stage/velnor-workflow"
           binary_sha256="$(sha256sum "$stage/velnor-workflow" | awk '{{print $1}}')"
           jq -n \
             --arg repository "$GITHUB_REPOSITORY" \
             --arg head_sha "$CANDIDATE_HEAD_SHA" \
             --arg artifact_name "$CANDIDATE_ARTIFACT_NAME" \
+            --arg profile debug \
+            --arg platform linux/amd64 \
+            --arg features tui \
+            --arg build_image_repository "$CANDIDATE_BUILD_IMAGE_REPOSITORY" \
+            --arg build_image_digest "$CANDIDATE_BUILD_IMAGE_DIGEST" \
+            --arg build_image_platform_digest "$builder_platform_digest" \
             --arg binary_sha256 "$binary_sha256" \
-            '{{role: "producer", workflow_path: ".github/workflows/ci-pr.yml", job_name: "candidate_producer", event: "pull_request", repository: $repository, head_sha: $head_sha, artifact_name: $artifact_name, binary_sha256: $binary_sha256}}' > "$stage/candidate-manifest.json"
+            '{{role: "producer", workflow_path: ".github/workflows/ci-pr.yml", job_name: "candidate_producer", event: "pull_request", repository: $repository, head_sha: $head_sha, artifact_name: $artifact_name, profile: $profile, platform: $platform, features: $features, build_image_repository: $build_image_repository, build_image_digest: $build_image_digest, build_image_platform_digest: $build_image_platform_digest, binary_sha256: $binary_sha256}}' > "$stage/candidate-manifest.json"
       - name: Upload candidate generator product
         id: candidate_upload
         uses: {upload}
@@ -3151,6 +3232,8 @@ impl WorkflowIr {
 "#,
             job = CANDIDATE_PRODUCER_JOB,
             artifact = crate::s2::CANDIDATE_ARTIFACT_NAME,
+            build_image_repository = crate::s2::CANDIDATE_BUILD_IMAGE_REPOSITORY,
+            build_image_digest = crate::s2::CANDIDATE_BUILD_IMAGE_DIGEST,
             checkout = self.pins.checkout,
             upload = self.pins.upload_artifact,
         );
