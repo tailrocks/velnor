@@ -35,23 +35,28 @@ pub const UNCERTAIN_REACQUIRE_AFTER: Duration = Duration::from_secs(60);
 /// row holding a permit, and unattested-but-granted rows adopt their
 /// about-to-reserve permit early — retention direction), while step-7
 /// convergence excludes `granted` (it is the acquire pass's input).
-pub(crate) const PERMIT_STATES: [DemandState; 5] = [
+pub(crate) const PERMIT_STATES: [DemandState; 7] = [
     DemandState::Granted,
     DemandState::AcquireIntent,
     DemandState::Acquired,
     DemandState::Uncertain,
+    DemandState::CanceledPending,
+    DemandState::CanceledAcquired,
     DemandState::ProvisionIntent,
 ];
 
 pub(crate) fn permit_state_for_demand(state: DemandState) -> LedgerPermitState {
     match state {
         DemandState::Granted => LedgerPermitState::Reserved,
-        DemandState::AcquireIntent | DemandState::Acquired => LedgerPermitState::Acquiring,
-        DemandState::Uncertain => LedgerPermitState::Uncertain,
+        DemandState::AcquireIntent | DemandState::Acquired | DemandState::CanceledAcquired => {
+            LedgerPermitState::Acquiring
+        }
+        DemandState::Uncertain | DemandState::CanceledPending => LedgerPermitState::Uncertain,
         DemandState::ProvisionIntent => LedgerPermitState::Provisioning,
         DemandState::Observed
         | DemandState::Eligible
         | DemandState::Declined
+        | DemandState::CanceledDone
         | DemandState::Terminal => LedgerPermitState::Uncertain,
     }
 }
@@ -61,6 +66,9 @@ pub(crate) fn permit_state_for_demand(state: DemandState) -> LedgerPermitState {
 pub struct StartupReport {
     pub generation: u64,
     pub stale_grants_reset: u64,
+    /// Acquire intents with no batch are pre-network crash orphans: the
+    /// request could not have been sent, so their reservation was released.
+    pub unbatched_acquire_intents_recovered: u64,
     pub adopted: Vec<String>,
     pub marked_uncertain: Vec<String>,
     pub confirmed: Vec<String>,
@@ -97,6 +105,48 @@ pub fn startup<L: CapacityLedger>(
     let generation = ledger
         .generation()
         .map_err(|error| anyhow::anyhow!("read ledger generation: {error}"))?;
+
+    // An unbatched acquire intent cannot have crossed the network boundary:
+    // both the previous row-first writer and the current batch-first writer
+    // persist the acquire batch before calling `acquirejobs`. Return these
+    // crash orphans to eligibility before ledger attestation.
+    let mut unbatched_acquire_intents_recovered = 0;
+    for (request_id, state) in demand.list_in_states(
+        scale_set_id,
+        &[DemandState::AcquireIntent, DemandState::CanceledPending],
+    )? {
+        if !batches.contains_request(scale_set_id, request_id)? {
+            let holder = permit_holder(scale_set_id, request_id);
+            if state == DemandState::CanceledPending {
+                demand.set_state(request_id, DemandState::CanceledDone, None, generation)?;
+                ledger.release_cancelled(&holder)?;
+            } else {
+                demand.set_state(request_id, DemandState::Eligible, None, generation)?;
+                ledger.release_to_eligible(&holder)?;
+            }
+            unbatched_acquire_intents_recovered += 1;
+        }
+    }
+
+    // Open batches are the durable network boundary. Mark members uncertain
+    // before stale-generation reset so a crash between batch and demand-row
+    // writes cannot be mistaken for an unsent grant.
+    let open_batches = batches.open_batches(scale_set_id, usize::MAX)?;
+    let mut batches_orphaned = 0u64;
+    for batch in &open_batches {
+        if batch.state == crate::scaleset::intents::BatchState::Intended {
+            batches.resolve(&batch.batch_id, true)?;
+            for request_id in &batch.request_ids {
+                if let Some(row) = demand.get(*request_id)?
+                    && matches!(row.state, DemandState::Granted | DemandState::AcquireIntent)
+                {
+                    demand.set_state(*request_id, DemandState::Uncertain, None, generation)?;
+                }
+            }
+            batches_orphaned += 1;
+        }
+    }
+
     let stale_grants_reset = demand.reset_stale_grants(scale_set_id, generation)?;
     metrics.add_stale_grants_reset(stale_grants_reset);
 
@@ -128,28 +178,11 @@ pub fn startup<L: CapacityLedger>(
         .reconcile(&alive_refs)
         .map_err(|error| anyhow::anyhow!("reconcile ledger: {error}"))?;
 
-    // Crash orphans: `intended` batches never saw their `acquirejobs`
-    // answer. They become `uncertain` (members keep their permits, still
-    // counted) for idle reconcile to resolve — never silently dropped.
-    let mut batches_orphaned = 0u64;
-    for batch in batches.open_batches(scale_set_id, 64)? {
-        if batch.state == crate::scaleset::intents::BatchState::Intended {
-            batches.resolve(&batch.batch_id, true)?;
-            for request_id in &batch.request_ids {
-                if let Some(row) = demand.get(*request_id)?
-                    && row.state == DemandState::AcquireIntent
-                {
-                    demand.set_state(*request_id, DemandState::Uncertain, None, generation)?;
-                }
-            }
-            batches_orphaned += 1;
-        }
-    }
-
     metrics.inc_reconcile_runs();
     Ok(StartupReport {
         generation,
         stale_grants_reset,
+        unbatched_acquire_intents_recovered,
         adopted: report.adopted,
         marked_uncertain: report.marked_uncertain,
         confirmed: report.confirmed,
@@ -230,8 +263,12 @@ async fn resolve_from_observations<L: CapacityLedger>(
         states.push(demand.get(*request_id)?);
     }
     if states.iter().any(|row| {
-        row.as_ref()
-            .is_some_and(|row| row.state == DemandState::Uncertain)
+        row.as_ref().is_some_and(|row| {
+            matches!(
+                row.state,
+                DemandState::Uncertain | DemandState::CanceledPending
+            )
+        })
     }) {
         return Ok(false);
     }
@@ -242,11 +279,12 @@ async fn resolve_from_observations<L: CapacityLedger>(
             DemandState::Acquired => {
                 transition_or_adopt(ledger, &holder, LedgerPermitState::Acquiring, generation)?;
             }
-            DemandState::Terminal => {
-                ledger
-                    .release(&holder)
-                    .map_err(|error| anyhow::anyhow!("release orphaned holder: {error}"))?;
+            DemandState::CanceledAcquired => {
+                transition_or_adopt(ledger, &holder, LedgerPermitState::Acquiring, generation)?;
             }
+            // The terminal handler owns worker cleanup and permit release.
+            // A completion message alone is not cleanup confirmation.
+            DemandState::Terminal => {}
             _ => {}
         }
     }
@@ -315,14 +353,19 @@ async fn reacquire_batch<Q: QueueSession, L: CapacityLedger>(
     generation: u64,
     metrics: &Metrics,
 ) -> Result<bool> {
+    let mut canceled_pending = std::collections::HashSet::new();
     let uncertain: Vec<i64> = {
         let mut members = Vec::new();
         for request_id in &batch.request_ids {
-            if demand
-                .get(*request_id)?
-                .is_some_and(|row| row.state == DemandState::Uncertain)
-            {
-                members.push(*request_id);
+            if let Some(row) = demand.get(*request_id)? {
+                match row.state {
+                    DemandState::Uncertain => members.push(*request_id),
+                    DemandState::CanceledPending => {
+                        members.push(*request_id);
+                        canceled_pending.insert(*request_id);
+                    }
+                    _ => {}
+                }
             }
         }
         members
@@ -344,7 +387,12 @@ async fn reacquire_batch<Q: QueueSession, L: CapacityLedger>(
     };
     let (acquired, missing) = reconcile_returned_ids(&uncertain, &returned);
     for request_id in &acquired {
-        demand.set_state(*request_id, DemandState::Acquired, None, generation)?;
+        let state = if canceled_pending.contains(request_id) {
+            DemandState::CanceledAcquired
+        } else {
+            DemandState::Acquired
+        };
+        demand.set_state(*request_id, state, None, generation)?;
         transition_or_adopt(
             ledger,
             &permit_holder(batch.scale_set_id, *request_id),
@@ -353,10 +401,21 @@ async fn reacquire_batch<Q: QueueSession, L: CapacityLedger>(
         )?;
     }
     for request_id in &missing {
-        ledger
-            .release(&permit_holder(batch.scale_set_id, *request_id))
-            .map_err(|error| anyhow::anyhow!("release missing holder: {error}"))?;
-        demand.set_state(*request_id, DemandState::Eligible, None, generation)?;
+        let holder = permit_holder(batch.scale_set_id, *request_id);
+        if canceled_pending.contains(request_id) {
+            // The cancellation message was already ACKed. Once the batch
+            // proves this request was not acquired, close this old attempt;
+            // upstream sends a new JobAvailable for the requeued job.
+            demand.set_state(*request_id, DemandState::CanceledDone, None, generation)?;
+            ledger
+                .release_cancelled(&holder)
+                .map_err(|error| anyhow::anyhow!("release canceled holder: {error}"))?;
+        } else {
+            ledger
+                .release_to_eligible(&holder)
+                .map_err(|error| anyhow::anyhow!("release missing holder: {error}"))?;
+            demand.set_state(*request_id, DemandState::Eligible, None, generation)?;
+        }
     }
     metrics.add_acquired_ids(acquired.len() as u64);
     metrics.add_missing_ids(missing.len() as u64);
@@ -479,6 +538,52 @@ mod tests {
         assert_eq!(report.adopted, vec!["scaleset/7/11".to_owned()]);
         assert_eq!(ledger.advertised_free().unwrap(), Some(3));
         assert_eq!(metrics.snapshot().reconcile_runs, 1);
+    }
+
+    #[test]
+    fn startup_requeues_unbatched_acquire_intent_without_claiming_network_success() {
+        let path = temp_path("unbatched-acquire-intent");
+        let mut demand = DemandStore::open(&path).unwrap();
+        let mut batches = AcquireBatchStore::open(&path).unwrap();
+        let mut ledger = MemLedger::new();
+        ledger.set_max_jobs(4);
+        let metrics = Metrics::new();
+
+        demand.submit_offer(7, &push_offer(12), 0).unwrap();
+        demand
+            .set_state(12, DemandState::AcquireIntent, None, 0)
+            .unwrap();
+        let holder = permit_holder(7, 12);
+        assert_eq!(
+            ledger
+                .acquire(
+                    &holder,
+                    LedgerLane::ScaleSet,
+                    LedgerPermitState::Acquiring,
+                    0,
+                )
+                .unwrap(),
+            AcquireOutcome::Acquired
+        );
+
+        let report = startup(&mut ledger, &mut demand, &mut batches, 7, &metrics).unwrap();
+        assert_eq!(report.unbatched_acquire_intents_recovered, 1);
+        assert_eq!(report.batches_orphaned, 0);
+        assert_eq!(
+            demand.get(12).unwrap().unwrap().state,
+            DemandState::Eligible
+        );
+        assert_eq!(ledger.holder_state(&holder).unwrap(), None);
+        assert_eq!(ledger.occupied().unwrap(), 0);
+
+        // Restart replay is idempotent after the reservation was freed.
+        let replay = startup(&mut ledger, &mut demand, &mut batches, 7, &metrics).unwrap();
+        assert_eq!(replay.unbatched_acquire_intents_recovered, 0);
+        assert_eq!(
+            demand.get(12).unwrap().unwrap().state,
+            DemandState::Eligible
+        );
+        assert_eq!(ledger.occupied().unwrap(), 0);
     }
 
     #[test]

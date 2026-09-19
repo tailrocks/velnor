@@ -190,6 +190,28 @@ impl CapacityLedger for SharedLedger {
         Ok(self.inner.holder_state(holder)?.map(from_control_state))
     }
 
+    fn observe_demand(
+        &mut self,
+        holder: &str,
+        lane: LedgerLane,
+        scope: &str,
+        first_seen_unix: u64,
+        observed_unix: u64,
+    ) -> Result<(), Self::Error> {
+        self.inner.observe_demand(
+            holder,
+            to_control_lane(lane),
+            scope,
+            first_seen_unix,
+            observed_unix,
+        )?;
+        Ok(())
+    }
+
+    fn cancel_demand(&mut self, holder: &str) -> Result<bool, Self::Error> {
+        self.inner.cancel_demand(holder)
+    }
+
     fn acquire(
         &mut self,
         holder: &str,
@@ -218,6 +240,18 @@ impl CapacityLedger for SharedLedger {
 
     fn release(&mut self, holder: &str) -> Result<bool, Self::Error> {
         self.inner.release(holder)
+    }
+
+    fn release_to_eligible(&mut self, holder: &str) -> Result<bool, Self::Error> {
+        self.inner.release_to_eligible(holder)
+    }
+
+    fn release_cancelled(&mut self, holder: &str) -> Result<bool, Self::Error> {
+        self.inner.release_cancelled(holder)
+    }
+
+    fn retain_uncertain(&mut self, holder: &str, generation: u64) -> Result<(), Self::Error> {
+        self.inner.retain_uncertain(holder, generation)
     }
 
     fn reconcile(

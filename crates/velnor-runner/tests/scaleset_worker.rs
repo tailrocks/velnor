@@ -218,7 +218,14 @@ fn full_lifecycle_holds_one_permit_until_confirmed_cleanup() {
         ScriptRunner::ok("work\n"),
         ScriptRunner::ok("dindata\n"),
     ]);
-    let outcome = provision_worker(&mut script, &DockerToolContentHook, &plan, &|_| {}).unwrap();
+    let outcome = provision_worker(
+        &mut script,
+        &DockerToolContentHook,
+        &plan,
+        &|_| {},
+        &mut || Ok(()),
+    )
+    .unwrap();
     assert_eq!(outcome.dind_attestation.content_version, DIND_VERSION);
     assert_eq!(outcome.runner_attestation.content_version, RUNNER_VERSION);
     worker.record_versions(

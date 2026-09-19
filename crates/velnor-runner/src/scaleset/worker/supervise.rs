@@ -28,6 +28,7 @@
 //! instead of releasing fictitious capacity.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 
@@ -37,6 +38,8 @@ use super::WorkerRunner;
 
 /// How many DinD restarts one worker tolerates before failing.
 pub const MAX_DIND_RESTARTS: u32 = 3;
+/// JIT runner startup deadline, persisted as an absolute epoch time.
+pub const RUNNER_START_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Per-worker DinD restart budget (persisted with the worker record once
 /// the journal extension lands; until then owned by the tick caller).
@@ -50,6 +53,20 @@ impl RestartBudget {
     #[must_use]
     pub fn new(max: u32) -> Self {
         Self { used: 0, max }
+    }
+
+    /// Rebuild a persisted budget; corrupt values cannot grant extra tries.
+    #[must_use]
+    pub fn from_used(max: u32, used: u32) -> Self {
+        Self {
+            used: used.min(max),
+            max,
+        }
+    }
+
+    /// Record a count that was persisted before the corresponding command.
+    pub fn record_used(&mut self, used: u32) {
+        self.used = self.used.max(used.min(self.max));
     }
 
     /// Spend one restart. `false` means the budget is exhausted.
@@ -110,6 +127,8 @@ pub enum SupervisionOutcome {
     Healthy,
     /// DinD was down and got restarted (budget spent).
     DindRestarted { restarts_used: u32 },
+    /// A formerly starting runner reached the connected marker.
+    RunnerConnected,
     /// The worker must move to `terminal`: restart would be wrong.
     WorkerFailed { reason: String },
 }
@@ -120,12 +139,42 @@ pub enum SupervisionOutcome {
 /// reconciles it against `observed` and either repairs (DinD restart)
 /// or fails the worker toward `terminal`. Pure decision + the DinD
 /// restart effect; the caller performs the lifecycle edge.
+#[cfg(test)]
 pub(crate) fn supervise_tick(
     runner: &mut dyn WorkerRunner,
     identity: &WorkerIdentity,
     recorded: velnor_model::ScaleSetWorkerState,
     observed: &ObservedPair,
     restarts: &mut RestartBudget,
+) -> Result<SupervisionOutcome> {
+    supervise_tick_with_runtime(
+        runner,
+        identity,
+        recorded,
+        observed,
+        restarts,
+        None,
+        0,
+        &mut |_| Ok(()),
+    )
+}
+
+/// Runtime-aware supervision. `persist_restarts` commits a restart count
+/// before the corresponding Docker `start`, so process death cannot restore
+/// the consumed budget.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "single runtime decision boundary"
+)]
+pub(crate) fn supervise_tick_with_runtime(
+    runner: &mut dyn WorkerRunner,
+    identity: &WorkerIdentity,
+    recorded: velnor_model::ScaleSetWorkerState,
+    observed: &ObservedPair,
+    restarts: &mut RestartBudget,
+    runner_start_deadline_epoch: Option<u64>,
+    now_epoch: u64,
+    persist_restarts: &mut dyn FnMut(u32) -> Result<()>,
 ) -> Result<SupervisionOutcome> {
     use velnor_model::ScaleSetWorkerState as S;
     // Terminal-side states are owned by the cleanup path, not the tick.
@@ -134,6 +183,20 @@ pub(crate) fn supervise_tick(
         S::Terminal | S::DiagnosticExport | S::OwnedCleanup | S::PermitReleased
     ) {
         return Ok(SupervisionOutcome::Healthy);
+    }
+    let not_yet_connected = !matches!(recorded, S::RunnerConnected | S::Running);
+    if not_yet_connected
+        && runner_start_deadline_epoch.is_some_and(|deadline| now_epoch >= deadline)
+    {
+        return Ok(SupervisionOutcome::WorkerFailed {
+            reason: format!(
+                "runner container {} did not connect before its startup deadline",
+                identity.runner_container()
+            ),
+        });
+    }
+    if not_yet_connected && observed.runner == RunnerConnection::Connected {
+        return Ok(SupervisionOutcome::RunnerConnected);
     }
     // Runner death decides first: a dead runner is never restarted.
     if matches!(recorded, S::RunnerConnected | S::Running)
@@ -149,7 +212,10 @@ pub(crate) fn supervise_tick(
     }
     // DinD death is repairable within budget.
     if !observed.dind_running {
-        if restarts.spend() {
+        let next_restart = restarts.used().saturating_add(1);
+        if next_restart <= MAX_DIND_RESTARTS && next_restart <= restarts.max {
+            persist_restarts(next_restart)?;
+            restarts.record_used(next_restart);
             let name = identity.dind_container();
             let started = runner
                 .run(
@@ -177,6 +243,14 @@ pub(crate) fn supervise_tick(
         });
     }
     Ok(SupervisionOutcome::Healthy)
+}
+
+/// Wall-clock seconds used for durable startup deadlines.
+#[must_use]
+pub fn epoch_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 /// Exported diagnostics: log + inspect files for both containers.
@@ -222,28 +296,75 @@ pub(crate) fn export_diagnostics(
     let mut failures = Vec::new();
 
     let runner_log = dir.join("runner.log");
+    let dind_log = dir.join("dind.log");
+    let runner_inspect = dir.join("runner.inspect.json");
+    let dind_inspect = dir.join("dind.inspect.json");
+    let complete = dir.join("capture.complete");
+    if complete.exists() {
+        let marker = std::fs::read(&complete)
+            .with_context(|| format!("read diagnostic marker {}", complete.display()))?;
+        if marker != b"velnor-diagnostics-v1\n" {
+            anyhow::bail!(
+                "invalid diagnostic completion marker {}",
+                complete.display()
+            );
+        }
+        return Ok(DiagnosticExport {
+            dir,
+            runner_log,
+            dind_log,
+            runner_inspect,
+            dind_inspect,
+            failures,
+        });
+    }
+
+    // No completion marker means a prior capture was interrupted. The
+    // cleanup phase never removes containers before the marker lands, so
+    // incomplete artifacts can be discarded and captured again safely.
+    for artifact in [&runner_log, &dind_log, &runner_inspect, &dind_inspect] {
+        match std::fs::remove_file(artifact) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                failures.push(format!("remove incomplete {}: {error}", artifact.display()))
+            }
+        }
+    }
+    if !failures.is_empty() {
+        return Ok(DiagnosticExport {
+            dir,
+            runner_log,
+            dind_log,
+            runner_inspect,
+            dind_inspect,
+            failures,
+        });
+    }
     capture_logs(
         runner,
         &identity.runner_container(),
         &runner_log,
         &mut failures,
     );
-    let dind_log = dir.join("dind.log");
     capture_logs(runner, &identity.dind_container(), &dind_log, &mut failures);
-    let runner_inspect = dir.join("runner.inspect.json");
     capture_inspect(
         runner,
         &identity.runner_container(),
         &runner_inspect,
         &mut failures,
     );
-    let dind_inspect = dir.join("dind.inspect.json");
     capture_inspect(
         runner,
         &identity.dind_container(),
         &dind_inspect,
         &mut failures,
     );
+    if failures.is_empty()
+        && let Err(error) = write_diagnostic(&complete, b"velnor-diagnostics-v1\n")
+    {
+        failures.push(format!("write {}: {error}", complete.display()));
+    }
 
     Ok(DiagnosticExport {
         dir,
@@ -331,7 +452,19 @@ fn redact_inspect(raw: &str) -> Option<String> {
         let mut kept = serde_json::Map::new();
         for key in ["Id", "Name", "State", "NetworkSettings"] {
             if let Some(value) = map.get(key) {
-                kept.insert(key.to_string(), value.clone());
+                let safe = if key == "State" {
+                    let mut state = value.clone();
+                    if let Some(health) = state.get_mut("Health").and_then(|v| v.as_object_mut()) {
+                        // Healthcheck output is container-controlled and can
+                        // echo process environment, including the one-shot
+                        // JIT secret. Preserve health status/metadata only.
+                        health.remove("Log");
+                    }
+                    state
+                } else {
+                    value.clone()
+                };
+                kept.insert(key.to_string(), safe);
             }
         }
         if let Some(labels) = map.get("Config").and_then(|config| config.get("Labels")) {
@@ -347,7 +480,45 @@ fn redact_inspect(raw: &str) -> Option<String> {
 
 /// Write one diagnostic file with owner-only permissions.
 fn write_diagnostic(dest: &Path, contents: &[u8]) -> std::io::Result<()> {
-    super::write_owner_only(dest, contents)
+    use std::io::Write;
+    use std::time::SystemTime;
+
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let file_name = dest
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("diagnostic");
+    let temporary =
+        dest.with_file_name(format!(".{file_name}.{}.{}.tmp", std::process::id(), stamp));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let write_result = (|| {
+        let mut file = options.open(&temporary)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        drop(file);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))?;
+        }
+        std::fs::rename(&temporary, dest)?;
+        if let Some(parent) = dest.parent() {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    write_result
 }
 
 /// Restrict the diagnostics dir to the owner. Best-effort on non-unix,
@@ -384,28 +555,61 @@ impl CleanupReport {
     }
 }
 
-/// Tear down every object the worker owns, in dependency order.
-///
-/// Order: stop runner → export diagnostics → remove runner → stop DinD →
-/// remove DinD → remove network → remove volumes. The runner stops first
-/// (it shares the DinD netns; removing DinD first would strand it) and
-/// diagnostics export before the first deletion. Every step is attempted;
-/// failures collect into the report instead of aborting the sequence.
-pub(crate) fn owned_cleanup(
+/// Stop the runner and persist a complete diagnostics capture before any
+/// owned resource can be deleted.
+pub(crate) fn prepare_cleanup(
     runner: &mut dyn WorkerRunner,
     identity: &WorkerIdentity,
     state_dir: &Path,
-) -> Result<CleanupReport> {
+) -> Result<DiagnosticExport> {
+    let mut stop_failures = Vec::new();
+    stop_container(runner, &identity.runner_container(), &mut stop_failures);
+    let mut export = export_diagnostics(runner, identity, state_dir)?;
+    export.failures.extend(stop_failures);
+    Ok(export)
+}
+
+/// Remove every owned object after diagnostics are durably complete.
+pub(crate) fn finish_cleanup(
+    runner: &mut dyn WorkerRunner,
+    identity: &WorkerIdentity,
+    export: DiagnosticExport,
+) -> CleanupReport {
+    let failures = teardown_owned_resources(runner, identity);
+    CleanupReport { export, failures }
+}
+
+/// Remove every Docker resource owned by one worker. Missing objects count
+/// as removed, making replay safe after a process crash mid-teardown.
+pub(crate) fn teardown_owned_resources(
+    runner: &mut dyn WorkerRunner,
+    identity: &WorkerIdentity,
+) -> Vec<String> {
     let mut failures = Vec::new();
-    stop_container(runner, &identity.runner_container(), &mut failures);
-    let export = export_diagnostics(runner, identity, state_dir)?;
     remove_container(runner, &identity.runner_container(), &mut failures);
     stop_container(runner, &identity.dind_container(), &mut failures);
     remove_container(runner, &identity.dind_container(), &mut failures);
     remove_network(runner, &identity.network(), &mut failures);
     remove_volume(runner, &identity.workspace_volume(), &mut failures);
     remove_volume(runner, &identity.dind_data_volume(), &mut failures);
-    Ok(CleanupReport { export, failures })
+    failures
+}
+
+/// Tear down every object the worker owns, in dependency order. An export
+/// failure prevents deletion, preserving evidence for a replay.
+pub(crate) fn owned_cleanup(
+    runner: &mut dyn WorkerRunner,
+    identity: &WorkerIdentity,
+    state_dir: &Path,
+) -> Result<CleanupReport> {
+    let export = prepare_cleanup(runner, identity, state_dir)?;
+    if !export.failures.is_empty() {
+        return Ok(CleanupReport {
+            export,
+            failures: Vec::new(),
+        });
+    }
+    Ok(finish_cleanup(runner, identity, export))
 }
 
 fn stop_container(runner: &mut dyn WorkerRunner, container: &str, failures: &mut Vec<String>) {
@@ -482,12 +686,13 @@ fn remove_volume(runner: &mut dyn WorkerRunner, volume: &str, failures: &mut Vec
     }
 }
 
-/// Supervision handle: identity + state dir + restart budget.
+/// Supervision handle: identity + state dir + durable runtime counters.
 #[derive(Debug)]
 pub struct Supervision {
     identity: WorkerIdentity,
     state_dir: PathBuf,
     restarts: RestartBudget,
+    runner_start_deadline_epoch: Option<u64>,
 }
 
 impl Supervision {
@@ -497,6 +702,23 @@ impl Supervision {
             identity,
             state_dir: state_dir.to_path_buf(),
             restarts: RestartBudget::new(MAX_DIND_RESTARTS),
+            runner_start_deadline_epoch: None,
+        }
+    }
+
+    /// Rebuild supervision from the durable worker registry after restart.
+    #[must_use]
+    pub fn from_runtime(
+        identity: WorkerIdentity,
+        state_dir: &Path,
+        restarts_used: u32,
+        runner_start_deadline_epoch: Option<u64>,
+    ) -> Self {
+        Self {
+            identity,
+            state_dir: state_dir.to_path_buf(),
+            restarts: RestartBudget::from_used(MAX_DIND_RESTARTS, restarts_used),
+            runner_start_deadline_epoch,
         }
     }
 
@@ -506,19 +728,99 @@ impl Supervision {
         runner: &mut dyn WorkerRunner,
         recorded: velnor_model::ScaleSetWorkerState,
     ) -> Result<SupervisionOutcome> {
+        self.tick_with_runtime(runner, recorded, epoch_seconds(), &mut |_| Ok(()))
+    }
+
+    /// Observe + decide one tick while persisting runtime state before
+    /// commands with external side effects.
+    pub fn tick_with_runtime(
+        &mut self,
+        runner: &mut dyn WorkerRunner,
+        recorded: velnor_model::ScaleSetWorkerState,
+        now_epoch: u64,
+        persist_restarts: &mut dyn FnMut(u32) -> Result<()>,
+    ) -> Result<SupervisionOutcome> {
         let observed = observe_pair(runner, &self.identity)?;
-        supervise_tick(
+        supervise_tick_with_runtime(
             runner,
             &self.identity,
             recorded,
             &observed,
             &mut self.restarts,
+            self.runner_start_deadline_epoch,
+            now_epoch,
+            persist_restarts,
         )
+    }
+
+    pub fn clear_runner_start_deadline(&mut self) {
+        self.runner_start_deadline_epoch = None;
+    }
+
+    pub fn set_runner_start_deadline(&mut self, deadline_epoch: u64) {
+        self.runner_start_deadline_epoch = Some(deadline_epoch);
     }
 
     /// Run the owned teardown sequence.
     pub fn cleanup(&self, runner: &mut dyn WorkerRunner) -> Result<CleanupReport> {
         owned_cleanup(runner, &self.identity, &self.state_dir)
+    }
+
+    pub(crate) fn prepare_cleanup(
+        &self,
+        runner: &mut dyn WorkerRunner,
+    ) -> Result<DiagnosticExport> {
+        prepare_cleanup(runner, &self.identity, &self.state_dir)
+    }
+
+    pub(crate) fn teardown_owned_resources(&self, runner: &mut dyn WorkerRunner) -> Vec<String> {
+        teardown_owned_resources(runner, &self.identity)
+    }
+
+    pub(crate) fn state_dir_exists(&self) -> Result<bool> {
+        match std::fs::symlink_metadata(&self.state_dir) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(true),
+            Ok(_) => anyhow::bail!(
+                "refusing worker state path {}: not a real directory",
+                self.state_dir.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error)
+                .with_context(|| format!("inspect worker state dir {}", self.state_dir.display())),
+        }
+    }
+
+    pub(crate) fn diagnostics_complete(&self) -> Result<bool> {
+        let marker = self.state_dir.join("diagnostics").join("capture.complete");
+        let contents = match std::fs::read(&marker) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("read diagnostic marker {}", marker.display()));
+            }
+        };
+        if contents != b"velnor-diagnostics-v1\n" {
+            anyhow::bail!("invalid diagnostic completion marker {}", marker.display());
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn clear_diagnostic_completion_marker(&self) -> Result<()> {
+        let diagnostics = self.state_dir.join("diagnostics");
+        let marker = diagnostics.join("capture.complete");
+        match std::fs::remove_file(&marker) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("remove diagnostic marker {}", marker.display()));
+            }
+        }
+        std::fs::File::open(&diagnostics)
+            .and_then(|directory| directory.sync_all())
+            .with_context(|| format!("sync diagnostics dir {}", diagnostics.display()))?;
+        Ok(())
     }
 
     /// Delete the worker's state dir. Call once, after the permit
@@ -527,7 +829,35 @@ impl Supervision {
     /// worker's export did not create (no `diagnostics/` child) rather
     /// than deleting an unrelated tree.
     pub fn release_state(&self) -> Result<()> {
-        if !self.state_dir.join("diagnostics").is_dir() {
+        self.remove_state_dir(true)
+    }
+
+    /// Delete a state directory whose ownership and released state were
+    /// verified from the durable worker registry. This path is idempotent,
+    /// including after a prior partial directory removal.
+    pub(crate) fn release_owned_state(&self) -> Result<()> {
+        self.remove_state_dir(false)
+    }
+
+    fn remove_state_dir(&self, require_diagnostics: bool) -> Result<()> {
+        super::runner::RunnerSpec::scrub_jit_env_files_for_state(&self.state_dir)
+            .context("scrub JIT env file before deleting worker state")?;
+        let metadata = match std::fs::symlink_metadata(&self.state_dir) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("inspect worker state dir {}", self.state_dir.display())
+                });
+            }
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            anyhow::bail!(
+                "refusing to delete {}: worker state path is not a real directory",
+                self.state_dir.display()
+            );
+        }
+        if require_diagnostics && !self.state_dir.join("diagnostics").is_dir() {
             anyhow::bail!(
                 "refusing to delete {}: no diagnostics dir (not a released worker state dir)",
                 self.state_dir.display()
@@ -689,6 +1019,73 @@ mod tests {
     }
 
     #[test]
+    fn runner_start_deadline_is_enforced_and_durable() {
+        let observed = ObservedPair {
+            dind_running: true,
+            runner: RunnerConnection::Connected,
+        };
+        let mut runner = ScriptRunner::scripted(vec![]);
+        let mut restarts = RestartBudget::new(MAX_DIND_RESTARTS);
+        let expired = supervise_tick_with_runtime(
+            &mut runner,
+            &identity(),
+            S::DindReady,
+            &observed,
+            &mut restarts,
+            Some(100),
+            100,
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        assert!(matches!(expired, SupervisionOutcome::WorkerFailed { .. }));
+        assert!(runner.seen.is_empty());
+
+        let within_deadline = supervise_tick_with_runtime(
+            &mut runner,
+            &identity(),
+            S::DindReady,
+            &observed,
+            &mut restarts,
+            Some(100),
+            99,
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(within_deadline, SupervisionOutcome::RunnerConnected);
+    }
+
+    #[test]
+    fn restart_budget_persists_before_docker_start() {
+        let observed = ObservedPair {
+            dind_running: false,
+            runner: RunnerConnection::Connected,
+        };
+        let mut runner = ScriptRunner::scripted(vec![]);
+        let mut restarts = RestartBudget::new(MAX_DIND_RESTARTS);
+        let error = supervise_tick_with_runtime(
+            &mut runner,
+            &identity(),
+            S::Running,
+            &observed,
+            &mut restarts,
+            None,
+            100,
+            &mut |_| anyhow::bail!("registry unavailable"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("registry unavailable"));
+        assert!(
+            runner.seen.is_empty(),
+            "DinD must not start before persistence"
+        );
+        assert_eq!(restarts.used(), 0);
+        assert_eq!(
+            RestartBudget::from_used(MAX_DIND_RESTARTS, u32::MAX).used(),
+            MAX_DIND_RESTARTS
+        );
+    }
+
+    #[test]
     fn terminal_side_states_skip_the_tick() {
         let observed = ObservedPair {
             dind_running: false,
@@ -707,6 +1104,35 @@ mod tests {
                     .unwrap();
             assert_eq!(outcome, SupervisionOutcome::Healthy);
         }
+    }
+
+    #[test]
+    fn inspect_redaction_drops_healthcheck_output_that_can_echo_jit() {
+        let raw = r#"[
+            {
+                "Id": "container-id",
+                "Config": {
+                    "Env": ["ACTIONS_RUNNER_INPUT_JITCONFIG=JIT_ENV_SENTINEL"],
+                    "Labels": {"owner": "velnor"}
+                },
+                "State": {
+                    "Status": "running",
+                    "Health": {
+                        "Status": "healthy",
+                        "FailingStreak": 0,
+                        "Log": [{"Output": "HEALTH_OUTPUT_SENTINEL"}]
+                    }
+                },
+                "NetworkSettings": {}
+            }
+        ]"#;
+        let redacted = redact_inspect(raw).unwrap();
+        assert!(redacted.contains("healthy"));
+        assert!(redacted.contains("FailingStreak"));
+        assert!(!redacted.contains("HEALTH_OUTPUT_SENTINEL"));
+        assert!(!redacted.contains("JIT_ENV_SENTINEL"));
+        assert!(!redacted.contains("\"Log\""));
+        assert!(!redacted.contains("\"Env\""));
     }
 
     #[test]
@@ -772,10 +1198,15 @@ mod tests {
         ]);
         let report = owned_cleanup(&mut runner, &identity(), &state).unwrap();
         assert!(!report.confirmed());
-        assert_eq!(report.export.failures.len(), 1);
-        assert_eq!(report.failures.len(), 2);
-        // Every step still ran: 11 docker calls.
-        assert_eq!(runner.seen.len(), 11);
+        assert_eq!(report.export.failures.len(), 2);
+        assert!(report.failures.is_empty());
+        // Every export step ran, but no deletion ran because evidence was
+        // incomplete: stop + four captures only.
+        assert_eq!(runner.seen.len(), 5);
+        assert!(!runner
+            .seen
+            .iter()
+            .any(|args| args.iter().any(|arg| arg == "rm")));
         std::fs::remove_dir_all(&state).unwrap();
     }
 
@@ -815,6 +1246,29 @@ mod tests {
         );
         assert!(persisted.contains("\"State\""), "{persisted}");
         assert!(persisted.contains("\"NetworkSettings\""), "{persisted}");
+        std::fs::remove_dir_all(&state).unwrap();
+    }
+
+    #[test]
+    fn completed_diagnostics_replay_without_recapturing() {
+        let state = temp_state("diagnostics-replay");
+        let mut first = ScriptRunner::scripted(vec![
+            ScriptRunner::ok("LOGS-R\n"),
+            ScriptRunner::ok("LOGS-D\n"),
+            ScriptRunner::ok("[{}]\n"),
+            ScriptRunner::ok("[{}]\n"),
+        ]);
+        let export = export_diagnostics(&mut first, &identity(), &state).unwrap();
+        assert!(export.failures.is_empty());
+        let mut replay = ScriptRunner::scripted(vec![]);
+        let replayed = export_diagnostics(&mut replay, &identity(), &state).unwrap();
+        assert!(replayed.failures.is_empty());
+        assert_eq!(replay.seen.len(), 0);
+        assert_eq!(replayed.runner_log, export.runner_log);
+        assert_eq!(
+            std::fs::read_to_string(state.join("diagnostics/capture.complete")).unwrap(),
+            "velnor-diagnostics-v1\n"
+        );
         std::fs::remove_dir_all(&state).unwrap();
     }
 
