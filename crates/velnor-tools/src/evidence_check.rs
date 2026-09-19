@@ -8,6 +8,7 @@
 
 use crate::g0_contract::*;
 use crate::g0_workflow::{derive_workflow_plan, DerivedWorkflowPlan};
+use crate::github_raw_store::RawEvidenceStore;
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use clap::Args;
@@ -1907,13 +1908,13 @@ fn check_g0_inventory(
     );
 }
 
-const MAX_G0_STORE_OBJECT_BYTES: u64 = 128 * 1024 * 1024;
-
 /// Reopen every content-addressed object from an explicitly approved local
 /// store.  `storage_ref` is only an identifier; accepting its shape without
 /// reading the object would leave the checker vulnerable to self-attested
 /// wrapper digests.  The root is never inferred from a URI and no network
-/// scheme is accepted here.
+/// scheme is accepted here.  The shared store reads through descriptor-
+/// relative no-follow handles; this checker does not canonicalize a path and
+/// then reopen it by name.
 fn check_g0_external_storage(
     stage: Stage,
     inventory: Option<&G0InventoryEvidence>,
@@ -1936,32 +1937,25 @@ fn check_g0_external_storage(
         );
         return;
     };
-    let Ok(root) = fs::canonicalize(root) else {
-        finding(
-            findings,
-            "g0-storage-root",
-            "",
-            "evidence_root",
-            "evidence root must exist and be readable",
-        );
-        return;
+    let store = match RawEvidenceStore::open(root) {
+        Ok(store) => store,
+        Err(error) => {
+            finding(
+                findings,
+                "g0-storage-root",
+                "",
+                "evidence_root",
+                error.to_string(),
+            );
+            return;
+        }
     };
-    if !root.is_dir() {
-        finding(
-            findings,
-            "g0-storage-root",
-            "",
-            "evidence_root",
-            "evidence root must be a directory",
-        );
-        return;
-    }
 
     let snapshot_bytes = BASE64.decode(&inventory.collector_snapshot_bytes_base64);
     if let Ok(bytes) = snapshot_bytes.as_ref() {
         check_g0_external_object(
             "evidence.g0_inventory.collector_snapshot_storage_ref",
-            &root,
+            &store,
             &inventory.collector_snapshot_storage_ref,
             &inventory.collector_snapshot_sha256,
             bytes,
@@ -1992,7 +1986,7 @@ fn check_g0_external_storage(
         };
         check_g0_external_object(
             "evidence.g0_inventory.collector_snapshot.raw_objects.storage_ref",
-            &root,
+            &store,
             &raw.storage_ref,
             &raw.sha256,
             &bytes,
@@ -2003,74 +1997,41 @@ fn check_g0_external_storage(
 
 fn check_g0_external_object(
     field: &str,
-    root: &Path,
+    store: &RawEvidenceStore,
     storage_ref: &str,
     digest: &str,
     expected: &[u8],
     findings: &mut Vec<Finding>,
 ) {
-    let Some(path) = g0_storage_path(root, storage_ref, digest) else {
-        finding(
-            findings,
-            "g0-storage-ref",
-            "",
-            field,
-            "storage reference must resolve to a digest-addressed object below the approved evidence root",
-        );
-        return;
-    };
-    let Ok(metadata) = fs::metadata(&path) else {
-        finding(
-            findings,
-            "g0-storage-missing",
-            "",
-            field,
-            format!("immutable storage object is missing: {}", path.display()),
-        );
-        return;
-    };
-    if !metadata.is_file() || metadata.len() > MAX_G0_STORE_OBJECT_BYTES {
-        finding(
-            findings,
-            "g0-storage-size",
-            "",
-            field,
-            "immutable storage object must be a regular file within the bounded CAS size",
-        );
-        return;
-    }
-    let Ok(measured) = fs::read(&path) else {
-        finding(
-            findings,
-            "g0-storage-read",
-            "",
-            field,
-            format!("cannot reopen immutable storage object: {}", path.display()),
-        );
-        return;
-    };
-    if measured != expected || digest_bytes(&measured) != digest {
-        finding(
+    match store.read_verified(storage_ref, digest, expected.len() as u64) {
+        Ok(measured) if measured == expected => {}
+        Ok(_) => finding(
             findings,
             "g0-storage-mismatch",
             "",
             field,
-            "reopened immutable storage bytes do not match the captured bytes and digest",
-        );
+            "reopened immutable storage bytes do not match the captured bytes",
+        ),
+        Err(error) => {
+            let code = match error {
+                crate::github_raw_store::RawStoreError::InvalidReference
+                | crate::github_raw_store::RawStoreError::InvalidDigest => "g0-storage-ref",
+                crate::github_raw_store::RawStoreError::NotRegular
+                | crate::github_raw_store::RawStoreError::TooLarge => "g0-storage-size",
+                crate::github_raw_store::RawStoreError::OpenObject(ref io)
+                    if io.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    "g0-storage-missing"
+                }
+                crate::github_raw_store::RawStoreError::OpenObject(_)
+                | crate::github_raw_store::RawStoreError::Read(_)
+                | crate::github_raw_store::RawStoreError::Length { .. }
+                | crate::github_raw_store::RawStoreError::Digest { .. } => "g0-storage-mismatch",
+                crate::github_raw_store::RawStoreError::OpenRoot(_) => "g0-storage-root",
+            };
+            finding(findings, code, "", field, error.to_string());
+        }
     }
-}
-
-fn g0_storage_path(root: &Path, storage_ref: &str, digest: &str) -> Option<PathBuf> {
-    let hex = digest.strip_prefix("sha256:")?;
-    if !g0_storage_ref(storage_ref, digest)
-        || hex.len() != DIGEST_LENGTH
-        || !hex.chars().all(|character| character.is_ascii_hexdigit())
-    {
-        return None;
-    }
-    let path = root.join("sha256").join(hex);
-    let canonical = fs::canonicalize(path).ok()?;
-    canonical.starts_with(root).then_some(canonical)
 }
 
 fn check_g0_collector_identity(collector: &G0CollectorSnapshot, findings: &mut Vec<Finding>) {

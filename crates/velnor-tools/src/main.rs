@@ -5,6 +5,7 @@ mod fleet_policy;
 mod fleet_policy_client;
 mod g0_contract;
 mod g0_workflow;
+mod github_raw_store;
 mod lane_compare;
 mod workflow_monitor;
 
