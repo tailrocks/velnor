@@ -4489,6 +4489,7 @@ mod tests {
                 stage: "G7".to_owned(),
                 records: Vec::new(),
                 reviewer_attestation: None,
+                g0_inventory: None,
             },
             None,
             "offline",

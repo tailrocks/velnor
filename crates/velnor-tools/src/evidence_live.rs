@@ -93,10 +93,22 @@ async fn collect_repository<H: FleetHttp>(
     let mut open_prs = Vec::with_capacity(open_pr_values.len());
     for value in open_pr_values {
         let number = positive_u64(&value, "number")?;
+        let draft = value
+            .get("draft")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| anyhow!("PR #{number} lacks draft state"))?;
+        let author = nested_string(&value, &["user", "login"])?;
+        let author_association = string_field(&value, "author_association")?;
+        let head_repository = nested_string(&value, &["head", "repo", "full_name"])?;
         let head_sha = nested_string(&value, &["head", "sha"])?;
         let base_sha = nested_string(&value, &["base", "sha"])?;
         let merge_sha = value
             .get("merge_commit_sha")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let merge_group_sha = value
+            .get("merge_group")
+            .and_then(|group| group.get("sha"))
             .and_then(Value::as_str)
             .map(str::to_owned);
         let source_url = string_field(&value, "html_url")?;
@@ -105,9 +117,14 @@ async fn collect_repository<H: FleetHttp>(
         open_prs.push(SnapshotPullRequest {
             number,
             state: "open".to_owned(),
+            draft,
+            author,
+            author_association,
+            head_repository,
             head_sha,
             base_sha,
             merge_sha,
+            merge_group_sha,
             source_url,
             executions,
         });
