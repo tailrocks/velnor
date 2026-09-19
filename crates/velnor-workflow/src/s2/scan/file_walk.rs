@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -11,16 +11,26 @@ use super::{RepositoryShape, ScanContext};
 use crate::s2::{parent_path, GeneratorError};
 
 /// Generator-owned artifacts must not feed back into the next scan pass.
-const GENERATOR_OWNED_SCAN_FILES: &[&str] = &["config/fleet/velnor-host.env"];
+const GENERATOR_OWNED_SCAN_FILES: &[&str] = &[
+    ".github/ci/.github-actions-generator-state",
+    "config/fleet/velnor-host.env",
+];
 
 pub(crate) fn repository_files(
     root: &Path,
     exclude: &[String],
 ) -> Result<Vec<String>, GeneratorError> {
-    // Ownership comes from the generator's recorded output sidecar, not from
-    // bytes inside a file claiming to be generated. A forged header must stay
-    // a scan input until the generator can independently prove ownership.
-    let generator_owned = crate::s2::generator_owned_output_paths(root)?;
+    repository_files_with_owned_paths(root, exclude, &BTreeSet::new())
+}
+
+pub(crate) fn repository_files_with_owned_paths(
+    root: &Path,
+    exclude: &[String],
+    owned_paths: &BTreeSet<PathBuf>,
+) -> Result<Vec<String>, GeneratorError> {
+    // `owned_paths` is supplied only after the schema-2 caller proves each
+    // path against the current renderer and recorded preimage. Never parse a
+    // sidecar here: doing so would let its text hide scan inputs.
     if !root.is_dir() {
         return Err(GeneratorError::usage(format!(
             "not a repository directory: {}",
@@ -44,7 +54,7 @@ pub(crate) fn repository_files(
     files.retain(|file| {
         !excludes.is_match(file)
             && !GENERATOR_OWNED_SCAN_FILES.contains(&file.as_str())
-            && !generator_owned.contains(Path::new(file))
+            && !owned_paths.contains(Path::new(file))
     });
     files.sort();
     Ok(files)

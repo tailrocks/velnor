@@ -16,7 +16,7 @@ pub(crate) mod canonical;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -2080,7 +2080,7 @@ fn validate_unit_references(
 /// Static file rows write inside `.github/` only, from a repository file that
 /// stays inside the repository: anything else would turn configuration into an
 /// arbitrary filesystem write.
-fn validate_static_files(rows: &[StaticFileSection]) -> Result<(), GeneratorError> {
+pub(crate) fn validate_static_files(rows: &[StaticFileSection]) -> Result<(), GeneratorError> {
     for row in rows {
         let file = row.file.as_deref().unwrap_or_default();
         let source = row.source.as_deref().unwrap_or_default();
@@ -2094,7 +2094,9 @@ fn validate_static_files(rows: &[StaticFileSection]) -> Result<(), GeneratorErro
                 "[[static_file]] source must be a repository-relative path, found `{source}`"
             )));
         }
-        if Path::new(source).starts_with(".github") {
+        if normalize_repository_relative_path(source)
+            .is_some_and(|normalized| normalized.starts_with(".github"))
+        {
             return Err(GeneratorError::usage(format!(
                 "[[static_file]] source must stay outside `.github/` so a static output cannot hide workflow or action inputs, found `{source}`"
             )));
@@ -2113,14 +2115,33 @@ fn validate_static_files(rows: &[StaticFileSection]) -> Result<(), GeneratorErro
 }
 
 fn is_contained_github_path(path: &str) -> bool {
-    is_contained_repository_path(path) && Path::new(path).starts_with(".github/")
+    normalize_repository_relative_path(path).is_some_and(|normalized| {
+        normalized.starts_with(".github") && normalized != Path::new(".github")
+    })
 }
 
 fn is_contained_repository_path(path: &str) -> bool {
-    !path.is_empty()
-        && !path.starts_with('/')
-        && !path.contains('\\')
-        && !path.split('/').any(|segment| segment == "..")
+    normalize_repository_relative_path(path).is_some()
+}
+
+/// Normalize repository-relative config paths before applying containment
+/// policy. Lexical normalization catches equivalent spellings such as
+/// `./.github/...` and `.//.github/...`; filesystem canonicalization is applied
+/// by the caller when a source is read so symlinks cannot escape the root.
+pub(crate) fn normalize_repository_relative_path(path: &str) -> Option<PathBuf> {
+    if path.is_empty() || path.starts_with('/') || path.contains('\\') {
+        return None;
+    }
+    let mut normalized = PathBuf::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => continue,
+            ".." => return None,
+            segment if segment.chars().any(char::is_control) => return None,
+            segment => normalized.push(segment),
+        }
+    }
+    (!normalized.as_os_str().is_empty()).then_some(normalized)
 }
 
 /// The publishers the renderer implements, and the contract fields each one

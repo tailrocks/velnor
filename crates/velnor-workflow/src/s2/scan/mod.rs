@@ -34,13 +34,26 @@ use crate::s2::{
 ///
 /// # Errors
 /// Returns filesystem errors with the affected path.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn scan_shape(
     root: &Path,
     providers: &ProviderSet,
     default_branch: &str,
     exclude: &[String],
 ) -> Result<RepositoryShape, GeneratorError> {
-    let files = file_walk::repository_files(root, exclude)?;
+    scan_shape_with_owned_paths(root, providers, default_branch, exclude, &BTreeSet::new())
+}
+
+/// Run the detector pipeline while excluding only ownership paths that the
+/// caller has independently verified against the current renderer.
+pub(crate) fn scan_shape_with_owned_paths(
+    root: &Path,
+    providers: &ProviderSet,
+    default_branch: &str,
+    exclude: &[String],
+    owned_paths: &BTreeSet<std::path::PathBuf>,
+) -> Result<RepositoryShape, GeneratorError> {
+    let files = file_walk::repository_files_with_owned_paths(root, exclude, owned_paths)?;
     let file_set: BTreeSet<String> = files.iter().cloned().collect();
     let context = ScanContext {
         root,
