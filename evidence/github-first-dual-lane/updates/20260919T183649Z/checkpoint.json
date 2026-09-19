@@ -1,0 +1,38 @@
+{
+  "schema": "velnor.external-evidence-update.v1",
+  "update_id": "20260919T183649Z",
+  "captured_at_utc": "2026-09-19T18:36:49Z",
+  "repository": "tailrocks/velnor",
+  "ref": "refs/heads/evidence/github-first-dual-lane-20260919T181508Z",
+  "parent_checkpoint_commit": "d6b54026f74eb301f2c09e62653302d9bc91fa54",
+  "source_base_revision": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+  "attestation": "none",
+  "gate_status": "not-evaluated",
+  "gate_statement": "This final coordinator snapshot does not establish G0, G1, G2, G3, G4, G5, G6, or G7 success.",
+  "original_evidence_root": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence",
+  "previous_updates_preserved": [
+    "evidence/github-first-dual-lane/updates/20260919T182822Z",
+    "commit d6b54026f74eb301f2c09e62653302d9bc91fa54"
+  ],
+  "integrity": {
+    "sha256_manifest": "SHA256SUMS",
+    "inventory": "INVENTORY.tsv",
+    "manifest_scope": "All files in this update directory except this update SHA256SUMS file"
+  },
+  "included_file_count_before_manifests": 3,
+  "included": {
+    "source": "G0/fleet/pushes.json",
+    "source_captured_at_utc": "2026-09-19T18:35:57Z",
+    "source_sha256": "8faaa8af6224e45e4ebf7f908be731680bb37061b31d83b6ce8817ac9aad410f",
+    "source_reconciliation_reads": 4,
+    "source_reconciliation_result": "same size and SHA across four reads before copy; exact source hash reconciled after copy",
+    "coordinator_reported_status": "18/18 task worktrees clean, local/remote equal, trailers valid; three historical refs verified"
+  },
+  "excluded_boundaries": [
+    "All other live evidence files; prior report updates remain separate and immutable",
+    "Mutable session ledger, credentials, tokens, private keys, and operational state not in pushes.json",
+    "Research trees, cloned repositories, build/debug/target outputs, binaries, caches, raw logs, and transient output",
+    "Any source file written after the capture timestamp or changed during reconciliation"
+  ],
+  "reproducibility_note": "pushes.json is a coordinator worktree/push observation snapshot. Its entries retain clean/dirty, local/remote, owner, and review-status distinctions; none are converted into source approval or G0-G7 success."
+}
