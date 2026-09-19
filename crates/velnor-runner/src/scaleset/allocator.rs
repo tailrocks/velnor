@@ -70,7 +70,7 @@ impl ScaleSetAllocator {
     ///   that moved twice under one acquire (retry the poll).
     pub fn acquire(&self, holder: &str) -> Result<Option<ScaleSetPermitGuard>, AllocatorError> {
         let mut ledger = PermitLedger::open(&self.ledger_path).map_err(AllocatorError::Storage)?;
-        let observed = crate::native_demand::now_unix();
+        let observed = velnor_control::permit_ledger::unix_now();
         ledger
             .observe_demand(holder, PermitLane::ScaleSet, "", observed, observed)
             .map_err(AllocatorError::Storage)?;
