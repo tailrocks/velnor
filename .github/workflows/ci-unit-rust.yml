@@ -126,7 +126,7 @@ on:
 jobs:
   velnor-prepare-cargo-sources:
     name: prepare-cargo
-    if: ${{ inputs.provider == 'control' && (contains(inputs.selected_units, '"unit_id":"rust-unit-collector"') || contains(inputs.selected_units, '"unit_id":"rust-velnor-bench"') || contains(inputs.selected_units, '"unit_id":"rust-velnor-client"') || contains(inputs.selected_units, '"unit_id":"rust-velnor-control"') || contains(inputs.selected_units, '"unit_id":"rust-velnor-model"') || contains(inputs.selected_units, '"unit_id":"rust-velnor-render"') || contains(inputs.selected_units, '"unit_id":"rust-velnor-runner"') || contains(inputs.selected_units, '"unit_id":"rust-velnor-tools"') || contains(inputs.selected_units, '"unit_id":"rust-velnor-workflow"') || contains(inputs.selected_units, '"unit_id":"rust-velnor-workflow-contract"') || contains(inputs.selected_units, '"unit_id":"rust-velnorctl"') || contains(inputs.selected_units, '"unit_id":"rust-production-topology"')) && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    if: ${{ inputs.provider == 'control' && (contains(inputs.selected_units, '"unit_id":"rust-unit-collector"') || contains(inputs.selected_units, '"unit_id":"rust-velnor-bench"') || contains(inputs.selected_units, '"unit_id":"rust-velnor-client"') || contains(inputs.selected_units, '"unit_id":"rust-velnor-control"') || contains(inputs.selected_units, '"unit_id":"rust-velnor-model"') || contains(inputs.selected_units, '"unit_id":"rust-velnor-render"') || contains(inputs.selected_units, '"unit_id":"rust-velnor-runner"') || contains(inputs.selected_units, '"unit_id":"rust-velnor-tools"') || contains(inputs.selected_units, '"unit_id":"rust-velnor-workflow"') || contains(inputs.selected_units, '"unit_id":"rust-velnor-workflow-contract"') || contains(inputs.selected_units, '"unit_id":"rust-velnorctl"') || contains(inputs.selected_units, '"unit_id":"rust-production-topology"')) && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 20
     steps:
@@ -332,7 +332,7 @@ jobs:
         run: echo "MBX_GC_MAX_SIZE=12GiB" >> "$GITHUB_ENV"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: github
           github-cache-mode: objects
@@ -668,7 +668,7 @@ jobs:
 
   verify-velnor:
     name: velnor
-    if: ${{ inputs.provider == 'velnor' && contains(inputs.selected_units, format('"unit_id":"{0}"', inputs.unit)) && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
+    if: ${{ inputs.provider == 'velnor' && contains(inputs.selected_units, format('"unit_id":"{0}"', inputs.unit)) && (((github.event_name == 'workflow_dispatch' && contains(format(',{0},', github.event.inputs.providers), ',velnor,')) || (false)) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))) }}
     runs-on: [self-hosted, velnor-target-mvp]
     timeout-minutes: 45
     steps:
@@ -816,7 +816,7 @@ jobs:
           mise --yes install "${tools[@]}"
       - name: Set up Mr. Boxington
         id: mbx-cache
-        uses: jdx/mr-boxington-action@7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777 # v1.3.0
+        uses: jdx/mr-boxington-action@a20e1ffcd962370fb2b6045c13b7b349f7b03386 # v1.3.1
         with:
           backend: local
       - name: Mark tool bootstrap end
