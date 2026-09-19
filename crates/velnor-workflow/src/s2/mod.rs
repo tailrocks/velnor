@@ -5169,8 +5169,45 @@ fn policy_candidate_result_verification_step() -> String {
             --output "$result_archive"
           result_raw_zip_sha256="$(sha256sum "$result_archive" | awk '{{print $1}}')"
           case "$result_raw_zip_sha256" in [0-9a-f]{{64}}) ;; *) exit 1 ;; esac
-          result_json="$RUNNER_TEMP/candidate-result/result.json"
+          result_dir="$RUNNER_TEMP/candidate-result-verified"
+          rm -rf "$result_dir"; mkdir -m 0700 "$result_dir"
+          python3 - "$result_archive" "$result_dir" <<'PY'
+          import sys, zipfile
+          from pathlib import Path
+          archive, destination = Path(sys.argv[1]), Path(sys.argv[2])
+          with zipfile.ZipFile(archive) as payload:
+              members = payload.infolist()
+              if len(members) > 4096:
+                  raise SystemExit("result archive has too many members")
+              names = set()
+              total_bytes = 0
+              for info in members:
+                  raw_name = info.filename
+                  name = raw_name[:-1] if raw_name.endswith("/") else raw_name
+                  parts = name.split("/")
+                  mode = (info.external_attr >> 16) & 0o170000
+                  if not name or raw_name.startswith("/") or "\\" in raw_name or any(part in ("", ".", "..") for part in parts):
+                      raise SystemExit("unsafe result archive member")
+                  if raw_name.endswith("/") and not info.is_dir():
+                      raise SystemExit("non-directory has directory suffix")
+                  if name in names or (mode not in (0, 0o100000) and not info.is_dir()):
+                      raise SystemExit("duplicate or non-regular result member")
+                  if name != "result.json" and name != "render" and not name.startswith("render/"):
+                      raise SystemExit("result archive surface is not exact")
+                  names.add(name)
+                  total_bytes += info.file_size
+                  if total_bytes > 67108864:
+                      raise SystemExit("result archive is too large")
+              if "result.json" not in names or not any(name.startswith("render/") for name in names):
+                  raise SystemExit("result archive is incomplete")
+              for info in members:
+                  payload.extract(info, destination)
+          PY
+          result_json="$result_dir/result.json"
           test -f "$result_json"
+          test -d "$result_dir/render"
+          test -z "$(find -P "$result_dir" -type l -print -quit)"
+          test -z "$(find -P "$result_dir" ! -type f ! -type d ! -type l -print -quit)"
           jq -e --argjson result_id "$RESULT_ID" --arg result_digest "$RESULT_DIGEST" \
             --arg head "$HEAD_SHA" --arg base "$BASE_SHA" --arg repo "$GITHUB_REPOSITORY" \
             --arg head_repo "$HEAD_REPOSITORY" --argjson head_repo_id "$HEAD_REPOSITORY_ID" \
@@ -5330,7 +5367,7 @@ fn policy_candidate_result_verification_step() -> String {
           git ls-tree -r "$HEAD_SHA" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo | LC_ALL=C sort > "$closure_file"
           printf 'closure-version:1\\nfeatures:tui\\nprofile:debug\\n' >> "$closure_file"
           test "$(sha256sum "$closure_file" | awk '{{print $1}}')" = "$(jq -er .candidate_closure "$handoff_json")"
-          render_sha256="$(cd "$RUNNER_TEMP/candidate-result/render" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{{print $1}}')"
+          render_sha256="$(cd "$result_dir/render" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{{print $1}}')"
           test "$render_sha256" = "$(jq -er .render_sha256 "$result_json")"
           echo "result_raw_zip_sha256=$result_raw_zip_sha256" >> "$GITHUB_OUTPUT"
           echo "handoff_raw_zip_sha256=$handoff_raw_zip_sha256" >> "$GITHUB_OUTPUT"
@@ -5438,21 +5475,13 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
     } else {
         String::new()
     };
-    let candidate_result_download = if candidate_graph {
-        format!(
-            "      - name: Download candidate verification result\n        if: github.event_name == 'pull_request_target'\n        uses: {}\n        with:\n          artifact-ids: ${{{{ needs.candidate_execute.outputs.result_id }}}}\n          path: ${{{{ runner.temp }}}}/candidate-result\n",
-            ActionPin::DownloadArtifact.reference()
-        )
-    } else {
-        String::new()
-    };
     let candidate_result_verification = if candidate_graph {
         policy_candidate_result_verification_step()
     } else {
         String::new()
     };
     let candidate_render_argument = if candidate_graph {
-        "          candidate_args=()\n          if [[ \"$GITHUB_EVENT_NAME\" == pull_request_target ]]; then\n            candidate_args+=(--candidate-render \"$RUNNER_TEMP/candidate-result/render\")\n          fi\n"
+        "          candidate_args=()\n          if [[ \"$GITHUB_EVENT_NAME\" == pull_request_target ]]; then\n            candidate_args+=(--candidate-render \"$RUNNER_TEMP/candidate-result-verified/render\")\n          fi\n"
     } else {
         ""
     };
@@ -5498,7 +5527,7 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
         policy = policy.replacen(
             "      - name: Resolve required status checks\n",
             &format!(
-                "{candidate_result_download}{candidate_result_verification}      - name: Resolve required status checks\n"
+                "{candidate_result_verification}      - name: Resolve required status checks\n"
             ),
             1,
         );

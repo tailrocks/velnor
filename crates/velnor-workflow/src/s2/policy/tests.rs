@@ -612,10 +612,7 @@ fn owner_entrypoint_renders_the_isolated_candidate_transport() {
         job.contains("needs.policy_acquire.outputs.handoff_id"),
         "{job}"
     );
-    assert!(
-        job.contains("artifact-ids: ${{ needs.candidate_execute.outputs.result_id }}"),
-        "{job}"
-    );
+    assert!(job.contains("RESULT_ID:"), "{job}");
     assert!(
         job.contains("name: velnor-workflow-candidate-linux-x64"),
         "{job}"
@@ -678,7 +675,13 @@ fn owner_entrypoint_renders_the_isolated_candidate_transport() {
         "{job}"
     );
     assert!(
-        job.contains("--candidate-render \"$RUNNER_TEMP/candidate-result/render\""),
+        job.contains("--candidate-render \"$RUNNER_TEMP/candidate-result-verified/render\""),
+        "{job}"
+    );
+    assert!(job.contains("result archive has too many members"), "{job}");
+    assert!(job.contains("result archive is incomplete"), "{job}");
+    assert!(
+        !job.contains("Download candidate verification result"),
         "{job}"
     );
     assert!(job.contains("SANDBOX_IMAGE_DIGEST"), "{job}");
