@@ -48,7 +48,7 @@ impl Primitive for WatchGraph {
             // down watches what the scan derived for it.
             let derived = matches!(
                 unit.kind,
-                UnitKind::Bun | UnitKind::Docs | UnitKind::OpenTofu
+                UnitKind::Bun | UnitKind::Docs | UnitKind::OpenTofu | UnitKind::Skills
             ) || (unit.kind == UnitKind::Docker && unit.root == ".");
             let mut watch = BTreeSet::new();
             if !derived {
@@ -93,6 +93,21 @@ impl Primitive for WatchGraph {
                     watch.extend(
                         ["content/docs/**/*.mdx".to_owned(), "*.md".to_owned()].map(String::from),
                     );
+                }
+                UnitKind::Skills => {
+                    watch.extend([
+                        "README.md".to_owned(),
+                        "catalog.json".to_owned(),
+                        "plugin.json".to_owned(),
+                        ".codex-plugin/**".to_owned(),
+                        ".kimi-plugin/**".to_owned(),
+                        ".claude-plugin/**".to_owned(),
+                        "skills/**".to_owned(),
+                        "docs/index.json".to_owned(),
+                        "docs/README.md".to_owned(),
+                        "docs/skills/**".to_owned(),
+                        "scripts/**".to_owned(),
+                    ]);
                 }
                 UnitKind::OpenTofu => {
                     watch.extend(opentofu_watch_paths(ctx.shape.files()));

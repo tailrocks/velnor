@@ -2984,6 +2984,7 @@ fn kind_from_unit_workflow_file(file: &str) -> Option<UnitKind> {
         "docker" => Some(UnitKind::Docker),
         "homebrew" => Some(UnitKind::Homebrew),
         "docs" => Some(UnitKind::Docs),
+        "skills" => Some(UnitKind::Skills),
         _ => None,
     }
 }
@@ -3442,7 +3443,11 @@ impl WorkflowIr {
         {
             tools.insert(ToolRequirement::Homebrew);
         }
-        if config.units.iter().any(|unit| unit.kind == UnitKind::Bun) {
+        if config
+            .units
+            .iter()
+            .any(|unit| matches!(unit.kind, UnitKind::Bun | UnitKind::Skills))
+        {
             tools.insert(ToolRequirement::Bun);
         }
         if config.units.iter().any(|unit| unit.kind == UnitKind::Node) {
@@ -5256,7 +5261,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             UnitKind::Homebrew => {
                 tools.insert(ToolRequirement::Homebrew);
             }
-            UnitKind::Bun => {
+            UnitKind::Bun | UnitKind::Skills => {
                 tools.insert(ToolRequirement::Bun);
             }
             UnitKind::Node => {
