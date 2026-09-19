@@ -4628,6 +4628,10 @@ fn policy_candidate_step(revision: &str) -> String {
           grep -Fq 'test -z "${{ACTIONS_RUNTIME_TOKEN:-}}"' <<<"$candidate_block"
           grep -Fq 'test -z "${{ACTIONS_RUNTIME_URL:-}}"' <<<"$candidate_block"
           grep -Fq 'env -i' <<<"$candidate_block"
+          head_contract="$RUNNER_TEMP/ci-pr-head.yml"
+          git show "$HEAD_SHA:.github/workflows/ci-pr.yml" > "$head_contract"
+          head_candidate_block="$(awk '/^  candidate_producer:/{{seen=1}} seen && /^  [A-Za-z0-9_-]+:/ && $0 !~ /^  candidate_producer:/{{exit}} seen{{print}}' "$head_contract")"
+          test "$head_candidate_block" = "$candidate_block" || {{ echo "::error::PR workflow changed the trusted candidate producer contract" >&2; exit 1; }}
           test "$(grep -Fxc "          name: {artifact}" <<<"$candidate_block")" = 1
           test "$(grep -Fxc "        id: candidate_upload" <<<"$candidate_block")" = 1
           test "$(grep -Fxc "        uses: {upload}" <<<"$candidate_block")" = 1
