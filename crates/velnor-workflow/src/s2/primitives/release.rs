@@ -5443,7 +5443,7 @@ mod tests {
                 "linux builders must use the configured hosted selector: {workflow}"
             );
             assert!(
-                workflow.contains("runner: macos-26"),
+                workflow.contains("runner: xcode-27"),
                 "apple builders use the fixed GitHub-owned macos image: {workflow}"
             );
             assert!(
