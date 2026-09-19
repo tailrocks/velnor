@@ -19,6 +19,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 
 use crate::{GeneratorError, ProjectConfig, RunnerMode, Unit, UnitKind};
+use crate::native_contract::{
+    hosted_apple_offer, offer_mismatches, AppleNativeContract,
+};
 
 /// The SDK capability an Xcode scheme build needs. Only a macOS executor
 /// offers it, so ordinary `SwiftPM` units must never declare it: they verify
@@ -253,11 +256,64 @@ pub(crate) fn github_runner_for_unit<'a>(
     macos_runner: &'a str,
     unit: &Unit,
 ) -> &'a str {
-    if unit.platform.requires_apple() {
+    if unit.platform.requires_apple() || unit.apple_native.is_some() {
         macos_runner
     } else {
         github_runner
     }
+}
+
+pub(crate) fn unit_requires_native(unit: &Unit) -> bool {
+    unit.platform.requires_apple() || unit.apple_native.is_some()
+}
+
+/// Add the minimal typed contract for an explicit Apple placement and reject
+/// any configured hosted label that has no verified native offer or cannot
+/// satisfy a scanned source contract.
+pub(crate) fn validate_native_host_contract(
+    config: &mut ProjectConfig,
+) -> Result<(), GeneratorError> {
+    let macos_runner = config.macos_runner.clone();
+    let native_units = config
+        .units
+        .iter_mut()
+        .filter(|unit| unit.platform.requires_apple() || unit.apple_native.is_some());
+    for unit in native_units {
+        if unit.apple_native.is_none() {
+            unit.apple_native = Some(AppleNativeContract::new(
+                crate::native_contract::AppleSdkFamily::Macos,
+                None,
+            ));
+        }
+        if !unit.platform.requires_apple() {
+            return Err(GeneratorError::usage(format!(
+                "unit {} has Apple SDK evidence but config weakens placement to a portable executor; remove the os/capabilities override",
+                unit.id
+            )));
+        }
+        let Some(contract) = unit.apple_native.as_ref() else {
+            continue;
+        };
+        let Some(offer) = hosted_apple_offer(&macos_runner) else {
+            return Err(GeneratorError::usage(format!(
+                "unit {} requires {}; selected hosted label {} has no verified Apple capability offer; select macos-26 or macos-26-intel and rerun generation",
+                unit.id,
+                contract.describe(),
+                macos_runner
+            )));
+        };
+        let mismatches = offer_mismatches(contract, offer);
+        if !mismatches.is_empty() {
+            return Err(GeneratorError::usage(format!(
+                "unit {} requires {} but hosted label {} cannot satisfy it: {}; choose a compatible hosted macOS label or strengthen the source/config contract",
+                unit.id,
+                contract.describe(),
+                offer.label,
+                mismatches.join("; ")
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// A named build product one unit produces for others: an `XCFramework`

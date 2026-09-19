@@ -11,7 +11,7 @@ use crate::s2::{
     identifier_suffix, parent_path, shell_change_dir, shell_quote, CachePurpose, CacheSpec, Unit,
     UnitKind,
 };
-use crate::swift_capability::package_evidence;
+use crate::swift_capability::{package_evidence, xcode_native_contract};
 
 fn swift_package_unit(package_root: &str) -> Unit {
     let prefix = path_prefix(package_root);
@@ -99,6 +99,11 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
             })
             .and_then(|project| fs::read_to_string(root.join(project)).ok())
             .unwrap_or_default();
+        let project_config = files
+            .iter()
+            .find(|file| file.as_str() == format!("{container_root}/project.yml"))
+            .and_then(|file| fs::read_to_string(root.join(file)).ok());
+        let apple_native = xcode_native_contract(&project_contents, project_config.as_deref());
         let ios_destination = xcode_project_is_ios(&project_contents);
         let build_destination = if ios_destination {
             " -destination 'generic/platform=iOS Simulator'"
@@ -169,6 +174,7 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
                 native_macos_arm64: true,
                 ..crate::s2::provider::Capabilities::default()
             },
+            apple_native,
             workspace_check: false,
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -198,6 +204,7 @@ pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
             unit.platform = crate::s2::provider::Platform::MacosArm64;
             unit.capabilities.native_macos_arm64 = true;
         }
+        unit.apple_native = evidence.native;
         shape.units.push(unit);
     }
     let mut xcode_units = xcode_scheme_units(context.root, context.files);

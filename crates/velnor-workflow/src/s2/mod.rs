@@ -644,6 +644,9 @@ pub struct Unit {
     /// The capabilities this unit needs, derived by the scan. An in-scope
     /// unit that needs a capability its provider lacks is a hard error.
     pub(crate) capabilities: provider::Capabilities,
+    /// Shape-derived Apple host contract. Kept in the scan shape for digest
+    /// stability; generation-only rendering omits it from runtime TOML.
+    pub(crate) apple_native: Option<crate::native_contract::AppleNativeContract>,
     /// Workspace-wide `cargo check` gate declared through generation config.
     /// Watch-graph uses this to omit per-crate source trees that narrower
     /// crate units already cover. Generation-time only: pinned Planning
@@ -1335,6 +1338,7 @@ fn scan_target(
     if let Some(generation) = &generation {
         apply_generation_config(&mut config, generation, root)?;
     }
+    validate_native_host_contract(&mut config)?;
     // Prerequisites compile into the selection graph and prepare commands, and
     // placement is rejected before any byte renders, so every later stage —
     // mbxify, templates, validation — sees the resolved surface.
@@ -2425,6 +2429,11 @@ fn apply_unit_row(
     let Some(id) = row.id() else {
         return Ok(());
     };
+    let explicit_native = row
+        .native()
+        .map(|native| native.contract(&format!("[[units]] {id}.native")))
+        .transpose()
+        .map_err(GeneratorError::usage)?;
     let existing = config.units.iter_mut().find(|unit| unit.id == id);
     let Some(unit) = existing else {
         let Some(kind) = row.kind().and_then(UnitKind::from_prefix) else {
@@ -2444,6 +2453,20 @@ fn apply_unit_row(
         let prerequisites = row.declared_prerequisites(id)?;
         let docker_contexts = row.named_docker_contexts(id, root)?;
         let env = row.validated_env(id)?.unwrap_or_default();
+        let platform = match (row.platform(), explicit_native.as_ref()) {
+            (Some(value), Some(_)) if value != "macos-arm64" => {
+                return Err(GeneratorError::usage(format!(
+                    "[[units]] {id}.native requires platform = \"macos-arm64\"; found `{value}`"
+                )));
+            }
+            (Some(value), _) => provider::Platform::parse(value).map_err(|_| {
+                GeneratorError::usage(format!(
+                    "[[units]] {id} declares unknown platform `{value}`"
+                ))
+            })?,
+            (None, Some(_)) => provider::Platform::MacosArm64,
+            (None, None) => provider::Platform::LinuxX64,
+        };
         config.units.push(Unit {
             id: id.to_owned(),
             label: row.label().unwrap_or_default().to_owned(),
@@ -2489,11 +2512,9 @@ fn apply_unit_row(
                 .trust()
                 .and_then(|trust| provider::TrustReq::parse(trust).ok())
                 .unwrap_or_default(),
-            platform: row
-                .platform()
-                .and_then(|platform| provider::Platform::parse(platform).ok())
-                .unwrap_or(provider::Platform::LinuxX64),
+            platform,
             capabilities: provider::Capabilities::default(),
+            apple_native: explicit_native,
             workspace_check: row.workspace_check(),
             products,
             prerequisites,
@@ -2560,6 +2581,22 @@ fn apply_unit_row(
         .and_then(|platform| provider::Platform::parse(platform).ok())
     {
         unit.platform = platform;
+    }
+    if let Some(explicit) = explicit_native {
+        if unit.platform != provider::Platform::MacosArm64 {
+            if row.platform().is_some() {
+                return Err(GeneratorError::usage(format!(
+                    "[[units]] {id}.native requires platform = \"macos-arm64\"; remove the portable platform override"
+                )));
+            }
+            unit.platform = provider::Platform::MacosArm64;
+        }
+        unit.apple_native = Some(match unit.apple_native.take() {
+            Some(detected) => detected
+                .strengthen_with(&explicit)
+                .map_err(|error| GeneratorError::usage(format!("[[units]] {id}.native: {error}")))?,
+            None => explicit,
+        });
     }
     if !row.products().is_empty() {
         unit.products = row.named_products(id)?;
@@ -2999,6 +3036,55 @@ fn validate_unit_capabilities(config: &ProjectConfig) -> Result<(), GeneratorErr
             if provider::eligibility(unit.platform, unit.trust, *provider, true).is_ok() {
                 provider::check_capabilities(&unit.id, unit.capabilities, *provider)?;
             }
+        }
+    }
+    Ok(())
+}
+
+/// Native work is hosted-only in schema 2. The fixed Apple job label is
+/// accepted only through the verified host-offer table; provider selectors do
+/// not turn a Linux label into an Apple capability.
+fn validate_native_host_contract(config: &mut ProjectConfig) -> Result<(), GeneratorError> {
+    let offer = crate::native_contract::hosted_apple_offer(MACOS_HOSTED_RUNS_ON)
+        .expect("MACOS_HOSTED_RUNS_ON must remain a verified host offer");
+    let hosted_enabled = config
+        .providers
+        .contains(&provider::ProviderId::GithubHosted);
+    for unit in &mut config.units {
+        if unit.apple_native.is_none()
+            && unit.platform == provider::Platform::MacosArm64
+        {
+            unit.apple_native = Some(crate::native_contract::AppleNativeContract::new(
+                crate::native_contract::AppleSdkFamily::Macos,
+                None,
+            ));
+        }
+        let Some(contract) = unit.apple_native.as_ref() else {
+            continue;
+        };
+        if unit.platform != provider::Platform::MacosArm64 {
+            return Err(GeneratorError::usage(format!(
+                "unit {} has Apple SDK evidence but config weakens placement to {}; remove the platform override",
+                unit.id,
+                unit.platform
+            )));
+        }
+        if !hosted_enabled {
+            return Err(GeneratorError::usage(format!(
+                "unit {} requires {} but no github-hosted provider is enabled; native jobs are hosted-only",
+                unit.id,
+                contract.describe()
+            )));
+        }
+        let mismatches = crate::native_contract::offer_mismatches(contract, offer);
+        if !mismatches.is_empty() {
+            return Err(GeneratorError::usage(format!(
+                "unit {} requires {} but hosted label {} cannot satisfy it: {}",
+                unit.id,
+                contract.describe(),
+                offer.label,
+                mismatches.join("; ")
+            )));
         }
     }
     Ok(())
@@ -5057,7 +5143,7 @@ pub(crate) fn rust_dependency_needs(
         .collect()
 }
 
-/// The GitHub-owned macOS image jobs with `platform = "macos-arm64"` run on.
+/// The GitHub-owned macOS image jobs with platform macos-arm64 run on.
 /// Hosted selectors carry Linux labels; Apple execution needs the macOS
 /// image, which only exists on the hosted provider.
 pub(crate) const MACOS_HOSTED_RUNS_ON: &str = "macos-26";

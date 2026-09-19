@@ -617,6 +617,7 @@ fn analyze_rust_manifests(
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
+            apple_native: None,
             mbx: None,
             prepared_tools: Vec::new(),
         });
@@ -681,6 +682,7 @@ fn analyze_rust_manifests(
             prerequisites: Vec::new(),
             docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
+            apple_native: None,
             mbx: None,
             prepared_tools: Vec::new(),
         });

@@ -5,8 +5,13 @@
 //! package needs an Apple SDK. It never evaluates Package.swift or project
 //! code.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
+
+use crate::native_contract::{
+    AppleArch, AppleNativeContract, AppleSdkFamily, AppleVersion,
+};
 
 /// Apple frameworks/modules that cannot be provided by a Linux Swift SDK.
 const APPLE_MODULES: &[&str] = &[
@@ -94,12 +99,14 @@ const APPLE_LINK_MARKERS: &[&str] = &[
 ];
 
 /// A package's statically provable Apple requirements.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct SwiftPackageEvidence {
     /// The package needs an Apple SDK, even if it has no Xcode project.
     pub(crate) apple: bool,
     /// The package consumes an `XCFramework` binary target.
     pub(crate) xcframework: bool,
+    /// Typed host/SDK/toolchain evidence, when the package is Apple-bound.
+    pub(crate) native: Option<AppleNativeContract>,
 }
 
 /// Inspect one `SwiftPM` package without executing its manifest.
@@ -126,7 +133,163 @@ pub(crate) fn package_evidence(
                 fs::read_to_string(root.join(file))
                     .is_ok_and(|contents| source_imports_apple_module(&contents))
             });
-    SwiftPackageEvidence { apple, xcframework }
+    let project_configs = files
+        .iter()
+        .filter(|file| is_package_project_config(file, package_root, package_roots))
+        .filter_map(|file| fs::read_to_string(root.join(file)).ok())
+        .collect::<Vec<_>>();
+    let native = apple.then(|| {
+        let mut contract = manifest_native_contract(&manifest);
+        for project in &project_configs {
+            contract = merge_contract(contract, project_native_contract(project));
+        }
+        contract
+    });
+    SwiftPackageEvidence {
+        apple,
+        xcframework,
+        native,
+    }
+}
+
+fn manifest_native_contract(contents: &str) -> AppleNativeContract {
+    let code = strip_swift_comments(contents);
+    let family = if code.contains(".iOS(") {
+        AppleSdkFamily::IosSimulator
+    } else {
+        AppleSdkFamily::Macos
+    };
+    let minimum = platform_version(&code, family);
+    let mut contract = AppleNativeContract::new(family, minimum);
+    let arches = architecture_evidence(&code);
+    if !arches.is_empty() {
+        contract.build_arches = arches;
+    }
+    contract
+}
+
+fn project_native_contract(contents: &str) -> Option<AppleNativeContract> {
+    let code = strip_non_code_comments(contents);
+    let family = if code.contains("iphonesimulator") {
+        AppleSdkFamily::IosSimulator
+    } else if code.contains("iphoneos") || code.contains("IPHONEOS_DEPLOYMENT_TARGET") {
+        AppleSdkFamily::IosDevice
+    } else if code.contains("macosx")
+        || code.contains("macOS")
+        || code.contains("MACOSX_DEPLOYMENT_TARGET")
+    {
+        AppleSdkFamily::Macos
+    } else {
+        return None;
+    };
+    let minimum = match family {
+        AppleSdkFamily::Macos => first_setting_version(
+            &code,
+            &["MACOSX_DEPLOYMENT_TARGET", "macOS", "macos"],
+        ),
+        AppleSdkFamily::IosDevice | AppleSdkFamily::IosSimulator => {
+            first_setting_version(&code, &["IPHONEOS_DEPLOYMENT_TARGET", "iOS", "ios"])
+        }
+    };
+    let mut contract = AppleNativeContract::new(family, minimum);
+    let arches = architecture_evidence(&code);
+    if !arches.is_empty() {
+        contract.build_arches = arches;
+    }
+    if let Some(version) = setting_version(&code, "xcodeVersion") {
+        contract.xcode = crate::native_contract::AppleVersionConstraint::exact(version);
+    }
+    Some(contract)
+}
+
+/// Combine the generated Xcode project and its declarative generator input.
+/// The latter is where XcodeGen pins facts such as xcodeVersion and universal
+/// ARCHS; neither is guaranteed to survive into a generated project file.
+pub(crate) fn xcode_native_contract(
+    project: &str,
+    project_config: Option<&str>,
+) -> Option<AppleNativeContract> {
+    let mut contract = project_native_contract(project);
+    if let Some(project_config) = project_config {
+        contract = match (contract, project_native_contract(project_config)) {
+            (Some(left), Some(right)) => match left.merge(&right) {
+                Ok(merged) => Some(merged),
+                Err(error) => {
+                    let mut conflicted = left;
+                    conflicted.conflicts.push(error);
+                    Some(conflicted)
+                }
+            },
+            (left, right) => left.or(right),
+        };
+    }
+    contract
+}
+
+fn merge_contract(
+    left: AppleNativeContract,
+    right: Option<AppleNativeContract>,
+) -> AppleNativeContract {
+    let Some(right) = right else {
+        return left;
+    };
+    match left.merge(&right) {
+        Ok(merged) => merged,
+        Err(error) => {
+            let mut conflicted = left;
+            conflicted.conflicts.push(error);
+            conflicted
+        }
+    }
+}
+
+fn platform_version(contents: &str, family: AppleSdkFamily) -> Option<AppleVersion> {
+    let marker = match family {
+        AppleSdkFamily::Macos => ".macOS(",
+        AppleSdkFamily::IosDevice | AppleSdkFamily::IosSimulator => ".iOS(",
+    };
+    let start = contents.find(marker)? + marker.len();
+    let rest = &contents[start..];
+    let version_start = rest.find(".v")? + 2;
+    let version = rest[version_start..]
+        .chars()
+        .take_while(|character| character.is_ascii_digit() || *character == '.')
+        .collect::<String>();
+    AppleVersion::parse(&version)
+}
+
+fn first_setting_version(contents: &str, keys: &[&str]) -> Option<AppleVersion> {
+    keys.iter().find_map(|key| setting_version(contents, key))
+}
+
+fn setting_version(contents: &str, key: &str) -> Option<AppleVersion> {
+    let position = contents.find(key)? + key.len();
+    let value = contents[position..]
+        .trim_start_matches(|character: char| matches!(character, ' ' | '\t' | ':' | '=' | '"'))
+        .split(|character: char| {
+            character.is_whitespace() || matches!(character, '"' | ',' | '#')
+        })
+        .next()?;
+    AppleVersion::parse(value)
+}
+
+fn architecture_evidence(contents: &str) -> BTreeSet<AppleArch> {
+    let mut arches = BTreeSet::new();
+    if contents.contains("arm64") {
+        arches.insert(AppleArch::Arm64);
+    }
+    if contents.contains("x86_64") {
+        arches.insert(AppleArch::X86_64);
+    }
+    arches
+}
+
+fn strip_non_code_comments(contents: &str) -> String {
+    contents
+        .lines()
+        .map(|line| line.split_once('#').map_or(line, |(code, _)| code))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn manifest_uses_xcframework(contents: &str) -> bool {
@@ -488,6 +651,25 @@ fn is_package_source(file: &str, package_root: &str, package_roots: &[String]) -
     }
     // A repository can contain nested packages. Do not let a child package's
     // imports turn its parent package's unit Apple-bound (or vice versa).
+    !package_roots.iter().any(|other| {
+        other != package_root
+            && other.starts_with(&package_prefix)
+            && file.starts_with(&format!("{other}/"))
+    })
+}
+
+fn is_package_project_config(file: &str, package_root: &str, package_roots: &[String]) -> bool {
+    if !file.ends_with("project.yml") && !file.ends_with("project.yaml") {
+        return false;
+    }
+    let package_prefix = if package_root == "." {
+        String::new()
+    } else {
+        format!("{package_root}/")
+    };
+    if !file.starts_with(&package_prefix) {
+        return false;
+    }
     !package_roots.iter().any(|other| {
         other != package_root
             && other.starts_with(&package_prefix)

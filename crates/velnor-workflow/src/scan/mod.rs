@@ -182,6 +182,7 @@ pub(crate) fn unit(
         prerequisites: Vec::new(),
         docker_contexts: Vec::new(),
         env: std::collections::BTreeMap::new(),
+        apple_native: None,
         mbx: None,
         prepared_tools: Vec::new(),
     }
@@ -218,7 +219,7 @@ impl From<RepositoryShape> for ProjectConfig {
             runners: shape.runners,
             automatic: crate::inferred_automatic(shape.runners),
             github_runner: "ubuntu-24.04".to_owned(),
-            macos_runner: "macos-15".to_owned(),
+            macos_runner: "macos-26".to_owned(),
             velnor_labels: Vec::new(),
             release_enabled: false,
             release_reason: "Release is fail-closed. Enable only after declaring immutable artifact, registry, provenance, and tag-protection policy.".to_owned(),
