@@ -1493,7 +1493,10 @@ fn debian_identity_steps(
 ) -> String {
     let release_dir = shell_quote(release_dir);
     let repository = shell_quote(repository);
-    let tool = format!("metadata/{binary}-release-tool");
+    // Artifact downloads are untracked workspace files. Keep them under the
+    // runner's temp directory so release-build's clean-tree identity gate
+    // observes only the checked-out source, never its input artifacts.
+    let tool = format!("\"$metadata_dir/{binary}-release-tool\"");
     let source_check = if preview {
         "          jq -e --arg sha \"$SOURCE_COMMIT\" '.source_sha == $sha' metadata/build-identity.json >/dev/null \\\n            || { echo \"::error::build identity source_sha != preview source commit $SOURCE_COMMIT\" >&2; exit 1; }\n"
     } else {
@@ -1513,6 +1516,33 @@ fn debian_identity_steps(
     };
     format!(
         "      - name: Stage acyclic identity files packaged into the deb\n        run: |\n          set -euo pipefail\n          test -s metadata/build-identity.json || {{ echo \"::error::release metadata missing build-identity.json\" >&2; exit 1; }}\n          test -s metadata/manifest.json || {{ echo \"::error::release metadata missing manifest.json\" >&2; exit 1; }}\n          jq -e '.source_sha and .crate_version' metadata/build-identity.json >/dev/null\n          jq -e 'type == \"object\"' metadata/manifest.json >/dev/null\n{source_check}          mkdir -p {release_dir}\n          cp metadata/build-identity.json metadata/manifest.json {release_dir}/\n      - name: Stage the deb's own package record\n        run: |\n          set -euo pipefail\n          chmod +x {tool}\n          binary=\"target/$TARGET/release/{binary}\"\n          test -s \"$binary\" || {{ echo \"::error::missing cross-built runner binary\" >&2; exit 1; }}\n          binary_sha256=\"$(sha256sum \"$binary\" | awk '{{print $1}}')\"\n          manifest_sha256=\"$(sha256sum metadata/manifest.json | awk '{{print $1}}')\"\n          manifest_version=\"$(jq -er '.version | numbers' metadata/manifest.json)\"\n          source_sha={commit_value}\n          jq -n \\\n            --arg schema \"velnor.package-record/v1\" \\\n            --arg repo {repository} \\\n            --arg kind \"{kind}\" \\\n            --arg commit \"$source_sha\" \\\n            --arg crate {crate_expr} \\\n            --arg debian \"$VERSION\" \\\n            --argjson mv \"$manifest_version\" \\\n            --arg mhash \"$manifest_sha256\" \\\n            --arg arch \"${{{{ matrix.arch }}}}\" \\\n            --arg target \"$TARGET\" \\\n            --arg binary \"$binary_sha256\" \\\n            '{{\n              schema: $schema,\n              build: {{ repository: $repo, kind: $kind, commit: $commit,\n                       crate_version: $crate, debian_version: $debian,\n                       manifest_version: $mv, manifest_sha256: $mhash }},\n              architecture: {{ arch: $arch, target: $target, binary_sha256: $binary }}\n            }}' > package-record.candidate.json\n          {tool} release emit \\\n            --record package-record.candidate.json \\\n            --binary \"$binary\" \\\n            --out {release_dir}/package-record.json\n{record_check}"
+    )
+}
+
+fn release_metadata_artifact_name(preview: bool) -> &'static str {
+    if preview {
+        "preview-metadata"
+    } else {
+        "release-metadata"
+    }
+}
+
+fn release_metadata_download_path(steps: &str) -> String {
+    steps.replace(
+        "path: metadata\n",
+        "path: ${{ runner.temp }}/velnor-release-metadata\n",
+    )
+}
+
+fn release_metadata_in_temp_dir(steps: &str) -> String {
+    let mut steps = steps.replace("metadata/", "$metadata_dir/");
+    steps = steps.replace(
+        "        run: |\n          set -euo pipefail\n          test -s $metadata_dir/",
+        "        run: |\n          set -euo pipefail\n          metadata_dir=\"$RUNNER_TEMP/velnor-release-metadata\"\n          test -s $metadata_dir/",
+    );
+    steps.replace(
+        "      - name: Stage the deb's own package record\n        run: |\n          set -euo pipefail\n",
+        "      - name: Stage the deb's own package record\n        run: |\n          set -euo pipefail\n          metadata_dir=\"$RUNNER_TEMP/velnor-release-metadata\"\n",
     )
 }
 
@@ -1657,14 +1687,11 @@ fn render_identity_debian_job(
         )
     };
     let lane_env = identity_debian_lane_env(preview, version);
-    let metadata_artifact = if preview {
-        "preview-metadata"
-    } else {
-        "release-metadata"
-    };
+    let metadata_artifact = release_metadata_artifact_name(preview);
     let mut steps = format!(
         "      - name: Checkout\n        uses: {checkout}\n        with:\n{checkout_ref}          persist-credentials: false\n{setup}      - name: Add Rust target\n        run: rustup target add \"$TARGET\"\n      - name: Set up sccache\n        uses: {sccache}\n        with:\n          version: v0.16.0\n      - name: Install cargo-deb\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: |\n          set -euo pipefail\n          cargo install cargo-deb --version 3.7.0 --locked\n          cargo-deb --version\n      - name: Download release metadata\n        uses: {download}\n        with:\n          name: {metadata_artifact}\n          path: metadata\n",
     );
+    steps = release_metadata_download_path(&steps);
     if preview {
         let _ = writeln!(
             steps,
@@ -1674,14 +1701,14 @@ fn render_identity_debian_job(
         steps.push_str(&debian_reuse_release_steps(config, release));
     }
     steps.push_str(&debian_sibling_build_steps(cargo_cmd, &release.package));
-    steps.push_str(&debian_identity_steps(
+    steps.push_str(&release_metadata_in_temp_dir(&debian_identity_steps(
         &release_package_dir(config, &release.package),
         &release.binary,
         &config.repository,
         kind,
         crate_expr,
         preview,
-    ));
+    )));
     if guest {
         steps.push_str(&debian_guest_steps(config, release, cargo_cmd));
     }
@@ -7735,6 +7762,15 @@ mod tests {
             "{metadata}"
         );
         let debian = yaml_job(&preview, "debian");
+        assert!(
+            debian.contains("path: ${{ runner.temp }}/velnor-release-metadata"),
+            "release metadata must stay outside the source checkout: {debian}"
+        );
+        assert!(!debian.contains("path: metadata\n"), "{debian}");
+        assert!(
+            debian.contains("metadata_dir=\"$RUNNER_TEMP/velnor-release-metadata\""),
+            "identity staging must resolve the temp metadata directory: {debian}"
+        );
         assert!(debian.contains("needs: [identity, metadata]"), "{debian}");
         assert!(
             debian.contains("VERSION: ${{ needs.identity.outputs.version }}"),
