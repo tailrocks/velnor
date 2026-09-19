@@ -114,14 +114,17 @@ records both paths/IDs rather than overwriting the producer tuple.
 
 The artifact REST response supplies an artifact ID, name, expiry, service digest, and workflow_run association, but it does not supply an uploader job ID or run attempt. The jobs REST response supplies job IDs but does not supply artifact IDs. The observed correlation between producer job 105961562345 and run 10591573147 is therefore not API proof of artifact ownership. This design does not claim that it is.
 
-The required binding is an explicit trusted unique-uploader workflow contract, or an independently verifiable attestation; otherwise the gate remains BLOCKED:
+The selected binding mechanism is the trusted unique-uploader workflow contract
+named static-single-uploader-v1; there is no attestation fallback in this
+implementation. The gate remains BLOCKED until this mechanism and its hostile
+producer proof are implemented:
 
 * Each transport workflow has exactly one fixed upload step and exactly one eligible job: candidate_upload in candidate_producer, handoff_upload in policy_acquire, and result_upload in candidate_execute. The static contract forbids every other upload-artifact invocation, dynamic artifact name, matrix duplicate, reusable-workflow uploader, or post-job uploader.
 * The base verifier fetches the exact workflow blob from the target head object and checks it against a base-owned normalized contract digest: exact workflow path, exact job ID/name, exact upload step ID/action commit, exact permissions, exact static artifact name, no extra jobs that can upload, and no candidate-controlled upload action. A missing or changed contract is red. For base-owned policy workflows, the same contract is checked against the base pinned blob.
 * Only after that contract check does the verifier derive artifact uploader_job_id/name from the unique uploader. It records artifact_binding_method=static-single-uploader-v1 and still rechecks the selected job REST id/run id/run attempt. The artifact service digest and raw ZIP digest remain mandatory. The derivation is a proof from the trusted workflow contract plus singularity, not an invented API field.
-* If the workflow cannot be independently normalized and contract-hashed, or if the artifact service later provides an uploader job/attempt field, implementation must use that stronger field. An unavailable contract/attestation or any non-singular uploader fails closed; it must not infer ownership from timing, names, candidate JSON, or job/artifact numeric proximity.
+* If the workflow cannot be independently normalized and contract-hashed, or if the artifact service later provides an uploader job/attempt field, the transport fails closed. It must not infer ownership from timing, names, candidate JSON, or job/artifact numeric proximity.
 
-This is a concrete blocker from G1/bootstrap-artifact-feasibility-2026-09-20.md and must be resolved in source design before code. A future signed uploader attestation is acceptable only if the verifier checks its signer, exact run/attempt/job/artifact IDs, action archive digest, and raw bytes independently; a candidate-written unsigned manifest is not an attestation.
+This is a concrete blocker from G1/bootstrap-artifact-feasibility-2026-09-20.md and must be resolved in source design before code. A future signed uploader attestation may replace static-single-uploader-v1 only through a separately reviewed migration after this implementation; it is not a runtime choice or fallback. A candidate-written unsigned manifest is not an attestation.
 
 ### Producer-hostile build proof
 
@@ -347,4 +350,4 @@ Post-implementation gates are cargo fmt --all -- --check, focused S2 generator/p
 * [upload-artifact action metadata](https://github.com/actions/upload-artifact/blob/main/action.yml) — immutable artifact ID/digest outputs.
 * [Docker container runtime controls](https://docs.docker.com/engine/containers/run/) — private network/filesystem, capability, PID, and resource controls.
 
-This amended design remains conditional and blocked on the six mandatory review rows, the artifact-to-job binding mechanism, and the nine actual hostile canaries above.
+This amended design remains conditional and blocked on the six mandatory review rows, static-single-uploader-v1 proof, and the nine actual hostile canaries above.
