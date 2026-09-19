@@ -1035,6 +1035,7 @@ old_prerelease=""
 old_source_commit=""
 old_version=""
 legacy_migration="${LEGACY_ROLLING_MIGRATION:-0}"
+legacy_migration_configured="$legacy_migration"
 legacy_expected_release_id="${LEGACY_ROLLING_RELEASE_ID:-}"
 legacy_expected_source_commit="${LEGACY_ROLLING_SOURCE_COMMIT:-}"
 legacy_expected_tag_commit="${LEGACY_ROLLING_TAG_COMMIT:-}"
@@ -1335,7 +1336,7 @@ discard_stale_rolling_draft() {
 }
 
 discard_stale_rolling_draft_safely() {
-  if [ "$legacy_migration" = 1 ]; then
+  if [ "$legacy_migration_configured" = 1 ]; then
     echo "::error::legacy rolling migration found an existing draft; refusing to delete it automatically" >&2
     exit 1
   fi
@@ -2289,6 +2290,8 @@ concurrency_group = "package-release-preview"
         assert!(workflow.contains(".target_commitish == $source"));
         assert!(workflow.contains("legacy rolling archive differs from its configured asset set"));
         assert!(workflow.contains("legacy rolling tag commit changed"));
+        assert!(workflow.contains("legacy_migration_configured=\"$legacy_migration\""));
+        assert!(workflow.contains("if [ \"$legacy_migration_configured\" = 1 ]; then"));
         assert!(workflow.contains(
             "legacy rolling migration found an existing draft; refusing to delete it automatically"
         ));
@@ -2318,7 +2321,6 @@ concurrency_group = "package-release-preview"
         script.push_str(
             r#"
 set -Eeuo pipefail
-jq() { return 1; }
 git() { return 0; }
 find() { return 0; }
 transaction_dir="$TEST_TMPDIR/transaction"
@@ -2335,7 +2337,7 @@ rolling_tag=preview
 RELEASE_TITLE_PREFIX=Preview
 RELEASE_PRERELEASE=true
 VELNOR_PACKAGE_CHANNEL=preview
-if ! validate_legacy_rolling_release '{"draft":true}' "$source_dir"; then
+if ! validate_legacy_rolling_release '{"draft":true,"prerelease":true,"tag_name":"preview","id":123,"name":"Preview 1.2.3-preview.1+0000000","target_commitish":"0000000000000000000000000000000000000000"}' "$source_dir"; then
   printf 'rejected\n'
 else
   : > "$TEST_TMPDIR/mutated"
@@ -2373,6 +2375,56 @@ fi
         );
         assert!(String::from_utf8_lossy(&output.stderr)
             .contains("legacy rolling release metadata does not match its configured identity"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_legacy_migration_never_discards_a_draft_after_contract_switch() {
+        use std::process::Command;
+
+        let verification = PublishVerification {
+            script: "",
+            attestation_flags: "",
+        };
+        let rolling_script = render_rolling_refresh_script("", "", "", &verification, "");
+        let function_start = rolling_script
+            .find("discard_stale_rolling_draft_safely() {")
+            .expect("safe draft cleanup function");
+        let cleanup_tail = &rolling_script[function_start..];
+        let function_end = cleanup_tail
+            .find("\nverify_restored_assets() {")
+            .expect("next shell function");
+        let mut script = cleanup_tail[..function_end].to_owned();
+        script.push_str(
+            r#"
+set -Eeuo pipefail
+discard_stale_rolling_draft() { : > "$TEST_TMPDIR/mutated"; }
+legacy_migration=1
+legacy_migration_configured="$legacy_migration"
+legacy_migration=0
+rolling_release_id=999
+legacy_expected_release_id=123
+discard_stale_rolling_draft_safely
+"#,
+        );
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-legacy-draft-guard-{}",
+            crate::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create shell fixture");
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .env("TEST_TMPDIR", &root)
+            .output()
+            .expect("run legacy draft cleanup regression");
+        let mutation_exists = root.join("mutated").exists();
+        let _ = std::fs::remove_dir_all(root);
+        assert!(!output.status.success(), "configured migration must abort");
+        assert!(!mutation_exists, "configured migration deleted a draft");
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("legacy rolling migration found an existing draft"));
     }
 
     #[test]
