@@ -1,0 +1,9 @@
+{"case":"baseline","exit_code":0,"status":"pass","findings":0,"codes":[]}
+{"case":"applicable-install-na","exit_code":0,"status":"pass","findings":0,"codes":[]}
+{"case":"applicable-release-install-na","exit_code":0,"status":"pass","findings":0,"codes":[]}
+{"case":"required-release-applicable","exit_code":1,"status":"fail","findings":1,"codes":["release-applicability"]}
+{"case":"required-install-applicable","exit_code":1,"status":"fail","findings":1,"codes":["install-applicability"]}
+{"case":"required-install-na","exit_code":1,"status":"fail","findings":1,"codes":["install-applicability"]}
+{"case":"required-install-excluded","exit_code":1,"status":"fail","findings":1,"codes":["install-applicability"]}
+{"case":"required-missing-upgrade","exit_code":1,"status":"fail","findings":2,"codes":["install-operation"]}
+{"case":"required-platform-mismatch","exit_code":1,"status":"fail","findings":1,"codes":["installed-identity-mismatch"]}

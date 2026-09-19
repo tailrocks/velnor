@@ -1,0 +1,14 @@
+{
+  "schema_version": 2,
+  "stage": "G2",
+  "mode": "offline",
+  "status": "fail",
+  "findings": [
+    {
+      "code": "release-applicability",
+      "repository": "tailrocks/velnor",
+      "field": "release.applicability",
+      "message": "record cannot downgrade a required release to not-applicable"
+    }
+  ]
+}

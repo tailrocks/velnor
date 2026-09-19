@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "manifest": {
+    "schema": "placeholder",
+    "product_id": "placeholder",
+    "channel": "stable",
+    "version": "0.0.0",
+    "source_repository": "tailrocks/velnor",
+    "source_ref": "refs/tags/v0.0.0",
+    "source_commit": "0000000000000000000000000000000000000000",
+    "release_tag": "v0.0.0",
+    "release_id": "placeholder",
+    "producer": {
+      "repository": "tailrocks/velnor",
+      "workflow_path": ".github/workflows/release.yml",
+      "run_id": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "source_commit": "0000000000000000000000000000000000000000"
+    },
+    "artifacts": [],
+    "components": [],
+    "targets": []
+  },
+  "manifest_sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+}

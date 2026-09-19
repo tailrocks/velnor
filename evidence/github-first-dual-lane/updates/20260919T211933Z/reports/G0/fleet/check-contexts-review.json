@@ -1,0 +1,219 @@
+{
+  "schema": "g0-fleet-check-contexts-review/v1",
+  "reviewed_at_utc": "2026-09-19T19:46:29Z",
+  "artifact": {
+    "path": "G0/fleet/check-contexts-full.json",
+    "sha256": "1a51f8a276c912c6f03f3bcb749d1f5845b52c0551cdff6254c8e90c0c78901e",
+    "bytes": 5778314,
+    "lines": 140185,
+    "json_valid": true,
+    "schema": "g0-fleet-check-contexts-full/v1",
+    "api": "https://api.github.com",
+    "api_version": "2022-11-28",
+    "api_calls": 788,
+    "requested_runtime": {
+      "model": "gpt-5.6-luna",
+      "reasoning_effort": "max"
+    }
+  },
+  "capture": {
+    "started_at_utc": "2026-09-19T19:15:10.439Z",
+    "checks_observed_min_utc": "2026-09-19T19:15:21.068Z",
+    "checks_observed_max_utc": "2026-09-19T19:26:58.512Z",
+    "final_open_list_min_utc": "2026-09-19T19:27:03.364Z",
+    "final_open_list_max_utc": "2026-09-19T19:28:02.940Z",
+    "reconciliation_finished_at_utc": "2026-09-19T19:28:02.940Z",
+    "artifact_finished_at_utc": "2026-09-19T19:29:58.430Z",
+    "reconciliation_declared": true
+  },
+  "scope_and_identity": {
+    "goal_manifest_path": "/Users/donbeave/Projects/tailrocks/velnor-project/velnor3/velnor-github-first-dual-lane-goal.md",
+    "goal_manifest_exact_order_and_contents": true,
+    "expected_repositories": 32,
+    "observed_repositories": 32,
+    "unique_repositories": 32,
+    "matrix_repositories": 32,
+    "matrix_matches_repository_keys": true,
+    "default_branch_main_count": 32,
+    "internal_default_identity_mismatches": 0,
+    "open_pr_records": 76,
+    "repos_with_open_prs": 12,
+    "repos_without_open_prs": 20,
+    "initial_open_pr_count": 76,
+    "final_open_pr_count": 76,
+    "pr_count_mismatches": 0,
+    "pr_number_duplicates": 0,
+    "pr_records_not_open": 0,
+    "pr_records_missing_identity": 0,
+    "pr_head_observation_sha_mismatches": 0,
+    "pr_base_not_default": 0,
+    "source_classes": {
+      "same-repository-contributor": 76
+    },
+    "tested_merge_sha_present": 65,
+    "tested_merge_sha_missing": 11
+  },
+  "pagination_and_completeness": {
+    "repository_open_pr_endpoints": 64,
+    "all_pagination_endpoints_access_ok": true,
+    "all_pagination_endpoints_http_200": true,
+    "repository_list_pages_gt_one": 0,
+    "main_observation_pages_gt_one": 2,
+    "pr_observation_pages_gt_one": 2,
+    "main_count_vs_pagination_mismatches": 0,
+    "pr_count_vs_pagination_mismatches": 0,
+    "initial_open_list_count_vs_payload_mismatches": 0,
+    "final_open_list_count_vs_summary_mismatches": 0,
+    "main_observed_check_runs": 1268,
+    "pr_observed_check_runs": 1742,
+    "main_observed_workflow_runs": 188,
+    "pr_observed_workflow_runs": 184,
+    "main_observed_statuses": 0,
+    "pr_observed_statuses": 2,
+    "required_policy_checks": 54,
+    "required_policy_checks_with_ruleset_provenance": 54
+  },
+  "check_app_event_binding": {
+    "check_rows_total": 3010,
+    "check_rows_missing_app_id_or_slug": 0,
+    "check_rows_missing_source_or_sha_or_kind": 0,
+    "check_source_sha_mismatches": 0,
+    "workflow_rows_total": 372,
+    "workflow_rows_missing_event": 0,
+    "workflow_rows_missing_source_identity": 0,
+    "workflow_source_sha_mismatches": 0,
+    "workflow_source_event_mismatches": 0,
+    "check_workflow_binding_edges": {
+      "main": 1263,
+      "pr": 1616
+    },
+    "check_workflow_binding_ids_missing_from_local_workflow_rows": 0,
+    "checks_without_workflow_run_ids": 131,
+    "checks_without_workflow_run_ids_by_app": {
+      "dco-2": 76,
+      "sonarqubecloud": 55
+    },
+    "apps": {
+      "github-actions": 2879,
+      "dco-2": 76,
+      "sonarqubecloud": 55
+    },
+    "interpretation": "GitHub Actions rows have source SHA and workflow-run bindings. External DCO/Sonar rows retain app and source SHA but no workflow event/run binding; do not treat that absence as a successful workflow binding."
+  },
+  "no_newest_green_selection": {
+    "status": "not_satisfied",
+    "evidence": "Every main and PR check-runs query_contract declares filter=latest; no all-runs/run-attempt inventory is retained.",
+    "main_query_contract": {
+      "check_runs": "filter=latest",
+      "statuses": "all returned statuses",
+      "workflow_runs": "head_sha exact"
+    },
+    "pr_query_contract_same_for_all_76": true,
+    "required_followup": "Collect filter=all (or equivalent complete run-attempt inventory), retain every run identity/conclusion, and make gate evaluation fail closed on missing history."
+  },
+  "branch_protection_404_semantics": {
+    "status": "semantically_preserved",
+    "404_records": 31,
+    "404_state": "not_protected",
+    "404_access": "not_found",
+    "404_error_message": "Branch not protected",
+    "protected_200_records": 1,
+    "unknown_access_records": 0,
+    "unresolved_access_gap_records": 0,
+    "ruleset_api_non_ok_records": 0,
+    "consumer_constraint": "Keep api.access=not_found/http_status=404 distinct from access=ok and from unknown/unavailable; branch-protection absence does not erase separately observed ruleset requirements."
+  },
+  "freshness_and_reconciliation": {
+    "declared_no_gate_claim": true,
+    "default_ref_reconciliation": "all 32 initial/final default refs matched",
+    "changed_default_refs": 0,
+    "pr_added": 0,
+    "pr_removed": 0,
+    "pr_changed": 0,
+    "closed_during_capture": 0,
+    "late_open_prs": 0,
+    "head_changes": 0,
+    "final_pr_identity_payload_retained": false,
+    "freshness_boundary": "Historical snapshot only; final open-list endpoint metadata and churn counters are retained, but the final PR identity rows are not retained.",
+    "live_sample_after_capture": {
+      "checked_start_utc": "2026-09-19T19:46:08Z",
+      "checked_end_utc": "2026-09-19T19:46:16Z",
+      "velnor_main_sha": "e713841bdb9c33d853b7a9af88ceac924af1b3b6",
+      "homebrew_tap_main_sha": "34ae3239f3f6760a11d02bec85b2c07cd454eb2a",
+      "velnor_pr_954_artifact_head_sha": "b93157f7f0971c73d1964447b5570c39aca6bf5e",
+      "velnor_pr_954_live_head_sha": "7609366f5ad530c12a87addf98d0c49448009362",
+      "velnor_pr_954_live_base_sha": "e713841bdb9c33d853b7a9af88ceac924af1b3b6",
+      "velnor_pr_954_live_check_rows": 70,
+      "velnor_pr_954_artifact_check_rows": 2,
+      "velnor_pr_954_live_workflow_rows": 2,
+      "velnor_pr_954_live_events": [
+        "pull_request",
+        "pull_request_target"
+      ],
+      "homebrew_tap_pr_492_live_head_sha": "9255223b26d4a7340d92ec20fef7f95474aa4a58",
+      "homebrew_tap_pr_492_artifact_head_sha": "9255223b26d4a7340d92ec20fef7f95474aa4a58",
+      "homebrew_tap_pr_492_live_check_rows": 7
+    },
+    "interpretation": "The sample live head change and check-count growth occurred after the artifact's 19:28Z reconciliation; they confirm the artifact must remain explicitly historical, not current-state proof."
+  },
+  "live_crosscheck_scope": {
+    "read_only": true,
+    "full_collector_redo": false,
+    "samples": [
+      "tailrocks/velnor default ref and PR 954",
+      "jackin-project/homebrew-tap default ref and PR 492",
+      "tailrocks/velnor main branch-protection endpoint"
+    ],
+    "sample_default_refs_match_artifact": true,
+    "sample_pr_identity_match_at_capture": true,
+    "velnor_branch_protection_live_response": {
+      "http_status": 404,
+      "message": "Branch not protected",
+      "documentation_url": "https://docs.github.com/rest/branches/branch-protection#get-branch-protection"
+    }
+  },
+  "deficiencies": [
+    {
+      "id": "CC-1",
+      "severity": "blocking_for_complete_check_evidence",
+      "finding": "All 108 observation contracts use check-runs filter=latest.",
+      "impact": "A latest-only snapshot cannot prove that a prior failed/cancelled run or prior attempt was not omitted before a newer result; it cannot satisfy the no-newest-green requirement."
+    },
+    {
+      "id": "CC-2",
+      "severity": "coverage_limitation",
+      "finding": "131 external-app check rows have no workflow_run_ids and no explicit event binding (76 DCO-2, 55 SonarQubeCloud).",
+      "impact": "App and source SHA are present, but per-check workflow/event binding is incomplete for these providers; consumers must classify them as external-provider evidence, not bound hosted workflow evidence."
+    },
+    {
+      "id": "CC-3",
+      "severity": "replayability_limitation",
+      "finding": "Final open-PR endpoint responses are represented only by counts/churn metadata; final PR identity rows are absent.",
+      "impact": "The claimed no-churn final set cannot be independently replayed from this artifact alone."
+    },
+    {
+      "id": "CC-4",
+      "severity": "explicit_unknown",
+      "finding": "11 PR records have no tested_merge.sha.",
+      "impact": "Merge-result evidence is unavailable for those PRs; this must remain unknown/not-applicable, never success."
+    },
+    {
+      "id": "CC-5",
+      "severity": "freshness_boundary",
+      "finding": "A live sample changed Velnor PR 954 head SHA after the artifact capture.",
+      "impact": "Artifact data is historical as-of its per-endpoint UTC timestamps; it is not a current PR inventory."
+    }
+  ],
+  "ingest_approval": {
+    "approved": true,
+    "scope": "Ingest as an immutable, historical, schema-valid external evidence snapshot with the five limitations above attached.",
+    "not_approved_for": [
+      "G0 gate pass",
+      "G7 fresh-live reconciliation pass",
+      "complete all-run/no-newest-green proof",
+      "current PR identity claims after 2026-09-19T19:28:02.940Z",
+      "treating artifact counts as semantic required-check success"
+    ],
+    "g0_gate_status": "pending"
+  }
+}

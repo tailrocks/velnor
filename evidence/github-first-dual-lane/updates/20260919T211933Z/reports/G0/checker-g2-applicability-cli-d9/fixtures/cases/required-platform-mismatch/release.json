@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "manifest": {
+    "schema": "velnor.application-manifest.v1",
+    "product_id": "product-tailrocks-velnor",
+    "channel": "stable",
+    "version": "1.0.0",
+    "source_repository": "tailrocks/velnor",
+    "source_ref": "refs/tags/v1.0.0",
+    "source_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "release_tag": "v1.0.0",
+    "release_id": "release-1.0.0",
+    "producer": {
+      "repository": "tailrocks/velnor",
+      "workflow_path": ".github/workflows/ci.yml",
+      "run_id": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "source_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "artifacts": [
+      {
+        "name": "velnorctl-linux",
+        "target": "linux-x64",
+        "kind": "archive",
+        "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "size": 1
+      },
+      {
+        "name": "velnor-runner-linux",
+        "target": "linux-x64",
+        "kind": "archive",
+        "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "size": 1
+      },
+      {
+        "name": "velnor-workflow-linux",
+        "target": "linux-x64",
+        "kind": "archive",
+        "sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "size": 1
+      }
+    ],
+    "components": [
+      {
+        "name": "velnorctl",
+        "crate_name": "velnorctl",
+        "version": "1.0.0",
+        "binary": "velnorctl",
+        "target": "linux-x64",
+        "artifact": "velnorctl-linux"
+      },
+      {
+        "name": "velnor-runner",
+        "crate_name": "velnor-runner",
+        "version": "1.0.0",
+        "binary": "velnor-runner",
+        "target": "linux-x64",
+        "artifact": "velnor-runner-linux"
+      },
+      {
+        "name": "velnor-workflow",
+        "crate_name": "velnor-workflow",
+        "version": "1.0.0",
+        "binary": "velnor-workflow",
+        "target": "linux-x64",
+        "artifact": "velnor-workflow-linux"
+      }
+    ],
+    "targets": [
+      {
+        "target": "linux-x64",
+        "platform": "linux",
+        "architecture": "x64",
+        "service": "not-applicable",
+        "binaries": [
+          "velnorctl",
+          "velnor-runner",
+          "velnor-workflow"
+        ]
+      }
+    ]
+  },
+  "manifest_sha256": "sha256:b477abf048b380b2c7e6cd661da42e0743df46491e173a4af33b462b0d003cb3"
+}

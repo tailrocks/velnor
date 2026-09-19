@@ -1,0 +1,20 @@
+{
+  "schema_version": 2,
+  "stage": "G2",
+  "mode": "offline",
+  "status": "fail",
+  "findings": [
+    {
+      "code": "install-operation",
+      "repository": "tailrocks/velnor",
+      "field": "install.operations.channel_switch.predecessor",
+      "message": "channel switch predecessor is required"
+    },
+    {
+      "code": "install-operation",
+      "repository": "tailrocks/velnor",
+      "field": "install.operations.same_channel_upgrade.predecessor",
+      "message": "same-channel upgrade predecessor is required"
+    }
+  ]
+}

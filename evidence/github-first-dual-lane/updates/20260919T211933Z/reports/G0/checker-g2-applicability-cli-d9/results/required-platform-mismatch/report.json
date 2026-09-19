@@ -1,0 +1,14 @@
+{
+  "schema_version": 2,
+  "stage": "G2",
+  "mode": "offline",
+  "status": "fail",
+  "findings": [
+    {
+      "code": "installed-identity-mismatch",
+      "repository": "tailrocks/velnor",
+      "field": "install.installed",
+      "message": "installed product identity does not bind canonical source/manifest/target"
+    }
+  ]
+}

@@ -1,0 +1,80 @@
+{
+  "schema": "g0-records-contract-review/v1",
+  "task": "Reconcile five user findings against the exact committed records documents",
+  "observed_at_utc": "2026-09-19T19:39:35Z",
+  "old_revision": {
+    "sha": "df9591e6fd7ca5f79ef2f9b493103e905653106a",
+    "parent": "c2e70e53a09c0e59bf7cec5e5f2575d35f6a631f",
+    "subject": "docs: record runtime promotion evidence",
+    "files": {
+      "SPEC.md": "8d740f91e0fc85809c124797bfd058e7c5135a4902c1f75aa7f589a2f72e623c",
+      "PLAN.md": "1a21f318e0db2e108647f9cbf6abba1b3dbad365553025cc123ca6ea3b6254e3",
+      "STATUS.md": "706231c7a7ffe0622e5cd9a9da9b377f1ae3f75d86e2285676083685057c5c17"
+    }
+  },
+  "current_revision": {
+    "sha": "4a9435e7cbeb220f1d2e985ab4d3fac97290dcef",
+    "parent": "85382073f3fa77e629e6cdffcbb341c031d08e67",
+    "subject": "docs: enforce canonical checker schema wording",
+    "files": {
+      "SPEC.md": "0da3bf79b128f51cee7d6127a7990991159a2a0be3a34ce989affde6bdebf050",
+      "PLAN.md": "a4a2b785be026c1bfc8627707b19ae2e3b8252cd457a1d4cd7f116200e3c62f0",
+      "STATUS.md": "413d6f4402e982ac8fe9a41ff32880581d2fb9ed05dbd6dec7ded8f8f9c03283"
+    }
+  },
+  "findings": [
+    {
+      "id": "F1-stale-31",
+      "user_finding": "SPEC.md claimed live/default/PR/check/workflow/workload/access facts for 31 repositories.",
+      "old_coordinates": ["SPEC.md:432-435", "STATUS.md:10-20"],
+      "current_coordinates": ["SPEC.md:672-680", "PLAN.md:131-153", "STATUS.md:95-99"],
+      "disposition": "fixed-in-documentation",
+      "evidence": "Current SPEC says the 32-row static manifest still has null workload/check/App/platform/provider fields, 31 access rows unknown, and no graph. It calls external snapshots timestamped observations, not fresh current-state proof. Current PLAN/STATUS preserve the distinction between historical 78/77 snapshots and later all-32 collection.",
+      "residual": "The committed records are still not a live G0 proof: current collector/checker inputs are external and require independent source binding, workload/dependency/access validation, and run/child verification. No gate pass follows from this wording fix."
+    },
+    {
+      "id": "F2-schema-aliases",
+      "user_finding": "PLAN.md retained both schema_version/manifest_id and manifest_version/schema spellings.",
+      "old_coordinates": ["PLAN.md:84-89"],
+      "current_coordinates": ["PLAN.md:212-216", "SPEC.md:164-169"],
+      "disposition": "fixed-in-documentation",
+      "evidence": "Current PLAN names only schema_version: 1 and manifest_id. Current SPEC explicitly rejects CLI/serde aliases, flat-fleet coercion, fallback, and conflict-precedence shims.",
+      "residual": "The source checker at d9a277938d54d93f06b85ce6e8d406ebb67468c3 must independently prove strict runtime rejection. Its ManifestDocument uses schema_version/manifest_id, but this review did not run its tests and does not certify the dirty checker worktree or canonical producer input."
+    },
+    {
+      "id": "F3-graph-binding",
+      "user_finding": "SPEC.md required a G0 dependency graph/access/model but did not bind graph artifacts beyond task graph/session metadata; a task graph is not a repository/workload execution graph.",
+      "old_coordinates": ["SPEC.md:136-145", "SPEC.md:362-382"],
+      "current_coordinates": ["SPEC.md:127-162", "SPEC.md:489-539", "SPEC.md:583-600", "PLAN.md:99-121"],
+      "disposition": "documented-contract-added",
+      "evidence": "Current SPEC separates manifest, current-snapshot, and records artifacts; requires typed workload→child/release/package/required-check edges with source revision, UTC observation, evidence reference, applicability, and status; and explicitly says the schema is a requirement, not implementation completion.",
+      "residual": "The reviewed checker source d9 has only G0InventoryEvidence.dependency_graph_digest, access scopes/gaps, and model strings. It has no typed dependency_graph_edges/dependent_workload_graph fields in ManifestRepository, SnapshotRepository, or G0InventoryEvidence. check_g0_inventory validates digest shape and count/model metadata, not graph edge/artifact binding. The residual is a real implementation blocker."
+    },
+    {
+      "id": "F4-checker-overclaim",
+      "user_finding": "SPEC.md described the checker as validating exact 32 coverage and all queued/canceled/timed-out/cold/warm behavior as though the checker were complete.",
+      "old_coordinates": ["SPEC.md:384-392", "SPEC.md:396-420"],
+      "current_coordinates": ["SPEC.md:541-557", "SPEC.md:624-631", "STATUS.md:111-118"],
+      "disposition": "fixed-in-documentation",
+      "evidence": "Current wording calls this a target/required contract, says it is not a claim about the current checker, records the initial checker rejection, and requires canonical scope/live/run/provider/phase/package bindings plus independent review before any result can support a gate.",
+      "residual": "The current d9 checker has substantial scope/snapshot/PR/execution checks, but no independent pass was established here; typed graph binding and authoritative complete inputs remain absent. Unit or helper diagnostics cannot close G0."
+    },
+    {
+      "id": "F5-absolute-paths",
+      "user_finding": "The docs contained absolute local paths and were not portable.",
+      "old_coordinates": ["SPEC.md:24-31", "PLAN.md:48-65", "STATUS.md:71-93"],
+      "current_coordinates": ["SPEC.md:624-629", "STATUS.md:92-93", "PLAN.md:176-182"],
+      "disposition": "partially-fixed",
+      "evidence": "Current docs moved mutable evidence references to the external evidence policy and retain explicit external paths for operational ownership/review links. The current docs also remove the old pinned session-content assumption and state that mutable session state is external.",
+      "residual": "Absolute /Users/... and /root/... references remain throughout current SPEC/PLAN/STATUS for local evidence, worktrees, owners, and links. They are useful on this host but are not portable repository references. Replace with evidence-root-relative references plus an environment-local mapping before treating portability as resolved; do not rewrite operational provenance away."
+    }
+  ],
+  "checker_source_observation": {
+    "revision": "d9a277938d54d93f06b85ce6e8d406ebb67468c3",
+    "scope": "git show of committed evidence_check.rs only; no working-tree edits",
+    "positive": ["ManifestDocument uses canonical schema_version/manifest_id with deny_unknown_fields", "exact canonical 32 scope and snapshot repository/PR/run identity checks are implemented", "execution checks require provider, event, checkout/source identity, nonempty jobs, terminal success, and child graph checks"],
+    "blocking_gaps": ["G0 inventory stores only dependency_graph_digest, not typed graph edges/nodes", "digest/access/model fields are not independently bound to the required external graph/access artifacts", "no authoritative fresh all-32 evidence input and independent reviewer pass was established"],
+    "verdict": "records documentation is improved but G0/G7 remains incomplete"
+  },
+  "gate_result": "NO_G0_PASS"
+}

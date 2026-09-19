@@ -1,0 +1,3611 @@
+{
+  "schema_version": 2,
+  "manifest_id": "github-first-dual-lane-2026-09-19",
+  "snapshot_id": "snapshot-review",
+  "stage": "G2",
+  "records": [
+    {
+      "repository": "tailrocks/velnor",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-tailrocks-velnor",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "tailrocks/velnor:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "tailrocks/velnor:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "tailrocks/velnor:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "required",
+        "justification": null,
+        "execution": {
+          "channel": "stable",
+          "version": "1.0.0",
+          "tag_target_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "release_id": "release-1.0.0",
+          "asset_digests": {
+            "velnorctl-linux": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "velnor-runner-linux": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "velnor-workflow-linux": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+          },
+          "producer": {
+            "repository": "tailrocks/velnor",
+            "workflow_path": ".github/workflows/ci.yml",
+            "run_id": 1,
+            "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+            "source_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "manifest_sha256": "sha256:b477abf048b380b2c7e6cd661da42e0743df46491e173a4af33b462b0d003cb3"
+          },
+          "apt": {
+            "repository": "tailrocks/velnor-apt",
+            "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "suite": "stable",
+            "candidate": "1.0.0",
+            "manifest_sha256": "sha256:b477abf048b380b2c7e6cd661da42e0743df46491e173a4af33b462b0d003cb3"
+          },
+          "homebrew": {
+            "tap": "tailrocks/homebrew-velnor",
+            "revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "formula": "velnor",
+            "version": "1.0.0",
+            "manifest_sha256": "sha256:b477abf048b380b2c7e6cd661da42e0743df46491e173a4af33b462b0d003cb3"
+          }
+        }
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "record waiver",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "tailrocks/velnor-apt",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-tailrocks-velnor-apt",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "tailrocks/velnor-apt:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "tailrocks/velnor-apt:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "tailrocks/velnor-apt:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "tailrocks/parallax",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-tailrocks-parallax",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "tailrocks/parallax:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "tailrocks/parallax:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "tailrocks/parallax:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "tailrocks/tracing-request-level",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-tailrocks-tracing-request-level",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "tailrocks/tracing-request-level:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "tailrocks/tracing-request-level:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "tailrocks/tracing-request-level:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "tailrocks/termrock",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-tailrocks-termrock",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "tailrocks/termrock:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "tailrocks/termrock:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "tailrocks/termrock:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "tailrocks/termpane",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-tailrocks-termpane",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "tailrocks/termpane:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "tailrocks/termpane:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "tailrocks/termpane:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "tailrocks/tablerock",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-tailrocks-tablerock",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "tailrocks/tablerock:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "tailrocks/tablerock:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "tailrocks/tablerock:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "tailrocks/schemalane",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-tailrocks-schemalane",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "tailrocks/schemalane:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "tailrocks/schemalane:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "tailrocks/schemalane:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "tailrocks/ruxel",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-tailrocks-ruxel",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "tailrocks/ruxel:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "tailrocks/ruxel:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "tailrocks/ruxel:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "tailrocks/pg-bigdecimal",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-tailrocks-pg-bigdecimal",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "tailrocks/pg-bigdecimal:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "tailrocks/pg-bigdecimal:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "tailrocks/pg-bigdecimal:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "tailrocks/parallax-telemetry-playground",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-tailrocks-parallax-telemetry-playground",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "tailrocks/parallax-telemetry-playground:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "tailrocks/parallax-telemetry-playground:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "tailrocks/parallax-telemetry-playground:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "tailrocks/homebrew-tablerock",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-tailrocks-homebrew-tablerock",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "tailrocks/homebrew-tablerock:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "tailrocks/homebrew-tablerock:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "tailrocks/homebrew-tablerock:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "tailrocks/homebrew-ruxel",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-tailrocks-homebrew-ruxel",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "tailrocks/homebrew-ruxel:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "tailrocks/homebrew-ruxel:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "tailrocks/homebrew-ruxel:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "tailrocks/homebrew-parallax",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-tailrocks-homebrew-parallax",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "tailrocks/homebrew-parallax:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "tailrocks/homebrew-parallax:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "tailrocks/homebrew-parallax:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "tailrocks/homebrew-holla",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-tailrocks-homebrew-holla",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "tailrocks/homebrew-holla:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "tailrocks/homebrew-holla:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "tailrocks/homebrew-holla:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "tailrocks/holla-apt",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-tailrocks-holla-apt",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "tailrocks/holla-apt:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "tailrocks/holla-apt:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "tailrocks/holla-apt:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "tailrocks/holla",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-tailrocks-holla",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "tailrocks/holla:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "tailrocks/holla:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "tailrocks/holla:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "tailrocks/homebrew-velnor",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-tailrocks-homebrew-velnor",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "tailrocks/homebrew-velnor:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "tailrocks/homebrew-velnor:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "tailrocks/homebrew-velnor:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "tailrocks/tailrocks-typescript-skills",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-tailrocks-tailrocks-typescript-skills",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "tailrocks/tailrocks-typescript-skills:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "tailrocks/tailrocks-typescript-skills:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "tailrocks/tailrocks-typescript-skills:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "tailrocks/tailrocks-skill-authoring-skills",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-tailrocks-tailrocks-skill-authoring-skills",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "tailrocks/tailrocks-skill-authoring-skills:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "tailrocks/tailrocks-skill-authoring-skills:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "tailrocks/tailrocks-skill-authoring-skills:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "tailrocks/tailrocks-rust-skills",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-tailrocks-tailrocks-rust-skills",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "tailrocks/tailrocks-rust-skills:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "tailrocks/tailrocks-rust-skills:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "tailrocks/tailrocks-rust-skills:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "tailrocks/tailrocks-roadmap-skills",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-tailrocks-tailrocks-roadmap-skills",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "tailrocks/tailrocks-roadmap-skills:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "tailrocks/tailrocks-roadmap-skills:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "tailrocks/tailrocks-roadmap-skills:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "tailrocks/tailrocks-pull-request-skills",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-tailrocks-tailrocks-pull-request-skills",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "tailrocks/tailrocks-pull-request-skills:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "tailrocks/tailrocks-pull-request-skills:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "tailrocks/tailrocks-pull-request-skills:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "tailrocks/tailrocks-open-source-skills",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-tailrocks-tailrocks-open-source-skills",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "tailrocks/tailrocks-open-source-skills:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "tailrocks/tailrocks-open-source-skills:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "tailrocks/tailrocks-open-source-skills:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "tailrocks/tailrocks-macos-skills",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-tailrocks-tailrocks-macos-skills",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "tailrocks/tailrocks-macos-skills:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "tailrocks/tailrocks-macos-skills:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "tailrocks/tailrocks-macos-skills:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "tailrocks/tailrocks-code-quality-skills",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-tailrocks-tailrocks-code-quality-skills",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "tailrocks/tailrocks-code-quality-skills:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "tailrocks/tailrocks-code-quality-skills:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "tailrocks/tailrocks-code-quality-skills:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "jackin-project/jackin",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-jackin-project-jackin",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "jackin-project/jackin:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "jackin-project/jackin:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "jackin-project/jackin:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "jackin-project/jackin-agent-smith",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-jackin-project-jackin-agent-smith",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "jackin-project/jackin-agent-smith:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "jackin-project/jackin-agent-smith:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "jackin-project/jackin-agent-smith:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "jackin-project/homebrew-tap",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-jackin-project-homebrew-tap",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "jackin-project/homebrew-tap:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "jackin-project/homebrew-tap:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "jackin-project/homebrew-tap:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "jackin-project/jackin-the-architect",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-jackin-project-jackin-the-architect",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "jackin-project/jackin-the-architect:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "jackin-project/jackin-the-architect:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "jackin-project/jackin-the-architect:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "jackin-project/jackin-sentinel",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-jackin-project-jackin-sentinel",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "jackin-project/jackin-sentinel:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "jackin-project/jackin-sentinel:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "jackin-project/jackin-sentinel:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    },
+    {
+      "repository": "jackin-project/jackin-role-action",
+      "repository_role": "library",
+      "default_branch": "main",
+      "default_branch_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "observed_at_utc": "2026-09-20T00:00:00Z",
+      "generator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_product_id": "product-jackin-project-jackin-role-action",
+      "generator_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "configuration_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "generated_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "scan_state_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "runtime_release_version": "1.0.0",
+      "runtime_source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "job_image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "expected_workload_ids": [
+        "jackin-project/jackin-role-action:unit"
+      ],
+      "required_check_contexts_and_apps": [
+        {
+          "context": "ci-required",
+          "app_id": "123"
+        }
+      ],
+      "workload_platform_architecture": [
+        {
+          "workload_id": "jackin-project/jackin-role-action:unit",
+          "platform": "linux",
+          "architecture": "x64"
+        }
+      ],
+      "provider_eligibility": {
+        "github": "eligible",
+        "velnor": "not-applicable"
+      },
+      "justified_exclusions": [],
+      "pr_number": null,
+      "pr_head_sha": null,
+      "pr_base_sha": null,
+      "tested_merge_sha": null,
+      "merge_group_sha": null,
+      "workflow_path": ".github/workflows/ci.yml",
+      "workflow_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "event": "push",
+      "run_id": 1,
+      "run_attempt": 1,
+      "run_url": "https://github.com/tailrocks/velnor/actions/runs/1",
+      "trigger_source_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "actual_checkout_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "provider": "github",
+      "runner_name": "GitHub Actions 1",
+      "host_id": "runner-1",
+      "runner_kind": "github-hosted",
+      "runner_labels": [
+        "ubuntu-24.04"
+      ],
+      "run_status": "completed",
+      "run_conclusion": "success",
+      "expected_jobs": [
+        {
+          "job_id": "unit",
+          "workload_id": "jackin-project/jackin-role-action:unit",
+          "provider": "github",
+          "platform": "linux",
+          "architecture": "x64",
+          "required": true,
+          "child_workflow": null
+        }
+      ],
+      "actual_job_ids": [
+        "1"
+      ],
+      "actual_job_conclusions": {
+        "1": "success"
+      },
+      "logs": [
+        "https://github.com/tailrocks/velnor/actions/jobs/1/logs"
+      ],
+      "child_run_links": [],
+      "required_checks": [
+        {
+          "context": "ci-required",
+          "app_id": "123",
+          "job_id": "1",
+          "status": "completed",
+          "conclusion": "success",
+          "run_id": 1,
+          "source_url": "https://github.com/tailrocks/velnor/runs/1/check",
+          "event": "push"
+        }
+      ],
+      "release": {
+        "applicability": "not-applicable",
+        "justification": "no release surface",
+        "execution": null
+      },
+      "install": {
+        "applicability": "not-applicable",
+        "justification": "no installed product",
+        "environment": null,
+        "operations": null,
+        "installed": null,
+        "service": null,
+        "functional_result": null
+      },
+      "owner": "owner",
+      "reviewer": "reviewer",
+      "gate_status": "pass",
+      "blocker": null,
+      "next_action": null
+    }
+  ],
+  "reviewer_attestation": null,
+  "g0_inventory": {
+    "source_url": "https://github.com/tailrocks/velnor/blob/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/docs/ci/github-first-dual-lane/fleet.json",
+    "repository_count": 32,
+    "open_pr_count": 0,
+    "workflow_repository_count": 32,
+    "ruleset_repository_count": 32,
+    "workload_matrix_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "dependency_graph_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "access_scopes": [
+      "metadata:read",
+      "contents:read"
+    ],
+    "access_gaps": [],
+    "orchestrator_model": "gpt-6-astra",
+    "orchestrator_effort": "low",
+    "agent_model": "gpt-5.6-luna",
+    "agent_effort": "max"
+  }
+}

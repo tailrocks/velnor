@@ -1,0 +1,14 @@
+{
+  "schema_version": 2,
+  "stage": "G2",
+  "mode": "offline",
+  "status": "fail",
+  "findings": [
+    {
+      "code": "install-applicability",
+      "repository": "tailrocks/velnor",
+      "field": "install.applicability",
+      "message": "record cannot downgrade a required install to not-applicable"
+    }
+  ]
+}
