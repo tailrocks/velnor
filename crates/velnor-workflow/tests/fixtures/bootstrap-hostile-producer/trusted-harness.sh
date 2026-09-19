@@ -98,6 +98,7 @@ for name in G1_EXPECTED_PRODUCER_JOB_NAME G1_EXPECTED_PRODUCER_ARTIFACT_NAME G1_
 done
 [[ "$G1_PRODUCER_BINARY_MEMBER" != /* && "$G1_PRODUCER_BINARY_MEMBER" != *..* && "$G1_PRODUCER_BINARY_MEMBER" != *\\* ]] || die "bad producer member path"
 is_digest "$G1_EXPECTED_PRODUCER_SERVICE_DIGEST" || die "bad producer service digest"
+[[ "$G1_EXPECTED_PRODUCER_SERVICE_DIGEST" == "sha256:$G1_PRODUCER_ARCHIVE_SHA256" ]] || die "producer service/archive digest mismatch"
 [[ "$G1_SANDBOX_BASE_REF" == ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b ]] || die "unapproved sandbox base"
 [[ "$G1_SANDBOX_IMAGE" =~ ^[a-z0-9./_-]+$ ]] || die "bad sandbox image name"
 

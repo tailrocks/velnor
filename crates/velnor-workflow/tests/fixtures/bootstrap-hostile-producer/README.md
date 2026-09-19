@@ -117,9 +117,10 @@ probe output:
   Linux ELF binary SHA-256;
 * exact source head/tree/closure, target/head repository names and numeric IDs,
   producer workflow/event/run/job/artifact IDs and exact names, artifact service
-  digest, re-hashed producer archive and exact binary member, archive digest,
-  profile/features/platform. These API observations are supplied by the trusted
-  acquire job; the fixture cannot mint or select them;
+  digest (which must equal `sha256:` plus the re-hashed producer archive), exact
+  binary member, archive digest, profile/features/platform. These API
+  observations are supplied by the trusted acquire job; the fixture cannot mint
+  or select them;
 * final sandbox image name, raw multi-platform index digest, exact `linux/amd64`
   platform-manifest digest, config digest, base digest, and image-build revision.
 
