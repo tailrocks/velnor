@@ -555,11 +555,10 @@ fn validate_composite_steps(value: &serde_yaml::Value) -> Result<(), crate::s2::
                     require_string(value, &format!("composite step {field}"), field == "uses")?;
                 }
                 "with" | "env" => validate_string_mapping(value, &format!("step.{field}"))?,
-                "continue-on-error" => {
-                    if !value.is_bool() {
-                        require_string(value, "composite step continue-on-error", false)?;
-                    }
-                }
+                "continue-on-error" => match value {
+                    serde_yaml::Value::Bool(_) => {}
+                    _ => require_string(value, "composite step continue-on-error", false)?,
+                },
                 _ => {}
             }
         }
