@@ -162,6 +162,10 @@ pub(crate) struct G0ArtifactReference {
     pub schema: String,
     pub source_url: String,
     pub sha256: String,
+    /// The artifact bytes are reopened from this external CAS object.  The
+    /// reference is outside the artifact object so it cannot be a hash-cycle
+    /// or an unverified caller path.
+    pub storage_ref: String,
     pub source_revision: String,
     pub source_digest: String,
     pub observed_at_utc: String,
@@ -235,6 +239,8 @@ pub(crate) struct G0WorkflowSource {
     pub media_type: String,
     pub canonicalization: String,
     pub sha256: String,
+    /// Exact source bytes are independently reopened from this CAS object.
+    pub storage_ref: String,
     pub byte_length: u64,
     pub bytes_base64: String,
     pub raw_object_refs: Vec<String>,

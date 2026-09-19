@@ -1993,6 +1993,43 @@ fn check_g0_external_storage(
             findings,
         );
     }
+    check_g0_external_artifact(
+        "evidence.g0_inventory.collector_snapshot.workload_artifact",
+        &inventory.collector_snapshot.workload_artifact,
+        &inventory.collector_snapshot.raw_objects,
+        &store,
+        findings,
+    );
+    for repository in &inventory.collector_snapshot.repositories {
+        for workflow in &repository.workflows {
+            check_g0_external_source(
+                "evidence.g0_inventory.collector_snapshot.workflow.source",
+                &workflow.source,
+                &store,
+                findings,
+            );
+            check_g0_external_artifact(
+                "evidence.g0_inventory.collector_snapshot.workflow.generated_state",
+                &workflow.generated_state,
+                &inventory.collector_snapshot.raw_objects,
+                &store,
+                findings,
+            );
+            for dependency in workflow
+                .reusable_workflows
+                .iter()
+                .chain(workflow.actions.iter())
+                .chain(workflow.scanners.iter())
+            {
+                check_g0_external_source(
+                    "evidence.g0_inventory.collector_snapshot.workflow_dependency.source",
+                    &dependency.source,
+                    &store,
+                    findings,
+                );
+            }
+        }
+    }
 }
 
 fn check_g0_external_object(
@@ -2032,6 +2069,73 @@ fn check_g0_external_object(
             finding(findings, code, "", field, error.to_string());
         }
     }
+}
+
+fn check_g0_external_source(
+    field: &str,
+    source: &G0WorkflowSource,
+    store: &RawEvidenceStore,
+    findings: &mut Vec<Finding>,
+) {
+    let Ok(expected) = BASE64.decode(&source.bytes_base64) else {
+        finding(
+            findings,
+            "g0-storage-bytes",
+            "",
+            field,
+            "workflow source bytes must decode before external CAS verification",
+        );
+        return;
+    };
+    check_g0_external_object(
+        &format!("{field}.storage_ref"),
+        store,
+        &source.storage_ref,
+        &source.sha256,
+        &expected,
+        findings,
+    );
+}
+
+fn check_g0_external_artifact(
+    field: &str,
+    artifact: &G0ArtifactReference,
+    raw_objects: &[G0RawObjectRef],
+    store: &RawEvidenceStore,
+    findings: &mut Vec<Finding>,
+) {
+    let Some(raw) = artifact.raw_object_refs.iter().find_map(|raw_id| {
+        raw_objects
+            .iter()
+            .find(|raw| raw.raw_id == *raw_id && raw.sha256 == artifact.sha256)
+    }) else {
+        finding(
+            findings,
+            "g0-storage-artifact",
+            "",
+            field,
+            "artifact CAS verification requires a referenced raw object with the same digest",
+        );
+        return;
+    };
+    let Ok(expected) = BASE64.decode(&raw.bytes_base64) else {
+        finding(
+            findings,
+            "g0-storage-bytes",
+            "",
+            field,
+            "artifact raw object bytes must decode before external CAS verification",
+        );
+        return;
+    };
+    check_g0_external_object(
+        &format!("{field}.storage_ref"),
+        store,
+        &artifact.storage_ref,
+        &artifact.sha256,
+        &expected,
+        findings,
+    );
 }
 
 fn check_g0_collector_identity(collector: &G0CollectorSnapshot, findings: &mut Vec<Finding>) {
@@ -2382,6 +2486,7 @@ fn check_g0_artifact_reference(
         || artifact.schema.trim().is_empty()
         || !nonempty_url(&artifact.source_url)
         || !valid_digest(&artifact.sha256)
+        || !g0_storage_ref(&artifact.storage_ref, &artifact.sha256)
         || !valid_sha(&artifact.source_revision)
         || !valid_digest(&artifact.source_digest)
         || !valid_timestamp(&artifact.observed_at_utc)
@@ -2684,9 +2789,13 @@ fn check_g0_workflow_source(
     repository: &str,
     default_branch_sha: &str,
     dependencies: &[G0WorkflowDependency],
-    raw_ids: &BTreeSet<String>,
+    raw_objects: &[G0RawObjectRef],
     findings: &mut Vec<Finding>,
 ) -> Option<DerivedWorkflowPlan> {
+    let raw_ids = raw_objects
+        .iter()
+        .map(|raw| raw.raw_id.clone())
+        .collect::<BTreeSet<_>>();
     let decoded = BASE64.decode(&source.bytes_base64);
     let valid = !source.repository.trim().is_empty()
         && source.repository == repository
@@ -2695,10 +2804,11 @@ fn check_g0_workflow_source(
         && valid_sha(&source.revision)
         && valid_sha(&source.source_sha)
         && source.source_sha == default_branch_sha
-        && source_url_for_repository(&source.repository, &source.source_url)
+        && workflow_source_url_matches(source)
         && matches!(source.media_type.as_str(), "text/yaml" | "application/yaml")
         && source.canonicalization == "raw-utf8"
         && valid_digest(&source.sha256)
+        && g0_storage_ref(&source.storage_ref, &source.sha256)
         && decoded.as_ref().is_ok_and(|bytes| {
             bytes.len() as u64 == source.byte_length && digest_bytes(bytes) == source.sha256
         })
@@ -2707,7 +2817,8 @@ fn check_g0_workflow_source(
             .raw_object_refs
             .iter()
             .all(|raw_id| raw_ids.contains(raw_id));
-    if !valid {
+    let raw_binding = source_has_raw_binding(source, raw_objects);
+    if !valid || !raw_binding {
         finding(
             findings,
             "g0-workflow-source",
@@ -2733,8 +2844,25 @@ fn check_g0_workflow_source(
     }
 }
 
-fn source_url_for_repository(repository: &str, source_url: &str) -> bool {
-    nonempty_url(source_url) && source_url.starts_with(&format!("https://github.com/{repository}/"))
+fn workflow_source_url_matches(source: &G0WorkflowSource) -> bool {
+    let Ok(url) = Url::parse(&source.source_url) else {
+        return false;
+    };
+    if url.scheme() != "https"
+        || url.host_str() != Some("github.com")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return false;
+    }
+    url.path()
+        == format!(
+            "/{}/blob/{}/{}",
+            source.repository, source.source_sha, source.path
+        )
 }
 
 fn g0_api_base(value: &str) -> bool {
@@ -2745,6 +2873,7 @@ fn check_g0_dependency_source(
     field: &str,
     source: &G0WorkflowSource,
     raw_ids: &BTreeSet<String>,
+    raw_objects: &[G0RawObjectRef],
     findings: &mut Vec<Finding>,
 ) {
     let decoded = BASE64.decode(&source.bytes_base64);
@@ -2753,10 +2882,11 @@ fn check_g0_dependency_source(
         || source.path.contains("..")
         || !valid_sha(&source.revision)
         || !valid_sha(&source.source_sha)
-        || !source_url_for_repository(&source.repository, &source.source_url)
+        || !workflow_source_url_matches(source)
         || !matches!(source.media_type.as_str(), "text/yaml" | "application/yaml")
         || source.canonicalization != "raw-utf8"
         || !valid_digest(&source.sha256)
+        || !g0_storage_ref(&source.storage_ref, &source.sha256)
         || decoded.is_err()
         || decoded.as_ref().is_ok_and(|bytes| {
             bytes.len() as u64 != source.byte_length || digest_bytes(bytes) != source.sha256
@@ -2766,6 +2896,7 @@ fn check_g0_dependency_source(
             .raw_object_refs
             .iter()
             .any(|raw_id| !raw_ids.contains(raw_id))
+        || !source_has_raw_binding(source, raw_objects)
     {
         finding(
             findings,
@@ -2775,6 +2906,22 @@ fn check_g0_dependency_source(
             "workflow dependency source must bind immutable repository bytes and raw references",
         );
     }
+}
+
+fn source_has_raw_binding(source: &G0WorkflowSource, raw_objects: &[G0RawObjectRef]) -> bool {
+    let Ok(bytes) = BASE64.decode(&source.bytes_base64) else {
+        return false;
+    };
+    source.raw_object_refs.iter().any(|raw_id| {
+        raw_objects.iter().any(|raw| {
+            raw.raw_id == *raw_id
+                && raw.sha256 == source.sha256
+                && BASE64
+                    .decode(&raw.bytes_base64)
+                    .ok()
+                    .is_some_and(|raw_bytes| raw_bytes == bytes)
+        })
+    })
 }
 
 fn check_g0_derived_plan(
@@ -3163,7 +3310,7 @@ fn check_g0_repositories(
                 &repo.repository,
                 &repo.default_branch_sha,
                 &dependencies,
-                raw_ids,
+                &collector.raw_objects,
                 findings,
             );
             if workflow.source.path.trim().is_empty()
@@ -3217,6 +3364,7 @@ fn check_g0_repositories(
                     "evidence.g0_inventory.collector_snapshot.workflow_dependency.source",
                     &dependency.source,
                     raw_ids,
+                    &collector.raw_objects,
                     findings,
                 );
                 if dependency.kind.trim().is_empty()
@@ -4131,6 +4279,7 @@ fn check_g0_dependency_graph(
                 node.source_sha != edge.target_source_sha
                     || node.source_ref != edge.target_source_ref
             })
+            || !g0_graph_edge_shape_is_bound(edge, from_node, to_node)
         {
             finding(
                 findings,
@@ -4248,6 +4397,38 @@ fn check_g0_dependency_graph(
             "collector_snapshot.dependency_graph.edges",
             "dependency graph contains an illegal cycle",
         );
+    }
+}
+
+fn g0_graph_edge_shape_is_bound(
+    edge: &G0GraphEdge,
+    from: Option<&&G0GraphNode>,
+    to: Option<&&G0GraphNode>,
+) -> bool {
+    let (Some(from), Some(to)) = (from, to) else {
+        return false;
+    };
+    match edge.kind.as_str() {
+        "workload-to-check" => {
+            from.kind == "workload"
+                && to.kind == "check"
+                && from.repository == to.repository
+                && from.workload_id == to.workload_id
+        }
+        "workload-to-child" => from.kind == "workload" && to.kind == "child",
+        "workload-to-package" => {
+            from.kind == "workload"
+                && to.kind == "package"
+                && from.repository == to.repository
+                && from.workload_id == to.workload_id
+        }
+        "workload-to-release" => {
+            from.kind == "workload"
+                && to.kind == "release"
+                && from.repository == to.repository
+                && from.workload_id == to.workload_id
+        }
+        _ => true,
     }
 }
 
@@ -7191,6 +7372,12 @@ mod tests {
                 source_url: "https://github.com/tailrocks/velnor/blob/reviewed/matrix.json"
                     .to_owned(),
                 sha256: digest_bytes(b"{}"),
+                storage_ref: format!(
+                    "artifact://sha256/{}",
+                    digest_bytes(b"{}")
+                        .strip_prefix("sha256:")
+                        .expect("digest has prefix")
+                ),
                 source_revision: sha('a'),
                 source_digest: digest('c'),
                 observed_at_utc: "2026-09-20T00:00:00Z".to_owned(),
@@ -7222,7 +7409,7 @@ mod tests {
     /// contract fixture, not a claim about the live fleet.
     fn complete_g0_fixture() -> (ManifestDocument, SnapshotDocument, G0InventoryEvidence) {
         let mut requests = Vec::with_capacity(REQUIRED_REPOSITORIES);
-        let mut raw_objects = Vec::with_capacity(REQUIRED_REPOSITORIES);
+        let mut raw_objects = Vec::with_capacity(REQUIRED_REPOSITORIES * 2);
         let mut manifest_repositories = Vec::with_capacity(REQUIRED_REPOSITORIES);
         let mut snapshot_repositories = Vec::with_capacity(REQUIRED_REPOSITORIES);
         let mut collector_repositories = Vec::with_capacity(REQUIRED_REPOSITORIES);
@@ -7265,6 +7452,24 @@ mod tests {
                 storage_ref: format!(
                     "artifact://sha256/{}",
                     raw_digest
+                        .strip_prefix("sha256:")
+                        .expect("digest has prefix")
+                ),
+            });
+            let workflow_raw_id = format!("raw-workflow-{repository_id}");
+            let workflow_raw_digest = digest_bytes(workflow_bytes);
+            raw_objects.push(G0RawObjectRef {
+                raw_id: workflow_raw_id.clone(),
+                request_id: request_id.clone(),
+                object_kind: "github-workflow-source".to_owned(),
+                canonicalization: "raw-utf8".to_owned(),
+                sha256: workflow_raw_digest.clone(),
+                byte_length: workflow_bytes.len() as u64,
+                bytes_base64: BASE64.encode(workflow_bytes),
+                media_type: "text/yaml".to_owned(),
+                storage_ref: format!(
+                    "artifact://sha256/{}",
+                    workflow_raw_digest
                         .strip_prefix("sha256:")
                         .expect("digest has prefix")
                 ),
@@ -7485,6 +7690,12 @@ mod tests {
                 schema: "velnor.generated-state.v1".to_owned(),
                 source_url: workflow_url,
                 sha256: raw_digest.clone(),
+                storage_ref: format!(
+                    "artifact://sha256/{}",
+                    raw_digest
+                        .strip_prefix("sha256:")
+                        .expect("digest has prefix")
+                ),
                 source_revision: source_sha.clone(),
                 source_digest: digest('c'),
                 observed_at_utc: "2026-09-20T00:00:00Z".to_owned(),
@@ -7495,13 +7706,21 @@ mod tests {
                 path: workflow_path.to_owned(),
                 revision: source_sha.clone(),
                 source_sha: source_sha.clone(),
-                source_url: format!("https://github.com/{repository}/{workflow_url_suffix}"),
+                source_url: format!(
+                    "https://github.com/{repository}/blob/{source_sha}/{workflow_path}"
+                ),
                 media_type: "text/yaml".to_owned(),
                 canonicalization: "raw-utf8".to_owned(),
                 sha256: digest_bytes(workflow_bytes),
+                storage_ref: format!(
+                    "artifact://sha256/{}",
+                    digest_bytes(workflow_bytes)
+                        .strip_prefix("sha256:")
+                        .expect("digest has prefix")
+                ),
                 byte_length: workflow_bytes.len() as u64,
                 bytes_base64: BASE64.encode(workflow_bytes),
-                raw_object_refs: vec![raw_id.clone()],
+                raw_object_refs: vec![workflow_raw_id.clone()],
             };
             let main_check_producer = G0CheckProducer {
                 context: "ci".to_owned(),
@@ -7734,7 +7953,13 @@ mod tests {
                 schema: "velnor.workload-matrix.v1".to_owned(),
                 source_url: "https://github.com/tailrocks/velnor/blob/reviewed/matrix.json"
                     .to_owned(),
-                sha256: first_raw_digest,
+                sha256: first_raw_digest.clone(),
+                storage_ref: format!(
+                    "artifact://sha256/{}",
+                    first_raw_digest
+                        .strip_prefix("sha256:")
+                        .expect("digest has prefix")
+                ),
                 source_revision: source_sha,
                 source_digest: digest('c'),
                 observed_at_utc: "2026-09-20T00:00:00Z".to_owned(),
@@ -7847,6 +8072,25 @@ mod tests {
         );
         assert!(g0_codes(&findings).contains("g0-dependency-edge"));
 
+        let mut foreign_graph_target = complete_g0_fixture().2;
+        let target = foreign_graph_target
+            .collector_snapshot
+            .dependency_graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.kind == "check")
+            .expect("complete fixture has a check node");
+        target.repository = "foreign/repository".to_owned();
+        refresh_typed_inventory_bytes(&mut foreign_graph_target);
+        findings.clear();
+        check_g0_inventory(
+            &manifest,
+            &snapshot,
+            Some(&foreign_graph_target),
+            &mut findings,
+        );
+        assert!(g0_codes(&findings).contains("g0-dependency-edge"));
+
         let mut scope_tampered = inventory;
         scope_tampered.collector_snapshot.repositories.pop();
         findings.clear();
@@ -7862,7 +8106,10 @@ mod tests {
         refresh_typed_inventory_bytes(&mut omitted_job);
         findings.clear();
         check_g0_inventory(&manifest, &snapshot, Some(&omitted_job), &mut findings);
-        assert!(g0_codes(&findings).contains("g0-workflow-derivation"));
+        assert!(
+            g0_codes(&findings).contains("g0-workflow-source")
+                || g0_codes(&findings).contains("g0-workflow-derivation")
+        );
 
         let mut omitted_child_source = complete_g0_fixture().2;
         let source =
@@ -7879,7 +8126,10 @@ mod tests {
             Some(&omitted_child_source),
             &mut findings,
         );
-        assert!(g0_codes(&findings).contains("g0-workflow-derivation"));
+        assert!(
+            g0_codes(&findings).contains("g0-workflow-source")
+                || g0_codes(&findings).contains("g0-workflow-derivation")
+        );
 
         let mut evil_api = complete_g0_fixture().2;
         evil_api.collector_snapshot.collector.api_base =

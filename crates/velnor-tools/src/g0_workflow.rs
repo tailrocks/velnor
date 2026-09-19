@@ -551,11 +551,17 @@ mod tests {
             path: path.to_owned(),
             revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
             source_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
-            source_url: format!("https://github.com/{repository}/blob/main/{path}"),
+            source_url: format!(
+                "https://github.com/{repository}/blob/{}/{}",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", path
+            ),
             media_type: "text/yaml".to_owned(),
             canonicalization: "raw-utf8".to_owned(),
             sha256: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 .to_owned(),
+            storage_ref:
+                "artifact://sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_owned(),
             byte_length: yaml.len() as u64,
             bytes_base64: BASE64.encode(yaml.as_bytes()),
             raw_object_refs: vec!["raw-1".to_owned()],

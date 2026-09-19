@@ -17,6 +17,8 @@ use std::ffi::CString;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
 pub(crate) const MAX_OBJECT_BYTES: u64 = 128 * 1024 * 1024;
@@ -135,7 +137,7 @@ impl RawEvidenceStore {
             let object = open_child(&objects, hex, libc::O_NOFOLLOW | libc::O_CLOEXEC)
                 .map_err(RawStoreError::OpenObject)?;
             let metadata = object.metadata().map_err(RawStoreError::OpenObject)?;
-            if !metadata.is_file() {
+            if !metadata.is_file() || metadata.nlink() != 1 {
                 return Err(RawStoreError::NotRegular);
             }
             if metadata.len() > MAX_OBJECT_BYTES {
@@ -312,6 +314,37 @@ mod tests {
             )
             .expect_err("symlink must not be followed");
         assert!(matches!(error, RawStoreError::OpenObject(_)));
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_file(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hardlinked_object_is_rejected_as_nonexclusive_store_entry() {
+        let root = temp_root("hardlink");
+        fs::create_dir_all(root.join("sha256")).expect("objects");
+        let outside = root.with_extension("outside");
+        let bytes = b"captured response";
+        fs::write(&outside, bytes).expect("outside");
+        let digest = sha256_digest(bytes);
+        std::fs::hard_link(
+            &outside,
+            root.join("sha256")
+                .join(digest.strip_prefix("sha256:").expect("digest")),
+        )
+        .expect("hardlink");
+        let store = RawEvidenceStore::open(&root).expect("open store");
+        let error = store
+            .read_verified(
+                &format!(
+                    "artifact://sha256/{}",
+                    digest.strip_prefix("sha256:").expect("digest")
+                ),
+                &digest,
+                bytes.len() as u64,
+            )
+            .expect_err("hardlinked object must not be accepted");
+        assert!(matches!(error, RawStoreError::NotRegular));
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_file(outside);
     }

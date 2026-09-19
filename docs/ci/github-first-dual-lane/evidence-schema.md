@@ -236,7 +236,8 @@ manifest; collector claims cannot create an expected job or check.
 
 Each workflow row carries one immutable `source` blob with repository/path,
 blob revision, commit SHA, repository-bound URL, media type, byte length,
-base64 bytes, recomputed byte digest, and raw-object references. The checker
+base64 bytes, recomputed byte digest, an external `storage_ref` for the
+descriptor-relative CAS object, and raw-object references. The checker
 parses those bytes with the existing YAML parser. It derives non-empty job
 IDs, provider/platform/architecture targets, trigger events, and recursive
 `uses` dependencies; every referenced reusable workflow/action source must be
@@ -257,6 +258,16 @@ edges, illegal cycles, or a source/relation mismatch fail closed.
 Edges carry separate `source_sha/source_ref` and
 `target_source_sha/target_source_ref` bindings. An edge source digest alone
 cannot authorize an unrelated target revision.
+
+The same external-storage rule applies to generated-state and workload
+artifacts: `storage_ref` must address the exact measured `sha256` bytes of a
+raw object referenced by that artifact. The checker reopens every source and
+artifact object through the explicit evidence root before comparing bytes; a
+caller-provided base64 field, digest, URI, or parsed-object reserialization
+cannot substitute for that read. Typed workload-to-check/package/release
+edges must also preserve the source repository and workload identity; a node
+from another repository is not a valid endpoint merely because its digest and
+ID are present.
 
 The live API collector is not yet wired to this contract. The checker retains
 `g0-authoritative-proof-missing` for structurally valid typed fixtures;
