@@ -7,6 +7,7 @@
 //! read-only API collection before verification; G7 always requires it.
 
 use crate::g0_contract::*;
+use crate::g0_workflow::{derive_workflow_plan, DerivedWorkflowPlan};
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use clap::Args;
@@ -1873,10 +1874,7 @@ fn check_g0_collector_identity(collector: &G0CollectorSnapshot, findings: &mut V
         || !valid_sha(&collector.collector.revision)
         || collector.collector.mode != "read_only"
         || !collector.collector.api_base.starts_with("https://")
-        || !collector
-            .collector
-            .api_base
-            .starts_with("https://api.github.com")
+        || !exact_https_origin(&collector.collector.api_base, "https://api.github.com")
         || collector.collector.api_versions.is_empty()
     {
         finding(
@@ -2377,6 +2375,253 @@ fn g0_policy_pairs(rulesets: &[G0RulesetInventory]) -> BTreeSet<(String, String)
         .collect()
 }
 
+fn check_g0_workflow_source(
+    field: &str,
+    source: &G0WorkflowSource,
+    repository: &str,
+    default_branch_sha: &str,
+    dependencies: &[G0WorkflowDependency],
+    raw_ids: &BTreeSet<String>,
+    findings: &mut Vec<Finding>,
+) -> Option<DerivedWorkflowPlan> {
+    let decoded = BASE64.decode(&source.bytes_base64);
+    let valid = !source.repository.trim().is_empty()
+        && source.repository == repository
+        && source.path.starts_with(".github/workflows/")
+        && !source.path.contains("..")
+        && valid_sha(&source.revision)
+        && valid_sha(&source.source_sha)
+        && source.source_sha == default_branch_sha
+        && source_url_for_repository(&source.repository, &source.source_url)
+        && matches!(source.media_type.as_str(), "text/yaml" | "application/yaml")
+        && source.canonicalization == "raw-utf8"
+        && valid_digest(&source.sha256)
+        && decoded.as_ref().is_ok_and(|bytes| {
+            bytes.len() as u64 == source.byte_length && digest_bytes(bytes) == source.sha256
+        })
+        && !source.raw_object_refs.is_empty()
+        && source
+            .raw_object_refs
+            .iter()
+            .all(|raw_id| raw_ids.contains(raw_id));
+    if !valid {
+        finding(
+            findings,
+            "g0-workflow-source",
+            repository,
+            field,
+            "workflow source must bind repository/path, immutable revision/commit, URL, raw UTF-8 bytes, and recomputed digest",
+        );
+        return None;
+    }
+    let source_key = format!("{}/{}", source.repository, source.path);
+    match derive_workflow_plan(source, dependencies) {
+        Ok(plan) => Some(plan),
+        Err(error) => {
+            finding(
+                findings,
+                "g0-workflow-derivation",
+                repository,
+                field,
+                format!("cannot derive source-bound workflow plan for {source_key}: {error}"),
+            );
+            None
+        }
+    }
+}
+
+fn source_url_for_repository(repository: &str, source_url: &str) -> bool {
+    nonempty_url(source_url) && source_url.starts_with(&format!("https://github.com/{repository}/"))
+}
+
+fn exact_https_origin(value: &str, origin: &str) -> bool {
+    value
+        .strip_prefix(origin)
+        .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('/'))
+}
+
+fn check_g0_dependency_source(
+    field: &str,
+    source: &G0WorkflowSource,
+    raw_ids: &BTreeSet<String>,
+    findings: &mut Vec<Finding>,
+) {
+    let decoded = BASE64.decode(&source.bytes_base64);
+    if source.repository.trim().is_empty()
+        || source.path.trim().is_empty()
+        || source.path.contains("..")
+        || !valid_sha(&source.revision)
+        || !valid_sha(&source.source_sha)
+        || !source_url_for_repository(&source.repository, &source.source_url)
+        || !matches!(source.media_type.as_str(), "text/yaml" | "application/yaml")
+        || source.canonicalization != "raw-utf8"
+        || !valid_digest(&source.sha256)
+        || decoded.is_err()
+        || decoded.as_ref().is_ok_and(|bytes| {
+            bytes.len() as u64 != source.byte_length || digest_bytes(bytes) != source.sha256
+        })
+        || source.raw_object_refs.is_empty()
+        || source
+            .raw_object_refs
+            .iter()
+            .any(|raw_id| !raw_ids.contains(raw_id))
+    {
+        finding(
+            findings,
+            "g0-workflow-dependency-source",
+            &source.repository,
+            field,
+            "workflow dependency source must bind immutable repository bytes and raw references",
+        );
+    }
+}
+
+fn check_g0_derived_plan(
+    repository: &str,
+    manifest: &ManifestRepository,
+    workflow: &G0WorkflowInventory,
+    plan: &DerivedWorkflowPlan,
+    findings: &mut Vec<Finding>,
+) {
+    let expected_workloads = manifest
+        .expected_workload_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if expected_workloads.is_empty() || manifest.expected_jobs.is_empty() {
+        finding(
+            findings,
+            "g0-workflow-plan",
+            repository,
+            "manifest.expected_workload_ids/expected_jobs",
+            "source-derived G0 plan requires non-empty expected workloads and jobs",
+        );
+        return;
+    }
+    let actual_jobs = plan
+        .jobs
+        .iter()
+        .map(|job| job.job_id.clone())
+        .collect::<BTreeSet<_>>();
+    let expected_jobs = manifest
+        .expected_jobs
+        .iter()
+        .map(|job| job.job_id.clone())
+        .collect::<BTreeSet<_>>();
+    if actual_jobs != expected_jobs || expected_workloads != actual_jobs {
+        finding(
+            findings,
+            "g0-workflow-plan",
+            repository,
+            "workflow.source/jobs",
+            "source-derived workflow job identities must exactly equal reviewed expected workloads/jobs",
+        );
+    }
+    if plan.events != workflow.events.iter().cloned().collect::<BTreeSet<_>>() {
+        finding(
+            findings,
+            "g0-workflow-events",
+            repository,
+            "workflows.events",
+            "workflow trigger inventory must equal events parsed from immutable source bytes",
+        );
+    }
+    for expected in &manifest.expected_jobs {
+        let Some(actual) = plan.jobs.iter().find(|job| job.job_id == expected.job_id) else {
+            continue;
+        };
+        if actual.provider != expected.provider
+            || actual.platform != expected.platform
+            || actual.architecture != expected.architecture
+        {
+            finding(
+                findings,
+                "g0-workflow-job-target",
+                repository,
+                "manifest.expected_jobs",
+                format!(
+                    "source-derived job {} target differs from reviewed provider/platform/architecture",
+                    expected.job_id
+                ),
+            );
+        }
+    }
+    let derived_children = plan
+        .child_edges
+        .iter()
+        .map(|edge| {
+            (
+                edge.workload_id.clone(),
+                edge.repository.clone(),
+                edge.workflow_path.clone(),
+                edge.event.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    for edge in &plan.child_edges {
+        let Some(expected) = manifest
+            .expected_jobs
+            .iter()
+            .find(|job| job.job_id == edge.workload_id)
+        else {
+            finding(
+                findings,
+                "g0-workflow-child",
+                repository,
+                "workflow.source/child_edges",
+                format!(
+                    "source-derived child edge has no reviewed workload {}",
+                    edge.workload_id
+                ),
+            );
+            continue;
+        };
+        let matches = expected.child_workflow.as_ref().is_some_and(|child| {
+            child.repository == edge.repository
+                && child.workflow_path == edge.workflow_path
+                && child.event == edge.event
+        });
+        if !matches {
+            finding(
+                findings,
+                "g0-workflow-child",
+                repository,
+                "manifest.expected_jobs.child_workflow",
+                format!(
+                    "reviewed child obligation for {} does not match source-derived {} edge",
+                    edge.workload_id, edge.relation
+                ),
+            );
+        }
+    }
+    for expected in manifest
+        .expected_jobs
+        .iter()
+        .filter(|job| job.child_workflow.is_some())
+    {
+        let Some(child) = expected.child_workflow.as_ref() else {
+            continue;
+        };
+        if !derived_children.contains(&(
+            expected.job_id.clone(),
+            child.repository.clone(),
+            child.workflow_path.clone(),
+            child.event.clone(),
+        )) {
+            finding(
+                findings,
+                "g0-workflow-child",
+                repository,
+                "workflow.source/child_edges",
+                format!(
+                    "reviewed child obligation for {} is absent from immutable source",
+                    expected.job_id
+                ),
+            );
+        }
+    }
+}
+
 fn check_g0_repositories(
     manifest: &ManifestDocument,
     snapshot: &SnapshotDocument,
@@ -2483,9 +2728,9 @@ fn check_g0_repositories(
                 .iter()
                 .map(|workflow| {
                     (
-                        workflow.path.clone(),
-                        workflow.revision.clone(),
-                        workflow.source_sha.clone(),
+                        workflow.source.path.clone(),
+                        workflow.source.revision.clone(),
+                        workflow.source.source_sha.clone(),
                     )
                 })
                 .collect::<BTreeSet<_>>();
@@ -2598,15 +2843,31 @@ fn check_g0_repositories(
         }
         let mut workflow_ids = BTreeSet::new();
         for workflow in &repo.workflows {
-            if workflow.path.trim().is_empty()
-                || !valid_sha(&workflow.revision)
-                || !valid_sha(&workflow.source_sha)
-                || workflow.source_sha != repo.default_branch_sha
+            let dependencies = workflow
+                .reusable_workflows
+                .iter()
+                .chain(workflow.actions.iter())
+                .chain(workflow.scanners.iter())
+                .cloned()
+                .collect::<Vec<_>>();
+            let source_plan = check_g0_workflow_source(
+                "evidence.g0_inventory.collector_snapshot.workflow.source",
+                &workflow.source,
+                &repo.repository,
+                &repo.default_branch_sha,
+                &dependencies,
+                raw_ids,
+                findings,
+            );
+            if workflow.source.path.trim().is_empty()
+                || !valid_sha(&workflow.source.revision)
+                || !valid_sha(&workflow.source.source_sha)
+                || workflow.source.source_sha != repo.default_branch_sha
                 || workflow.events.is_empty()
                 || !workflow_ids.insert((
-                    workflow.path.clone(),
-                    workflow.revision.clone(),
-                    workflow.source_sha.clone(),
+                    workflow.source.path.clone(),
+                    workflow.source.revision.clone(),
+                    workflow.source.source_sha.clone(),
                 ))
             {
                 finding(
@@ -2645,9 +2906,15 @@ fn check_g0_repositories(
                 .chain(workflow.actions.iter())
                 .chain(workflow.scanners.iter())
             {
+                check_g0_dependency_source(
+                    "evidence.g0_inventory.collector_snapshot.workflow_dependency.source",
+                    &dependency.source,
+                    raw_ids,
+                    findings,
+                );
                 if dependency.kind.trim().is_empty()
-                    || dependency.path.trim().is_empty()
-                    || !valid_sha(&dependency.revision)
+                    || dependency.source.path.trim().is_empty()
+                    || !valid_sha(&dependency.source.revision)
                 {
                     finding(
                         findings,
@@ -2658,16 +2925,26 @@ fn check_g0_repositories(
                     );
                 }
                 validate_repository_name(
-                    &dependency.repository,
+                    &dependency.source.repository,
                     "workflow dependency.repository",
                     findings,
                 );
                 check_g0_raw_refs(
                     "evidence.g0_inventory.collector_snapshot.workflow_dependency.raw_object_refs",
-                    &dependency.raw_object_refs,
+                    &dependency.source.raw_object_refs,
                     raw_ids,
                     findings,
                 );
+            }
+            if let Some(manifest_repo) = manifest
+                .repositories
+                .iter()
+                .find(|candidate| candidate.repository == repo.repository)
+                && workflow.source.path == manifest_repo.workflow_path
+                && workflow.source.revision == manifest_repo.workflow_revision
+                && let Some(plan) = source_plan.as_ref()
+            {
+                check_g0_derived_plan(&repo.repository, manifest_repo, workflow, plan, findings);
             }
         }
         if let Some(manifest_repo) = manifest
@@ -2675,9 +2952,9 @@ fn check_g0_repositories(
             .iter()
             .find(|candidate| candidate.repository == repo.repository)
             && !repo.workflows.iter().any(|workflow| {
-                workflow.path == manifest_repo.workflow_path
-                    && workflow.revision == manifest_repo.workflow_revision
-                    && workflow.source_sha == repo.default_branch_sha
+                workflow.source.path == manifest_repo.workflow_path
+                    && workflow.source.revision == manifest_repo.workflow_revision
+                    && workflow.source.source_sha == repo.default_branch_sha
             })
         {
             finding(
@@ -3290,6 +3567,42 @@ fn g0_current_revision_map(
     result
 }
 
+fn g0_source_child_workloads(
+    manifest: &ManifestDocument,
+    collector: &G0CollectorSnapshot,
+) -> BTreeSet<(String, String)> {
+    let mut result = BTreeSet::new();
+    for repository in &collector.repositories {
+        let Some(manifest_repo) = manifest
+            .repositories
+            .iter()
+            .find(|candidate| candidate.repository == repository.repository)
+        else {
+            continue;
+        };
+        for workflow in &repository.workflows {
+            if workflow.source.path != manifest_repo.workflow_path
+                || workflow.source.revision != manifest_repo.workflow_revision
+            {
+                continue;
+            }
+            let dependencies = workflow
+                .reusable_workflows
+                .iter()
+                .chain(workflow.actions.iter())
+                .chain(workflow.scanners.iter())
+                .cloned()
+                .collect::<Vec<_>>();
+            if let Ok(plan) = derive_workflow_plan(&workflow.source, &dependencies) {
+                for edge in plan.child_edges {
+                    result.insert((repository.repository.clone(), edge.workload_id));
+                }
+            }
+        }
+    }
+    result
+}
+
 fn g0_revision_map(
     revisions: &[G0RepositoryRevision],
     raw_ids: &BTreeSet<String>,
@@ -3407,6 +3720,7 @@ fn check_g0_dependency_graph(
     let mut adjacency = BTreeMap::<String, Vec<String>>::new();
     let mut node_edges = BTreeSet::new();
     let mut edge_ids = BTreeSet::new();
+    let derived_child_workloads = g0_source_child_workloads(manifest, collector);
     let allowed_node_kinds = BTreeSet::from([
         "artifact", "check", "child", "package", "release", "source", "workload", "workflow",
     ]);
@@ -3566,7 +3880,9 @@ fn check_g0_dependency_graph(
                     ),
                 );
             }
-            if job.child_workflow.is_some()
+            if (job.child_workflow.is_some()
+                || derived_child_workloads
+                    .contains(&(repo.repository.clone(), job.workload_id.clone())))
                 && !outgoing.iter().any(|edge| {
                     edge.kind == "workload-to-child"
                         && node_by_id
@@ -6606,6 +6922,8 @@ mod tests {
         let merge_sha = sha('c');
         let workflow_path = ".github/workflows/ci.yml";
         let workflow_url_suffix = "blob/main/.github/workflows/ci.yml";
+        let workflow_bytes =
+            b"on: [push, pull_request]\njobs:\n  scan:\n    runs-on: ubuntu-24.04\n    steps: []\n";
 
         for (index, repository) in CANONICAL_REPOSITORIES.iter().enumerate() {
             let repository = (*repository).to_owned();
@@ -6809,6 +7127,19 @@ mod tests {
                 observed_at_utc: "2026-09-20T00:00:00Z".to_owned(),
                 raw_object_refs: vec!["raw-1".to_owned()],
             };
+            let workflow_source = G0WorkflowSource {
+                repository: repository.clone(),
+                path: workflow_path.to_owned(),
+                revision: source_sha.clone(),
+                source_sha: source_sha.clone(),
+                source_url: format!("https://github.com/{repository}/{workflow_url_suffix}"),
+                media_type: "text/yaml".to_owned(),
+                canonicalization: "raw-utf8".to_owned(),
+                sha256: digest_bytes(workflow_bytes),
+                byte_length: workflow_bytes.len() as u64,
+                bytes_base64: BASE64.encode(workflow_bytes),
+                raw_object_refs: vec!["raw-1".to_owned()],
+            };
             let main_check_producer = G0CheckProducer {
                 context: "ci".to_owned(),
                 app_id: "123".to_owned(),
@@ -6860,9 +7191,7 @@ mod tests {
                     raw_object_refs: vec!["raw-1".to_owned()],
                 }],
                 workflows: vec![G0WorkflowInventory {
-                    path: workflow_path.to_owned(),
-                    revision: source_sha.clone(),
-                    source_sha: source_sha.clone(),
+                    source: workflow_source,
                     events: vec!["push".to_owned(), "pull_request".to_owned()],
                     reusable_workflows: Vec::new(),
                     actions: Vec::new(),
@@ -7109,6 +7438,13 @@ mod tests {
             .collect()
     }
 
+    fn refresh_typed_inventory_bytes(inventory: &mut G0InventoryEvidence) {
+        let value = serde_json::to_value(&inventory.collector_snapshot).unwrap();
+        let bytes = canonical_json(&value).into_bytes();
+        inventory.collector_snapshot_bytes_base64 = BASE64.encode(&bytes);
+        inventory.collector_snapshot_sha256 = digest_bytes(&bytes);
+    }
+
     #[test]
     fn complete_g0_collector_fixture_is_positive_and_mutations_fail() {
         let (manifest, snapshot, inventory) = complete_g0_fixture();
@@ -7153,6 +7489,42 @@ mod tests {
         findings.clear();
         check_g0_inventory(&manifest, &snapshot, Some(&scope_tampered), &mut findings);
         assert!(g0_codes(&findings).contains("g0-scope"));
+
+        let mut omitted_job = complete_g0_fixture().2;
+        let source = &mut omitted_job.collector_snapshot.repositories[0].workflows[0].source;
+        let bytes = b"on: [push]\njobs: {}\n";
+        source.bytes_base64 = BASE64.encode(bytes);
+        source.byte_length = bytes.len() as u64;
+        source.sha256 = digest_bytes(bytes);
+        refresh_typed_inventory_bytes(&mut omitted_job);
+        findings.clear();
+        check_g0_inventory(&manifest, &snapshot, Some(&omitted_job), &mut findings);
+        assert!(g0_codes(&findings).contains("g0-workflow-derivation"));
+
+        let mut omitted_child_source = complete_g0_fixture().2;
+        let source =
+            &mut omitted_child_source.collector_snapshot.repositories[0].workflows[0].source;
+        let bytes = b"on: [push]\njobs:\n  scan:\n    uses: ./.github/workflows/missing.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n";
+        source.bytes_base64 = BASE64.encode(bytes);
+        source.byte_length = bytes.len() as u64;
+        source.sha256 = digest_bytes(bytes);
+        refresh_typed_inventory_bytes(&mut omitted_child_source);
+        findings.clear();
+        check_g0_inventory(
+            &manifest,
+            &snapshot,
+            Some(&omitted_child_source),
+            &mut findings,
+        );
+        assert!(g0_codes(&findings).contains("g0-workflow-derivation"));
+
+        let mut evil_api = complete_g0_fixture().2;
+        evil_api.collector_snapshot.collector.api_base =
+            "https://api.github.com.evil.example".to_owned();
+        refresh_typed_inventory_bytes(&mut evil_api);
+        findings.clear();
+        check_g0_inventory(&manifest, &snapshot, Some(&evil_api), &mut findings);
+        assert!(g0_codes(&findings).contains("g0-collector-source"));
     }
 
     fn minimal_execution() -> ExecutionObservation {

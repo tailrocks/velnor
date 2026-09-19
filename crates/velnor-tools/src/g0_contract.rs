@@ -201,9 +201,7 @@ pub(crate) struct G0RequiredCheckPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct G0WorkflowInventory {
-    pub path: String,
-    pub revision: String,
-    pub source_sha: String,
+    pub source: G0WorkflowSource,
     pub events: Vec<String>,
     pub reusable_workflows: Vec<G0WorkflowDependency>,
     pub actions: Vec<G0WorkflowDependency>,
@@ -216,9 +214,25 @@ pub(crate) struct G0WorkflowInventory {
 #[serde(deny_unknown_fields)]
 pub(crate) struct G0WorkflowDependency {
     pub kind: String,
+    pub source: G0WorkflowSource,
+}
+
+/// Immutable workflow/action bytes captured from the reviewed repository or a
+/// recursively referenced source.  The checker hashes these exact bytes and
+/// parses them; a URL, blob SHA, or caller-provided plan alone is insufficient.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct G0WorkflowSource {
     pub repository: String,
     pub path: String,
     pub revision: String,
+    pub source_sha: String,
+    pub source_url: String,
+    pub media_type: String,
+    pub canonicalization: String,
+    pub sha256: String,
+    pub byte_length: u64,
+    pub bytes_base64: String,
     pub raw_object_refs: Vec<String>,
 }
 

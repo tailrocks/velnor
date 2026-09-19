@@ -221,6 +221,19 @@ default branches, all current PR heads/bases/tested merges, workflow/run
 identities, and required check tuples with the regular snapshot and reviewed
 manifest; collector claims cannot create an expected job or check.
 
+Each workflow row carries one immutable `source` blob with repository/path,
+blob revision, commit SHA, repository-bound URL, media type, byte length,
+base64 bytes, recomputed byte digest, and raw-object references. The checker
+parses those bytes with the existing YAML parser. It derives non-empty job
+IDs, provider/platform/architecture targets, trigger events, and recursive
+`uses` dependencies; every referenced reusable workflow/action source must be
+present as another immutable dependency blob. `workflow_run` and
+`workflow_dispatch` triggers become explicit child obligations. The derived
+job/workload set and targets must equal the reviewed manifest's expected plan,
+and every reviewed child obligation must be present in the source-derived
+edges. Jobs, child runs, or expected checks observed only in result records
+cannot create an expectation.
+
 The dependency graph is also typed source evidence, not a summary digest.
 Every node and edge has an immutable source SHA/ref, raw-object references,
 known node/relation kinds, and no dangling or duplicate identities. Required
