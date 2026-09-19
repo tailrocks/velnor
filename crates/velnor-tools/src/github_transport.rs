@@ -21,6 +21,7 @@ use std::fs::File;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -68,6 +69,28 @@ impl GithubHttpTransport {
         let token = std::env::var("GITHUB_TOKEN")
             .or_else(|_| std::env::var("GH_TOKEN"))
             .context("live GitHub collection requires GITHUB_TOKEN or GH_TOKEN")?;
+        Self::new(token)
+    }
+
+    /// Resolve the credential through the host's `gh` keyring when no token
+    /// environment variable was supplied.  The token is captured only in
+    /// this process's private memory; command arguments, diagnostics, and
+    /// evidence never contain it.
+    pub fn from_env_or_gh() -> Result<Self> {
+        if std::env::var_os("GITHUB_TOKEN").is_some() || std::env::var_os("GH_TOKEN").is_some() {
+            return Self::from_env();
+        }
+        let output = Command::new("gh")
+            .args(["auth", "token", "--hostname", "github.com"])
+            .output()
+            .context("resolve GitHub credential through gh keyring")?;
+        if !output.status.success() {
+            bail!("gh keyring did not return an authenticated GitHub credential");
+        }
+        let token = String::from_utf8(output.stdout)
+            .context("gh keyring returned a non-text GitHub credential")?
+            .trim_end_matches(['\r', '\n'])
+            .to_owned();
         Self::new(token)
     }
 
@@ -232,7 +255,7 @@ fn classify_reqwest_error(error: reqwest::Error) -> TransportFailure {
 }
 
 fn safe_response_headers(headers: &HeaderMap) -> std::collections::BTreeMap<String, String> {
-    const ALLOWED: [&str; 10] = [
+    const ALLOWED: [&str; 11] = [
         "content-type",
         "link",
         "x-github-request-id",
@@ -243,6 +266,7 @@ fn safe_response_headers(headers: &HeaderMap) -> std::collections::BTreeMap<Stri
         "x-ratelimit-reset",
         "retry-after",
         "etag",
+        "x-oauth-scopes",
     ];
     let mut safe = std::collections::BTreeMap::new();
     for name in ALLOWED {

@@ -218,6 +218,25 @@ pub struct LiveCollection {
     pub reconciliation: IdentityReconciliation,
 }
 
+/// Small real-API capture used to verify credential resolution, endpoint
+/// binding, pagination/provenance, and raw-byte persistence before a 32-repo
+/// run.  It is intentionally not shaped as G0 evidence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiveSampleCollection {
+    pub schema_version: u32,
+    pub snapshot_id: String,
+    pub observed_at_utc: String,
+    pub completed_at_utc: String,
+    pub repository: String,
+    pub auth: AuthIdentity,
+    pub repository_object: Value,
+    pub default_branch: String,
+    pub default_branch_commit: Value,
+    pub requests: Vec<RequestRecord>,
+    pub raw_objects: Vec<RawObjectRef>,
+}
+
 #[derive(Default)]
 struct Ledger {
     requests: Vec<RequestRecord>,
@@ -298,7 +317,7 @@ where
         .first()
         .ok_or_else(|| anyhow!("GitHub /user returned no object"))?
         .clone();
-    let viewer_id = required_string(&viewer, &["id"])?;
+    let viewer_id = required_identifier(&viewer, &["id"])?;
     let viewer_login = required_string(&viewer, &["login"])?;
     let viewer_scopes = viewer_result
         .requests
@@ -362,6 +381,92 @@ where
     })
 }
 
+/// Capture a bounded set of real GitHub objects for transport/store
+/// verification.  The sample includes authenticated viewer identity, one
+/// repository object, and its default-branch commit; every response remains
+/// in the same request/raw ledger as the full collector.
+pub async fn collect_live_sample<T, S>(
+    transport: &T,
+    store: &mut S,
+    mut auth: AuthIdentity,
+    repository: &str,
+    snapshot_id: impl Into<String>,
+) -> Result<LiveSampleCollection>
+where
+    T: super::AcquisitionTransport + ?Sized,
+    S: RawObjectStore,
+{
+    validate_repository_slug(repository)?;
+    let snapshot_id = snapshot_id.into();
+    if snapshot_id.trim().is_empty() {
+        bail!("sample snapshot ID must be non-empty");
+    }
+    let observed_at_utc = utc_now();
+    let mut ledger = Ledger::default();
+    let viewer_result = collect_result(
+        transport,
+        store,
+        &auth,
+        github_single_object_request("sample-auth-viewer", "/user", "auth.viewer"),
+    )
+    .await?;
+    let viewer = viewer_result
+        .items
+        .first()
+        .ok_or_else(|| anyhow!("GitHub /user returned no object"))?
+        .clone();
+    let viewer_id = required_identifier(&viewer, &["id"])?;
+    let viewer_login = required_string(&viewer, &["login"])?;
+    let viewer_scopes = viewer_result
+        .requests
+        .iter()
+        .find_map(|request| request.safe_scopes.clone())
+        .ok_or_else(|| anyhow!("GitHub /user did not expose safe OAuth scopes"))?;
+    ledger.ingest(viewer_result)?;
+    auth.viewer_id = Some(viewer_id);
+    auth.viewer_login = Some(viewer_login);
+    auth.safe_scopes = viewer_scopes.into_iter().collect();
+
+    let (repository_object, _) = collect_one(
+        transport,
+        store,
+        &auth,
+        &mut ledger,
+        github_single_object_request(
+            "sample-repository",
+            format!("/repos/{repository}"),
+            "repository",
+        ),
+    )
+    .await?;
+    let default_branch = required_string(&repository_object, &["default_branch"])?;
+    let (default_branch_commit, _) = collect_one(
+        transport,
+        store,
+        &auth,
+        &mut ledger,
+        github_single_object_request(
+            "sample-default-commit",
+            format!("/repos/{repository}/commits/{default_branch}"),
+            "default_branch.commit",
+        ),
+    )
+    .await?;
+    Ok(LiveSampleCollection {
+        schema_version: 1,
+        snapshot_id,
+        observed_at_utc,
+        completed_at_utc: utc_now(),
+        repository: repository.to_owned(),
+        auth,
+        repository_object,
+        default_branch,
+        default_branch_commit,
+        requests: ledger.requests,
+        raw_objects: ledger.raw_objects,
+    })
+}
+
 async fn collect_result<T, S>(
     transport: &T,
     store: &mut S,
@@ -405,7 +510,20 @@ where
     T: super::AcquisitionTransport + ?Sized,
     S: RawObjectStore,
 {
+    let singleton = request.item_field.as_deref() == Some("$object");
     let (items, raw_ids) = collect_items(transport, store, auth, ledger, request).await?;
+    if singleton && items.len() > 1 {
+        let first_identity = singleton_identity(&items[0])
+            .ok_or_else(|| anyhow!("singleton endpoint returned unidentifiable pages"))?;
+        if items
+            .iter()
+            .skip(1)
+            .any(|item| singleton_identity(item).as_deref() != Some(first_identity.as_str()))
+        {
+            bail!("singleton endpoint returned conflicting object pages");
+        }
+        return Ok((items[0].clone(), raw_ids));
+    }
     if items.len() != 1 {
         bail!("single-object endpoint returned {} objects", items.len());
     }
@@ -413,6 +531,12 @@ where
         bail!("single-object endpoint returned no object");
     };
     Ok((item, raw_ids))
+}
+
+fn singleton_identity(value: &Value) -> Option<String> {
+    ["id", "node_id", "sha", "url", "path"]
+        .into_iter()
+        .find_map(|field| value.get(field).map(|value| value.to_string()))
 }
 
 async fn collect_pr_identities<T, S>(
@@ -1284,6 +1408,23 @@ fn required_string(value: &Value, fields: &[&str]) -> Result<String> {
         })
 }
 
+fn required_identifier(value: &Value, fields: &[&str]) -> Result<String> {
+    let mut current = value;
+    for field in fields {
+        current = current
+            .get(*field)
+            .ok_or_else(|| anyhow!("GitHub response lacks {}", fields.join(".")))?;
+    }
+    match current {
+        Value::String(value) if !value.trim().is_empty() => Ok(value.clone()),
+        Value::Number(value) if value.as_u64().is_some_and(|id| id > 0) => Ok(value.to_string()),
+        _ => bail!(
+            "GitHub response field {} is not a non-empty identifier",
+            fields.join(".")
+        ),
+    }
+}
+
 fn optional_string(value: &Value, fields: &[&str]) -> Option<String> {
     let mut current = value;
     for field in fields {
@@ -1318,6 +1459,25 @@ fn optional_u64(value: &Value, fields: &[&str]) -> Option<u64> {
 
 fn collection_id(repository: &str, suffix: &str) -> String {
     format!("{}--{}", safe_id(repository), safe_id(suffix))
+}
+
+fn validate_repository_slug(repository: &str) -> Result<()> {
+    let mut parts = repository.split('/');
+    let owner = parts.next().unwrap_or_default();
+    let name = parts.next().unwrap_or_default();
+    if parts.next().is_some()
+        || owner.is_empty()
+        || name.is_empty()
+        || !owner
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        bail!("repository must be an owner/name slug with safe path characters");
+    }
+    Ok(())
 }
 
 fn safe_id(value: &str) -> String {

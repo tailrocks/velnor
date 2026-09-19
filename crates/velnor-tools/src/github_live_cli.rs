@@ -5,7 +5,7 @@
 //! caller must still supply reviewed model/workload bindings before it can be
 //! presented as authoritative G0 evidence.
 
-use super::live_collector::collect_live;
+use super::live_collector::{collect_live, collect_live_sample};
 use super::live_transport::{GithubHttpTransport, RawObjectFileStore};
 use super::AuthIdentity;
 use crate::evidence_check::ManifestDocument;
@@ -33,6 +33,22 @@ pub struct G0LiveCollectArgs {
     pub collector_revision: String,
 }
 
+#[derive(Debug, Args)]
+pub struct G0LiveSampleArgs {
+    /// GitHub owner/name to sample.
+    #[arg(long)]
+    pub repository: String,
+    /// Non-empty caller-chosen capture identity.
+    #[arg(long)]
+    pub snapshot_id: String,
+    /// New local evidence directory. Existing output files are never replaced.
+    #[arg(long)]
+    pub evidence_dir: PathBuf,
+    /// Exact source revision of this collector binary.
+    #[arg(long, env = "VELNOR_COLLECTOR_REVISION")]
+    pub collector_revision: String,
+}
+
 #[derive(Debug, Serialize)]
 struct CaptureMetadata<'a> {
     schema_version: u32,
@@ -40,7 +56,7 @@ struct CaptureMetadata<'a> {
     snapshot_id: &'a str,
     manifest_id: &'a str,
     read_only: bool,
-    collection_file: &'static str,
+    collection_file: &'a str,
     raw_store_directory: &'static str,
 }
 
@@ -58,9 +74,7 @@ pub async fn run(args: G0LiveCollectArgs) -> Result<()> {
 
     fs::create_dir_all(&args.evidence_dir)
         .with_context(|| format!("create evidence directory {}", args.evidence_dir.display()))?;
-    let transport = GithubHttpTransport::from_env()?;
-    let mut auth = AuthIdentity::new("github-token", "github", None, None, BTreeSet::new());
-    transport.bind_auth(&mut auth)?;
+    let (transport, auth) = authenticated_transport()?;
     let mut store = RawObjectFileStore::new(args.evidence_dir.join("raw"))
         .with_context(|| format!("create raw store below {}", args.evidence_dir.display()))?;
     let collection = collect_live(
@@ -92,6 +106,56 @@ pub async fn run(args: G0LiveCollectArgs) -> Result<()> {
         args.evidence_dir.display()
     );
     Ok(())
+}
+
+pub async fn run_sample(args: G0LiveSampleArgs) -> Result<()> {
+    if args.collector_revision.trim().is_empty() {
+        bail!("--collector-revision must be non-empty");
+    }
+    if args.snapshot_id.trim().is_empty() {
+        bail!("--snapshot-id must be non-empty");
+    }
+    fs::create_dir_all(&args.evidence_dir)
+        .with_context(|| format!("create evidence directory {}", args.evidence_dir.display()))?;
+    let (transport, auth) = authenticated_transport()?;
+    let mut store = RawObjectFileStore::new(args.evidence_dir.join("raw"))
+        .with_context(|| format!("create raw store below {}", args.evidence_dir.display()))?;
+    let sample = collect_live_sample(
+        &transport,
+        &mut store,
+        auth,
+        &args.repository,
+        args.snapshot_id.clone(),
+    )
+    .await
+    .context("collect bounded read-only GitHub sample")?;
+    let manifest_id = format!("sample:{}", sample.repository);
+    let metadata = CaptureMetadata {
+        schema_version: 1,
+        collector_revision: &args.collector_revision,
+        snapshot_id: &sample.snapshot_id,
+        manifest_id: &manifest_id,
+        read_only: true,
+        collection_file: "live-sample.json",
+        raw_store_directory: "raw",
+    };
+    write_json_new(&args.evidence_dir.join("live-sample.json"), &sample)?;
+    write_json_new(&args.evidence_dir.join("capture-metadata.json"), &metadata)?;
+    println!(
+        "sampled {} with {} requests and {} raw objects into {}",
+        sample.repository,
+        sample.requests.len(),
+        sample.raw_objects.len(),
+        args.evidence_dir.display()
+    );
+    Ok(())
+}
+
+fn authenticated_transport() -> Result<(GithubHttpTransport, AuthIdentity)> {
+    let transport = GithubHttpTransport::from_env_or_gh()?;
+    let mut auth = AuthIdentity::new("github-token", "github", None, None, BTreeSet::new());
+    transport.bind_auth(&mut auth)?;
+    Ok((transport, auth))
 }
 
 fn write_json_new<T: Serialize>(path: &Path, value: &T) -> Result<()> {
