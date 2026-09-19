@@ -445,28 +445,44 @@ mod tests {
         )
     }
 
-    fn condition_runs(condition: Option<&str>) -> bool {
-        match condition {
-            None => true,
-            Some(condition) => {
-                let condition = condition
-                    .trim()
-                    .strip_prefix("${{")
-                    .and_then(|condition| condition.strip_suffix("}}"))
-                    .unwrap_or(condition)
-                    .trim();
-                if condition.eq_ignore_ascii_case("always()") {
-                    return true;
-                }
-                for (operator, expected) in [("==", true), ("!=", false)] {
-                    if let Some((left, right)) = condition.split_once(operator) {
-                        let left = left.trim().trim_matches(['\'', '"']);
-                        let right = right.trim().trim_matches(['\'', '"']);
-                        return (left == right) == expected;
-                    }
-                }
-                panic!("unexpected runner condition: {condition}")
-            }
+    type ActionStepOutputs = BTreeMap<String, BTreeMap<String, String>>;
+
+    fn condition_runs(condition: Option<&str>, step_outputs: &ActionStepOutputs) -> bool {
+        let Some(condition) = condition else {
+            return true;
+        };
+        must(
+            velnor_runner::action_contract::evaluate_action_condition(condition, step_outputs),
+            "evaluate runner action condition",
+        )
+    }
+
+    fn render_action_value(value: &str, step_outputs: &ActionStepOutputs) -> String {
+        must(
+            velnor_runner::action_contract::render_action_expression(value, step_outputs),
+            "evaluate runner action expression",
+        )
+    }
+
+    fn record_step_outputs(
+        output_file: &Path,
+        output_cursor: &mut usize,
+        step_id: &str,
+        step_outputs: &mut ActionStepOutputs,
+    ) {
+        let contents = fs::read_to_string(output_file).unwrap_or_default();
+        if *output_cursor > contents.len() {
+            *output_cursor = 0;
+        }
+        let new_content = &contents[*output_cursor..];
+        *output_cursor = contents.len();
+        let outputs = new_content
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect::<BTreeMap<_, _>>();
+        if !outputs.is_empty() {
+            step_outputs.insert(step_id.to_owned(), outputs);
         }
     }
 
@@ -476,6 +492,8 @@ mod tests {
         marker: &Path,
         downstream: &Path,
         output_file: &Path,
+        step_outputs: &mut ActionStepOutputs,
+        output_cursor: &mut usize,
     ) -> std::process::Output {
         use velnor_runner::action_contract::{
             parse_action_metadata, CompositeActionInvocation, ResolvedAction,
@@ -484,26 +502,28 @@ mod tests {
         for invocation in invocations {
             match invocation {
                 CompositeActionInvocation::Script(step) => {
-                    if !condition_runs(step.condition.as_deref()) {
+                    if !condition_runs(step.condition.as_deref(), step_outputs) {
                         continue;
                     }
+                    let script = render_action_value(&step.script, step_outputs);
                     let mut command = Command::new("bash");
                     command
-                        .args(["-euo", "pipefail", "-c", step.script.as_str()])
+                        .args(["-euo", "pipefail", "-c", script.as_str()])
                         .current_dir(root)
                         .env("ACTION_MARKER", marker)
                         .env("DOWNSTREAM_MARKER", downstream)
                         .env("GITHUB_OUTPUT", output_file);
                     for (name, value) in &step.env {
-                        command.env(name, value);
+                        command.env(name, render_action_value(value, step_outputs));
                     }
                     let output = must(command.output(), "execute runner script step");
+                    record_step_outputs(output_file, output_cursor, &step.id, step_outputs);
                     if !output.status.success() {
                         return output;
                     }
                 }
                 CompositeActionInvocation::Repository(plan) => {
-                    if !condition_runs(plan.condition.as_deref()) {
+                    if !condition_runs(plan.condition.as_deref(), step_outputs) {
                         continue;
                     }
                     let metadata_path = ["action.yml", "action.yaml"]
@@ -537,13 +557,29 @@ mod tests {
                         resolved.composite_invocations("/__w", root),
                         "expand runner repository action",
                     );
-                    let output =
-                        execute_action_invocations(root, &nested, marker, downstream, output_file);
+                    let output = execute_action_invocations(
+                        root,
+                        &nested,
+                        marker,
+                        downstream,
+                        output_file,
+                        step_outputs,
+                        output_cursor,
+                    );
                     if !output.status.success() {
                         return output;
                     }
                 }
-                CompositeActionInvocation::Outputs(_) => {}
+                CompositeActionInvocation::Outputs(outputs) => {
+                    let resolved = outputs
+                        .outputs
+                        .iter()
+                        .map(|(name, value)| {
+                            (name.clone(), render_action_value(value, step_outputs))
+                        })
+                        .collect::<BTreeMap<_, _>>();
+                    step_outputs.insert(outputs.step_id.clone(), resolved);
+                }
             }
         }
         std::process::Output {
@@ -606,12 +642,16 @@ mod tests {
             outputs.outputs.get("result").map(String::as_str),
             Some("${{ steps.consumer-downloader-run.outputs.result }}")
         );
+        let mut success_outputs = BTreeMap::new();
+        let mut success_output_cursor = 0;
         let success_result = execute_action_invocations(
             &root,
             &success,
             &success_marker,
             &success_downstream,
             &success_output,
+            &mut success_outputs,
+            &mut success_output_cursor,
         );
         assert!(success_result.status.success());
         let success_log = must(fs::read_to_string(&success_marker), "read success marker");
@@ -631,6 +671,46 @@ mod tests {
             must(fs::read_to_string(&success_output), "read success output")
                 .contains("result=downloaded")
         );
+        assert_eq!(
+            success_outputs
+                .get("consumer")
+                .and_then(|outputs| outputs.get("result"))
+                .map(String::as_str),
+            Some("downloaded")
+        );
+        let downstream_consumer = root.join("tests/downstream-output.sh");
+        must(
+            fs::write(
+                &downstream_consumer,
+                "set -euo pipefail\nprintf 'consumed=%s\\n' \"$CONSUMED\" >> \"$ACTION_MARKER\"\ntest \"$CONSUMED\" = downloaded\n",
+            ),
+            "write downstream output consumer",
+        );
+        let consumed =
+            render_action_value("${{ steps.consumer.outputs.result }}", &success_outputs);
+        let downstream_result = must(
+            Command::new("bash")
+                .args([
+                    "-euo",
+                    "pipefail",
+                    downstream_consumer.to_string_lossy().as_ref(),
+                ])
+                .current_dir(&root)
+                .env("ACTION_MARKER", &success_marker)
+                .env("CONSUMED", consumed)
+                .output(),
+            "execute downstream output consumer",
+        );
+        assert!(
+            downstream_result.status.success(),
+            "downstream output consumer failed: {}",
+            String::from_utf8_lossy(&downstream_result.stderr)
+        );
+        assert!(must(
+            fs::read_to_string(&success_marker),
+            "read downstream marker"
+        )
+        .contains("consumed=downloaded"));
 
         let external_marker = root.join("external.log");
         let external_output = root.join("external.output");
@@ -650,12 +730,16 @@ mod tests {
             external_plan.condition.as_deref(),
             Some("${{ 'external' == 'external' }}")
         );
+        let mut external_outputs = BTreeMap::new();
+        let mut external_output_cursor = 0;
         let external_result = execute_action_invocations(
             &root,
             &external,
             &external_marker,
             &root.join("external.downstream"),
             &external_output,
+            &mut external_outputs,
+            &mut external_output_cursor,
         );
         assert!(external_result.status.success());
         let external_log = must(
@@ -678,8 +762,17 @@ mod tests {
             let downstream = root.join(format!("{mode}.downstream"));
             let output_file = root.join(format!("{mode}.output"));
             let invocations = expanded_invocations(&root, mode, false, &marker);
-            let result =
-                execute_action_invocations(&root, &invocations, &marker, &downstream, &output_file);
+            let mut outputs = BTreeMap::new();
+            let mut output_cursor = 0;
+            let result = execute_action_invocations(
+                &root,
+                &invocations,
+                &marker,
+                &downstream,
+                &output_file,
+                &mut outputs,
+                &mut output_cursor,
+            );
             assert!(!result.status.success(), "{mode} failure must propagate");
             let log = must(fs::read_to_string(&marker), "read failure marker");
             assert!(
@@ -710,9 +803,22 @@ mod tests {
             })
             .find(|step| step.id.ends_with("-buildx"))
             .unwrap_or_else(|| panic!("runner graph lost conditional Buildx step"));
-        assert!(!condition_runs(skip_build.condition.as_deref()));
-        let skip_result =
-            execute_action_invocations(&root, &skip, &skip_marker, &skip_downstream, &skip_output);
+        let skip_outputs = BTreeMap::new();
+        assert!(!condition_runs(
+            skip_build.condition.as_deref(),
+            &skip_outputs
+        ));
+        let mut skip_outputs = BTreeMap::new();
+        let mut skip_output_cursor = 0;
+        let skip_result = execute_action_invocations(
+            &root,
+            &skip,
+            &skip_marker,
+            &skip_downstream,
+            &skip_output,
+            &mut skip_outputs,
+            &mut skip_output_cursor,
+        );
         assert!(skip_result.status.success());
         let skip_log = must(fs::read_to_string(&skip_marker), "read skip marker");
         assert!(skip_log.contains("downloader"));

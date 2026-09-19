@@ -24,12 +24,50 @@ mod action;
 /// fixtures against the same composite semantics.
 #[cfg(feature = "test-support")]
 pub mod action_contract {
+    use std::collections::BTreeMap;
+
     pub use crate::action::{
         composite_action_invocations, parse_action_metadata, ActionInput, ActionMetadata,
         ActionOutput, ActionRuns, ActionRuntime, CompositeActionInvocation, CompositeActionOutputs,
         CompositeActionStep, LocalActionPlan, RepositoryActionPlan, ResolvedAction,
     };
     pub use crate::script_step::ScriptStep;
+
+    /// Evaluate a fixture's action expression against runner-owned step output
+    /// state.  Consumer tests use this narrow test-support seam instead of a
+    /// string replacement evaluator, so output references exercise the same
+    /// expression engine used by job execution.
+    pub fn render_action_expression(
+        value: &str,
+        step_outputs: &BTreeMap<String, BTreeMap<String, String>>,
+    ) -> Result<String, String> {
+        let mut state = crate::executor::JobExecutionState::try_new_with_context(&[], &[])
+            .map_err(|error| error.to_string())?;
+        state.outputs = step_outputs.clone();
+        state
+            .resolve_expressions(value)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Evaluate a composite-step condition with the runner's expression
+    /// parser/evaluator.  Bare conditions are wrapped as a template because
+    /// action expansion may retain either form in the invocation contract.
+    pub fn evaluate_action_condition(
+        condition: &str,
+        step_outputs: &BTreeMap<String, BTreeMap<String, String>>,
+    ) -> Result<bool, String> {
+        let template = if condition.contains("${{") {
+            condition.to_owned()
+        } else {
+            format!("${{{{ {condition} }}}}")
+        };
+        let rendered = render_action_expression(&template, step_outputs)?;
+        match rendered.trim().to_ascii_lowercase().as_str() {
+            "true" => Ok(true),
+            "false" | "" => Ok(false),
+            _ => Err("runner condition did not evaluate to a boolean".to_owned()),
+        }
+    }
 }
 mod admission;
 pub mod args;
