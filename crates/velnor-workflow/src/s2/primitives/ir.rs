@@ -787,10 +787,6 @@ mod tests {
         }
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "pins the hosted bootstrap's source, runtime, and artifact contract"
-    )]
     #[test]
     fn pull_request_owner_renders_independent_candidate_bootstrap() {
         let owner = workflow_setup_action_repository().to_owned();

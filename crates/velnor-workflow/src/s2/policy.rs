@@ -104,6 +104,10 @@ pub(crate) struct PolicyOptions {
     pub(crate) build_pin: bool,
     /// Manifest binding the env-slot candidate binary; `None` disables it.
     pub(crate) candidate_manifest: Option<PathBuf>,
+    /// Trusted render artifact produced by the isolated candidate job.
+    /// When present, policy compares these bytes without executing the
+    /// candidate binary in the verifier process.
+    pub(crate) candidate_render: Option<PathBuf>,
 }
 
 /// One rule's verdict.
@@ -250,6 +254,7 @@ pub(crate) fn run_cli(arguments: &[OsString]) -> Result<(), GeneratorError> {
                 | "base-revision"
                 | "ruleset-contexts"
                 | "candidate-manifest"
+                | "candidate-render"
         ) {
             return Err(GeneratorError::usage(format!(
                 "unsupported policy option: --{name}"
@@ -286,6 +291,7 @@ pub(crate) fn run_cli(arguments: &[OsString]) -> Result<(), GeneratorError> {
     });
     let candidate_manifest =
         candidate_manifest_source(options.get("candidate-manifest").map(String::as_str));
+    let candidate_render = options.get("candidate-render").map(PathBuf::from);
     let report = evaluate(&PolicyOptions {
         root,
         head_sha: options.get("head-sha").cloned(),
@@ -294,6 +300,7 @@ pub(crate) fn run_cli(arguments: &[OsString]) -> Result<(), GeneratorError> {
         ruleset_contexts,
         build_pin,
         candidate_manifest,
+        candidate_render,
     })?;
     println!("{}", report.render());
     if report.passed() {
@@ -440,6 +447,7 @@ fn pin_rules(
         &declared.excludes,
         &lookup,
         &source,
+        options.candidate_render.as_deref(),
     );
     report
         .rules
@@ -574,6 +582,7 @@ pub(crate) fn verify_declared_pin_renders_tree(
         &excludes,
         &lookup,
         &source,
+        None,
     )? {
         TreeComparison::Pin => Ok(()),
         TreeComparison::Candidate(closure) => {
@@ -1479,6 +1488,7 @@ pub(crate) fn regenerate_and_compare(
     excludes: &BTreeSet<String>,
     lookup: &PinnedBinaryLookup,
     source: &PinSource,
+    candidate_render: Option<&Path>,
 ) -> Result<TreeComparison, GeneratorError> {
     // The generator's own repository audits a full history, so the pin's
     // closures are always computable there; a consumer tree without generator
@@ -1494,11 +1504,18 @@ pub(crate) fn regenerate_and_compare(
             if differences.is_empty() {
                 return Ok(TreeComparison::Pin);
             }
-            match render_with_candidate(checkout, tree, &scratch, default_branch, excludes, lookup)?
+            if let Some(render) = candidate_render {
+                let head = resolve_head(checkout, None).map_err(GeneratorError::usage)?;
+                let closure = closure_identity::candidate_closure_of_tree(checkout, &head)?;
+                if compare_rendered_tree(render, tree, excludes)?.is_empty() {
+                    return Ok(TreeComparison::Candidate(closure));
+                }
+            } else if let Some(closure) =
+                render_with_candidate(checkout, tree, &scratch, default_branch, excludes, lookup)?
             {
-                Some(closure) => Ok(TreeComparison::Candidate(closure)),
-                None => Ok(TreeComparison::Differences(differences)),
+                return Ok(TreeComparison::Candidate(closure));
             }
+            Ok(TreeComparison::Differences(differences))
         });
     let _ = fs::remove_dir_all(&scratch);
     verdict
@@ -1540,7 +1557,14 @@ fn render_with_candidate(
     // snapshot to scan and render, while `tree` remains the authoritative
     // checkout used for comparison. A candidate can mutate its snapshot
     // without changing the bytes the trusted comparison reads.
-    let candidate_source = scratch.join("candidate-source");
+    let candidate_source = scratch.with_file_name(format!(
+        "{}-candidate-source",
+        scratch
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("policy-render")
+    ));
+    let _ = fs::remove_dir_all(&candidate_source);
     immutable_git_snapshot(checkout, &candidate_source)?;
     let current_exe = env::current_exe().ok();
     // The manifest gate fails closed loudly: a manifest path that cannot be
@@ -1663,11 +1687,14 @@ fn render_with_candidate(
             scratch,
             default_branch,
             excludes,
-        )?;
+        );
+        let differences = differences?;
         if differences.is_empty() {
+            let _ = fs::remove_dir_all(&candidate_source);
             return Ok(Some(reported));
         }
     }
+    let _ = fs::remove_dir_all(&candidate_source);
     Ok(None)
 }
 
@@ -1745,11 +1772,22 @@ fn render_and_compare(
             detail.trim()
         )));
     }
+    compare_rendered_tree(scratch, root, excludes)
+}
+
+/// Compare an untrusted render directory with the untouched authoritative
+/// tree. The directory is never treated as source or provenance: only its
+/// regular-file bytes can match generated files in the clean tree.
+fn compare_rendered_tree(
+    rendered_root: &Path,
+    tree: &Path,
+    excludes: &BTreeSet<String>,
+) -> Result<Vec<String>, GeneratorError> {
     let mut rendered = BTreeMap::new();
-    collect_files(scratch, scratch, &mut rendered)?;
+    collect_files(rendered_root, rendered_root, &mut rendered)?;
     let mut differences = Vec::new();
     for (relative, content) in &rendered {
-        let actual = root.join(relative);
+        let actual = tree.join(relative);
         match fs::read(&actual) {
             Ok(bytes) if &bytes == content => {}
             Ok(_) => differences.push(format!(
@@ -1762,7 +1800,7 @@ fn render_and_compare(
             Err(error) => return Err(GeneratorError::io("read tree file", &actual, &error)),
         }
     }
-    let workflows = root.join(".github/workflows");
+    let workflows = tree.join(".github/workflows");
     if let Ok(entries) = fs::read_dir(&workflows) {
         for entry in entries {
             let path = entry
@@ -1807,13 +1845,31 @@ fn collect_files(
         let path = entry
             .map_err(|error| GeneratorError::usage(format!("read rendered entry: {error}")))?
             .path();
-        if path.is_dir() {
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| GeneratorError::io("read rendered metadata", &path, &error))?;
+        if metadata.file_type().is_symlink() {
+            return Err(GeneratorError::usage(format!(
+                "rendered output contains symlink {}",
+                path.display()
+            )));
+        }
+        if metadata.is_dir() {
             collect_files(base, &path, files)?;
-        } else if path.is_file() {
-            let relative = path.strip_prefix(base).unwrap_or(&path).to_path_buf();
+        } else if metadata.is_file() {
+            let relative = path.strip_prefix(base).map_err(|_| {
+                GeneratorError::usage(format!(
+                    "rendered output escaped its root: {}",
+                    path.display()
+                ))
+            })?;
             let content = fs::read(&path)
                 .map_err(|error| GeneratorError::io("read rendered file", &path, &error))?;
-            files.insert(relative, content);
+            files.insert(relative.to_path_buf(), content);
+        } else {
+            return Err(GeneratorError::usage(format!(
+                "rendered output contains non-file {}",
+                path.display()
+            )));
         }
     }
     Ok(())
