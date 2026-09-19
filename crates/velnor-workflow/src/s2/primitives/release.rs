@@ -4352,10 +4352,10 @@ fn render_apt_discovery_feed(config: &ProjectConfig, contract: &crate::apt::AptC
     );
     output.push_str(package_raw);
     output.push_str("-$prior_version-$arch.deb\" \"$feed/pool/main/");
-    output.push_str(&crate::apt::pool_letter(package_raw));
-    output.push_str("/");
+    output.push_str(crate::apt::pool_letter(package_raw));
+    output.push('/');
     output.push_str(package_raw);
-    output.push_str("/");
+    output.push('/');
     output.push_str(package_raw);
     output.push_str(
         "_${prior_version}_${arch}.deb\"\n              done\n              candidate_sha=\"$(awk '{print $1}' incoming/release-record.json.sha256)\"\n              curl --fail --show-error --silent --location -o published.json \"$feed/publication-record.json\"\n              velnor-workflow release apt-previous-pointer --selection \"$selection\" --suite stable --published published.json --prior \"$prior_tag\" --candidate \"$VERSION\" --candidate-sha \"$candidate_sha\" > previous-pointer.json\n              ;;\n            preview)\n              if curl --fail --show-error --silent --location --output /dev/null \"$feed/dists/preview/InRelease\"; then\n                curl --fail --show-error --silent --location -o live-packages \"$feed/dists/preview/main/binary-amd64/Packages\"\n                rollback=\"$(awk '$1==\"Package:\"{p=$2} p==\"",
@@ -4366,10 +4366,10 @@ fn render_apt_discovery_feed(config: &ProjectConfig, contract: &crate::apt::AptC
     );
     output.push_str(package_raw);
     output.push_str("_${rollback}_${arch}.deb\" \"$feed/pool/preview/main/");
-    output.push_str(&crate::apt::pool_letter(package_raw));
-    output.push_str("/");
+    output.push_str(crate::apt::pool_letter(package_raw));
+    output.push('/');
     output.push_str(package_raw);
-    output.push_str("/");
+    output.push('/');
     output.push_str(package_raw);
     output.push_str(
         "_${rollback}_${arch}.deb\"\n                done\n                velnor-workflow release apt-previous-pointer --selection \"$selection\" --suite preview > previous-pointer.json\n              else\n                velnor-workflow release apt-previous-pointer --selection \"$selection\" --suite preview --bootstrap true > previous-pointer.json\n                echo 'bootstrap=true' >> \"$GITHUB_OUTPUT\"\n              fi\n              ;;\n          esac\n      - name: Publish the staged suite\n        env:\n          CHANNEL: ${{ needs.verify.outputs.channel }}\n          VERSION: ${{ needs.verify.outputs.version }}\n          COMMIT: ${{ needs.verify.outputs.commit }}\n          ",
