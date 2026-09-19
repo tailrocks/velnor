@@ -763,15 +763,9 @@ fn include_str_paths_for_package(
     package_roots: &[String],
     package_root: &str,
 ) -> Result<Vec<String>, GeneratorError> {
-    let prefix = path_prefix(package_root);
     let mut targets = BTreeSet::new();
     for source in files.iter().filter(|file| {
-        has_extension(file, "rs")
-            && (package_root != "." && file.starts_with(&prefix)
-                || package_root == "."
-                    && !package_roots.iter().any(|nested_root| {
-                        nested_root != "." && file.starts_with(&path_prefix(nested_root))
-                    }))
+        has_extension(file, "rs") && source_belongs_to_package(file, package_roots, package_root)
     }) {
         let source_contents = fs::read_to_string(root.join(source))
             .map_err(|error| GeneratorError::io("read Rust source", &root.join(source), &error))?;
@@ -807,6 +801,21 @@ fn include_str_paths_for_package(
         }
     }
     Ok(targets.into_iter().collect())
+}
+
+fn source_belongs_to_package(source: &str, package_roots: &[String], package_root: &str) -> bool {
+    // The test-only helper has no manifest census. Preserve its historical
+    // package-prefix behavior in that mode; production always supplies all
+    // Cargo package roots and can therefore assign every source to its
+    // nearest (longest) owning root.
+    if package_roots.is_empty() {
+        return package_root == "." || source.starts_with(&path_prefix(package_root));
+    }
+    package_roots
+        .iter()
+        .filter(|candidate| *candidate == "." || source.starts_with(&path_prefix(candidate)))
+        .max_by_key(|candidate| candidate.len())
+        .is_some_and(|owner| owner == package_root)
 }
 
 pub(crate) fn cargo_dependency_name(key: &str) -> &str {
@@ -1251,6 +1260,79 @@ mod tests {
             "resolve member package includes",
         );
         assert_eq!(member_targets, vec!["crates/member/assets/member.txt"]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn nested_package_include_scan_uses_nearest_package_owner() {
+        let root = scratch("manifest-dir-nested-package-ownership");
+        for directory in [
+            "crates/outer/src",
+            "crates/outer/assets",
+            "crates/outer/tools/inner/src",
+            "crates/outer/tools/inner/assets",
+        ] {
+            must(
+                fs::create_dir_all(root.join(directory)),
+                "create package directory",
+            );
+        }
+        must(
+            fs::write(
+                root.join("crates/outer/src/lib.rs"),
+                "const OUTER: &str = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/assets/outer.txt\"));\n",
+            ),
+            "write outer source",
+        );
+        must(
+            fs::write(
+                root.join("crates/outer/tools/inner/src/lib.rs"),
+                "const INNER: &str = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/assets/inner.txt\"));\n",
+            ),
+            "write inner source",
+        );
+        must(
+            fs::write(root.join("crates/outer/assets/outer.txt"), "outer\n"),
+            "write outer asset",
+        );
+        must(
+            fs::write(
+                root.join("crates/outer/tools/inner/assets/inner.txt"),
+                "inner\n",
+            ),
+            "write inner asset",
+        );
+
+        let files = vec![
+            "crates/outer/assets/outer.txt".to_owned(),
+            "crates/outer/src/lib.rs".to_owned(),
+            "crates/outer/tools/inner/assets/inner.txt".to_owned(),
+            "crates/outer/tools/inner/src/lib.rs".to_owned(),
+        ];
+        let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+        let package_roots = vec![
+            "crates/outer".to_owned(),
+            "crates/outer/tools/inner".to_owned(),
+        ];
+        let outer_targets = must(
+            include_str_paths_for_package(&root, &files, &file_set, &package_roots, "crates/outer"),
+            "resolve outer package includes",
+        );
+        assert_eq!(outer_targets, vec!["crates/outer/assets/outer.txt"]);
+        let inner_targets = must(
+            include_str_paths_for_package(
+                &root,
+                &files,
+                &file_set,
+                &package_roots,
+                "crates/outer/tools/inner",
+            ),
+            "resolve inner package includes",
+        );
+        assert_eq!(
+            inner_targets,
+            vec!["crates/outer/tools/inner/assets/inner.txt"]
+        );
         let _ = fs::remove_dir_all(root);
     }
 
