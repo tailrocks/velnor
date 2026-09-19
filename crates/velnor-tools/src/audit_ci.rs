@@ -87,6 +87,10 @@ const GOAL_FLEET_REPOSITORIES: [&str; 32] = [
 const ESTATE_SCOPE_ROLE: &str = "auxiliary-concern-projection";
 const ESTATE_SCOPE_AUTHORITY: &str = "velnor-github-first-dual-lane-goal.md";
 const ESTATE_SCOPE_AUTHORITY_SECTION: &str = "2. Fixed repository manifest";
+// This digest binds the concern/default projection to the reviewed auxiliary
+// source.  The goal manifest remains the independent scope authority above.
+const ACCEPTED_AUXILIARY_CONTRACT_SHA256: &str =
+    "34e4f06de9d5b7c88549328c9365feae3b8927844f3645922883f15a4a8a00b0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -212,7 +216,7 @@ impl Finding {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct EstateManifest {
     version: u32,
     scope: EstateScope,
@@ -221,15 +225,16 @@ struct EstateManifest {
     repositories: Vec<EstateRepository>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct EstateScope {
     role: String,
     authority: String,
     authority_section: String,
     expected_repository_count: usize,
+    contract_sha256: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct EstateRepository {
     name: String,
     #[serde(default)]
@@ -269,7 +274,7 @@ impl Drop for RemoteCheckout {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum ConcernClassification {
     Required,
@@ -278,7 +283,7 @@ enum ConcernClassification {
     RepoSpecific,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct ConcernContract {
     classification: ConcernClassification,
     evidence: String,
@@ -286,7 +291,7 @@ struct ConcernContract {
     implementations: Vec<ConcernImplementation>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ConcernImplementation {
     workflow: String,
     #[serde(default)]
@@ -303,20 +308,48 @@ struct WorkflowAuditProfile {
 }
 
 fn canonical_fleet_map(root: &Path) -> Result<BTreeMap<String, GeneratedCallerClass>> {
+    let _ = canonical_auxiliary_manifest(root)?;
+    fixed_goal_classes()
+}
+
+#[derive(Serialize)]
+struct AuxiliaryEstateContract<'a> {
+    defaults: &'a BTreeMap<String, ConcernContract>,
+    repositories: &'a [EstateRepository],
+}
+
+fn auxiliary_contract_digest(manifest: &EstateManifest) -> Result<String> {
+    let payload = AuxiliaryEstateContract {
+        defaults: &manifest.defaults,
+        repositories: &manifest.repositories,
+    };
+    let bytes = serde_json::to_vec(&payload).context("serialize auxiliary estate contract")?;
+    Ok(Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn canonical_auxiliary_manifest(root: &Path) -> Result<EstateManifest> {
     let path = root.join(ESTATE_MANIFEST_FILE);
     let text = fs::read_to_string(&path)
         .with_context(|| format!("read estate manifest {}", path.display()))?;
     let manifest: EstateManifest = serde_json::from_str(&text)
         .with_context(|| format!("parse estate manifest {}", path.display()))?;
     validate_estate_scope_metadata(&manifest.scope)?;
-    validate_fixed_repository_scope("auxiliary estate manifest", &manifest.repositories)?;
+    validate_auxiliary_repository_scope(&manifest.repositories)?;
+    validate_accepted_auxiliary_contract(&manifest, "canonical estate manifest")?;
+    Ok(manifest)
+}
+
+fn fixed_goal_classes() -> Result<BTreeMap<String, GeneratedCallerClass>> {
     let mut map = BTreeMap::new();
-    for repo in manifest.repositories {
-        let class = generated_class_for_repository(&repo.name);
-        if map.insert(repo.name.clone(), class).is_some() {
+    for repository in GOAL_FLEET_REPOSITORIES {
+        let class = generated_class_for_repository(repository);
+        if map.insert(repository.to_string(), class).is_some() {
             bail!(
-                "estate manifest contains duplicate repository {}",
-                repo.name
+                "compiled fixed-goal scope contains duplicate repository {}",
+                repository
             );
         }
     }
@@ -339,6 +372,49 @@ fn generated_class_for_repository(repository: &str) -> GeneratedCallerClass {
 
 fn goal_fleet_repository_names() -> BTreeSet<&'static str> {
     GOAL_FLEET_REPOSITORIES.into_iter().collect()
+}
+
+fn validate_accepted_auxiliary_contract(manifest: &EstateManifest, context: &str) -> Result<()> {
+    let observed = auxiliary_contract_digest(manifest)?;
+    if observed != ACCEPTED_AUXILIARY_CONTRACT_SHA256 {
+        bail!(
+            "{context} auxiliary contract digest mismatch: expected {ACCEPTED_AUXILIARY_CONTRACT_SHA256}, observed {observed}; concern classifications/defaults are source-bound"
+        );
+    }
+    Ok(())
+}
+
+fn validate_auxiliary_contract_binding(
+    observed: &EstateManifest,
+    accepted: &EstateManifest,
+) -> Result<()> {
+    let observed_digest = auxiliary_contract_digest(observed)?;
+    let accepted_digest = auxiliary_contract_digest(accepted)?;
+    if observed_digest != accepted_digest {
+        bail!(
+            "estate manifest auxiliary contract digest mismatch: accepted {accepted_digest}, observed {observed_digest}; external concern rewrites cannot downgrade required concerns"
+        );
+    }
+    Ok(())
+}
+
+fn validate_auxiliary_repository_scope(repositories: &[EstateRepository]) -> Result<()> {
+    let names = repositories
+        .iter()
+        .map(|repository| repository.name.as_str())
+        .collect::<Vec<_>>();
+    let observed = names.iter().copied().collect::<BTreeSet<_>>();
+    if observed.len() != names.len() {
+        bail!("auxiliary estate manifest contains duplicate repository names");
+    }
+    let expected = goal_fleet_repository_names();
+    let extra = observed.difference(&expected).copied().collect::<Vec<_>>();
+    if !extra.is_empty() {
+        bail!(
+            "auxiliary estate manifest contains out-of-scope repositories: {extra:?}; fixed goal scope remains authoritative"
+        );
+    }
+    Ok(())
 }
 
 fn validate_estate_scope_metadata(scope: &EstateScope) -> Result<()> {
@@ -365,6 +441,12 @@ fn validate_estate_scope_metadata(scope: &EstateScope) -> Result<()> {
             "estate manifest scope declares {} repositories; fixed goal scope requires {}",
             scope.expected_repository_count,
             GOAL_FLEET_REPOSITORIES.len()
+        );
+    }
+    if scope.contract_sha256 != ACCEPTED_AUXILIARY_CONTRACT_SHA256 {
+        bail!(
+            "estate manifest scope contract digest must be {ACCEPTED_AUXILIARY_CONTRACT_SHA256}, got {}",
+            scope.contract_sha256
         );
     }
     Ok(())
@@ -473,6 +555,11 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
     } else {
         BTreeMap::new()
     };
+    let accepted_auxiliary = if args.estate.is_some() {
+        Some(canonical_auxiliary_manifest(&args.repo_path)?)
+    } else {
+        None
+    };
     let estate = if let Some(estate) = &args.estate {
         let text = fs::read_to_string(estate)
             .with_context(|| format!("read estate file {}", estate.display()))?;
@@ -494,10 +581,24 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
             );
         }
         validate_estate_scope(estate, &canonical_classes)?;
+        let accepted_auxiliary = accepted_auxiliary
+            .as_ref()
+            .context("estate audit has no accepted auxiliary contract")?;
+        validate_auxiliary_contract_binding(estate, accepted_auxiliary)?;
         if args.offline {
             bail!("estate audit cannot skip delivered-default freshness checks");
         }
         for repo in &estate.repositories {
+            let authoritative_repo = accepted_auxiliary
+                .repositories
+                .iter()
+                .find(|candidate| candidate.name == repo.name)
+                .with_context(|| {
+                    format!(
+                        "accepted auxiliary contract has no concern plan for {}",
+                        repo.name
+                    )
+                })?;
             let expected_class = canonical_classes
                 .get(&repo.name)
                 .copied()
@@ -544,15 +645,19 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
                     root.display()
                 )
             })?;
-            let workload_files = concern_implementations(repo, &estate.defaults, "lane-selection")
-                .map(|concern| {
-                    concern
-                        .implementations
-                        .iter()
-                        .map(|implementation| implementation.workflow.as_str())
-                        .collect::<BTreeSet<_>>()
-                })
-                .unwrap_or_default();
+            let workload_files = concern_implementations(
+                authoritative_repo,
+                &accepted_auxiliary.defaults,
+                "lane-selection",
+            )
+            .map(|concern| {
+                concern
+                    .implementations
+                    .iter()
+                    .map(|implementation| implementation.workflow.as_str())
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
             let mut findings = audit_repo_profile(
                 &canonical,
                 args.offline,
@@ -560,7 +665,11 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
                 false,
                 Some(expected_class),
             )?;
-            findings.extend(audit_concern_contract(repo, &estate.defaults, &canonical)?);
+            findings.extend(audit_concern_contract(
+                authoritative_repo,
+                &accepted_auxiliary.defaults,
+                &canonical,
+            )?);
             let generated_ci_sha256 =
                 generated_caller_sample(&canonical, &repo.name, expected_class)?.map(|sample| {
                     let sha256 = sample.sha256.clone();
@@ -3369,6 +3478,7 @@ mod tests {
             authority: ESTATE_SCOPE_AUTHORITY.to_string(),
             authority_section: ESTATE_SCOPE_AUTHORITY_SECTION.to_string(),
             expected_repository_count: GOAL_FLEET_REPOSITORIES.len(),
+            contract_sha256: ACCEPTED_AUXILIARY_CONTRACT_SHA256.to_string(),
         }
     }
 
@@ -4247,11 +4357,68 @@ jobs:
     #[test]
     fn estate_manifest_parses_classified_repository() {
         let manifest: EstateManifest = serde_json::from_str(
-            r#"{"version":2,"scope":{"role":"auxiliary-concern-projection","authority":"velnor-github-first-dual-lane-goal.md","authority_section":"2. Fixed repository manifest","expected_repository_count":32},"defaults":{},"repositories":[{"name":"one","path":"/one","concerns":{}}]}"#,
+            r#"{"version":2,"scope":{"role":"auxiliary-concern-projection","authority":"velnor-github-first-dual-lane-goal.md","authority_section":"2. Fixed repository manifest","expected_repository_count":32,"contract_sha256":"34e4f06de9d5b7c88549328c9365feae3b8927844f3645922883f15a4a8a00b0"},"defaults":{},"repositories":[{"name":"one","path":"/one","concerns":{}}]}"#,
         )
         .unwrap();
         assert_eq!(manifest.repositories.len(), 1);
         assert_eq!(manifest.repositories[0].name, "one");
+    }
+
+    fn reviewed_auxiliary_manifest() -> EstateManifest {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        canonical_auxiliary_manifest(&root).unwrap()
+    }
+
+    #[test]
+    fn hostile_concern_rewrite_cannot_downgrade_required_plan() {
+        let accepted = reviewed_auxiliary_manifest();
+        let mut hostile = accepted.clone();
+        let repository = hostile
+            .repositories
+            .iter_mut()
+            .find(|repository| repository.name == "tailrocks/velnor")
+            .unwrap();
+        repository.concerns.insert(
+            "rust-ci".to_string(),
+            ConcernContract {
+                classification: ConcernClassification::NonApplicable,
+                evidence: "hostile caller rewrite".to_string(),
+                implementations: Vec::new(),
+            },
+        );
+
+        let error = validate_auxiliary_contract_binding(&hostile, &accepted)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("auxiliary contract digest mismatch"),
+            "{error}"
+        );
+        assert!(
+            error.contains("cannot downgrade required concerns"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn auxiliary_contract_digest_detects_source_drift() {
+        let accepted = reviewed_auxiliary_manifest();
+        let mut drifted = accepted.clone();
+        drifted
+            .defaults
+            .get_mut("lane-selection")
+            .unwrap()
+            .evidence
+            .push_str(" hostile drift");
+
+        let accepted_digest = auxiliary_contract_digest(&accepted).unwrap();
+        let drifted_digest = auxiliary_contract_digest(&drifted).unwrap();
+        assert_eq!(accepted_digest, ACCEPTED_AUXILIARY_CONTRACT_SHA256);
+        assert_ne!(drifted_digest, accepted_digest);
+        let error = validate_accepted_auxiliary_contract(&drifted, "drifted source")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("digest mismatch"), "{error}");
     }
 
     #[test]
