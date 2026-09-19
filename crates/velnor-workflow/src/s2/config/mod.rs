@@ -3232,42 +3232,7 @@ fn validate_release_binding_kind(release: &ReleaseSection) -> Result<(), Generat
 fn validate_release_bindings(release: &ReleaseSection) -> Result<(), GeneratorError> {
     validate_release_naming(release)?;
     validate_release_binding_kind(release)?;
-    match (
-        release.producer_workflow.as_deref(),
-        release.producer_workflow_id,
-        release.producer_workflow_path.as_deref(),
-    ) {
-        (Some(workflow), Some(workflow_id), Some(path))
-            if !workflow.is_empty() && workflow_id > 0 && valid_producer_workflow_path(path) => {}
-        (None, None, None) => {}
-        (Some(_), Some(_), Some(_)) => {
-            let workflow = release.producer_workflow.as_deref().unwrap_or_default();
-            let path = release
-                .producer_workflow_path
-                .as_deref()
-                .unwrap_or_default();
-            if workflow.is_empty() {
-                return Err(GeneratorError::usage(
-                    "[release] producer_workflow must be non-empty when producer binding is declared",
-                ));
-            }
-            if release.producer_workflow_id.unwrap_or_default() == 0 {
-                return Err(GeneratorError::usage(
-                    "[release] producer_workflow_id must be a positive Actions workflow ID",
-                ));
-            }
-            if !valid_producer_workflow_path(path) {
-                return Err(GeneratorError::usage(format!(
-                    "[release] producer_workflow_path must be a repository workflow path under `.github/workflows/`, found `{path}`"
-                )));
-            }
-        }
-        _ => {
-            return Err(GeneratorError::usage(
-                "[release] producer_workflow, producer_workflow_id, and producer_workflow_path must be declared together",
-            ));
-        }
-    }
+    validate_producer_workflow_identity(release)?;
     if let Some(conclusion) = release.producer_conclusion.as_deref()
         && conclusion != "success"
     {
@@ -3335,6 +3300,46 @@ fn validate_release_bindings(release: &ReleaseSection) -> Result<(), GeneratorEr
     Ok(())
 }
 
+fn validate_producer_workflow_identity(release: &ReleaseSection) -> Result<(), GeneratorError> {
+    match (
+        release.producer_workflow.as_deref(),
+        release.producer_workflow_id,
+        release.producer_workflow_path.as_deref(),
+    ) {
+        (Some(workflow), Some(workflow_id), Some(path))
+            if !workflow.is_empty() && workflow_id > 0 && valid_producer_workflow_path(path) => {}
+        (None, None, None) => {}
+        (Some(_), Some(_), Some(_)) => {
+            let workflow = release.producer_workflow.as_deref().unwrap_or_default();
+            let path = release
+                .producer_workflow_path
+                .as_deref()
+                .unwrap_or_default();
+            if workflow.is_empty() {
+                return Err(GeneratorError::usage(
+                    "[release] producer_workflow must be non-empty when producer binding is declared",
+                ));
+            }
+            if release.producer_workflow_id.unwrap_or_default() == 0 {
+                return Err(GeneratorError::usage(
+                    "[release] producer_workflow_id must be a positive Actions workflow ID",
+                ));
+            }
+            if !valid_producer_workflow_path(path) {
+                return Err(GeneratorError::usage(format!(
+                    "[release] producer_workflow_path must be a repository workflow path under `.github/workflows/`, found `{path}`"
+                )));
+            }
+        }
+        _ => {
+            return Err(GeneratorError::usage(
+                "[release] producer_workflow, producer_workflow_id, and producer_workflow_path must be declared together",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// A workflow path is an immutable repository object identity, not a display
 /// name. Keep the accepted shape narrow because the value travels into the
 /// privileged admission command as a shell argument.
@@ -3343,7 +3348,12 @@ fn valid_producer_workflow_path(path: &str) -> bool {
     !suffix.is_empty()
         && !suffix.contains('/')
         && !suffix.chars().any(char::is_whitespace)
-        && (suffix.ends_with(".yml") || suffix.ends_with(".yaml"))
+        && matches!(
+            Path::new(suffix)
+                .extension()
+                .and_then(|extension| extension.to_str()),
+            Some("yml" | "yaml")
+        )
 }
 
 /// Whether `value` is a portable archive member name: a bare file name over

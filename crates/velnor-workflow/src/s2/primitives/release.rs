@@ -718,7 +718,12 @@ fn valid_producer_workflow_path(path: &str) -> bool {
     !suffix.is_empty()
         && !suffix.contains('/')
         && !suffix.chars().any(char::is_whitespace)
-        && (suffix.ends_with(".yml") || suffix.ends_with(".yaml"))
+        && matches!(
+            std::path::Path::new(suffix)
+                .extension()
+                .and_then(|extension| extension.to_str()),
+            Some("yml" | "yaml")
+        )
 }
 
 /// Validate declared dispatch modes: every mode must be one the renderer
@@ -2528,8 +2533,8 @@ fn render_binding_gate_job(config: &ProjectConfig, release: &ReleaseSpec) -> Str
         yaml_scalar(&config.default_branch),
     );
     rendered.replace(
-        "--event \\\"$PRODUCER_EVENT\\\"",
-        "--producer-event \\\"$PRODUCER_EVENT\\\"",
+        "--event \"$PRODUCER_EVENT\"",
+        "--producer-event \"$PRODUCER_EVENT\"",
     )
 }
 
@@ -2878,17 +2883,10 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
         &format!("  publish:\n    name: Publish rolling preview\n    needs: [{publish_needs}]\n"),
         1,
     );
-    let publish_if = if has_producer_binding(release) {
-        format!(
-            "    if: ${{{{ github.ref == 'refs/heads/{}' }}}}\n",
-            config.default_branch
-        )
-    } else {
-        format!(
-            "    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{}' }}}}\n",
-            config.default_branch
-        )
-    };
+    let publish_if = format!(
+        "    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{}' }}}}\n",
+        config.default_branch
+    );
     output = output.replacen(
         &publish_if,
         &format!(
@@ -4989,6 +4987,74 @@ mod tests {
         )
     }
 
+    fn yaml_job_needs(job: &str) -> Vec<String> {
+        let Some(line) = job
+            .lines()
+            .find(|line| line.trim_start().starts_with("needs:"))
+        else {
+            return Vec::new();
+        };
+        let Some(value) = line.trim_start().strip_prefix("needs:") else {
+            return Vec::new();
+        };
+        let value = value.trim();
+        if let Some(value) = value.strip_prefix('[') {
+            let Some(value) = value.strip_suffix(']') else {
+                return Vec::new();
+            };
+            return value
+                .split(',')
+                .map(str::trim)
+                .filter(|dependency| !dependency.is_empty())
+                .map(str::to_owned)
+                .collect();
+        }
+        vec![value.to_owned()]
+    }
+
+    /// Every `needs.<job>.outputs.*` reference must name a direct dependency.
+    /// GitHub does not expose transitive needs outputs, so this catches a
+    /// source SHA that is only reachable through the publish gate.
+    fn assert_output_references_are_direct(job_id: &str, job: &str) {
+        let direct = yaml_job_needs(job);
+        for line in job.lines() {
+            let mut remaining = line;
+            while let Some(index) = remaining.find("needs.") {
+                let reference = &remaining[index + "needs.".len()..];
+                let Some(dependency) = reference.split('.').next() else {
+                    break;
+                };
+                assert!(
+                    direct.iter().any(|candidate| candidate == dependency),
+                    "{job_id} reads {dependency} through a non-direct needs edge; direct={direct:?}: {job}"
+                );
+                remaining = &reference[dependency.len()..];
+            }
+        }
+    }
+
+    /// The producer preview graph is rendered in topological order. Requiring
+    /// every edge to point to an earlier known job rejects both cycles and
+    /// accidental references to jobs omitted from the graph.
+    fn assert_jobs_form_acyclic_graph(workflow: &str, jobs: &[&str]) {
+        for (index, id) in jobs.iter().enumerate() {
+            let job = yaml_job(workflow, id);
+            for dependency in yaml_job_needs(job) {
+                let dependency_index = jobs.iter().position(|candidate| *candidate == dependency);
+                assert!(
+                    dependency_index.is_some(),
+                    "{id} depends on unknown job {dependency}: {job}"
+                );
+                if let Some(dependency_index) = dependency_index {
+                    assert!(
+                        dependency_index < index,
+                        "{id} depends on later job {dependency}; graph is cyclic or unordered"
+                    );
+                }
+            }
+        }
+    }
+
     fn assert_cache_retention_has_actions_write(workflow: &str) {
         let job = yaml_job(workflow, "cache-budget");
         assert!(
@@ -5848,27 +5914,85 @@ mod tests {
         let preview = super::render_preview(&cfg, Some(release));
 
         let verifier = yaml_job(&preview, "release-github-hosted-rust-example");
+        assert_eq!(
+            yaml_job_needs(verifier),
+            ["source", "publish-gate"],
+            "producer verifier must directly depend on source and admission gate"
+        );
+        assert_output_references_are_direct("release-github-hosted-rust-example", verifier);
         assert!(
-            verifier.contains("needs: [source, publish-gate]")
-                && verifier.contains("if: ${{ needs.publish-gate.outputs.admitted == 'true' }}")
+            verifier.contains("if: ${{ needs.publish-gate.outputs.admitted == 'true' }}")
                 && verifier.contains("ref: ${{ needs.source.outputs.sha }}")
                 && verifier.contains("HEAD_SHA: ${{ needs.source.outputs.sha }}"),
             "producer-bound verification must use the admitted source SHA: {verifier}"
         );
         let build = yaml_job(&preview, "build");
+        assert_eq!(
+            yaml_job_needs(build),
+            [
+                "source",
+                "publish-gate",
+                "release-github-hosted-rust-example"
+            ],
+            "preview build must directly depend on source, gate, and selected verifier"
+        );
+        assert_output_references_are_direct("build", build);
         assert!(
-            build.contains("needs: [source, release-github-hosted-rust-example]")
-                && build.contains("ref: ${{ needs.source.outputs.sha }}"),
+            build.contains("ref: ${{ needs.source.outputs.sha }}"),
             "preview build must use the producer source and selected verification gate: {build}"
         );
         let publish = yaml_job(&preview, "publish");
+        assert_eq!(
+            yaml_job_needs(publish),
+            [
+                "build",
+                "release-github-hosted-rust-example",
+                "publish-gate"
+            ],
+            "preview publisher must directly depend on every selected gate"
+        );
+        assert_output_references_are_direct("publish", publish);
         assert!(
             publish.contains(
-                "needs: [build, release-github-hosted-rust-example, publish-gate]"
-            ) && publish.contains(
                 "needs.publish-gate.outputs.admitted == 'true' && needs.publish-gate.outputs.mode == 'publish'"
-            ),
+            ) && publish.contains(
+                "if: ${{ github.ref == 'refs/heads/main' && (needs.publish-gate.outputs.admitted == 'true' && needs.publish-gate.outputs.mode == 'publish') }}"
+            ) && !publish.contains("github.event_name == 'push'"),
             "the singular preview publisher must require the selected lane and producer admission: {publish}"
+        );
+        assert!(
+            preview.contains("--producer-event \"$PRODUCER_EVENT\"")
+                && !preview.contains("--event \"$PRODUCER_EVENT\""),
+            "producer admission must pass the event payload through its dedicated option: {preview}"
+        );
+        for fragment in [
+            "PRODUCER_REPOSITORY: ${{ github.event.workflow_run.repository.full_name }}",
+            "PRODUCER_HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}",
+            "WORKFLOW_ID: ${{ github.event.workflow_run.workflow_id }}",
+            "WORKFLOW_PATH: ${{ github.event.workflow_run.path }}",
+            "RUN_ID: ${{ github.event.workflow_run.id }}",
+            "HEAD_SHA: ${{ github.event.workflow_run.head_sha }}",
+            "SOURCE_SHA: ${{ needs.source.outputs.sha }}",
+            "--repository \"$PRODUCER_REPOSITORY\"",
+            "--workflow-id \"$WORKFLOW_ID\"",
+            "--workflow-path \"$WORKFLOW_PATH\"",
+            "--run-id \"$RUN_ID\"",
+            "--source-sha \"$SOURCE_SHA\"",
+        ] {
+            assert!(
+                preview.contains(fragment),
+                "producer admission missing `{fragment}`"
+            );
+        }
+        assert_jobs_form_acyclic_graph(
+            &preview,
+            &[
+                "source",
+                "publish-gate",
+                "release-github-hosted-rust-example",
+                "build",
+                "publish",
+            ],
         );
         assert!(!preview.contains("release-velnor-"), "{preview}");
     }

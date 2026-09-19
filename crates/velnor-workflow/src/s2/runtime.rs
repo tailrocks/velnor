@@ -4116,7 +4116,12 @@ fn valid_admission_workflow_path(path: &str) -> bool {
     !suffix.is_empty()
         && !suffix.contains('/')
         && !suffix.chars().any(char::is_whitespace)
-        && (suffix.ends_with(".yml") || suffix.ends_with(".yaml"))
+        && matches!(
+            Path::new(suffix)
+                .extension()
+                .and_then(|extension| extension.to_str()),
+            Some("yml" | "yaml")
+        )
 }
 
 /// Assemble the consumer release manifest and the independent checksum
@@ -6199,10 +6204,11 @@ workspace_check = true
             ("--source-sha", "0123456789abcdef0123456789abcdef01234567"),
         ];
         for (name, value) in overrides {
-            let Some(entry) = values.iter_mut().find(|(key, _)| key == name) else {
-                panic!("unknown producer fixture option: {name}");
-            };
-            entry.1 = value;
+            let entry = values.iter_mut().find(|(key, _)| key == name);
+            assert!(entry.is_some(), "unknown producer fixture option: {name}");
+            if let Some(entry) = entry {
+                entry.1 = value;
+            }
         }
         values
             .into_iter()
@@ -6525,9 +6531,19 @@ workspace_check = true
                 "producer repository",
             ),
             (
+                "foreign head repository",
+                vec![("--head-repository", "fork/repo")],
+                "head repository",
+            ),
+            (
                 "same-name workflow object",
                 vec![("--workflow-id", "99")],
                 "workflow object",
+            ),
+            (
+                "same-name workflow path",
+                vec![("--workflow-path", ".github/workflows/other.yml")],
+                "workflow path",
             ),
             (
                 "wrong event",
