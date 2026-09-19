@@ -181,6 +181,7 @@ pub(crate) fn unit(
         trust,
         platform,
         capabilities,
+        apple_native: None,
         workspace_check: false,
         products: Vec::new(),
         prerequisites: Vec::new(),

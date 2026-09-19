@@ -4187,15 +4187,25 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             let provider = *provider;
             if provider == ProviderId::GithubHosted {
                 let hosted = self.collapsed_provider_members(members, contracts, provider, None);
-                if hosted.is_empty() {
-                    continue;
+                let (native, portable): (Vec<_>, Vec<_>) = hosted
+                    .into_iter()
+                    .partition(|unit| unit.apple_native.is_some());
+                if !portable.is_empty() {
+                    jobs.push((
+                        provider,
+                        portable,
+                        "verify-github-hosted".to_owned(),
+                        "GitHub · hosted".to_owned(),
+                    ));
                 }
-                jobs.push((
-                    provider,
-                    hosted,
-                    "verify-github-hosted".to_owned(),
-                    "GitHub · hosted".to_owned(),
-                ));
+                if !native.is_empty() {
+                    jobs.push((
+                        provider,
+                        native,
+                        "verify-github-hosted-apple".to_owned(),
+                        "GitHub · hosted · Apple".to_owned(),
+                    ));
+                }
                 continue;
             }
             for trusted in [false, true] {
@@ -4551,6 +4561,16 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             }
             per_member.into_iter().next().unwrap_or_default()
         };
+        let native_contract = {
+            let contracts = members
+                .iter()
+                .filter_map(|unit| unit.apple_native.as_ref())
+                .collect::<Vec<_>>();
+            if !contracts.is_empty() && contracts.iter().any(|contract| *contract != contracts[0]) {
+                return Err(disagreement("the Apple native host contract"));
+            }
+            contracts.into_iter().next().cloned()
+        };
         let gated = |block: String, coverage: FeatureCoverage, input: &str| -> String {
             prefix_step_block_with_if(&block, coverage.gate(input).as_deref())
         };
@@ -4681,6 +4701,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         self.render_collapsed_prepared_tool_steps(output, members, &facts);
         self.render_kind_level_tool_steps(output, provider, &kind_tools, cache_save);
         render_ci_tool_bootstrap_end_marker(output);
+        if hosted
+            && let Some(contract) = native_contract.as_ref()
+        {
+            output.push_str(&crate::native_contract::render_preflight_step(contract));
+        }
 
         // Cache preparation.
         let checks_offline = FeatureCoverage::over(&facts, |facts| facts.cargo_net_offline);

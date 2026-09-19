@@ -541,6 +541,10 @@ pub(crate) struct UnitSection {
     /// `linux-arm64`, or `macos-arm64`. Typed; platforms are never labels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     platform: Option<String>,
+    /// Typed native host facts that static scanning cannot prove. This table
+    /// can strengthen a scanned contract but cannot weaken it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native: Option<crate::native_contract::AppleNativeSection>,
     /// Extra environment the unit's jobs export: build flags and product
     /// outputs. Declared as `[units.env]`; replaces nothing, the scan
     /// derives no env of its own.
@@ -967,6 +971,10 @@ impl UnitSection {
 
     pub(crate) fn platform(&self) -> Option<&str> {
         self.platform.as_deref()
+    }
+
+    pub(crate) fn native(&self) -> Option<&crate::native_contract::AppleNativeSection> {
+        self.native.as_ref()
     }
 
     pub(crate) fn mbx(&self) -> Option<bool> {

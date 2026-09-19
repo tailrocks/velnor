@@ -4301,7 +4301,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         // Linux).
         let (github_apple, github_default): (Vec<_>, Vec<_>) = github_members
             .into_iter()
-            .partition(|unit| unit.platform.requires_apple());
+            .partition(|unit| crate::platform::unit_requires_native(unit));
         let split = !github_apple.is_empty() && !github_default.is_empty();
         if !github_default.is_empty() {
             let runs_on = self.runner_for_unit(RunnerMode::Github, github_default[0]);
@@ -4544,7 +4544,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 && !self.repository.is_empty()
                 && self.repository == crate::workflow_setup_action_repository()
                 && unit_owns_workflow_crate(unit),
-            apple_executor: github_lane && unit.platform.requires_apple(),
+            apple_executor: github_lane && crate::platform::unit_requires_native(unit),
             unit_dependencies: unit.depends_on.clone(),
             unit_admission: LaneAdmission::for_unit(lane, unit),
             prepared_tools: unit
@@ -4697,6 +4697,16 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             }
             per_member.into_iter().next().unwrap_or_default()
         };
+        let native_contract = {
+            let contracts = members
+                .iter()
+                .filter_map(|unit| unit.apple_native.as_ref())
+                .collect::<Vec<_>>();
+            if !contracts.is_empty() && contracts.iter().any(|contract| *contract != contracts[0]) {
+                return Err(disagreement("the Apple native host contract"));
+            }
+            contracts.into_iter().next().cloned()
+        };
         let gated = |block: String, coverage: FeatureCoverage, input: &str| -> String {
             prefix_step_block_with_if(&block, coverage.gate(input).as_deref())
         };
@@ -4821,6 +4831,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         self.render_collapsed_prepared_tool_steps(output, members, &facts);
         self.render_kind_level_tool_steps(output, lane, &kind_tools, cache_save);
         render_ci_tool_bootstrap_end_marker(output);
+        if github_lane
+            && let Some(contract) = native_contract.as_ref()
+        {
+            output.push_str(&crate::native_contract::render_preflight_step(contract));
+        }
 
         // Cache preparation.
         let checks_offline = FeatureCoverage::over(&facts, |facts| facts.cargo_net_offline);
@@ -5194,6 +5209,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         }
         self.render_unit_runtime(output, lane, unit);
         render_ci_runner_setup_end_marker(output);
+        if lane == RunnerMode::Github
+            && let Some(contract) = unit.apple_native.as_ref()
+        {
+            output.push_str(&crate::native_contract::render_preflight_step(contract));
+        }
         let units_source =
             input_unit.map_or("${{ inputs.units }}", |_| "${{ inputs.selected_units }}");
         output.push_str(&workflow_selection_file_materialize(
@@ -5420,7 +5440,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         // Portable SwiftPM jobs can: they run on the default executor.
         if self.control_plane_lane() != RunnerMode::Github
             || self.runners == RunnerMode::Velnor
-            || unit.platform.requires_apple()
+            || crate::platform::unit_requires_native(unit)
         {
             self.render_workflow_runtime_setup(output, lane);
         } else {
