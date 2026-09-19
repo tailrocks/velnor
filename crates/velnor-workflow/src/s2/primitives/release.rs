@@ -5745,7 +5745,7 @@ mod tests {
                 "linux builders must use the configured hosted selector: {workflow}"
             );
             assert!(
-                workflow.contains("runner: macos-15"),
+                workflow.contains("runner: macos-26"),
                 "apple builders use the fixed GitHub-owned macos image: {workflow}"
             );
             assert!(
@@ -6121,7 +6121,7 @@ mod tests {
             sign.contains("if: ${{ github.event_name != 'workflow_dispatch' }}"),
             "{sign}"
         );
-        assert!(sign.contains("runs-on: macos-15"), "{sign}");
+        assert!(sign.contains("runs-on: macos-26"), "{sign}");
         assert!(sign.contains("environment: release-macos"), "{sign}");
         assert!(
             sign.contains("contents: read"),

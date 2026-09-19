@@ -5135,7 +5135,7 @@ pub(crate) fn rust_dependency_needs(
 /// The GitHub-owned macOS image jobs with `platform = "macos-arm64"` run on.
 /// Hosted selectors carry Linux labels; Apple execution needs the macOS
 /// image, which only exists on the hosted provider.
-pub(crate) const MACOS_HOSTED_RUNS_ON: &str = "macos-15";
+pub(crate) const MACOS_HOSTED_RUNS_ON: &str = "macos-26";
 
 /// The `runs-on:` YAML value for one provider selector: a bare scalar for a
 /// single label, a flow list otherwise.
@@ -5876,11 +5876,15 @@ fn render_actionlint_config(config: &ProjectConfig) -> String {
             .iter()
             .any(|target| target.ends_with("-apple-darwin"))
     });
+    let runtime_products_owner = config.repository == workflow_setup_action_repository();
+    // The owner-only runtime-products workflow always emits a macOS ARM64
+    // matrix lane, even when the scanned project has no Apple unit.
     let macos = (config
         .units
         .iter()
         .any(|unit| unit.platform == provider::Platform::MacosArm64)
-        || apple_release)
+        || apple_release
+        || runtime_products_owner)
         .then_some(MACOS_HOSTED_RUNS_ON.to_owned());
     // Universe-scoped: scan defaults seed selectors for providers outside
     // the repo's universe, but only universe routing can reach a `runs-on`.
@@ -9435,7 +9439,7 @@ mod tests {
             "swift kind has members",
         )
         .1;
-        assert!(swift_kind.contains("runs-on: macos-15"));
+        assert!(swift_kind.contains("runs-on: macos-26"));
         assert!(swift_kind.contains("CI_UNIT_ID: ${{ inputs.unit }}"));
         let both_workflow = generated_ci_pr(&WorkflowIr::from_config(&ProjectConfig {
             providers: crate::s2::provider::ProviderId::ALL.into_iter().collect(),
@@ -9505,7 +9509,7 @@ mod tests {
         )
         .1;
         assert!(
-            swift_kind.contains("runs-on: macos-15"),
+            swift_kind.contains("runs-on: macos-26"),
             "macos-platform units use the fixed GitHub-owned image: {swift_kind}"
         );
         assert!(
@@ -9632,7 +9636,7 @@ mod tests {
         )
         .1;
         assert!(
-            swift_kind.contains("runs-on: macos-15"),
+            swift_kind.contains("runs-on: macos-26"),
             "xcode units use the fixed GitHub-owned image: {swift_kind}"
         );
         let _ = fs::remove_dir_all(root);
@@ -12024,7 +12028,7 @@ lockfile = true
         )
         .1;
         assert!(
-            swift_kind.contains("runs-on: macos-15"),
+            swift_kind.contains("runs-on: macos-26"),
             "Apple jobs run on the fixed GitHub-owned image: {swift_kind}"
         );
         assert!(
@@ -14877,6 +14881,17 @@ lockfile = true
     }
 
     #[test]
+    fn generated_actionlint_config_covers_runtime_product_apple_builder() {
+        let mut config = scanned_fixture(provider_set([ProviderId::GithubHosted]));
+        config.repository = workflow_setup_action_repository().to_owned();
+        let actionlint = render_actionlint_config(&config);
+        assert!(
+            actionlint.contains("    - macos-26\n"),
+            "the owner runtime-product matrix needs the macos label: {actionlint}"
+        );
+    }
+
+    #[test]
     fn generated_actionlint_config_covers_apple_release_targets() {
         let mut config = scanned_fixture(provider_set([ProviderId::GithubHosted]));
         assert!(
@@ -14895,7 +14910,7 @@ lockfile = true
         });
         let actionlint = render_actionlint_config(&config);
         assert!(
-            actionlint.contains("    - macos-15\n"),
+            actionlint.contains("    - macos-26\n"),
             "an apple release target needs the macos label: {actionlint}"
         );
         if let Some(release) = config.release.as_mut() {
@@ -14903,7 +14918,7 @@ lockfile = true
         }
         let linux_only = render_actionlint_config(&config);
         assert!(
-            !linux_only.contains("macos-15"),
+            !linux_only.contains("macos-15") && !linux_only.contains("macos-26"),
             "linux-only releases must not allowlist the macos label: {linux_only}"
         );
     }
