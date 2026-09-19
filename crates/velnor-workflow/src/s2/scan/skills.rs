@@ -13,7 +13,7 @@ use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 
 use super::{unit, RepositoryShape, ScanContext};
-use crate::s2::{GeneratorError, UnitKind};
+use crate::s2::{GeneratorError, UnitKind, SKILLS_BUN_VERSION};
 
 const CATALOG: &str = "catalog.json";
 const DOCS_INDEX: &str = "docs/index.json";
@@ -26,8 +26,37 @@ const REQUIRED_PLUGIN_FILES: [&str; 5] = [
     ".claude-plugin/marketplace.json",
 ];
 
-const DOC_DRIFT_COMMAND: &str = "tmp=$(mktemp -d) && trap 'rm -rf \"$tmp\"' EXIT && repo=$(basename \"$PWD\") && mkdir \"$tmp/$repo\" && git archive --format=tar HEAD | tar -x -C \"$tmp/$repo\" && cp -R \"$tmp/$repo/docs\" \"$tmp/docs.expected\" && bun \"$tmp/$repo/scripts/generate-docs.ts\" && diff -ru \"$tmp/docs.expected\" \"$tmp/$repo/docs\"";
-const HELPER_SYNTAX_COMMAND: &str = "tmp=$(mktemp -d) && trap 'rm -rf \"$tmp\"' EXIT && find scripts -type f -name '*.ts' -print0 | xargs -0 bun build --target=bun --no-bundle --outdir \"$tmp\"";
+const HELPER_TEMPLATE_GLOB: &str = "*/templates/*";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SkillsCheck {
+    GeneratedDocs,
+    HelperSyntax,
+}
+
+const SKILLS_CHECKS: [SkillsCheck; 2] = [SkillsCheck::GeneratedDocs, SkillsCheck::HelperSyntax];
+
+impl SkillsCheck {
+    fn command(self) -> String {
+        let bun = SKILLS_BUN_VERSION;
+        match self {
+            Self::GeneratedDocs => format!(
+                "set -o pipefail && test \"$(bun --version)\" = \"{bun}\" && tmp=$(mktemp -d) && trap 'rm -rf \"$tmp\"' EXIT && repo=$(basename \"$PWD\") && mkdir \"$tmp/$repo\" && git archive --format=tar HEAD | tar -x -C \"$tmp/$repo\" && cp -R \"$tmp/$repo/docs\" \"$tmp/docs.expected\" && bun \"$tmp/$repo/scripts/generate-docs.ts\" && diff -ru \"$tmp/docs.expected\" \"$tmp/$repo/docs\""
+            ),
+            Self::HelperSyntax => format!(
+                "set -o pipefail && test \"$(bun --version)\" = \"{bun}\" && tmp=$(mktemp -d) && trap 'rm -rf \"$tmp\"' EXIT && find scripts -type f -name '*.ts' -not -path '{HELPER_TEMPLATE_GLOB}' -print0 | xargs -0 bun build --target=bun --no-bundle --outdir \"$tmp\""
+            ),
+        }
+    }
+}
+
+fn verification_commands() -> Vec<String> {
+    SKILLS_CHECKS
+        .iter()
+        .copied()
+        .map(SkillsCheck::command)
+        .collect()
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Frontmatter {
@@ -65,14 +94,6 @@ pub(crate) fn detect(
             "skills plugin is missing scripts/generate-docs.ts",
         ));
     }
-    // The canonical repositories run the shared Bun helper without a
-    // repository-proven version. Keep that fact visible in the scan instead
-    // of rendering an apparently pinned version from a nested example
-    // template or silently claiming reproducibility.
-    shape.limitations.push(
-        "Skills helper checks have no repository-proven Bun version; setup-bun uses the generator action pin without a bun-version input."
-            .to_owned(),
-    );
     let mut skill_unit = unit(
         UnitKind::Skills,
         ".",
@@ -92,13 +113,15 @@ pub(crate) fn detect(
         Vec::new(),
         None,
     );
-    skill_unit.pr_commands = vec![
-        DOC_DRIFT_COMMAND.to_owned(),
-        HELPER_SYNTAX_COMMAND.to_owned(),
-    ];
+    skill_unit.tool_version = Some(SKILLS_BUN_VERSION.to_owned());
+    let commands = verification_commands();
+    skill_unit.pr_commands = commands.clone();
     skill_unit.full_commands.clone_from(&skill_unit.pr_commands);
     shape.units.push(skill_unit);
     shape.detected.push("skills-plugin".to_owned());
+    shape
+        .detected
+        .push(format!("skills-bun:{SKILLS_BUN_VERSION}"));
     shape
         .detected
         .push(format!("skills-count:{}", catalog.names.len()));
@@ -171,6 +194,177 @@ fn validate_skill_name(name: &str) -> Result<(), GeneratorError> {
     Ok(())
 }
 
+fn parse_markdown_destination(input: &str) -> Option<(&str, usize)> {
+    let bytes = input.as_bytes();
+    let mut index = 0;
+    skip_markdown_whitespace(bytes, &mut index);
+    let target_start;
+    let target_end;
+    if bytes.get(index) == Some(&b'<') {
+        index += 1;
+        target_start = index;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\\' if index + 1 < bytes.len() => index += 2,
+                b'>' => break,
+                _ => index += 1,
+            }
+        }
+        if bytes.get(index) != Some(&b'>') {
+            return None;
+        }
+        target_end = index;
+        index += 1;
+    } else {
+        target_start = index;
+        let mut depth = 0_usize;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\\' if index + 1 < bytes.len() => index += 2,
+                b'(' => {
+                    depth += 1;
+                    index += 1;
+                }
+                b')' if depth == 0 => break,
+                b')' => {
+                    depth -= 1;
+                    index += 1;
+                }
+                byte if byte.is_ascii_whitespace() && depth == 0 => break,
+                _ => index += 1,
+            }
+        }
+        target_end = index;
+    }
+    if target_start == target_end {
+        return None;
+    }
+    skip_markdown_whitespace(bytes, &mut index);
+    if bytes.get(index) != Some(&b')') {
+        match bytes.get(index) {
+            Some(b'"') | Some(b'\'') => {
+                let quote = bytes[index];
+                index += 1;
+                while index < bytes.len() {
+                    match bytes[index] {
+                        b'\\' if index + 1 < bytes.len() => index += 2,
+                        byte if byte == quote => {
+                            index += 1;
+                            break;
+                        }
+                        _ => index += 1,
+                    }
+                }
+            }
+            Some(b'(') => {
+                let mut depth = 0_usize;
+                while index < bytes.len() {
+                    match bytes[index] {
+                        b'\\' if index + 1 < bytes.len() => index += 2,
+                        b'(' => {
+                            depth += 1;
+                            index += 1;
+                        }
+                        b')' => {
+                            depth = depth.checked_sub(1)?;
+                            index += 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => index += 1,
+                    }
+                }
+            }
+            _ => return None,
+        }
+        skip_markdown_whitespace(bytes, &mut index);
+    }
+    (bytes.get(index) == Some(&b')')).then(|| (&input[target_start..target_end], index + 1))
+}
+
+fn skip_markdown_whitespace(bytes: &[u8], index: &mut usize) {
+    while bytes.get(*index).is_some_and(u8::is_ascii_whitespace) {
+        *index += 1;
+    }
+}
+
+fn normalize_markdown_destination(target: &str) -> Option<String> {
+    let path = target.split_once('#').map_or(target, |(path, _)| path);
+    let path = path.split_once('?').map_or(path, |(path, _)| path);
+    let target = unescape_markdown_target(path)?;
+    let target = percent_decode_markdown_uri(&target)?;
+    (!target.contains('\\') && !target.chars().any(char::is_control)).then_some(target)
+}
+
+fn unescape_markdown_target(target: &str) -> Option<String> {
+    let mut result = String::with_capacity(target.len());
+    let mut chars = target.chars();
+    while let Some(character) = chars.next() {
+        if character == '\\' {
+            let escaped = chars.next()?;
+            if !escaped.is_ascii_punctuation() {
+                return None;
+            }
+            result.push(escaped);
+        } else {
+            result.push(character);
+        }
+    }
+    Some(result)
+}
+
+fn percent_decode_markdown_uri(target: &str) -> Option<String> {
+    let bytes = target.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            decoded.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+        let first = hex_value(*bytes.get(index + 1)?)?;
+        let second = hex_value(*bytes.get(index + 2)?)?;
+        let byte = (first << 4) | second;
+        if matches!(byte, b'/' | b'\\' | b'.') {
+            return None;
+        }
+        decoded.push(byte);
+        index += 3;
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn is_external_uri(target: &str) -> bool {
+    target
+        .split_once(':')
+        .is_some_and(|(scheme, _)| matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https" | "mailto"))
+}
+
+fn has_uri_scheme(target: &str) -> bool {
+    let Some((scheme, _)) = target.split_once(':') else {
+        return false;
+    };
+    !scheme.is_empty()
+        && scheme
+            .chars()
+            .enumerate()
+            .all(|(index, character)| {
+                character.is_ascii_alphabetic()
+                    || (index > 0 && (character.is_ascii_digit() || matches!(character, '+' | '-' | '.')))
+            })
+}
+
 fn validate_plugin_manifests(
     context: &ScanContext<'_>,
     expected_name: &str,
@@ -194,11 +388,7 @@ fn validate_plugin_manifests(
             )));
         }
         let version = string_field(object, "version", path)?;
-        if version.is_empty() {
-            return Err(GeneratorError::usage(format!(
-                "{path} version must not be empty"
-            )));
-        }
+        validate_provider_version(version, path)?;
     }
     for path in [".codex-plugin/plugin.json", ".kimi-plugin/plugin.json"] {
         let object = if path.starts_with(".codex") {
@@ -237,6 +427,14 @@ fn validate_plugin_manifests(
     let marketplace_plugin = marketplace_plugins[0].as_object().ok_or_else(|| {
         GeneratorError::usage(".claude-plugin/marketplace.json plugins entries must be objects")
     })?;
+    validate_provider_version(
+        string_field(
+            marketplace_plugin,
+            "version",
+            ".claude-plugin/marketplace.json",
+        )?,
+        ".claude-plugin/marketplace.json",
+    )?;
     if string_field(
         marketplace_plugin,
         "name",
@@ -256,6 +454,37 @@ fn validate_plugin_manifests(
         return Err(GeneratorError::usage(
             ".claude-plugin/marketplace.json plugin name, source, and version do not match provider manifests",
         ));
+    }
+    Ok(())
+}
+
+fn validate_provider_version(version: &str, path: &str) -> Result<(), GeneratorError> {
+    let (core, prerelease) = version
+        .split_once('-')
+        .map_or((version, None), |(core, prerelease)| (core, Some(prerelease)));
+    let parts = core.split('.').collect::<Vec<_>>();
+    let valid_core = parts.len() == 3
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && (part == &"0" || !part.starts_with('0'))
+                && part.bytes().all(|byte| byte.is_ascii_digit())
+        });
+    let valid_prerelease = prerelease.is_none_or(|value| {
+        !value.is_empty()
+            && value.split('.').all(|part| {
+                !part.is_empty()
+                    && (part == "0"
+                        || !part.starts_with('0')
+                        || !part.bytes().all(|byte| byte.is_ascii_digit()))
+                    && part
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            })
+    });
+    if !valid_core || !valid_prerelease {
+        return Err(GeneratorError::usage(format!(
+            "{path} version `{version}` must be semantic version `MAJOR.MINOR.PATCH` with an optional prerelease"
+        )));
     }
     Ok(())
 }
@@ -386,27 +615,29 @@ fn validate_links(context: &ScanContext<'_>) -> Result<(), GeneratorError> {
             }
             let mut remaining = line;
             while let Some(start) = remaining.find("](") {
-                let target_start = start + 2;
-                let Some(end) = remaining[target_start..].find(')') else {
-                    break;
+                let destination = &remaining[start + 2..];
+                let Some((raw_target, consumed)) = parse_markdown_destination(destination) else {
+                    return Err(GeneratorError::usage(format!(
+                        "malformed Markdown link at {file}:{}",
+                        line_number + 1
+                    )));
                 };
-                let target = remaining[target_start..target_start + end].trim();
-                remaining = &remaining[target_start + end + 1..];
-                let target = target.split('#').next().unwrap_or_default().trim();
-                if target.is_empty()
-                    || target.starts_with("http://")
-                    || target.starts_with("https://")
-                    || target.starts_with("mailto:")
-                    || target.starts_with('#')
-                {
-                    continue;
-                }
-                if is_markdown_placeholder(target) {
-                    continue;
-                }
-                let resolved = resolve_markdown_path(file, target).ok_or_else(|| {
+                remaining = &destination[consumed..];
+                let target = normalize_markdown_destination(raw_target).ok_or_else(|| {
                     GeneratorError::usage(format!(
-                        "unsafe Markdown link `{target}` at {file}:{}",
+                        "unsafe Markdown link {raw_target} at {file}:{}",
+                        line_number + 1
+                    ))
+                })?;
+                if target.is_empty() || is_external_uri(&target) {
+                    continue;
+                }
+                if is_markdown_placeholder(&target) {
+                    continue;
+                }
+                let resolved = resolve_markdown_path(file, &target).ok_or_else(|| {
+                    GeneratorError::usage(format!(
+                        "unsafe Markdown link {target} at {file}:{}",
                         line_number + 1
                     ))
                 })?;
@@ -417,7 +648,7 @@ fn validate_links(context: &ScanContext<'_>) -> Result<(), GeneratorError> {
                         .any(|candidate| candidate.starts_with(&format!("{resolved}/")))
                 {
                     return Err(GeneratorError::usage(format!(
-                        "missing Markdown link `{target}` at {file}:{}",
+                        "missing Markdown link {target} at {file}:{}",
                         line_number + 1
                     )));
                 }
@@ -428,7 +659,12 @@ fn validate_links(context: &ScanContext<'_>) -> Result<(), GeneratorError> {
 }
 
 fn resolve_markdown_path(source: &str, target: &str) -> Option<String> {
-    if target.starts_with('/') || target.chars().any(char::is_control) {
+    if target.starts_with('/')
+        || target.starts_with("//")
+        || target.contains('\\')
+        || target.chars().any(char::is_control)
+        || has_uri_scheme(target)
+    {
         return None;
     }
     let mut parts = source
@@ -475,10 +711,11 @@ fn is_markdown_placeholder(target: &str) -> bool {
             .strip_prefix('<')
             .and_then(|value| value.strip_suffix('>'));
         inner.is_some_and(|value| {
-            !value.is_empty()
-                && !value
-                    .chars()
-                    .any(|character| character == '<' || character == '>' || character.is_control())
+            let mut characters = value.chars();
+            characters.next().is_some_and(|first| first.is_ascii_alphabetic())
+                && characters.all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+                })
         })
     })
 }
@@ -492,7 +729,7 @@ fn has_template_context(text: &str) -> bool {
 }
 
 fn template_files(context: &ScanContext<'_>, names: &BTreeSet<String>) -> BTreeSet<String> {
-    names
+    let mut files = names
         .iter()
         .flat_map(|name| {
             let prefix = format!("skills/{name}/templates/");
@@ -502,7 +739,62 @@ fn template_files(context: &ScanContext<'_>, names: &BTreeSet<String>) -> BTreeS
                 .filter(move |file| file.starts_with(&prefix))
                 .cloned()
         })
-        .collect()
+        .collect::<BTreeSet<_>>();
+    for prefix in helper_template_prefixes(context) {
+        files.extend(
+            context
+                .files
+                .iter()
+                .filter(|file| file.starts_with(&prefix))
+                .cloned(),
+        );
+    }
+    files
+}
+
+fn helper_template_prefixes(context: &ScanContext<'_>) -> BTreeSet<String> {
+    let mut prefixes = BTreeSet::new();
+    let helper_roots = context
+        .files
+        .iter()
+        .filter_map(|file| {
+            let relative = file.strip_prefix("scripts/")?;
+            let helper = relative.split('/').next()?;
+            (!helper.is_empty()).then(|| format!("scripts/{helper}/"))
+        })
+        .collect::<BTreeSet<_>>();
+    for root in helper_roots {
+        let prefix = format!("{root}templates/");
+        if !context.files.iter().any(|file| file.starts_with(&prefix)) {
+            continue;
+        }
+        let declares_templates = context.files.iter().any(|file| {
+            file.starts_with(&root)
+                && !file.starts_with(&prefix)
+                && is_helper_source(file)
+                && read_text(&context.root.join(file), "read helper source")
+                    .is_ok_and(|text| helper_source_declares_templates(&text))
+        });
+        if declares_templates {
+            prefixes.insert(prefix);
+        }
+    }
+    prefixes
+}
+
+fn is_helper_source(file: &str) -> bool {
+    Path::new(file)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension, "ts" | "tsx" | "js" | "jsx" | "sh"))
+}
+
+fn helper_source_declares_templates(text: &str) -> bool {
+    text.contains("\"templates\"")
+        || text.contains("\"templates/")
+        || text.contains("'templates'")
+        || text.contains("'templates/")
+        || text.contains("/templates/")
 }
 
 fn validate_templates(
@@ -603,17 +895,79 @@ fn parse_frontmatter(text: &str, path: &str) -> Result<Frontmatter, GeneratorErr
         serde_yaml::from_str::<serde_yaml::Value>(&yaml_lines.join("\n")).map_err(|error| {
             GeneratorError::usage(format!("{path} has invalid YAML frontmatter: {error}"))
         })?;
-    if !yaml.is_mapping() {
-        return Err(GeneratorError::usage(format!(
-            "{path} frontmatter must contain a YAML mapping"
-        )));
-    }
-    if !values.contains_key("name") || !values.contains_key("description") {
-        return Err(GeneratorError::usage(format!(
-            "{path} frontmatter requires name and description"
-        )));
-    }
+    let mapping = yaml.as_mapping().ok_or_else(|| {
+        GeneratorError::usage(format!("{path} frontmatter must contain a YAML mapping"))
+    })?;
+    validate_frontmatter_mapping(mapping, path)?;
+    let values = mapping
+        .iter()
+        .filter_map(|(key, value)| {
+            let key = key.as_str()?;
+            let value = match value {
+                serde_yaml::Value::String(value) => value.clone(),
+                serde_yaml::Value::Bool(value) => value.to_string(),
+                _ => return None,
+            };
+            Some((key.to_owned(), value))
+        })
+        .collect();
     Ok(Frontmatter { values })
+}
+
+const FRONTMATTER_KEYS: [&str; 6] = [
+    "name",
+    "description",
+    "argument-hint",
+    "license",
+    "user-invocable",
+    "disable-model-invocation",
+];
+
+fn validate_frontmatter_mapping(
+    mapping: &serde_yaml::Mapping,
+    path: &str,
+) -> Result<(), GeneratorError> {
+    for (key, value) in mapping {
+        let key = key.as_str().ok_or_else(|| {
+            GeneratorError::usage(format!("{path} frontmatter keys must be strings"))
+        })?;
+        if !FRONTMATTER_KEYS.contains(&key) {
+            return Err(GeneratorError::usage(format!(
+                "{path} frontmatter contains unsupported key `{key}`"
+            )));
+        }
+        if matches!(key, "name" | "description" | "argument-hint" | "license")
+            && !value.is_string()
+        {
+            return Err(GeneratorError::usage(format!(
+                "{path} frontmatter {key} must be a YAML string"
+            )));
+        }
+    }
+    for key in ["name", "description", "argument-hint", "license"] {
+        if !mapping.contains_key(serde_yaml::Value::String(key.to_owned())) {
+            return Err(GeneratorError::usage(format!(
+                "{path} frontmatter requires {key}"
+            )));
+        }
+    }
+    if !mapping
+        .get(serde_yaml::Value::String("user-invocable".to_owned()))
+        .is_some_and(|value| value.as_bool() == Some(true))
+    {
+        return Err(GeneratorError::usage(format!(
+            "{path} frontmatter user-invocable must be the YAML boolean true"
+        )));
+    }
+    if let Some(value) = mapping.get(serde_yaml::Value::String(
+        "disable-model-invocation".to_owned(),
+    )) && !value.is_bool()
+    {
+        return Err(GeneratorError::usage(format!(
+            "{path} frontmatter disable-model-invocation must be a YAML boolean"
+        )));
+    }
+    Ok(())
 }
 
 fn require_frontmatter_value(
