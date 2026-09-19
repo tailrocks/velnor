@@ -79,23 +79,10 @@ impl Primitive for PackageRelease {
                 spec.source_repository, ctx.config.repository
             )));
         }
-        let content = render_workflow(ctx.config, &spec);
-        let file = ctx.file.filter(|file| !file.is_empty()).ok_or_else(|| {
-            GeneratorError::usage(
-                "package-release renders preview.yml and needs file = preview.yml",
-            )
-        })?;
-        if file != "preview.yml" {
-            return Err(GeneratorError::usage(format!(
-                "package-release must declare preview.yml, found {file}"
-            )));
-        }
+        let file = validate_workflow_file(ctx.file)?;
+        let content = render_workflow(ctx.config, &spec, &file);
         Ok(Rendered {
-            files: std::iter::once((
-                Path::new(".github/workflows/preview.yml").to_owned(),
-                content,
-            ))
-            .collect(),
+            files: std::iter::once((Path::new(".github/workflows").join(&file), content)).collect(),
             ..Rendered::default()
         })
     }
@@ -195,6 +182,31 @@ fn validate_secret_name(value: &str) -> Result<(), GeneratorError> {
         ));
     }
     Ok(())
+}
+
+fn validate_workflow_file(file: Option<&str>) -> Result<String, GeneratorError> {
+    let file = file
+        .filter(|file| !file.is_empty())
+        .ok_or_else(|| GeneratorError::usage("package-release needs a declared workflow file"))?;
+    let path = Path::new(file);
+    let valid_segment = |segment: &str| {
+        !segment.is_empty()
+            && segment != "."
+            && segment != ".."
+            && segment
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    };
+    if path.is_absolute()
+        || file.contains(['\\', ':', '\n', '\r'])
+        || file.split('/').any(|segment| !valid_segment(segment))
+        || !(file.ends_with(".yml") || file.ends_with(".yaml"))
+    {
+        return Err(GeneratorError::usage(
+            "package-release file must be a safe relative .yml/.yaml workflow path",
+        ));
+    }
+    Ok(file.to_owned())
 }
 
 #[cfg(test)]
@@ -672,7 +684,11 @@ fn release_asset_names(spec: &PackageReleaseSpec) -> Vec<String> {
 }
 
 #[allow(clippy::too_many_lines)]
-fn render_workflow(config: &ProjectConfig, spec: &PackageReleaseSpec) -> String {
+fn render_workflow(
+    config: &ProjectConfig,
+    spec: &PackageReleaseSpec,
+    workflow_file: &str,
+) -> String {
     let (provider, runner) = release_runner(config);
     let runtime_setup = if provider == ProviderId::GithubHosted {
         workflow_runtime_setup(
@@ -748,7 +764,9 @@ fn render_workflow(config: &ProjectConfig, spec: &PackageReleaseSpec) -> String 
             "            \"$PACKAGE_DIR/{name}\"{suffix}",
         );
     }
-    let attestation_flags = "--repo \"$GITHUB_REPOSITORY\" --signer-workflow \"$GITHUB_REPOSITORY/.github/workflows/preview.yml\" --source-ref \"$EXPECTED_SOURCE_REF\" --source-digest \"$EXPECTED_SOURCE_COMMIT\"";
+    let attestation_flags = format!(
+        "--repo \"$GITHUB_REPOSITORY\" --signer-workflow \"$GITHUB_REPOSITORY/.github/workflows/{workflow_file}\" --source-ref \"$EXPECTED_SOURCE_REF\" --source-digest \"$EXPECTED_SOURCE_COMMIT\""
+    );
 
     let mut output = String::new();
     let _ = writeln!(
@@ -801,7 +819,7 @@ fn render_workflow(config: &ProjectConfig, spec: &PackageReleaseSpec) -> String 
         download,
         &publish_verify,
         &publish_attestation_targets,
-        attestation_flags,
+        &attestation_flags,
         &workspace_expr,
         &updater_token_expr,
         &github_token_expr,
@@ -869,6 +887,8 @@ old_name=""
 old_body=""
 old_draft=""
 old_prerelease=""
+old_source_commit=""
+old_version=""
 candidate_version="$(jq -er '.version | strings' "$published_dir/release-manifest.json")"
 had_release=0
 mutated=0
@@ -893,7 +913,7 @@ validate_existing_rolling_release() {
   local name expected_digest actual_digest api_digest
 
   jq -e --arg tag "$rolling_tag" '
-    .draft == false and .prerelease == true and .tag_name == $tag and
+    (.draft | type == "boolean") and .prerelease == true and .tag_name == $tag and
     (.id | type == "number") and
     (.assets | type == "array" and length > 0) and
     ((.assets | map(.name)) as $names |
@@ -1003,6 +1023,27 @@ validate_existing_rolling_release() {
     echo "::error::candidate source commit is not a descendant of the live rolling source" >&2
     return 1
   fi
+}
+
+discard_stale_rolling_draft() {
+  local stale_tag_sha
+  echo "::warning::discarding incomplete rolling draft and retrying publication" >&2
+  gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" >/dev/null
+  stale_tag_sha="$(remote_tag_sha "$rolling_tag")"
+  if [ -n "$stale_tag_sha" ]; then
+    gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" >/dev/null
+  fi
+  had_release=0
+  rolling_release_id=""
+  old_tag_sha=""
+  old_name=""
+  old_body=""
+  old_draft=""
+  old_prerelease=""
+  old_source_commit=""
+  old_version=""
+  : > "$old_assets"
+  rm -rf -- "$rollback_dir"
 }
 
 verify_restored_assets() {
@@ -1150,30 +1191,51 @@ case "$rolling_http" in
   200)
     awk 'body {print; next} /^\r?$/ {body = 1}' "$rolling_response" > "$rolling_body"
     had_release=1
-    jq -e --arg tag "$rolling_tag" '(.draft | not) and .prerelease == true and .tag_name == $tag' "$rolling_body" >/dev/null
+    jq -e --arg tag "$rolling_tag" '(.draft | type == "boolean") and .tag_name == $tag and (.id | type == "number")' "$rolling_body" >/dev/null
     rolling_release_id="$(jq -er '.id' "$rolling_body")"
     old_name="$(jq -er '.name | strings' "$rolling_body")"
     old_body="$(jq -r '.body // ""' "$rolling_body")"
     old_draft="$(jq -er '.draft | tostring' "$rolling_body")"
     old_prerelease="$(jq -er '.prerelease | tostring' "$rolling_body")"
     old_tag_sha="$(remote_tag_sha "$rolling_tag")"
-    [[ "$old_tag_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::rolling release tag is not a commit ref" >&2; exit 1; }
-    jq -r '.assets[].name' "$rolling_body" | LC_ALL=C sort > "$old_assets"
-    mkdir -p "$rollback_dir"
-    gh release download "$rolling_tag" --repo "$GITHUB_REPOSITORY" --dir "$rollback_dir" --clobber
-    validate_existing_rolling_release "$rolling_body" "$rollback_dir"
+    if ! [[ "$old_tag_sha" =~ ^[0-9a-f]{40}$ ]]; then
+      if [ "$old_draft" = true ]; then
+        discard_stale_rolling_draft
+      else
+        echo "::error::rolling release tag is not a commit ref" >&2
+        exit 1
+      fi
+    elif [ "$old_draft" = true ] && [ "$old_prerelease" != true ]; then
+      discard_stale_rolling_draft
+    elif ! mkdir -p "$rollback_dir" || ! gh release download "$rolling_tag" --repo "$GITHUB_REPOSITORY" --dir "$rollback_dir" --clobber; then
+      if [ "$old_draft" = true ]; then
+        discard_stale_rolling_draft
+      else
+        echo "::error::existing rolling release could not be downloaded" >&2
+        exit 1
+      fi
+    elif ! validate_existing_rolling_release "$rolling_body" "$rollback_dir"; then
+      if [ "$old_draft" = true ]; then
+        discard_stale_rolling_draft
+      else
+        echo "::error::existing rolling release failed immutable validation" >&2
+        exit 1
+      fi
+    fi
+    if [ "$had_release" = 1 ]; then
+      old_version_order="${old_version%%+*}"
+      candidate_version_order="${candidate_version%%+*}"
+      if [ "$old_version" = "$candidate_version" ] && [ "$old_source_commit" = "$EXPECTED_SOURCE_COMMIT" ]; then
+        :
+      elif [ "$old_version_order" = "$candidate_version_order" ] || [ "$(printf '%s\n' "$old_version_order" "$candidate_version_order" | LC_ALL=C sort -V | tail -n 1)" != "$candidate_version_order" ]; then
+        echo "::error::candidate version is not newer than the live rolling version" >&2
+        exit 1
+      fi
+    fi
 "#,
     );
     script.push_str(
         r#"
-    old_version_order="${old_version%%+*}"
-    candidate_version_order="${candidate_version%%+*}"
-    if [ "$old_version" = "$candidate_version" ] && [ "$old_source_commit" = "$EXPECTED_SOURCE_COMMIT" ]; then
-      :
-    elif [ "$old_version_order" = "$candidate_version_order" ] || [ "$(printf '%s\n' "$old_version_order" "$candidate_version_order" | LC_ALL=C sort -V | tail -n 1)" != "$candidate_version_order" ]; then
-      echo "::error::candidate version is not newer than the live rolling version" >&2
-      exit 1
-    fi
     ;;
   404)
     test -z "$(remote_tag_sha "$rolling_tag")" || { echo "::error::rolling tag exists without a release; refusing to overwrite it" >&2; exit 1; }
@@ -1238,40 +1300,6 @@ export VELNOR_VERIFIED_PACKAGE_DIR="$transaction_dir/rolling-published"
     script.push_str("do\n  gh attestation verify \"$transaction_dir/rolling-published/$payload\" ");
     script.push_str(verification.attestation_flags);
     script.push_str("\ndone\ntrap 'rm -rf -- \"$transaction_dir\"' EXIT\n");
-    script
-}
-
-fn render_formula_mapping_script(payload_names: &str) -> String {
-    let mut script = String::from(
-        r#"set -euo pipefail
-manifest="$GITHUB_WORKSPACE/published-package/release-manifest.json"
-test -d Formula
-formula_pairs="$(mktemp)"
-trap 'rm -f -- "$formula_pairs"' EXIT
-current_url=""
-while IFS= read -r line; do
-  if [[ "$line" =~ ^[[:space:]]*url[[:space:]]+\"([^\"]+)\" ]]; then
-    current_url="${BASH_REMATCH[1]}"
-  elif [[ "$line" =~ ^[[:space:]]*sha256[[:space:]]+\"([0-9a-f]{64})\" ]]; then
-    if [ -n "$current_url" ]; then
-      printf '%s\t%s\n' "$current_url" "${BASH_REMATCH[1]}"
-    fi
-    current_url=""
-  fi
-done < <(git grep -h -E '^[[:space:]]*(url|sha256)[[:space:]]+' -- Formula || true) > "$formula_pairs"
-for payload in \
-"#,
-    );
-    script.push_str(payload_names);
-    script.push_str(
-        r#"do
-  url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$payload"
-  expected="$(jq -er --arg name "$payload" '[.assets[] | select(.name == $name)] | select(length == 1) | .[0].sha256' "$manifest")"
-  expected_pair="$(printf '%s\t%s' "$url" "$expected")"
-  grep -Fqx -- "$expected_pair" "$formula_pairs" || { echo "::error::formula URL/checksum pair does not match the verified rolling asset: $payload" >&2; exit 1; }
-done
-"#,
-    );
     script
 }
 
@@ -1501,7 +1529,6 @@ fn render_publish_job(
         ),
         10,
     );
-    let formula_mapping = indent_script(&render_formula_mapping_script(&payload_names), 10);
     let mut output = String::new();
     let _ = writeln!(output, "  publish:");
     output.push_str("    name: Publish immutable package and update consumer\n");
@@ -1646,12 +1673,6 @@ fn render_publish_job(
         "          else\n            if [ -n \"$remote_branch_sha\" ]; then\n              echo \"::error::immutable consumer branch already exists and would need rewriting; refusing to mutate it\" >&2\n              exit 1\n            fi\n            git add -A\n            git commit -s -m \"$UPDATE_COMMIT_MESSAGE\"\n            git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" push origin \"HEAD:refs/heads/$automation_branch\"\n          fi",
     );
     output = output.replace(
-        "          git diff --check\n          if [ -n \"$(git status --porcelain --untracked-files=all)\" ]; then",
-        &format!(
-            "          git diff --check\n{formula_mapping}          if [ -n \"$(git status --porcelain --untracked-files=all)\" ]; then"
-        ),
-    );
-    output = output.replace(
         "VELNOR_PACKAGE_RELEASE_TAG=\"$RELEASE_ASSET_TAG\"",
         "VELNOR_PACKAGE_RELEASE_TAG=\"$RELEASE_TAG\"",
     );
@@ -1754,9 +1775,27 @@ concurrency_group = "package-release-preview"
     }
 
     #[test]
+    fn workflow_file_configures_output_and_attestation_identity() {
+        let spec = parse_spec(&Args(&args())).expect("valid fixture");
+        let workflow_file = validate_workflow_file(Some("release.yml")).expect("safe workflow");
+        let workflow = render_workflow(&render_config(), &spec, &workflow_file);
+        assert!(workflow
+            .contains("--signer-workflow \"$GITHUB_REPOSITORY/.github/workflows/release.yml\""));
+        assert!(!workflow.contains("preview.yml"));
+        assert!(!workflow.to_ascii_lowercase().contains("formula"));
+        assert!(!workflow.to_ascii_lowercase().contains("homebrew"));
+        assert_eq!(
+            Path::new(".github/workflows").join(&workflow_file),
+            Path::new(".github/workflows/release.yml")
+        );
+        assert!(validate_workflow_file(Some("../release.yml")).is_err());
+        assert!(validate_workflow_file(Some("release.txt")).is_err());
+    }
+
+    #[test]
     fn existing_rolling_release_validation_is_live_and_fail_closed() {
         let spec = parse_spec(&Args(&args())).expect("valid fixture");
-        let workflow = render_workflow(&render_config(), &spec);
+        let workflow = render_workflow(&render_config(), &spec, "preview.yml");
         assert!(!workflow.contains("LEGACY_ROLLING"));
         assert!(workflow.contains("validate_existing_rolling_release"));
         assert!(workflow.contains("test -s \"$manifest\""));
@@ -1769,6 +1808,26 @@ concurrency_group = "package-release-preview"
         ));
         assert!(workflow.contains("existing rolling manifest source_commit does not match its tag"));
         assert!(workflow.contains("existing rolling manifest version does not bind to its source"));
+    }
+
+    #[test]
+    fn rendered_workflow_recovers_or_discards_interrupted_rolling_draft() {
+        let spec = parse_spec(&Args(&args())).expect("valid fixture");
+        let workflow = render_workflow(&render_config(), &spec, "preview.yml");
+        assert!(workflow.contains(
+            "(.draft | type == \"boolean\") and .tag_name == $tag and (.id | type == \"number\")"
+        ));
+        assert!(workflow
+            .contains("if [ \"$old_draft\" = true ] && [ \"$old_prerelease\" != true ]; then"));
+        assert!(workflow.contains("elif ! validate_existing_rolling_release"));
+        assert!(workflow.contains("discard_stale_rolling_draft"));
+        assert!(workflow.contains("discarding incomplete rolling draft and retrying publication"));
+        assert!(workflow.contains(
+            "gh api --method DELETE --repo \"$GITHUB_REPOSITORY\" \"repos/$GITHUB_REPOSITORY/releases/$rolling_release_id\""
+        ));
+        assert!(workflow.contains("stale_tag_sha=\"$(remote_tag_sha \"$rolling_tag\")\""));
+        assert!(workflow.contains("git/refs/tags/$rolling_tag\""));
+        assert!(workflow.contains("had_release=0"));
     }
 
     fn render_config() -> ProjectConfig {
@@ -1961,7 +2020,7 @@ concurrency_group = "package-release-preview"
     #[test]
     fn rendered_workflow_rechecks_published_dir_and_attests_declared_assets() {
         let spec = parse_spec(&Args(&args())).expect("valid fixture");
-        let workflow = render_workflow(&render_config(), &spec);
+        let workflow = render_workflow(&render_config(), &spec, "preview.yml");
         assert!(
             workflow.contains(
                 "          export VELNOR_VERIFIED_PACKAGE_DIR=\"$GITHUB_WORKSPACE/published-package\""
@@ -2007,6 +2066,10 @@ concurrency_group = "package-release-preview"
         assert!(workflow.contains("git ls-files --others --exclude-standard"));
         assert!(workflow.contains("git status --porcelain --untracked-files=all"));
         assert!(workflow.contains("consumer updater produced untracked files; staging them"));
+        assert!(workflow.contains("bash -c \"$UPDATER\""));
+        let workflow_lower = workflow.to_ascii_lowercase();
+        assert!(!workflow_lower.contains("formula"));
+        assert!(!workflow_lower.contains("homebrew"));
         assert!(!workflow.contains("--force-with-lease=refs/heads/$automation_branch"));
         let untracked_check = workflow
             .find("git ls-files --others --exclude-standard")
@@ -2082,7 +2145,7 @@ concurrency_group = "package-release-preview"
     #[test]
     fn rendered_workflow_has_rollback_and_post_upload_proof() {
         let spec = parse_spec(&Args(&args())).expect("valid fixture");
-        let workflow = render_workflow(&render_config(), &spec);
+        let workflow = render_workflow(&render_config(), &spec, "preview.yml");
         assert!(workflow.contains("repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag"));
         assert!(workflow.contains("previous release restored"));
         assert!(workflow.contains("validate_existing_rolling_release"));
@@ -2101,13 +2164,6 @@ concurrency_group = "package-release-preview"
         );
         assert!(workflow
             .contains("gh attestation verify \"$transaction_dir/rolling-published/$payload\""));
-        assert!(workflow.contains(
-            "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$payload"
-        ));
-        assert!(
-            workflow.contains("git grep -h -E '^[[:space:]]*(url|sha256)[[:space:]]+' -- Formula")
-        );
-        assert!(workflow.contains("formula URL/checksum pair does not match"));
         assert!(workflow.contains("VELNOR_PACKAGE_RELEASE_TAG=\"$RELEASE_TAG\""));
         assert!(!workflow.contains("gh release delete"));
         assert!(!workflow.contains("HEAD:$CONSUMER_BRANCH"));
@@ -2119,7 +2175,7 @@ concurrency_group = "package-release-preview"
         use std::process::Command;
 
         let spec = parse_spec(&Args(&args())).expect("valid fixture");
-        let workflow = render_workflow(&render_config(), &spec);
+        let workflow = render_workflow(&render_config(), &spec, "preview.yml");
         let document = serde_yaml::from_str::<serde_yaml::Value>(&workflow)
             .expect("rendered workflow is YAML");
         let publish = document
@@ -2153,125 +2209,6 @@ concurrency_group = "package-release-preview"
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    #[allow(clippy::too_many_lines)]
-    fn generated_formula_mapping_accepts_only_verified_rolling_assets() {
-        use std::process::Command;
-
-        let spec = parse_spec(&Args(&args())).expect("valid fixture");
-        let root = std::env::temp_dir().join(format!(
-            "velnor-package-formula-mapping-{}",
-            crate::unique_suffix()
-        ));
-        let package_dir = root.join("published-package");
-        let formula_dir = root.join("Formula");
-        std::fs::create_dir_all(&package_dir).expect("create package fixture");
-        std::fs::create_dir_all(&formula_dir).expect("create formula fixture");
-
-        let mut payload_names = String::new();
-        let mut manifest_assets = String::new();
-        let mut formula = String::new();
-        for (index, payload) in spec.payloads.iter().enumerate() {
-            let suffix = if index + 1 == spec.payloads.len() {
-                String::new()
-            } else {
-                String::from(" ") + "\\"
-            };
-            let _ = writeln!(payload_names, "  {}{suffix}", shell_quote(payload));
-            let digest = format!("{:064x}", index + 1);
-            if !manifest_assets.is_empty() {
-                manifest_assets.push(',');
-            }
-            let _ = write!(
-                manifest_assets,
-                "{{\"name\":\"{payload}\",\"sha256\":\"{digest}\"}}"
-            );
-            let _ = writeln!(
-                formula,
-                "  url \"https://github.com/example/project/releases/download/preview/{payload}\"\n  sha256 \"{digest}\""
-            );
-        }
-        std::fs::write(
-            package_dir.join("release-manifest.json"),
-            format!("{{\"assets\":[{manifest_assets}]}}"),
-        )
-        .expect("write manifest fixture");
-        std::fs::write(formula_dir.join("example-preview.rb"), &formula)
-            .expect("write formula fixture");
-        let script = root.join("formula-mapping.sh");
-        std::fs::write(&script, render_formula_mapping_script(&payload_names))
-            .expect("write mapping script");
-
-        for args in [
-            ["init", "--quiet"].as_slice(),
-            [
-                "add",
-                "Formula/example-preview.rb",
-                "published-package/release-manifest.json",
-            ]
-            .as_slice(),
-            [
-                "-c",
-                "user.name=Velnor test",
-                "-c",
-                "user.email=velnor-test@example.invalid",
-                "commit",
-                "--quiet",
-                "-m",
-                "fixture",
-            ]
-            .as_slice(),
-        ] {
-            let status = Command::new("git")
-                .args(args)
-                .current_dir(&root)
-                .status()
-                .expect("run git fixture command");
-            assert!(status.success(), "git fixture command failed: {args:?}");
-        }
-
-        let run = |expected_success: bool| {
-            let output = Command::new("bash")
-                .arg(&script)
-                .current_dir(&root)
-                .env("GITHUB_WORKSPACE", &root)
-                .env("GITHUB_REPOSITORY", "example/project")
-                .env("RELEASE_TAG", "preview")
-                .output()
-                .expect("run formula mapping script");
-            assert_eq!(
-                output.status.success(),
-                expected_success,
-                "formula mapping output: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        };
-        run(true);
-
-        let stale = formula.replace("/releases/download/preview/", "/releases/download/old/");
-        std::fs::write(formula_dir.join("example-preview.rb"), stale)
-            .expect("write stale formula fixture");
-        run(false);
-
-        let first_digest = format!("{:064x}", 1);
-        let second_digest = format!("{:064x}", 2);
-        let placeholder = "sha256 \"formula-pair-placeholder\"";
-        let swapped = formula
-            .replacen(&format!("sha256 \"{first_digest}\""), placeholder, 1)
-            .replacen(
-                &format!("sha256 \"{second_digest}\""),
-                &format!("sha256 \"{first_digest}\""),
-                1,
-            )
-            .replace(placeholder, &format!("sha256 \"{second_digest}\""));
-        std::fs::write(formula_dir.join("example-preview.rb"), swapped)
-            .expect("write mismatched formula fixture");
-        run(false);
-
         let _ = std::fs::remove_dir_all(root);
     }
 
