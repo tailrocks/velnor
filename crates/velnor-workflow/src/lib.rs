@@ -25,6 +25,7 @@ mod config;
 #[cfg(all(test, unix))]
 mod consumer_negatives;
 mod estate;
+mod native_contract;
 pub(crate) mod platform;
 mod policy;
 mod primitives;
@@ -2673,7 +2674,8 @@ fn apply_unit_row(
                 "[[units.docker_contexts]] {id} applies to a non-Docker unit"
             )));
         }
-        let mut platform = row.platform_requirement(id, &platform::PlatformRequirement::portable())?;
+        let mut platform =
+            row.platform_requirement(id, &platform::PlatformRequirement::portable())?;
         let apple_native = if let Some(native) = explicit_native {
             if !platform.requires_apple() {
                 if row.os().is_some() || row.capabilities().is_some() {
@@ -2810,9 +2812,9 @@ fn apply_unit_row(
             unit.platform.os = platform::Os::Macos;
         }
         unit.apple_native = Some(match unit.apple_native.take() {
-            Some(detected) => detected
-                .strengthen_with(&explicit)
-                .map_err(|error| GeneratorError::usage(format!("[[units]] {id}.native: {error}")))?,
+            Some(detected) => detected.strengthen_with(&explicit).map_err(|error| {
+                GeneratorError::usage(format!("[[units]] {id}.native: {error}"))
+            })?,
             None => explicit,
         });
     }
@@ -6578,11 +6580,7 @@ fn generation_reasons(config: &ProjectConfig) -> Vec<String> {
             "SwiftPM packages verify on the lane's default executor wherever their toolchain provisions; they imply no Apple placement.".to_owned(),
         );
     }
-    if config
-        .units
-        .iter()
-        .any(platform::unit_requires_native)
-    {
+    if config.units.iter().any(platform::unit_requires_native) {
         reasons.push(
             "Shared Xcode schemes run as isolated Apple jobs on macOS; unknown schemes/destinations are not guessed.".to_owned(),
         );
@@ -9554,6 +9552,7 @@ mod tests {
             docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
             mbx: None,
+            apple_native: None,
             prepared_tools: Vec::new(),
         };
         let mut config = ProjectConfig {
@@ -11523,6 +11522,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
             mbx: None,
+            apple_native: None,
             prepared_tools: Vec::new(),
         });
         config.units.push(Unit {
@@ -11552,6 +11552,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
             mbx: None,
+            apple_native: None,
             prepared_tools: Vec::new(),
         });
         config.units.push(Unit {
@@ -11581,6 +11582,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
             mbx: None,
+            apple_native: None,
             prepared_tools: Vec::new(),
         });
         let ir = WorkflowIr::from_config(&config);
@@ -15302,6 +15304,7 @@ channel = "stable"
             docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
             mbx: None,
+            apple_native: None,
             prepared_tools: Vec::new(),
         };
         let config = ProjectConfig {
@@ -17058,6 +17061,7 @@ channel = "stable"
             docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
             mbx: None,
+            apple_native: None,
             prepared_tools: Vec::new(),
         });
         let workflow = WorkflowIr::from_config(&config).render_nested_unit(
@@ -17331,6 +17335,7 @@ channel = "stable"
             docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
             mbx: None,
+            apple_native: None,
             prepared_tools: Vec::new(),
         });
         let ir = WorkflowIr::from_config(&config);
@@ -17443,6 +17448,7 @@ channel = "stable"
             docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
             mbx: None,
+            apple_native: None,
             prepared_tools: Vec::new(),
         });
         let ir = WorkflowIr::from_config(&config);
@@ -17539,6 +17545,7 @@ channel = "stable"
             docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
             mbx: None,
+            apple_native: None,
             prepared_tools: Vec::new(),
         };
         let independent = Unit {
@@ -17633,6 +17640,7 @@ channel = "stable"
             docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
             mbx: None,
+            apple_native: None,
             prepared_tools: Vec::new(),
         };
         let config = ProjectConfig {
@@ -17737,6 +17745,7 @@ channel = "stable"
             docker_contexts: Vec::new(),
             env: std::collections::BTreeMap::new(),
             mbx: None,
+            apple_native: None,
             prepared_tools: Vec::new(),
         };
         let config = ProjectConfig {
@@ -17879,6 +17888,7 @@ channel = "stable"
                     docker_contexts: Vec::new(),
                     env: std::collections::BTreeMap::new(),
                     mbx: None,
+                    apple_native: None,
                     prepared_tools: Vec::new(),
                 },
                 Unit {
@@ -17908,6 +17918,7 @@ channel = "stable"
                     docker_contexts: Vec::new(),
                     env: std::collections::BTreeMap::new(),
                     mbx: None,
+                    apple_native: None,
                     prepared_tools: Vec::new(),
                 },
             ],

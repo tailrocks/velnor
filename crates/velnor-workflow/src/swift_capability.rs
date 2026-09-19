@@ -9,9 +9,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-use crate::native_contract::{
-    AppleArch, AppleNativeContract, AppleSdkFamily, AppleVersion,
-};
+use crate::native_contract::{AppleArch, AppleNativeContract, AppleSdkFamily, AppleVersion};
 
 /// Apple frameworks/modules that cannot be provided by a Linux Swift SDK.
 const APPLE_MODULES: &[&str] = &[
@@ -122,29 +120,19 @@ pub(crate) fn package_evidence(
         root.join(package_root).join("Package.swift")
     };
     let manifest = fs::read_to_string(manifest_path).unwrap_or_default();
+    let source_roots = package_source_roots(&manifest, package_root);
     let xcframework = manifest_uses_xcframework(&manifest);
     let apple = xcframework
         || manifest_declares_apple_platform(&manifest)
         || manifest_uses_apple_linker(&manifest)
         || files
             .iter()
-            .filter(|file| is_package_source(file, package_root, package_roots))
+            .filter(|file| is_package_source(file, package_root, package_roots, &source_roots))
             .any(|file| {
                 fs::read_to_string(root.join(file))
                     .is_ok_and(|contents| source_imports_apple_module(&contents))
             });
-    let project_configs = files
-        .iter()
-        .filter(|file| is_package_project_config(file, package_root, package_roots))
-        .filter_map(|file| fs::read_to_string(root.join(file)).ok())
-        .collect::<Vec<_>>();
-    let native = apple.then(|| {
-        let mut contract = manifest_native_contract(&manifest);
-        for project in &project_configs {
-            contract = merge_contract(contract, project_native_contract(project));
-        }
-        contract
-    });
+    let native = apple.then(|| manifest_native_contract(&manifest));
     SwiftPackageEvidence {
         apple,
         xcframework,
@@ -161,6 +149,9 @@ fn manifest_native_contract(contents: &str) -> AppleNativeContract {
     };
     let minimum = platform_version(&code, family);
     let mut contract = AppleNativeContract::new(family, minimum);
+    if let Some(version) = swift_tools_version(contents) {
+        contract.swift = crate::native_contract::AppleVersionConstraint::minimum(version);
+    }
     let arches = architecture_evidence(&code);
     if !arches.is_empty() {
         contract.build_arches = arches;
@@ -183,10 +174,9 @@ fn project_native_contract(contents: &str) -> Option<AppleNativeContract> {
         return None;
     };
     let minimum = match family {
-        AppleSdkFamily::Macos => first_setting_version(
-            &code,
-            &["MACOSX_DEPLOYMENT_TARGET", "macOS", "macos"],
-        ),
+        AppleSdkFamily::Macos => {
+            first_setting_version(&code, &["MACOSX_DEPLOYMENT_TARGET", "macOS", "macos"])
+        }
         AppleSdkFamily::IosDevice | AppleSdkFamily::IosSimulator => {
             first_setting_version(&code, &["IPHONEOS_DEPLOYMENT_TARGET", "iOS", "ios"])
         }
@@ -199,7 +189,18 @@ fn project_native_contract(contents: &str) -> Option<AppleNativeContract> {
     if let Some(version) = setting_version(&code, "xcodeVersion") {
         contract.xcode = crate::native_contract::AppleVersionConstraint::exact(version);
     }
+    if let Some(version) = setting_version(&code, "SWIFT_VERSION") {
+        contract.swift = crate::native_contract::AppleVersionConstraint::exact(version);
+    }
     Some(contract)
+}
+
+fn swift_tools_version(contents: &str) -> Option<AppleVersion> {
+    contents.lines().take(5).find_map(|line| {
+        let line = line.trim();
+        let value = line.strip_prefix("// swift-tools-version:")?.trim();
+        AppleVersion::parse(value)
+    })
 }
 
 /// Combine the generated Xcode project and its declarative generator input.
@@ -226,23 +227,6 @@ pub(crate) fn xcode_native_contract(
     contract
 }
 
-fn merge_contract(
-    left: AppleNativeContract,
-    right: Option<AppleNativeContract>,
-) -> AppleNativeContract {
-    let Some(right) = right else {
-        return left;
-    };
-    match left.merge(&right) {
-        Ok(merged) => merged,
-        Err(error) => {
-            let mut conflicted = left;
-            conflicted.conflicts.push(error);
-            conflicted
-        }
-    }
-}
-
 fn platform_version(contents: &str, family: AppleSdkFamily) -> Option<AppleVersion> {
     let marker = match family {
         AppleSdkFamily::Macos => ".macOS(",
@@ -267,7 +251,7 @@ fn setting_version(contents: &str, key: &str) -> Option<AppleVersion> {
     let value = contents[position..]
         .trim_start_matches(|character: char| matches!(character, ' ' | '\t' | ':' | '=' | '"'))
         .split(|character: char| {
-            character.is_whitespace() || matches!(character, '"' | ',' | '#')
+            character.is_whitespace() || matches!(character, '"' | '\'' | ',' | ';' | '#' | ')')
         })
         .next()?;
     AppleVersion::parse(value)
@@ -351,42 +335,27 @@ fn region_has_apple_linker_evidence(region: &str) -> bool {
 }
 
 fn find_marker_outside_strings(contents: &str, marker: &str, search_from: usize) -> Option<usize> {
-    let mut in_string = false;
-    let mut in_multiline_string = false;
-    let mut escaped = false;
-    let mut skip_quotes_until = 0;
-    for (offset, character) in contents[search_from..].char_indices() {
-        let index = search_from + offset;
-        if index < skip_quotes_until {
-            continue;
-        }
-        if in_multiline_string {
-            if contents[index..].starts_with("\"\"\"") {
-                in_multiline_string = false;
-                skip_quotes_until = index + 3;
+    let mut index = search_from;
+    let mut string = None;
+    while index < contents.len() {
+        if let Some((hashes, multiline)) = string {
+            if let Some(length) = swift_string_end_at(contents, index, hashes, multiline) {
+                index += length;
+                string = None;
+            } else {
+                index += contents[index..].chars().next().map_or(1, char::len_utf8);
             }
             continue;
         }
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == '"' {
-                in_string = false;
-            }
+        if let Some((hashes, multiline, length)) = swift_string_start_at(contents, index) {
+            string = Some((hashes, multiline));
+            index += length;
             continue;
         }
-        if contents[index..].starts_with("\"\"\"") {
-            in_multiline_string = true;
-            skip_quotes_until = index + 3;
-            continue;
-        }
-        if character == '"' {
-            in_string = true;
-        } else if contents[index..].starts_with(marker) {
+        if contents[index..].starts_with(marker) {
             return Some(index);
         }
+        index += contents[index..].chars().next().map_or(1, char::len_utf8);
     }
     None
 }
@@ -408,42 +377,25 @@ fn call_argument_region(contents: &str, after_marker: usize) -> Option<&str> {
         _ => return None,
     };
     let mut depth = 0_u32;
-    let mut in_string = false;
-    let mut in_multiline_string = false;
-    let mut escaped = false;
-    let mut skip_quotes_until = 0;
-    for (offset, character) in contents[open..].char_indices() {
-        let index = open + offset;
-        if index < skip_quotes_until {
-            continue;
-        }
-        if in_multiline_string {
-            if contents[index..].starts_with("\"\"\"") {
-                in_multiline_string = false;
-                skip_quotes_until = index + 3;
+    let mut index = open;
+    let mut string = None;
+    while index < contents.len() {
+        if let Some((hashes, multiline)) = string {
+            if let Some(length) = swift_string_end_at(contents, index, hashes, multiline) {
+                index += length;
+                string = None;
+            } else {
+                index += contents[index..].chars().next().map_or(1, char::len_utf8);
             }
             continue;
         }
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if character == '\\' {
-                escaped = true;
-            } else if character == '"' {
-                in_string = false;
-            }
+        if let Some((hashes, multiline, length)) = swift_string_start_at(contents, index) {
+            string = Some((hashes, multiline));
+            index += length;
             continue;
         }
-        if contents[index..].starts_with("\"\"\"") {
-            in_multiline_string = true;
-            skip_quotes_until = index + 3;
-            continue;
-        }
-        if character == '"' {
-            in_string = true;
-            continue;
-        }
-        if contents.as_bytes()[index] == opening {
+        let character = contents.as_bytes()[index];
+        if character == opening {
             depth += 1;
         } else if contents.as_bytes()[index] == closing {
             depth = depth.saturating_sub(1);
@@ -451,8 +403,51 @@ fn call_argument_region(contents: &str, after_marker: usize) -> Option<&str> {
                 return Some(&contents[open + 1..index]);
             }
         }
+        index += 1;
     }
     None
+}
+
+fn swift_string_start_at(contents: &str, index: usize) -> Option<(usize, bool, usize)> {
+    let bytes = contents.as_bytes();
+    let (hashes, quote) = if bytes.get(index) == Some(&b'"') {
+        (0, index)
+    } else if bytes.get(index) == Some(&b'#') {
+        let mut quote = index;
+        while bytes.get(quote) == Some(&b'#') {
+            quote += 1;
+        }
+        if bytes.get(quote) != Some(&b'"') {
+            return None;
+        }
+        (quote - index, quote)
+    } else {
+        return None;
+    };
+    let multiline = bytes.get(quote..quote + 3) == Some(b"\"\"\"");
+    Some((hashes, multiline, hashes + if multiline { 3 } else { 1 }))
+}
+
+fn swift_string_end_at(
+    contents: &str,
+    index: usize,
+    hashes: usize,
+    multiline: bool,
+) -> Option<usize> {
+    let bytes = contents.as_bytes();
+    let quote_count = if multiline { 3 } else { 1 };
+    let quotes_match = if multiline {
+        bytes.get(index..index + 3) == Some(&b"\"\"\""[..])
+    } else {
+        bytes.get(index..index + 1) == Some(&b"\""[..])
+    };
+    if !quotes_match {
+        return None;
+    }
+    if (0..hashes).any(|offset| bytes.get(index + quote_count + offset) != Some(&b'#')) {
+        return None;
+    }
+    Some(quote_count + hashes)
 }
 
 fn source_imports_apple_module(contents: &str) -> bool {
@@ -463,12 +458,7 @@ fn source_imports_apple_module(contents: &str) -> bool {
     let code = strip_swift_comments_and_strings(contents);
     code.lines().any(|line| {
         let line = line.trim_start();
-        let imported = line
-            .strip_prefix("import ")
-            .or_else(|| line.strip_prefix("@testable import "))
-            .or_else(|| line.strip_prefix("@_implementationOnly import "))
-            .and_then(|rest| rest.split_whitespace().next())
-            .and_then(|module| module.split('.').next());
+        let imported = swift_import_module(line);
         imported.is_some_and(|module| APPLE_MODULES.contains(&module))
             || (line.starts_with("#if ") || line.starts_with("#elseif "))
                 && APPLE_MODULES
@@ -477,164 +467,177 @@ fn source_imports_apple_module(contents: &str) -> bool {
     })
 }
 
-fn strip_swift_comments_and_strings(contents: &str) -> String {
-    let mut output = String::with_capacity(contents.len());
-    let mut chars = contents.chars().peekable();
-    let mut block_depth = 0_u32;
-    let mut in_string = false;
-    let mut in_multiline_string = false;
-    while let Some(character) = chars.next() {
-        if block_depth > 0 {
-            if character == '/' && chars.peek() == Some(&'*') {
-                chars.next();
-                block_depth += 1;
-            } else if character == '*' && chars.peek() == Some(&'/') {
-                chars.next();
-                block_depth -= 1;
-            } else if character == '\n' {
-                output.push('\n');
-            }
-            continue;
-        }
-        if in_multiline_string {
-            if character == '"' && chars.peek() == Some(&'"') {
-                let mut quotes = chars.clone();
-                quotes.next();
-                if quotes.peek() == Some(&'"') {
-                    chars.next();
-                    chars.next();
-                    in_multiline_string = false;
-                    output.push_str("\"\"\"");
-                    continue;
-                }
-            }
-            if character == '\n' {
-                output.push('\n');
-            }
-            continue;
-        }
-        if in_string {
-            if character == '\\' {
-                chars.next();
-            } else if character == '"' {
-                in_string = false;
-            } else if character == '\n' {
-                output.push('\n');
-            }
-            continue;
-        }
-        if character == '/' && chars.peek() == Some(&'/') {
-            chars.next();
-            for next in chars.by_ref() {
-                if next == '\n' {
-                    output.push('\n');
-                    break;
-                }
-            }
-        } else if character == '/' && chars.peek() == Some(&'*') {
-            chars.next();
-            block_depth = 1;
-        } else if character == '"' && chars.peek() == Some(&'"') {
-            let mut quotes = chars.clone();
-            quotes.next();
-            if quotes.peek() == Some(&'"') {
-                chars.next();
-                chars.next();
-                in_multiline_string = true;
-            } else {
-                in_string = true;
-            }
-        } else if character == '"' {
-            in_string = true;
-        } else {
-            output.push(character);
+fn swift_import_module(line: &str) -> Option<&str> {
+    let mut rest = line;
+    for attribute in ["@_exported ", "@testable ", "@_implementationOnly "] {
+        if let Some(stripped) = rest.strip_prefix(attribute) {
+            rest = stripped.trim_start();
         }
     }
-    output
+    let rest = rest.strip_prefix("import ")?.trim_start();
+    let mut words = rest.split_whitespace();
+    let first = words.next()?;
+    let module = if matches!(first, "class" | "struct" | "enum" | "func" | "var" | "let") {
+        words.next()?
+    } else {
+        first
+    };
+    Some(module.split('.').next()?)
+}
+
+fn strip_swift_comments_and_strings(contents: &str) -> String {
+    strip_swift_lexemes(contents, false)
 }
 
 fn strip_swift_comments(contents: &str) -> String {
-    let mut output = String::with_capacity(contents.len());
-    let mut chars = contents.chars().peekable();
+    strip_swift_lexemes(contents, true)
+}
+
+/// Remove comments and optionally strings using Swift's nesting/raw-string
+/// delimiters. Keeping this one lexer for manifest and source evidence avoids
+/// the old false positives where `#"..."#` or `##"""..."""##` looked like
+/// code after the first quote.
+fn strip_swift_lexemes(contents: &str, keep_strings: bool) -> String {
+    let chars = contents.chars().collect::<Vec<_>>();
     let mut block_depth = 0_u32;
-    let mut in_string = false;
-    let mut in_multiline_string = false;
-    while let Some(character) = chars.next() {
-        if block_depth > 0 {
-            if character == '/' && chars.peek() == Some(&'*') {
-                chars.next();
-                block_depth += 1;
-            } else if character == '*' && chars.peek() == Some(&'/') {
-                chars.next();
-                block_depth -= 1;
-            } else if character == '\n' {
+    let mut string = None;
+    let mut output = String::with_capacity(contents.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if let Some((hashes, multiline)) = string {
+            if swift_string_terminator(&chars, index, hashes, multiline) {
+                let length = string_delimiter_length(&chars, index, hashes, multiline);
+                if keep_strings {
+                    output.extend(&chars[index..index + length]);
+                }
+                index += length;
+                string = None;
+                continue;
+            }
+            if keep_strings {
+                output.push(chars[index]);
+            } else if chars[index] == '\n' {
                 output.push('\n');
             }
+            index += 1;
             continue;
         }
-        if in_multiline_string {
-            if character == '"' && chars.peek() == Some(&'"') {
-                let mut quotes = chars.clone();
-                quotes.next();
-                if quotes.peek() == Some(&'"') {
-                    chars.next();
-                    chars.next();
-                    in_multiline_string = false;
-                    output.push_str("\"\"\"");
-                    continue;
-                }
-            }
-            output.push(character);
-            continue;
-        }
-        if in_string {
-            if character == '\\' {
-                output.push(character);
-                if let Some(escaped) = chars.next() {
-                    output.push(escaped);
-                }
-            } else if character == '"' {
-                in_string = false;
-                output.push(character);
+        if block_depth > 0 {
+            if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
+                index += 2;
+                block_depth += 1;
+            } else if chars[index] == '*' && chars.get(index + 1) == Some(&'/') {
+                index += 2;
+                block_depth -= 1;
             } else {
-                output.push(character);
-            }
-            continue;
-        }
-        if character == '/' && chars.peek() == Some(&'/') {
-            chars.next();
-            for next in chars.by_ref() {
-                if next == '\n' {
+                if chars[index] == '\n' {
                     output.push('\n');
-                    break;
                 }
+                index += 1;
             }
-        } else if character == '/' && chars.peek() == Some(&'*') {
-            chars.next();
-            block_depth = 1;
-        } else if character == '"' && chars.peek() == Some(&'"') {
-            let mut quotes = chars.clone();
-            quotes.next();
-            if quotes.peek() == Some(&'"') {
-                chars.next();
-                chars.next();
-                in_multiline_string = true;
-                output.push_str("\"\"\"");
-            } else {
-                in_string = true;
-                output.push(character);
-            }
-        } else if character == '"' {
-            in_string = true;
-            output.push(character);
-        } else {
-            output.push(character);
+            continue;
         }
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'/') {
+            index += 2;
+            while index < chars.len() && chars[index] != '\n' {
+                index += 1;
+            }
+            if index < chars.len() {
+                output.push('\n');
+                index += 1;
+            }
+            continue;
+        }
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
+            index += 2;
+            block_depth = 1;
+            continue;
+        }
+        if let Some((hashes, multiline, length)) = swift_string_start(&chars, index) {
+            if keep_strings {
+                output.extend(&chars[index..index + length]);
+            }
+            string = Some((hashes, multiline));
+            index += length;
+            continue;
+        }
+        output.push(chars[index]);
+        index += 1;
     }
     output
 }
 
-fn is_package_source(file: &str, package_root: &str, package_roots: &[String]) -> bool {
+fn swift_string_start(chars: &[char], index: usize) -> Option<(usize, bool, usize)> {
+    let (hashes, quote) = if chars[index] == '"' {
+        (0, index)
+    } else if chars[index] == '#' {
+        let mut quote = index;
+        while chars.get(quote) == Some(&'#') {
+            quote += 1;
+        }
+        if chars.get(quote) != Some(&'"') {
+            return None;
+        }
+        (quote - index, quote)
+    } else {
+        return None;
+    };
+    let multiline = quote + 3 <= chars.len()
+        && chars[quote..quote + 3]
+            .iter()
+            .all(|character| *character == '"');
+    let length = hashes + if multiline { 3 } else { 1 };
+    Some((hashes, multiline, length))
+}
+
+fn swift_string_terminator(chars: &[char], index: usize, hashes: usize, multiline: bool) -> bool {
+    string_delimiter_length(chars, index, hashes, multiline) > 0
+}
+
+fn string_delimiter_length(chars: &[char], index: usize, hashes: usize, multiline: bool) -> usize {
+    let quote_count = if multiline { 3 } else { 1 };
+    if index + quote_count > chars.len()
+        || !chars[index..index + quote_count]
+            .iter()
+            .all(|character| *character == '"')
+    {
+        return 0;
+    }
+    if (0..hashes).any(|offset| chars.get(index + quote_count + offset) != Some(&'#')) {
+        return 0;
+    }
+    quote_count + hashes
+}
+
+fn package_source_roots(manifest: &str, _package_root: &str) -> Vec<String> {
+    let mut roots = vec!["Sources".to_owned(), "Tests".to_owned()];
+    for line in manifest.lines() {
+        let Some(path) = line.split_once("path:").and_then(|(_, value)| {
+            value
+                .trim()
+                .strip_prefix('"')
+                .and_then(|value| value.split('"').next())
+        }) else {
+            continue;
+        };
+        if !path.is_empty()
+            && !path.starts_with('.')
+            && !path.starts_with('/')
+            && !path.contains("..")
+            && !roots.iter().any(|root| root == path)
+        {
+            roots.push(path.to_owned());
+        }
+    }
+    roots
+}
+
+fn is_package_source(
+    file: &str,
+    package_root: &str,
+    package_roots: &[String],
+    source_roots: &[String],
+) -> bool {
     if !Path::new(file)
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("swift"))
@@ -649,27 +652,15 @@ fn is_package_source(file: &str, package_root: &str, package_roots: &[String]) -
     if !file.starts_with(&package_prefix) {
         return false;
     }
+    let relative = file.strip_prefix(&package_prefix).unwrap_or(file);
+    let declared_source = source_roots
+        .iter()
+        .any(|source| relative == source || relative.starts_with(&format!("{source}/")));
+    if !declared_source {
+        return false;
+    }
     // A repository can contain nested packages. Do not let a child package's
     // imports turn its parent package's unit Apple-bound (or vice versa).
-    !package_roots.iter().any(|other| {
-        other != package_root
-            && other.starts_with(&package_prefix)
-            && file.starts_with(&format!("{other}/"))
-    })
-}
-
-fn is_package_project_config(file: &str, package_root: &str, package_roots: &[String]) -> bool {
-    if !file.ends_with("project.yml") && !file.ends_with("project.yaml") {
-        return false;
-    }
-    let package_prefix = if package_root == "." {
-        String::new()
-    } else {
-        format!("{package_root}/")
-    };
-    if !file.starts_with(&package_prefix) {
-        return false;
-    }
     !package_roots.iter().any(|other| {
         other != package_root
             && other.starts_with(&package_prefix)
@@ -695,6 +686,9 @@ mod tests {
         assert!(source_imports_apple_module("import SwiftUI\n"));
         assert!(source_imports_apple_module(
             "@_implementationOnly import CoreGraphics.CGFloat\n"
+        ));
+        assert!(source_imports_apple_module(
+            "@_exported import SwiftUI\nimport class AppKit.NSView\n"
         ));
         assert!(manifest_uses_apple_linker(".linkedFramework(\"Security\")"));
         assert!(manifest_uses_apple_linker(
@@ -722,6 +716,9 @@ mod tests {
         assert!(!manifest_uses_xcframework(
             "// .binaryTarget(name: \"Bridge\", path: \"Bridge.xcframework\")\nlet note = \".binaryTarget Bridge.xcframework\""
         ));
+        assert!(!manifest_uses_xcframework(
+            "let note = #\".binaryTarget(name: 'Bridge', path: 'Bridge.xcframework')\"#"
+        ));
         assert!(!source_imports_apple_module(
             "import Foundation\nimport Logging\n"
         ));
@@ -740,6 +737,9 @@ mod tests {
         ));
         assert!(!source_imports_apple_module(
             "/*\nimport SwiftUI\n#if canImport(Darwin)\n*/\n"
+        ));
+        assert!(!source_imports_apple_module(
+            "let note = ##\"\"\"\nimport SwiftUI\n\"\"\"##\n"
         ));
     }
 }
