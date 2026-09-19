@@ -22,6 +22,7 @@ use velnor_model::{
     SCALESET_API_VERSION, SCALESET_ENDPOINT,
 };
 
+use crate::protocol::redacted_authenticated_url;
 use crate::scaleset::backoff::RetryPolicy;
 use crate::scaleset::config::GitHubConfig;
 use crate::scaleset::credentials::{
@@ -71,19 +72,30 @@ impl std::fmt::Debug for AdminToken {
         f.debug_struct("AdminToken")
             .field("authorization_header", &"<redacted>")
             .field("expires_at_epoch", &self.expires_at_epoch)
-            .field("url", &self.url)
+            .field("url", &redacted_authenticated_url(&self.url))
             .finish()
     }
 }
 
 /// Raw HTTP response: status + headers + BOM-stripped body (`sendRequest`).
-#[derive(Debug)]
 pub(crate) struct RawResponse {
     pub method: String,
     pub url: String,
     pub status: StatusCode,
     pub headers: HeaderMap,
     pub body: Vec<u8>,
+}
+
+impl std::fmt::Debug for RawResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawResponse")
+            .field("method", &self.method)
+            .field("url", &redacted_authenticated_url(&self.url))
+            .field("status", &self.status)
+            .field("headers", &"<redacted>")
+            .field("body", &"<redacted>")
+            .finish()
+    }
 }
 
 impl RawResponse {
@@ -122,7 +134,10 @@ struct ClientInner {
 impl std::fmt::Debug for ClientInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClientInner")
-            .field("config", &self.config)
+            .field(
+                "config_url",
+                &redacted_authenticated_url(self.config.config_url.as_str()),
+            )
             .field("auth", &self.auth)
             .field("retry", &self.retry)
             .finish_non_exhaustive()
@@ -245,18 +260,12 @@ impl ScaleSetClient {
         let registration = self
             .get_runner_registration_token()
             .await
-            .map_err(|error| {
-                ScaleSetError::Local(format!(
-                    "failed to get runner registration token on refresh: {error}"
-                ))
-            })?;
+            .map_err(|error| error.context("failed to get runner registration token on refresh"))?;
         let connection = self
             .get_actions_service_admin_connection(&registration.token)
             .await
             .map_err(|error| {
-                ScaleSetError::Local(format!(
-                    "failed to get actions service admin connection on refresh: {error}"
-                ))
+                error.context("failed to get actions service admin connection on refresh")
             })?;
         let expires_at = admin_token_expires_at(&connection.admin_token).map_err(|error| {
             ScaleSetError::Local(format!(
@@ -289,9 +298,10 @@ impl ScaleSetClient {
         let bearer = if let Some(token) = self.inner.auth.token.as_deref() {
             format!("Bearer {token}")
         } else {
-            let access = self.fetch_access_token().await.map_err(|error| {
-                ScaleSetError::Local(format!("failed to fetch access token: {error}"))
-            })?;
+            let access = self
+                .fetch_access_token()
+                .await
+                .map_err(|error| error.context("failed to fetch access token"))?;
             format!("Bearer {}", access.token)
         };
         // Upstream sends an empty buffer as the POST body.
@@ -825,13 +835,12 @@ impl ScaleSetClient {
                         body: trim_byte_order_mark(&body).to_vec(),
                     });
                 }
-                // Mirror `DefaultRetryPolicy`: retry transport failures (connect,
-                // reset, timeout, DNS) but never malformed requests or
-                // redirect loops, which a retry cannot fix.
+                // Mirror `DefaultRetryPolicy`: retry transient transport
+                // failures, but not deadlines, malformed requests, redirect
+                // loops, or TLS certificate validation errors.
                 Err(error)
                     if self.inner.retry.may_retry(attempt)
-                        && !error.is_builder()
-                        && !error.is_redirect() =>
+                        && RetryPolicy::retryable_transport_error(&error) =>
                 {
                     let delay = self.inner.retry.delay_for_attempt(attempt);
                     attempt += 1;
@@ -853,9 +862,7 @@ impl ScaleSetClient {
         attempt: u32,
     ) -> tokio::time::Duration {
         let backoff = self.inner.retry.delay_for_attempt(attempt);
-        let now = unix_now().unwrap_or(0);
-        let limited = RetryPolicy::rate_limit_delay(status, headers, now, backoff);
-        limited.min(self.inner.retry.wait_max.max(backoff))
+        RetryPolicy::retry_after_delay(status, headers, SystemTime::now()).unwrap_or(backoff)
     }
 }
 
@@ -998,13 +1005,13 @@ fn unexpected_status(response: &RawResponse) -> ScaleSetError {
     )
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 struct RegistrationToken {
     #[serde(default)]
     token: String,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 struct AdminConnectionWire {
     #[serde(default)]
     url: Option<String>,
@@ -1012,10 +1019,21 @@ struct AdminConnectionWire {
     token: Option<String>,
 }
 
-#[derive(Debug)]
 struct AdminConnection {
     actions_service_url: String,
     admin_token: String,
+}
+
+impl std::fmt::Debug for AdminConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdminConnection")
+            .field(
+                "actions_service_url",
+                &redacted_authenticated_url(&self.actions_service_url),
+            )
+            .field("admin_token", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Header value for test doubles: expose the UA for assertion.
@@ -1116,7 +1134,7 @@ mod tests {
         let token = AdminToken {
             authorization_header: "Bearer live-admin-token".into(),
             expires_at_epoch: 2_000_000_000,
-            url: "https://actions.invalid/tenant".into(),
+            url: "https://actions.invalid/tenant?sig=admin-url-secret".into(),
         };
         let rendered = format!("{token:?}");
         assert!(
@@ -1124,6 +1142,7 @@ mod tests {
             "admin token Debug leaked: {rendered}"
         );
         assert!(rendered.contains("https://actions.invalid/tenant"));
+        assert!(!rendered.contains("admin-url-secret"), "{rendered}");
     }
 
     #[test]
@@ -1206,5 +1225,47 @@ mod tests {
         let rendered = format!("{token:?}");
         assert!(rendered.contains("<redacted>"), "{rendered}");
         assert!(!rendered.contains("live-admin-token-bytes"), "{rendered}");
+    }
+
+    #[test]
+    fn response_and_connection_debug_redact_protocol_secrets() {
+        let response = RawResponse {
+            method: "GET".into(),
+            url: "https://queue.example/messages?sig=url-secret".into(),
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            headers: HeaderMap::from_iter([(
+                reqwest::header::SET_COOKIE,
+                "session=header-secret".parse().unwrap(),
+            )]),
+            body: b"body-secret".to_vec(),
+        };
+        let rendered = format!("{response:?}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        for secret in ["url-secret", "header-secret", "body-secret"] {
+            assert!(!rendered.contains(secret), "{rendered}");
+        }
+
+        let connection = AdminConnection {
+            actions_service_url: "https://actions.example/tenant?sig=connection-url-secret".into(),
+            admin_token: "connection-token-secret".into(),
+        };
+        let rendered = format!("{connection:?}");
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        assert!(!rendered.contains("connection-url-secret"), "{rendered}");
+        assert!(!rendered.contains("connection-token-secret"), "{rendered}");
+    }
+
+    #[test]
+    fn client_debug_redacts_credentials_in_config_url() {
+        let client = ScaleSetClient::new(
+            "https://github.com/octo-org?sig=config-url-secret",
+            ActionsAuth::pat("pat-secret".into()),
+            system_info(),
+            RetryPolicy::default(),
+        )
+        .unwrap();
+        let rendered = format!("{client:?}");
+        assert!(!rendered.contains("config-url-secret"), "{rendered}");
+        assert!(!rendered.contains("pat-secret"), "{rendered}");
     }
 }

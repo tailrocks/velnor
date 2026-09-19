@@ -336,6 +336,8 @@ mod tests {
             request_id: String::new(),
             message: "exists".into(),
             fault: Some(ScaleSetFault::Conflict),
+            status_fault: None,
+            api_exception: None,
         }));
         assert!(is_create_race(&conflict));
         let missing = ScaleSetError::RequestFailed(Box::new(crate::scaleset::RequestFailure {
@@ -346,6 +348,8 @@ mod tests {
             request_id: String::new(),
             message: "nope".into(),
             fault: Some(ScaleSetFault::NotFound),
+            status_fault: None,
+            api_exception: None,
         }));
         assert!(!is_create_race(&missing));
         assert!(!is_create_race(&ScaleSetError::Transport("down".into())));
