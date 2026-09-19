@@ -907,8 +907,12 @@ where
     )
     .await?;
     let mut rulesets = Vec::with_capacity(values.len());
+    let mut seen_ids = BTreeSet::new();
     for value in values {
         let id = required_u64(&value, &["id"])?;
+        if !seen_ids.insert(id) {
+            bail!("ruleset {id} was observed more than once");
+        }
         let name = required_string(&value, &["name"])?;
         let (detail, detail_raw_ids) = collect_one(
             transport,
@@ -970,8 +974,12 @@ where
         bail!("{} returned no workflows", manifest.repository);
     }
     let mut workflows = Vec::with_capacity(values.len());
+    let mut seen_paths = BTreeSet::new();
     for value in values {
         let path = required_string(&value, &["path"])?;
+        if !seen_paths.insert(path.clone()) {
+            bail!("workflow path {path} was observed more than once");
+        }
         let encoded_path = path.replace(' ', "%20");
         let (content, content_raw_ids) = collect_one(
             transport,
@@ -1634,10 +1642,11 @@ fn parse_job(
     if job_source_sha != source_sha {
         bail!("job head SHA differs from workflow run");
     }
+    let job_id = required_u64(value, &["id"])?;
     let source_url = required_string(value, &["html_url"])?;
-    validate_job_url(&source_url, repository, run_id)?;
+    validate_job_url(&source_url, repository, run_id, job_id)?;
     Ok(LiveJob {
-        job_id: required_u64(value, &["id"])?,
+        job_id,
         run_id: job_run_id,
         run_attempt: job_attempt,
         name: required_string(value, &["name"])?,
@@ -1666,17 +1675,15 @@ fn parse_artifact(
     if artifact_head_sha != run_head_sha {
         bail!("artifact workflow head SHA differs from run");
     }
+    let artifact_id = required_u64(value, &["id"])?;
     let source_url = required_string(value, &["archive_download_url"])?;
-    validate_artifact_url(&source_url, repository, run_id)?;
+    validate_artifact_url(&source_url, repository, artifact_id)?;
     let digest = required_string(value, &["digest"])?;
     if !is_digest(&digest) {
-        bail!(
-            "artifact {} has malformed digest",
-            required_u64(value, &["id"])?
-        );
+        bail!("artifact {} has malformed digest", artifact_id);
     }
     Ok(LiveArtifact {
-        artifact_id: required_u64(value, &["id"])?,
+        artifact_id,
         run_id: artifact_run_id,
         run_head_sha: artifact_head_sha,
         name: required_string(value, &["name"])?,
@@ -1689,6 +1696,14 @@ fn parse_artifact(
 
 fn merge_artifacts(destination: &mut Vec<LiveArtifact>, incoming: Vec<LiveArtifact>) -> Result<()> {
     for artifact in incoming {
+        if destination.iter().any(|existing| {
+            existing.name == artifact.name && existing.artifact_id != artifact.artifact_id
+        }) {
+            bail!(
+                "artifact name {} is bound to more than one artifact ID",
+                artifact.name
+            );
+        }
         if let Some(existing) = destination
             .iter_mut()
             .find(|existing| existing.artifact_id == artifact.artifact_id)
@@ -1817,20 +1832,20 @@ fn validate_workflow_content(
     Ok(())
 }
 
-fn validate_job_url(value: &str, repository: &str, _run_id: u64) -> Result<()> {
+fn validate_job_url(value: &str, repository: &str, run_id: u64, job_id: u64) -> Result<()> {
     let parsed = parse_safe_url(value, "github.com")?;
-    let prefix = format!("/{repository}/");
-    if !parsed.path().starts_with(&prefix) {
-        bail!("job URL is not bound to repository {repository}");
+    let expected = format!("/{repository}/actions/runs/{run_id}/job/{job_id}");
+    if parsed.path() != expected {
+        bail!("job URL is not bound to {repository}/{run_id}/{job_id}");
     }
     Ok(())
 }
 
-fn validate_artifact_url(value: &str, repository: &str, _run_id: u64) -> Result<()> {
+fn validate_artifact_url(value: &str, repository: &str, artifact_id: u64) -> Result<()> {
     let parsed = parse_safe_url(value, "api.github.com")?;
-    let prefix = format!("/repos/{repository}/actions/artifacts/");
-    if !parsed.path().starts_with(&prefix) {
-        bail!("artifact URL is not bound to repository {repository}");
+    let expected = format!("/repos/{repository}/actions/artifacts/{artifact_id}/zip");
+    if parsed.path() != expected {
+        bail!("artifact URL is not bound to {repository}/{artifact_id}");
     }
     Ok(())
 }
@@ -2298,12 +2313,26 @@ jobs:
             "https://github.com/other/repo/runs/9",
             "tailrocks/velnor",
             7,
+            8,
+        )
+        .is_err());
+        assert!(validate_job_url(
+            "https://github.com/tailrocks/velnor/actions/runs/7/job/9",
+            "tailrocks/velnor",
+            7,
+            8,
         )
         .is_err());
         assert!(validate_artifact_url(
             "https://api.github.com/repos/other/repo/actions/artifacts/9/zip",
             "tailrocks/velnor",
-            7,
+            9,
+        )
+        .is_err());
+        assert!(validate_artifact_url(
+            "https://api.github.com/repos/tailrocks/velnor/actions/artifacts/9/zip",
+            "tailrocks/velnor",
+            8,
         )
         .is_err());
         assert!(parse_previous_attempt_url(
