@@ -22,7 +22,7 @@ unknown observation into a success.
 The external session and ownership record is
 `/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/session.json`.
 After the G0 records amendment its SHA-256 is
-`ad9686d74a38bcf7293497e6a6ca463c9b2a7aafff5c9acb388cb2f1b89a8c11`.
+`a60b01155210c8f6d5db9ddb48375c487baf4cbb788cb39116a9e6e3c5ebcd4f`.
 It records the orchestrator, assigned agents, worktree ownership, current
 gate, and the Velnor ruleset snapshot. Amendments to that record are durable
 outside the source checkout and must retain an amendment history.
@@ -456,3 +456,11 @@ publication, and native-install gaps; they do not pass G0/G2/G3. The external
 `G1/reviews/seed-pin.md` report keeps exact PR-head test evidence separate from
 integrated-source verification, and `G1/reviews/bootstrap-hosted.md` is a
 checkpoint only. No dirty owner worktree is approval evidence.
+
+The external G1 runtime-product audit records a verified old generator pin
+(`fdeed261`), immutable runtime closure/release (`81ba31f` / release
+`391347842`), and a distinct current-main product closure (`63cea86`). The
+local source candidate `12cc87b` has an unpublished closure (`1cbf31a`) and
+must follow source admission, merged-main publication, immutable verification,
+then pin adoption/regeneration. This ordering is evidence and a promotion
+plan, not a G1 pass or permission to require an unpublished candidate product.

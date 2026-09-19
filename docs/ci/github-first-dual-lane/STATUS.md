@@ -53,6 +53,13 @@ required-check success, migration, or a gate exit.
   belong to exact PR head `a5c1c0bd` before regeneration, while 1736 tests,
   fmt, and clippy belong to integrated source `12cc87b`; these counts are not
   combined. `G1/reviews/bootstrap-hosted.md` is a checkpoint only.
+- G1 runtime-product audit is external at
+  `G1/runtime-product-audit/{runtime-product-audit.json,PROMOTION.md}`:
+  published old pin `fdeed261` resolves to closure `81ba31f`/release
+  `391347842`; current main `abe9ad82` publishes distinct closure `63cea86`;
+  local `12cc87b` needs unpublished closure `1cbf31a`. Promotion order is
+  source admission, merged-main publication, immutable verification, then pin
+  adoption/regeneration. This is not a G1 pass.
 
 These are documentation/setup facts only. They do not establish hosted CI,
 package delivery, fleet migration, Mac operation, or any gate exit.
@@ -67,7 +74,7 @@ package delivery, fleet migration, Mac operation, or any gate exit.
 | Generated state SHA-256 | `2643fad3e4943262ceeb47b888b451119998c2ea14114dd86b27cc29a2647646` | Observed locally |
 | Current ruleset | `19573071`, `DCO`, `ci-required`, `Policy`, active | External baseline; no change claimed |
 | Evidence root | `/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/` | Policy; live records pending |
-| Session registry | `session.json`, SHA-256 `ad9686d74a38bcf7293497e6a6ca463c9b2a7aafff5c9acb388cb2f1b89a8c11` | Actual Luna/max worker threads and evidence paths recorded; no gate pass |
+| Session registry | `session.json`, SHA-256 `a60b01155210c8f6d5db9ddb48375c487baf4cbb788cb39116a9e6e3c5ebcd4f` | Actual Luna/max worker threads and evidence paths recorded; no gate pass |
 | Final ledger | Immutable artifact/evidence ref outside source | Pending |
 | PR952 source/integration chronology | Exact PR head `a5c1c0bd5c92c4c52d58ccb21042b1b2c0b08637` had 1858 tests before regeneration; integrated source `12cc87b629802c294da9840325cb21087c020df` has 1736 tests, fmt, and clippy pass; generated snapshot failure remains until regeneration | Separate observations; not a gate pass |
 | PR954 current head | `f16592ea165ced141bf0bb1c43466a95d7df8b2e` | Observed; current run still pending/partial |
@@ -78,6 +85,7 @@ package delivery, fleet migration, Mac operation, or any gate exit.
 | G2 product identity | Application/native asset/component identity contract is missing | Blocker for package acceptance; owned by G2-native-product |
 | G1 scan integrity | Source task assigned to remove generated-output self-invalidation while preserving drift checks | Pending reviewed source change |
 | Early category audits | Skills, action/roles, Rust consumers, distribution consumers, and independent distribution review reports | Read-only evidence written; scanner/publication/native proof gaps remain |
+| G1 runtime-product audit | Old pin/release, current-main distinction, and candidate closure/promotion sequence | External evidence written; no candidate publication or pin adoption |
 
 ## Model and runtime evidence
 
@@ -108,11 +116,13 @@ unknown.
 | G1-hosted-config | In progress; candidate remains unverified | Thread `01a0ba77-5222-7e63-97fa-553849b96d7b`; recheck clean exact commit/output |
 | G1-review952 | Assigned; refresh pending | Thread `01a0ba77-dd88-7ac2-9fb7-118f3c09d1af`; review #952–954 without combining test counts |
 | G1-run-operations | In progress; stale-runs evidence updated | Thread `01a0ba7a-9d5d-7291-a2f5-357ff78dba5e`; trace child outcomes |
+| G1-runtime-product-audit | Evidence written; next publish verification pending | Same operations thread; old pin verified, candidate remains unpublished |
 | G1-seed-pin | Source review written; pin adoption pending | Thread `01a0ba72-3925-7141-b1f7-5529a5cf6c98`; clean regeneration remains required |
 | G1-scan-integrity | Assigned; result pending | Repair scan/output integrity in `dual-lane-scan-integrity`; review by `g1_review952` |
-| G2-native-packages | Compile/smoke observed; product identity missing | Thread `01a0ba7a-328e-7282-943e-5b54c2ac209d`; no install/publication claim |
+| G2-native-packages | Compile/smoke observed; now owns product/manifest contract | Thread `01a0ba7a-328e-7282-943e-5b54c2ac209d`; no install/publication claim |
 | G2-homebrew-contract | Assigned; producer contract coordination pending | Thread `01a0ba80-8408-7380-8ac2-b743eb4494a5`; coordinate with native packages |
-| G2-native-product | Source implementation assigned; thread metadata pending | `/root/g2_native_product` owns `dual-lane-native-product`; define application/runtime component identity and authoritative package manifest |
+| G2-native-product | Source implementation assigned to native-packages worker | `/root/g2_native_packages`, thread `01a0ba7a-328e-7282-943e-5b54c2ac209d`, worktree `dual-lane-native-product`; define application/runtime component identity and authoritative package manifest |
+| G2-preview-publication | Planned; blocked until G1 | `/root/g1_run_operations`, thread `01a0ba7a-9d5d-7291-a2f5-357ff78dba5e`, worktree `dual-lane-preview-publication`; reviewer `/root/g2_distribution_review` |
 | G2-distribution-review | Independent evidence written; acceptance blockers recorded | Thread `01a0ba81-1af6-7f11-9f24-3ff115b8f314`; no publication approval |
 | g3-skills-adapter | Read-only evidence written; central scanner fix required | Thread `01a0ba7b-0152-7a70-8d18-c2387f1c9469`; external report only, no rollout |
 | g3-native-routing | Read-only evidence written; rollout blocked until G2 | Thread `01a0ba7b-32f1-7af1-a25f-4cde73f1f075`; native routing report only |
