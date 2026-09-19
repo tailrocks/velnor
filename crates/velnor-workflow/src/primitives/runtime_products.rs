@@ -76,7 +76,7 @@ pub(crate) fn canonical_runtime_products_side_file(primitive: &str) -> Option<&'
 /// affecting the builders, and can never silently reselect them.
 const LINUX_X64_RUNNER: &str = "ubuntu-24.04";
 const LINUX_ARM64_RUNNER: &str = "ubuntu-24.04-arm";
-const MACOS_ARM64_RUNNER: &str = "macos-15";
+const MACOS_ARM64_RUNNER: &str = "xcode-27";
 
 /// The manifest acceptance filter, exactly as the setup action evaluates it:
 /// full closure, a well-formed source revision, release profile, empty
@@ -795,7 +795,7 @@ mod tests {
             runners: RunnerMode::Both,
             automatic: RunnerMode::Both,
             github_runner: "ubuntu-24.04".to_owned(),
-            macos_runner: "macos-15".to_owned(),
+            macos_runner: "xcode-27".to_owned(),
             velnor_labels: vec!["self-hosted".to_owned(), "example-runner".to_owned()],
             release_enabled: false,
             release_reason: String::new(),
@@ -2414,7 +2414,7 @@ exit 1
     /// bytes are for.
     #[test]
     fn rendered_bytes_are_pinned() {
-        const PINNED: &str = "f2e3a31f2196fc8244dd48042b9a5a796e051ab38a6c92448470ccbecb9ced44";
+        const PINNED: &str = "aa4b0af1250e0c3c993c088659e6999de64401c7b65e61ad8b003820fcb78bdb";
         let content = owner_content(&["maintenance.yml"]);
         let digest = digest_of(&content);
         assert_eq!(digest, PINNED, "rendered producer bytes changed");

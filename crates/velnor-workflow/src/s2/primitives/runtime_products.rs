@@ -70,7 +70,7 @@ pub(crate) fn canonical_runtime_products_side_file(primitive: &str) -> Option<&'
 /// silently reselect them.
 const LINUX_X64_RUNNER: &str = "ubuntu-24.04";
 const LINUX_ARM64_RUNNER: &str = "ubuntu-24.04-arm";
-const MACOS_ARM64_RUNNER: &str = "macos-15";
+const MACOS_ARM64_RUNNER: &str = "xcode-27";
 
 /// The manifest acceptance filter, exactly as the setup action evaluates it:
 /// full closure, a well-formed source revision, release profile, empty
@@ -1788,7 +1788,7 @@ mod tests {
     /// bytes are for.
     #[test]
     fn rendered_bytes_are_pinned() {
-        const PINNED: &str = "dc9c5d95a00c193a7c2332e348398ccd15f05df64252c863fa14558197b2843b";
+        const PINNED: &str = "b3fdd2b0433c55249f4664ad67f037587d850235c0a4df8f43d948ca68efe471";
         let content = owner_content(&["maintenance.yml"]);
         let digest = digest_of(&content);
         assert_eq!(digest, PINNED, "rendered producer bytes changed");

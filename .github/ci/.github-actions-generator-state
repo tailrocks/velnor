@@ -14,7 +14,7 @@ generator	52
 .github/workflows/ci-policy.yml	6e5254e9cabe7034
 .github/workflows/ci-pr.yml	696da022f7b0bb86
 .github/workflows/ci-release-package-signer.yml	d351a0beeba58430
-.github/workflows/ci-runtime-products.yml	49f404fe0be28813
+.github/workflows/ci-runtime-products.yml	bb3be0a90075bc38
 .github/workflows/ci-unit-bun.yml	85916051ca3e21c2
 .github/workflows/ci-unit-docker.yml	6856aeeb763dbb5c
 .github/workflows/ci-unit-docs.yml	12d7419015a14684
