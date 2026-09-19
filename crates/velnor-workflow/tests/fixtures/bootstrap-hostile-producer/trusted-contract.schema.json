@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://velnor.invalid/bootstrap/trusted-handoff-v1.json",
+  "title": "Velnor G1 base-owned bootstrap handoff",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "workflow_path",
+    "event",
+    "head_sha",
+    "source_repository",
+    "source_closure",
+    "profile",
+    "features",
+    "platform",
+    "producer",
+    "binary",
+    "source_archive",
+    "fixture",
+    "sandbox"
+  ],
+  "properties": {
+    "schema": { "const": "velnor.bootstrap.handoff.v1" },
+    "workflow_path": { "const": ".github/workflows/ci-pr.yml" },
+    "event": { "const": "pull_request" },
+    "head_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "source_repository": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "source_closure": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "profile": { "const": "debug" },
+    "features": { "const": [] },
+    "platform": { "const": "linux-amd64" },
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "job_id",
+        "job_name",
+        "artifact_id",
+        "artifact_name",
+        "artifact_service_digest",
+        "archive_sha256"
+      ],
+      "properties": {
+        "run_id": { "type": "integer", "minimum": 1 },
+        "job_id": { "type": "integer", "minimum": 1 },
+        "job_name": { "type": "string", "minLength": 1 },
+        "artifact_id": { "type": "integer", "minimum": 1 },
+        "artifact_name": { "type": "string", "minLength": 1 },
+        "artifact_service_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "archive_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "binary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256"],
+      "properties": {
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "source_archive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "head_sha", "tree_digest"],
+      "properties": {
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "head_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "tree_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "probe_sha256",
+        "build_sha256",
+        "contract_sha256",
+        "archive_checker_sha256",
+        "harness_sha256"
+      ],
+      "properties": {
+        "probe_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "build_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "contract_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "archive_checker_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "harness_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "sandbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "image",
+        "base",
+        "source_revision",
+        "index_digest",
+        "platform_digest",
+        "config_digest"
+      ],
+      "properties": {
+        "image": { "type": "string", "pattern": "^[a-z0-9./_-]+$" },
+        "base": {
+          "const": "ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b"
+        },
+        "source_revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "index_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "platform_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "config_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }
+    }
+  },
+  "x-velnor-limits": {
+    "archive_bytes": 67108864,
+    "archive_members": 4096,
+    "archive_unpacked_bytes": 268435456,
+    "output_bytes": 67108864,
+    "output_entries": 4096,
+    "image_layer_bytes": 536870912,
+    "container_memory_bytes": 536870912,
+    "container_pids": 128,
+    "container_timeout_seconds": 300
+  }
+}
