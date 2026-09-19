@@ -670,12 +670,14 @@ fn render_rolling_refresh_script(
     let mut script = String::from(
         r#"set -Eeuo pipefail
 rolling_tag="$RELEASE_TAG"
+staged_tag="$RELEASE_TAG-$EXPECTED_SOURCE_COMMIT"
 published_dir="$GITHUB_WORKSPACE/published-package"
 transaction_dir="$(mktemp -d)"
 rolling_response="$transaction_dir/rolling-response"
 rolling_body="$transaction_dir/rolling.json"
 expected_assets="$transaction_dir/expected-assets"
 old_assets="$transaction_dir/old-assets"
+staged_assets="$transaction_dir/staged-assets"
 rollback_dir="$transaction_dir/old-package"
 rolling_release_id=""
 old_tag_sha=""
@@ -683,6 +685,7 @@ old_name=""
 old_body=""
 old_draft=""
 old_prerelease=""
+candidate_version="$(jq -er '.version | strings' "$published_dir/release-manifest.json")"
 had_release=0
 mutated=0
 
@@ -703,22 +706,30 @@ rollback() {
     set +e
     rollback_status=0
     if [ "$had_release" = 1 ]; then
-      gh release upload "$rolling_tag" --repo "$GITHUB_REPOSITORY" --clobber \
+      # Keep the rollback release hidden while restoring its complete old set.
+      if gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" -F draft=true >/dev/null; then
+        gh release upload "$rolling_tag" --repo "$GITHUB_REPOSITORY" --clobber \
 "#,
     );
     script.push_str(rollback_assets);
     script.push_str(
         r#"
-      if [ -n "$old_tag_sha" ]; then
-        gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" -f "sha=$old_tag_sha" -F force=true >/dev/null || rollback_status=1
+        [ "$?" -eq 0 ] || rollback_status=1
+        if [ -n "$old_tag_sha" ]; then
+          gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" -f "sha=$old_tag_sha" -F force=true >/dev/null || rollback_status=1
+        fi
+        gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" \
+          -f "name=$old_name" -f "body=$old_body" -F "draft=$old_draft" -F "prerelease=$old_prerelease" -F make_latest=false >/dev/null || rollback_status=1
+      else
+        rollback_status=1
       fi
-      gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" \
-        -f "name=$old_name" -f "body=$old_body" -F "draft=$old_draft" -F "prerelease=$old_prerelease" -F make_latest=false >/dev/null || rollback_status=1
     else
       if [ -n "$rolling_release_id" ]; then
         gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" >/dev/null || rollback_status=1
       fi
-      gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" >/dev/null || rollback_status=1
+      if [ -n "$(remote_tag_sha "$rolling_tag")" ]; then
+        gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" >/dev/null || rollback_status=1
+      fi
     fi
     if [ "$rollback_status" -ne 0 ]; then
       echo "::error::rolling preview publication failed and rollback was incomplete" >&2
@@ -739,6 +750,16 @@ trap 'rm -rf -- "$transaction_dir"' EXIT
     script.push_str(
         r#"
 } | LC_ALL=C sort > "$expected_assets"
+
+if ! staged_body="$(gh api --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/tags/$staged_tag")"; then
+  echo "::error::verified immutable staging release is missing" >&2
+  exit 1
+fi
+jq -e --arg tag "$staged_tag" '(.draft | not) and .prerelease == true and .tag_name == $tag' <<<"$staged_body" >/dev/null
+jq -r '.assets[].name' <<<"$staged_body" | LC_ALL=C sort > "$staged_assets"
+cmp -s "$expected_assets" "$staged_assets" || { echo "::error::immutable staging release asset set is not exact" >&2; exit 1; }
+staged_tag_sha="$(remote_tag_sha "$staged_tag")"
+[ "$staged_tag_sha" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::immutable staging tag does not resolve to the verified source commit" >&2; exit 1; }
 
 if gh api --repo "$GITHUB_REPOSITORY" -i "repos/$GITHUB_REPOSITORY/releases/tags/$rolling_tag" > "$rolling_response" 2>/dev/null; then
   :
@@ -773,6 +794,27 @@ case "$rolling_http" in
     done
     old_source_commit="$(jq -er '.source_commit | strings' "$rollback_dir/release-manifest.json")"
     [ "$old_source_commit" = "$old_tag_sha" ] || { echo "::error::existing rolling release provenance does not match its tag" >&2; exit 1; }
+    old_version="$(jq -er '.version | strings' "$rollback_dir/release-manifest.json")"
+    [[ "$old_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]+\+[0-9a-f]{7}$ ]] || { echo "::error::existing rolling release version is not a preview version" >&2; exit 1; }
+    [ "${old_version##*+}" = "${old_source_commit:0:7}" ] || { echo "::error::existing rolling release version does not bind its source" >&2; exit 1; }
+    old_version_order="${old_version%%+*}"
+    candidate_version_order="${candidate_version%%+*}"
+    if [ "$old_source_commit" != "$EXPECTED_SOURCE_COMMIT" ]; then
+      if ! git -C source cat-file -e "${old_source_commit}^{commit}"; then
+        echo "::error::existing rolling source commit is not present in the checked-out history" >&2
+        exit 1
+      fi
+      if ! git -C source merge-base --is-ancestor "$old_source_commit" "$EXPECTED_SOURCE_COMMIT"; then
+        echo "::error::candidate source commit is not a descendant of the live rolling source" >&2
+        exit 1
+      fi
+    fi
+    if [ "$old_version" = "$candidate_version" ] && [ "$old_source_commit" = "$EXPECTED_SOURCE_COMMIT" ]; then
+      :
+    elif [ "$old_version_order" = "$candidate_version_order" ] || [ "$(printf '%s\n' "$old_version_order" "$candidate_version_order" | LC_ALL=C sort -V | tail -n 1)" != "$candidate_version_order" ]; then
+      echo "::error::candidate preview version is not newer than the live rolling version" >&2
+      exit 1
+    fi
     jq -e --arg repository "$EXPECTED_SOURCE_REPOSITORY" --arg source_ref "$EXPECTED_SOURCE_REF" --arg commit "$old_source_commit" --slurpfile old_manifest "$rollback_dir/release-manifest.json" 'keys == ["manifest","source_digest","source_ref","source_repository"] and .source_repository == $repository and .source_ref == $source_ref and .source_digest == $commit and .manifest == $old_manifest[0]' "$rollback_dir/identity.json" >/dev/null
     ;;
   404)
@@ -788,14 +830,18 @@ if [ "$had_release" = 0 ]; then
   mutated=1
   create_json="$(gh api --method POST --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases" \
     -f "tag_name=$rolling_tag" -f "target_commitish=$EXPECTED_SOURCE_COMMIT" \
-    -f "name=$RELEASE_TITLE_PREFIX $(jq -er '.version' "$published_dir/release-manifest.json")" \
+    -f "name=$RELEASE_TITLE_PREFIX $candidate_version" \
     -f "body=Verified package release from $EXPECTED_SOURCE_COMMIT" \
-    -F draft=false -F prerelease=true -F make_latest=false)"
+    -F draft=true -F prerelease=true -F make_latest=false)"
   rolling_release_id="$(jq -er '.id' <<<"$create_json")"
 else
   mutated=1
+  gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" -F draft=true >/dev/null
 fi
 
+# The immutable source-bound release is the candidate staging record.  Copy its
+# already-verified files only while the rolling release remains a draft; draft
+# publication is the visibility boundary, so readers never see mixed assets.
 gh release upload "$rolling_tag" --repo "$GITHUB_REPOSITORY" --clobber \
 "#,
     );
@@ -803,13 +849,18 @@ gh release upload "$rolling_tag" --repo "$GITHUB_REPOSITORY" --clobber \
     script.push_str(
         r#"
 
+rolling_stage_json="$(gh api --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id")"
+jq -e --arg tag "$rolling_tag" '.draft == true and .prerelease == true and .tag_name == $tag' <<<"$rolling_stage_json" >/dev/null
+jq -r '.assets[].name' <<<"$rolling_stage_json" | LC_ALL=C sort > "$old_assets"
+cmp -s "$expected_assets" "$old_assets" || { echo "::error::staged rolling release asset set is not exact" >&2; exit 1; }
+
 if [ "$had_release" = 1 ]; then
   gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" -f "sha=$EXPECTED_SOURCE_COMMIT" -F force=true >/dev/null
-  gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" \
-    -f "name=$RELEASE_TITLE_PREFIX $(jq -er '.version' "$published_dir/release-manifest.json")" \
-    -f "body=Verified package release from $EXPECTED_SOURCE_COMMIT" \
-    -F draft=false -F prerelease=true -F make_latest=false >/dev/null
 fi
+gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" \
+  -f "name=$RELEASE_TITLE_PREFIX $candidate_version" \
+  -f "body=Verified package release from $EXPECTED_SOURCE_COMMIT" \
+  -F draft=false -F prerelease=true -F make_latest=false >/dev/null
 
 new_tag_sha="$(remote_tag_sha "$rolling_tag")"
 [ "$new_tag_sha" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::rolling tag does not resolve to the verified source commit" >&2; exit 1; }
@@ -837,6 +888,19 @@ fn render_formula_mapping_script(payload_names: &str) -> String {
         r#"set -euo pipefail
 manifest="$GITHUB_WORKSPACE/published-package/release-manifest.json"
 test -d Formula
+formula_pairs="$(mktemp)"
+trap 'rm -f -- "$formula_pairs"' EXIT
+current_url=""
+while IFS= read -r line; do
+  if [[ "$line" =~ ^[[:space:]]*url[[:space:]]+\"([^\"]+)\" ]]; then
+    current_url="${BASH_REMATCH[1]}"
+  elif [[ "$line" =~ ^[[:space:]]*sha256[[:space:]]+\"([0-9a-f]{64})\" ]]; then
+    if [ -n "$current_url" ]; then
+      printf '%s\t%s\n' "$current_url" "${BASH_REMATCH[1]}"
+    fi
+    current_url=""
+  fi
+done < <(git grep -h -E '^[[:space:]]*(url|sha256)[[:space:]]+' -- Formula || true) > "$formula_pairs"
 for payload in \
 "#,
     );
@@ -844,9 +908,9 @@ for payload in \
     script.push_str(
         r#"do
   url="https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$payload"
-  git grep -Fq "$url" -- Formula || { echo "::error::formula URL does not use the verified rolling release: $url" >&2; exit 1; }
   expected="$(jq -er --arg name "$payload" '[.assets[] | select(.name == $name)] | select(length == 1) | .[0].sha256' "$manifest")"
-  git grep -Fq "sha256 \"$expected\"" -- Formula || { echo "::error::formula checksum does not match the verified rolling asset: $payload" >&2; exit 1; }
+  expected_pair="$(printf '%s\t%s' "$url" "$expected")"
+  grep -Fqx -- "$expected_pair" "$formula_pairs" || { echo "::error::formula URL/checksum pair does not match the verified rolling asset: $payload" >&2; exit 1; }
 done
 "#,
     );
@@ -900,6 +964,14 @@ fn render_publish_job(
             shell_quote(&name)
         );
     }
+    let mut immutable_expected_asset_names = String::new();
+    for name in release_asset_names(spec) {
+        let _ = writeln!(
+            immutable_expected_asset_names,
+            "            printf '%s\\n' {}",
+            shell_quote(&name)
+        );
+    }
     let mut published_assets = String::new();
     let mut rollback_assets = String::new();
     for (index, name) in release_asset_names(spec).iter().enumerate() {
@@ -935,7 +1007,9 @@ fn render_publish_job(
     output.push_str("    runs-on: ");
     output.push_str(runner);
     output.push_str("\n    timeout-minutes: 30\n    environment: github-preview\n");
-    output.push_str("    permissions:\n      contents: write\n      pull-requests: write\n");
+    output.push_str(
+        "    permissions:\n      contents: write\n      pull-requests: write\n      attestations: read\n",
+    );
     output.push_str("    outputs:\n      release_tag: ");
     output.push_str(&github_expression("steps.publish.outputs.immutable_tag"));
     output.push_str("\n      consumer_pr_url: ");
@@ -997,15 +1071,15 @@ fn render_publish_job(
     output.push_str("      - name: Publish immutable source-bound release\n        id: publish\n        env:\n          GH_TOKEN: ");
     output.push_str(github_token_expr);
     output.push_str(
-        "\n        run: |\n          set -euo pipefail\n          tag=\"$RELEASE_TAG-$EXPECTED_SOURCE_COMMIT\"\n          version=\"$(jq -er '.version' \"$PACKAGE_DIR/release-manifest.json\")\"\n          title=\"$RELEASE_TITLE_PREFIX $version\"\n          tag_sha=\"$(git -C source ls-remote origin \"refs/tags/$tag^{}\" | awk 'NR == 1 {print $1}')\"\n          if [ -z \"$tag_sha\" ]; then\n            tag_sha=\"$(git -C source ls-remote origin \"refs/tags/$tag\" | awk 'NR == 1 {print $1}')\"\n          fi\n          if [ -n \"$tag_sha\" ] && [ \"$tag_sha\" != \"$EXPECTED_SOURCE_COMMIT\" ]; then\n            echo \"::error::immutable release tag resolves to an unexpected source commit\" >&2\n            exit 1\n          fi\n          release_json=\"$(mktemp)\"\n          trap 'rm -f -- \"$release_json\"' EXIT\n          response_status=0\n          gh api --repo \"$GITHUB_REPOSITORY\" -i \"repos/$GITHUB_REPOSITORY/releases/tags/$tag\" > \"$release_json\" 2>/dev/null || response_status=$?\n          response_http=\"$(awk 'NR == 1 {print $2; exit}' \"$release_json\")\"\n          if [ \"$response_http\" = 404 ]; then\n            if [ -n \"$tag_sha\" ]; then\n              gh release create \"$tag\" --repo \"$GITHUB_REPOSITORY\" --verify-tag --prerelease --latest=false --title \"$title\" --notes \"Verified immutable package release $version from $EXPECTED_SOURCE_COMMIT\" ",
+        "\n        run: |\n          set -euo pipefail\n          tag=\"$RELEASE_TAG-$EXPECTED_SOURCE_COMMIT\"\n          version=\"$(jq -er '.version' \"$PACKAGE_DIR/release-manifest.json\")\"\n          title=\"$RELEASE_TITLE_PREFIX $version\"\n          tag_sha=\"$(git -C source ls-remote origin \"refs/tags/$tag^{}\" | awk 'NR == 1 {print $1}')\"\n          if [ -z \"$tag_sha\" ]; then\n            tag_sha=\"$(git -C source ls-remote origin \"refs/tags/$tag\" | awk 'NR == 1 {print $1}')\"\n          fi\n          if [ -n \"$tag_sha\" ] && [ \"$tag_sha\" != \"$EXPECTED_SOURCE_COMMIT\" ]; then\n            echo \"::error::immutable release tag resolves to an unexpected source commit\" >&2\n            exit 1\n          fi\n          release_json=\"$(mktemp)\"\n          expected_assets=\"$(mktemp)\"\n          existing_assets=\"$(mktemp)\"\n          trap 'rm -f -- \"$release_json\" \"$expected_assets\" \"$existing_assets\"' EXIT\n          {\n",
+    );
+    output.push_str(&immutable_expected_asset_names);
+    output.push_str(
+        "          } | LC_ALL=C sort > \"$expected_assets\"\n          if ! gh api --repo \"$GITHUB_REPOSITORY\" -i \"repos/$GITHUB_REPOSITORY/releases/tags/$tag\" > \"$release_json\" 2>/dev/null; then\n            :\n          fi\n          response_http=\"$(awk 'NR == 1 {print $2; exit}' \"$release_json\")\"\n          if [ \"$response_http\" = 404 ]; then\n            if [ -n \"$tag_sha\" ]; then\n              gh release create \"$tag\" --repo \"$GITHUB_REPOSITORY\" --verify-tag --prerelease --latest=false --title \"$title\" --notes \"Verified immutable package release $version from $EXPECTED_SOURCE_COMMIT\"\n            else\n              gh release create \"$tag\" --repo \"$GITHUB_REPOSITORY\" --target \"$EXPECTED_SOURCE_COMMIT\" --prerelease --latest=false --title \"$title\" --notes \"Verified immutable package release $version from $EXPECTED_SOURCE_COMMIT\"\n            fi\n          elif [ \"$response_http\" = 200 ]; then\n            live_body=\"$(awk 'body {print; next} /^\\r?$/ {body = 1}' \"$release_json\")\"\n            jq -e --arg tag \"$tag\" --arg title \"$title\" '(.draft | not) and .prerelease == true and .tag_name == $tag and .name == $title' <<<\"$live_body\" >/dev/null\n            test -n \"$tag_sha\" || { echo \"::error::existing release has no exact source tag\" >&2; exit 1; }\n            jq -r '.assets[].name' <<<\"$live_body\" | LC_ALL=C sort > \"$existing_assets\"\n            if comm -23 \"$existing_assets\" \"$expected_assets\" | grep -q .; then\n              echo \"::error::immutable release contains an undeclared asset\" >&2\n              exit 1\n            fi\n          else\n            echo \"::error::release preflight failed; refusing publication\" >&2\n            exit 1\n          fi\n          # Create first, upload second: a failed upload leaves a valid, resumable\n          # immutable release instead of an unrecoverable partial create.\n          gh release upload \"$tag\" --repo \"$GITHUB_REPOSITORY\" --clobber ",
     );
     output.push_str(assets);
     output.push_str(
-        "\n            else\n              gh release create \"$tag\" --repo \"$GITHUB_REPOSITORY\" --target \"$EXPECTED_SOURCE_COMMIT\" --prerelease --latest=false --title \"$title\" --notes \"Verified immutable package release $version from $EXPECTED_SOURCE_COMMIT\" ",
-    );
-    output.push_str(assets);
-    output.push_str(
-        "\n            fi\n          elif [ \"$response_http\" != 200 ]; then\n            echo \"::error::release preflight failed; refusing publication\" >&2\n            exit 1\n          else\n            live_body=\"$(awk 'body {print; next} /^\\r?$/ {body = 1}' \"$release_json\")\"\n            jq -e --arg tag \"$tag\" --arg title \"$title\" '(.draft | not) and .prerelease == true and .tag_name == $tag and .name == $title' <<<\"$live_body\" >/dev/null\n            test -n \"$tag_sha\" || { echo \"::error::existing release has no exact source tag\" >&2; exit 1; }\n          fi\n          final_tag_sha=\"$(git -C source ls-remote origin \"refs/tags/$tag^{}\" | awk 'NR == 1 {print $1}')\"\n          [ \"$final_tag_sha\" = \"$EXPECTED_SOURCE_COMMIT\" ] || { echo \"::error::immutable tag does not resolve to the verified source commit\" >&2; exit 1; }\n          printf 'immutable_tag=%s\\n' \"$tag\" >> \"$GITHUB_OUTPUT\"\n",
+        "\n          immutable_body=\"$(gh api --repo \"$GITHUB_REPOSITORY\" \"repos/$GITHUB_REPOSITORY/releases/tags/$tag\")\"\n          jq -e --arg tag \"$tag\" --arg title \"$title\" '(.draft | not) and .prerelease == true and .tag_name == $tag and .name == $title' <<<\"$immutable_body\" >/dev/null\n          jq -r '.assets[].name' <<<\"$immutable_body\" | LC_ALL=C sort > \"$existing_assets\"\n          cmp -s \"$expected_assets\" \"$existing_assets\" || { echo \"::error::immutable release asset set is not exact after publication\" >&2; exit 1; }\n          final_tag_sha=\"$(git -C source ls-remote origin \"refs/tags/$tag^{}\" | awk 'NR == 1 {print $1}')\"\n          if [ -z \"$final_tag_sha\" ]; then\n            final_tag_sha=\"$(git -C source ls-remote origin \"refs/tags/$tag\" | awk 'NR == 1 {print $1}')\"\n          fi\n          [ \"$final_tag_sha\" = \"$EXPECTED_SOURCE_COMMIT\" ] || { echo \"::error::immutable tag does not resolve to the verified source commit\" >&2; exit 1; }\n          printf 'immutable_tag=%s\\n' \"$tag\" >> \"$GITHUB_OUTPUT\"\n",
     );
 
     let immutable_tag_output = github_expression("steps.publish.outputs.immutable_tag");
@@ -1302,7 +1376,8 @@ concurrency_group = "package-release-preview"
             "{workflow}"
         );
         assert!(
-            workflow.contains("contents: write\n      pull-requests: write"),
+            workflow
+                .contains("contents: write\n      pull-requests: write\n      attestations: read"),
             "{workflow}"
         );
         assert!(workflow.contains("tag=\"$RELEASE_TAG-$EXPECTED_SOURCE_COMMIT\""));
@@ -1319,6 +1394,40 @@ concurrency_group = "package-release-preview"
         assert!(workflow.contains(
             "gh release upload \"$rolling_tag\" --repo \"$GITHUB_REPOSITORY\" --clobber"
         ));
+        assert!(workflow.contains("staged_tag=\"$RELEASE_TAG-$EXPECTED_SOURCE_COMMIT\""));
+        assert!(workflow.contains(
+            "merge-base --is-ancestor \"$old_source_commit\" \"$EXPECTED_SOURCE_COMMIT\""
+        ));
+        assert!(workflow
+            .contains("candidate preview version is not newer than the live rolling version"));
+        assert!(workflow
+            .contains("immutable staging tag does not resolve to the verified source commit"));
+        assert!(workflow.contains("-F draft=true -F prerelease=true"));
+        assert!(workflow.contains("staged rolling release asset set is not exact"));
+        assert!(workflow.contains("-F draft=false -F prerelease=true"));
+        let rolling_stage = workflow
+            .find("releases/$rolling_release_id\" -F draft=true")
+            .expect("rolling draft staging");
+        let rolling_upload = workflow
+            .find("gh release upload \"$rolling_tag\"")
+            .expect("rolling staged upload");
+        let rolling_check = workflow
+            .find("staged rolling release asset set is not exact")
+            .expect("rolling asset check");
+        let rolling_publish = rolling_check
+            + workflow[rolling_check..]
+                .find("-f \"name=$RELEASE_TITLE_PREFIX $candidate_version\"")
+                .expect("rolling draft publish");
+        assert!(rolling_stage < rolling_upload);
+        assert!(rolling_upload < rolling_check);
+        assert!(rolling_check < rolling_publish);
+        let immutable_upload = workflow
+            .find("gh release upload \"$tag\" --repo \"$GITHUB_REPOSITORY\" --clobber")
+            .expect("immutable resumable upload");
+        let immutable_check = workflow
+            .find("immutable release asset set is not exact after publication")
+            .expect("immutable asset check");
+        assert!(immutable_upload < immutable_check);
         assert!(workflow.contains("repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag"));
         assert!(workflow.contains("previous release restored"));
         assert!(
@@ -1327,8 +1436,10 @@ concurrency_group = "package-release-preview"
         assert!(workflow.contains(
             "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/$payload"
         ));
-        assert!(workflow.contains("git grep -Fq \"$url\" -- Formula"));
-        assert!(workflow.contains("sha256 \\\"$expected\\\""));
+        assert!(
+            workflow.contains("git grep -h -E '^[[:space:]]*(url|sha256)[[:space:]]+' -- Formula")
+        );
+        assert!(workflow.contains("formula URL/checksum pair does not match"));
         assert!(workflow.contains("VELNOR_PACKAGE_RELEASE_TAG=\"$RELEASE_TAG\""));
         assert!(!workflow.contains("gh release delete"));
         assert!(!workflow.contains("HEAD:$CONSUMER_BRANCH"));
@@ -1337,6 +1448,50 @@ concurrency_group = "package-release-preview"
 
     #[cfg(unix)]
     #[test]
+    fn generated_publish_scripts_are_bash_syntax_valid() {
+        use std::process::Command;
+
+        let spec = parse_spec(&Args(&args())).expect("valid fixture");
+        let workflow = render_workflow(&render_config(), &spec);
+        let document = serde_yaml::from_str::<serde_yaml::Value>(&workflow)
+            .expect("rendered workflow is YAML");
+        let publish = document
+            .get("jobs")
+            .and_then(serde_yaml::Value::as_mapping)
+            .and_then(|jobs| jobs.get("publish"))
+            .and_then(serde_yaml::Value::as_mapping)
+            .expect("publish job");
+        let steps = publish
+            .get("steps")
+            .and_then(serde_yaml::Value::as_sequence)
+            .expect("publish steps");
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-publish-bash-{}",
+            crate::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create shell fixture");
+        for (index, step) in steps.iter().enumerate() {
+            let Some(script) = step.get("run").and_then(serde_yaml::Value::as_str) else {
+                continue;
+            };
+            let path = root.join(format!("step-{index}.sh"));
+            std::fs::write(&path, script).expect("write shell fixture");
+            let output = Command::new("bash")
+                .args(["-n", path.to_str().expect("shell fixture path")])
+                .output()
+                .expect("run bash syntax check");
+            assert!(
+                output.status.success(),
+                "publish step {index} is not valid bash: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::too_many_lines)]
     fn generated_formula_mapping_accepts_only_verified_rolling_assets() {
         use std::process::Command;
 
@@ -1433,6 +1588,21 @@ concurrency_group = "package-release-preview"
         let stale = formula.replace("/releases/download/preview/", "/releases/download/old/");
         std::fs::write(formula_dir.join("example-preview.rb"), stale)
             .expect("write stale formula fixture");
+        run(false);
+
+        let first_digest = format!("{:064x}", 1);
+        let second_digest = format!("{:064x}", 2);
+        let placeholder = "sha256 \"formula-pair-placeholder\"";
+        let swapped = formula
+            .replacen(&format!("sha256 \"{first_digest}\""), placeholder, 1)
+            .replacen(
+                &format!("sha256 \"{second_digest}\""),
+                &format!("sha256 \"{first_digest}\""),
+                1,
+            )
+            .replace(placeholder, &format!("sha256 \"{second_digest}\""));
+        std::fs::write(formula_dir.join("example-preview.rb"), swapped)
+            .expect("write mismatched formula fixture");
         run(false);
 
         let _ = std::fs::remove_dir_all(root);
