@@ -35,6 +35,24 @@ they do not replace the historical 78-to-77 reconciliation or claim a
 current-forever state. The historical Velnor check contract at `abe9ad82` is
 not reusable against the later live default revision.
 
+## User native-version amendment
+
+The amended policy is explicit: every Velnor workload on a GitHub-hosted macOS
+runner uses the newest actual supported major available at dispatch—`macos-27`
+when available, otherwise `macos-26`. `macos-15`, older majors, and a lagging
+`macos-latest` alias are never fallback choices. Evidence must bind the
+resolved label, host/image identity, Xcode/Swift, SDK, deployment target, and
+architecture. An incompatible native constraint fails explicitly; it is not
+skipped, downgraded, or silently rerouted.
+
+This does not weaken immutable action, container-image, release-asset, or
+digest pins. Pin updates require reviewed immutable identities. The isolated
+`latest_macos_policy` task owns the AGENTS rule and official-label research/PR;
+`g3-native-routing` owns generator policy; and `g2_homebrew_contract`
+independently reviews the native/package contract. These ownership records do
+not approve a source change or alter G0→G1→G2→G3→G4/G5 sequencing. Exact label
+research and policy PR evidence remain external and pending.
+
 ## Completed
 
 - Read the full authoritative goal and applicable root rules.
@@ -115,6 +133,7 @@ package delivery, fleet migration, Mac operation, or any gate exit.
 | PR954 current head | `f16592ea165ced141bf0bb1c43466a95d7df8b2e` | Observed; current run still pending/partial |
 | PR953 cache result | Run `35453601367` failed cache contract | Observed; cache diagnosis reopened |
 | G0-runtime | Read-only report persisted at external `G0/runtime/report.md`; actual Mac not operated before G3 | Completed investigation; G4/G5 pending |
+| Native macOS version policy | GitHub-hosted Velnor macOS workloads must use newest actual `macos-27`, otherwise `macos-26`; no `macos-15`, lagging alias, old fallback, skip, or silent reroute | Amendment recorded; official-label research/PR and exact runner/image/SDK evidence pending; immutable action/image pins remain required |
 | Runner protocol source | `actions/runner` revision `80bb1fb827fa44d489263061e71ef4adba7ad8cd` pinned for later work | Observed; no implementation here |
 | G2 native package compile | Three required ARM64 macOS binaries compile/smoke at `abe9ad82`; nothing installed or published | Preliminary only; G2 remains pending |
 | G2 product identity | Application/native asset/component identity contract is missing | Blocker for package acceptance; owned by G2-native-product |
@@ -170,8 +189,9 @@ unknown.
 | G2-native-product | Source implementation assigned to native-packages worker | `/root/g2_native_packages`, thread `01a0ba7a-328e-7282-943e-5b54c2ac209d`, worktree `dual-lane-native-product`; define application/runtime component identity and authoritative package manifest |
 | G2-preview-publication | Planned; blocked until G1 | `/root/g1_run_operations`, thread `01a0ba7a-9d5d-7291-a2f5-357ff78dba5e`, worktree `dual-lane-preview-publication`; reviewer `/root/g2_distribution_review` |
 | G2-distribution-review | Typed review pending; initial checker hostile G2 suite failed all nine mutations on old b3b6 | Thread `01a0ba81-1af6-7f11-9f24-3ff115b8f314`; no publication approval |
+| latest_macos_policy | Amendment assigned; exact official label research/PR pending | Isolated AGENTS-rule/research task; newest actual `macos-27`, otherwise `macos-26`; no `macos-15`/lagging alias/old fallback/skip; reviewer `/root/g2_homebrew_contract` |
 | g3-skills-adapter | Read-only evidence written; central scanner fix required | Thread `01a0ba7b-0152-7a70-8d18-c2387f1c9469`; external report only, no rollout |
-| g3-native-routing | Read-only evidence written; rollout blocked until G2 | Thread `01a0ba7b-32f1-7af1-a25f-4cde73f1f075`; native routing report only |
+| g3-native-routing | Read-only evidence written; generator policy amendment must use newest actual hosted macOS major and explicit incompatibility failure; rollout blocked until G2 | Thread `01a0ba7b-32f1-7af1-a25f-4cde73f1f075`; native routing report only; native/package contract review `/root/g2_homebrew_contract` |
 | g3-action-roles | Read-only evidence written; G3 contract incomplete | Thread `01a0ba7b-57a5-7623-bd92-d0666a02b96e`; reusable publisher/runtime gaps remain |
 | g3-rust-consumers | Read-only evidence written; scanner/release gaps recorded | Thread `01a0ba7d-bb3f-78c3-84c8-eb0b2d75e5d0`; termrock central fix pending |
 | g3-distribution-consumers | Read-only evidence written; G3 blocked/incomplete | Thread `01a0ba7d-e457-7723-81ba-1f7ed038212c`; native install/feed proof missing |
@@ -194,6 +214,9 @@ inferred from assignment.
    Mac/OrbStack pilot, dual-provider run, or final audit is proven.
 5. Required-check transition and App binding remain unchanged/unknown beyond
    the recorded Velnor ruleset snapshot.
+6. Native macOS policy still lacks official-label research/PR and exact
+   runner/image/SDK evidence. Any incompatible native constraint must fail
+   explicitly; no older macOS fallback, skip, or silent reroute is allowed.
 
 Read-only early audits may continue before G2, but no `g3-*` task can claim a
 G3 migration or authorize operational rollout. The current runtime audit also
@@ -209,7 +232,10 @@ G3 barrier.
    rerun the nine hostile G2 mutations plus G0/G1 adversarial fixtures.
 3. Refresh live GitHub inventory and attach source/run/check evidence.
 4. Reconcile bootstrap, distribution, fleet, runtime, and failed-run findings.
-5. Start G1 only after G0 exit evidence is complete and independently reviewed.
+5. Complete `latest_macos_policy` official-label research/PR and the
+   `g3-native-routing` generator-policy review; preserve immutable action/image
+   pins and explicit incompatible-constraint failures.
+6. Start G1 only after G0 exit evidence is complete and independently reviewed.
 
 ## Checkpoint rule
 

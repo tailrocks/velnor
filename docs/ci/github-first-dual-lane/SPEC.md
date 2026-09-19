@@ -60,6 +60,28 @@ ruleset transition has been claimed. Preserve neutral contexts and substantive
 verification; prove the hosted-only contract on the exact candidate before any
 required-check change.
 
+### User native-version amendment
+
+For every Velnor workload that runs on GitHub-hosted macOS, select the newest
+actual supported macOS major available at dispatch time: `macos-27` when
+available, otherwise `macos-26` when available. Never select `macos-15` or any
+other older major as a fallback, and do not treat a lagging `macos-latest`
+alias as proof of the newest actual major. Record the resolved runner label,
+host/image identity, Xcode/Swift and SDK versions, deployment target, and
+architecture in the revision-bound evidence. If the newest actual major cannot
+execute an applicable native workload, fail explicitly with the incompatible
+constraint and its evidence; do not skip, downgrade, or silently reroute it.
+
+This policy does not weaken immutable action references, container image
+references, release assets, or digest pins. Pin changes require a reviewed
+update with the new immutable identity and compatibility evidence. The
+isolated `latest_macos_policy` task owns the AGENTS rule plus official label
+research/PR; `g3_native_routing` owns the generator policy; and
+`g2_homebrew_contract` independently reviews the resulting native/package
+contract. These are ownership assignments, not approvals. The existing
+G0→G1→G2→G3→G4/G5 sequencing remains binding; no native rollout or fallback
+is authorized by this amendment.
+
 ### Checkpoint and publication discipline
 
 Commit and push coherent checkpoints regularly at safe handoff, review, and
@@ -386,8 +408,11 @@ or missing history is not meaningful migration when code has behavior.
 Determine native capability from dependencies and code. Preserve Apple checks
 for Jackin, Tablerock, and the playground; verify macOS version, Xcode/Swift,
 SDK, deployment target, and architecture. A Linux Swift compiler or a macOS
-label alone is not evidence. Migrate in dependency-aware waves and record
-out-of-scope image/product dependencies.
+label alone is not evidence. For GitHub-hosted macOS Velnor jobs, the native
+version amendment above is mandatory: use the newest actual `macos-27` or
+`macos-26` major available, never `macos-15` or a lagging alias; incompatible
+constraints fail explicitly rather than skipping or falling back. Migrate in
+dependency-aware waves and record out-of-scope image/product dependencies.
 
 Every repository needs byte-stable regeneration, meaningful local/static checks,
 successful migration PR, deliberate full-workload hosted run, independent
@@ -409,6 +434,13 @@ through OrbStack. Do not provision Velnor-managed Firecracker/libvirt/runner
 VMs. Do not impose per-container CPU/RAM limits; enforce one host-wide
 `max_jobs=N` budget and bounded disk/cache retention. Do not alter unrelated
 containers, volumes, services, or projects.
+
+The hosted-runner native policy remains separate from this actual-host pilot:
+hosted macOS Velnor jobs must use the newest actual supported major
+(`macos-27`, otherwise `macos-26`), never `macos-15` or an older fallback. The
+pilot must record the actual host separately. An incompatible native
+constraint is a named failure with a reproduction and evidence; it is never a
+skip, downgrade, or silent provider fallback.
 
 Begin with existing `velnorctl host`; verify registration scope/labels/groups,
 shared capacity, trust policy, Docker resolution, and daemon defaults. Extend
@@ -641,6 +673,10 @@ The final report may say complete only if every applicable item passes:
 - Generation: source/pin/runtime/digest/scanner/output agree and reproduce.
 - Coverage: all required behavior has generated replacement; missing categories,
   native routing, feed automation, and action behavior are resolved.
+- Native version policy: every hosted macOS Velnor workload uses the newest
+  actual supported major (`macos-27`, otherwise `macos-26`), with explicit
+  failure for incompatible constraints and no older fallback/skip; immutable
+  action/image/assets pins remain revision-bound.
 - Hosted CI: final migration PR and main jobs pass in every repository; no hidden
   Velnor prerequisite remains.
 - Velnor CI: eligible jobs pass in OrbStack Docker on same contract; native-only
