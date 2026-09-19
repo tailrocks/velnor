@@ -12,9 +12,9 @@ use super::{
     collect_rest, github_check_suite_runs_request, github_check_suites_request,
     github_open_pull_requests_request, github_single_object_request,
     github_workflow_artifacts_request, github_workflow_attempt_jobs_request,
-    github_workflow_attempt_request, github_workflow_runs_request, AcquisitionError, AuthIdentity,
-    CollectionResult, IdentityReconciliation, RawObjectRef, RawObjectStore, RequestRecord,
-    RestCollectionRequest, RevisionIdentity,
+    github_workflow_attempt_request, github_workflow_runs_request, AcquisitionError,
+    AcquisitionState, AuthIdentity, CollectionResult, IdentityReconciliation, RawObjectRef,
+    RawObjectStore, RequestRecord, RestCollectionRequest, RevisionIdentity,
 };
 use crate::evidence_check::{ManifestDocument, ManifestRepository, CANONICAL_REPOSITORIES};
 use anyhow::{anyhow, bail, Context, Result};
@@ -758,6 +758,7 @@ where
     S: RawObjectStore,
 {
     let raw_start = ledger.raw_objects.len();
+    let request_start = ledger.requests.len();
     let (repository_value, _) = collect_one(
         transport,
         store,
@@ -860,6 +861,18 @@ where
         ledger,
     )
     .await?;
+    let mut access_gaps = access_gaps(&repository_value);
+    access_gaps.extend(access_endpoint_gaps(
+        &ledger.requests[request_start..],
+        &manifest.repository,
+    ));
+    access_gaps.sort();
+    access_gaps.dedup();
+    let access_state = if access_gaps.is_empty() {
+        "observed".to_owned()
+    } else {
+        "unknown".to_owned()
+    };
     Ok(LiveRepository {
         repository: manifest.repository.clone(),
         repository_id,
@@ -875,8 +888,8 @@ where
         closing_default_branch: default_branch.clone(),
         closing_default_branch_sha: default_branch_sha.clone(),
         source_invalidated: false,
-        access_state: access_state(&repository_value),
-        access_gaps: access_gaps(&repository_value),
+        access_state,
+        access_gaps,
         raw_object_refs: ledger.raw_ids_since(raw_start),
     })
 }
@@ -1731,24 +1744,94 @@ fn merge_artifacts(destination: &mut Vec<LiveArtifact>, incoming: Vec<LiveArtifa
     Ok(())
 }
 
-fn access_state(repository: &Value) -> String {
-    if repository
-        .get("permissions")
-        .and_then(Value::as_object)
-        .is_some()
-    {
-        "observed".to_owned()
-    } else {
-        "unknown".to_owned()
+fn access_gaps(repository: &Value) -> Vec<String> {
+    let mut gaps = Vec::new();
+    let Some(permissions) = repository.get("permissions").and_then(Value::as_object) else {
+        gaps.push("repository.permissions".to_owned());
+        return gaps;
+    };
+    if permissions.get("pull").and_then(Value::as_bool) != Some(true) {
+        gaps.push("repository.permissions.pull".to_owned());
     }
+    if repository.get("private").and_then(Value::as_bool).is_none() {
+        gaps.push("repository.private".to_owned());
+    }
+    if repository
+        .get("visibility")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        gaps.push("repository.visibility".to_owned());
+    }
+    if repository
+        .get("owner")
+        .and_then(|owner| owner.get("login"))
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+    {
+        gaps.push("repository.owner.login".to_owned());
+    }
+    gaps
 }
 
-fn access_gaps(repository: &Value) -> Vec<String> {
-    ["permissions", "private", "visibility", "owner"]
-        .into_iter()
-        .filter(|field| repository.get(*field).is_none())
-        .map(str::to_owned)
-        .collect()
+fn access_endpoint_gaps(requests: &[RequestRecord], repository: &str) -> Vec<String> {
+    let prefix = format!("/repos/{repository}");
+    let mut observed = BTreeSet::new();
+    for request in requests {
+        if !request.complete
+            || !matches!(
+                request.state,
+                AcquisitionState::Complete | AcquisitionState::EmptyComplete
+            )
+            || request.response_raw_ref.is_none()
+        {
+            continue;
+        }
+        let endpoint = request.endpoint_or_operation.as_str();
+        if endpoint == prefix {
+            observed.insert("repository".to_owned());
+        } else if endpoint == format!("{prefix}/rulesets") {
+            observed.insert("rulesets".to_owned());
+        } else if endpoint == format!("{prefix}/actions/workflows") {
+            observed.insert("workflow_inventory".to_owned());
+        } else if endpoint.starts_with(&format!("{prefix}/contents/")) {
+            observed.insert("workflow_source".to_owned());
+        } else if endpoint == format!("{prefix}/pulls") {
+            observed.insert("pull_requests".to_owned());
+        } else if endpoint == format!("{prefix}/actions/runs") {
+            observed.insert("workflow_runs".to_owned());
+        } else if endpoint.contains("/actions/runs/") && endpoint.ends_with("/jobs") {
+            observed.insert("workflow_jobs".to_owned());
+        } else if endpoint.contains("/actions/runs/") && endpoint.contains("/attempts/") {
+            observed.insert("workflow_attempts".to_owned());
+        } else if endpoint.contains("/actions/runs/") && endpoint.ends_with("/artifacts") {
+            observed.insert("workflow_artifacts".to_owned());
+        } else if endpoint.contains("/commits/") && endpoint.ends_with("/check-suites") {
+            observed.insert("check_suites".to_owned());
+        } else if endpoint.contains("/check-suites/") && endpoint.ends_with("/check-runs") {
+            observed.insert("check_runs".to_owned());
+        } else if endpoint.starts_with(&format!("{prefix}/commits/")) {
+            observed.insert("default_commit".to_owned());
+        }
+    }
+    [
+        "repository",
+        "default_commit",
+        "rulesets",
+        "workflow_inventory",
+        "workflow_source",
+        "pull_requests",
+        "workflow_runs",
+        "workflow_attempts",
+        "workflow_jobs",
+        "workflow_artifacts",
+        "check_suites",
+        "check_runs",
+    ]
+    .into_iter()
+    .filter(|capability| !observed.contains(*capability))
+    .map(|capability| format!("api.{capability}"))
+    .collect()
 }
 
 fn validate_workflow_attempt_url(
@@ -2410,6 +2493,21 @@ jobs:
         let slug_check = parse_check(&slug_only, "tailrocks/example", source_sha, vec![], 9)
             .expect("slug check remains observed but unbound");
         assert_eq!(slug_check.app_id, None);
+    }
+
+    #[test]
+    fn access_proof_requires_read_permission_fields_and_endpoint_observations() {
+        let repository = serde_json::json!({
+            "permissions": {"pull": false},
+            "private": false,
+            "visibility": "public",
+            "owner": {"login": "tailrocks"}
+        });
+        let shape_gaps = access_gaps(&repository);
+        assert_eq!(shape_gaps, vec!["repository.permissions.pull"]);
+        let endpoint_gaps = access_endpoint_gaps(&[], "tailrocks/example");
+        assert!(endpoint_gaps.iter().any(|gap| gap == "api.workflow_jobs"));
+        assert!(endpoint_gaps.iter().any(|gap| gap == "api.check_runs"));
     }
 
     #[test]
