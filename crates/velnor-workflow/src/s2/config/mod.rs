@@ -2094,6 +2094,11 @@ fn validate_static_files(rows: &[StaticFileSection]) -> Result<(), GeneratorErro
                 "[[static_file]] source must be a repository-relative path, found `{source}`"
             )));
         }
+        if Path::new(source).starts_with(".github") {
+            return Err(GeneratorError::usage(format!(
+                "[[static_file]] source must stay outside `.github/` so a static output cannot hide workflow or action inputs, found `{source}`"
+            )));
+        }
         let duplicate = rows
             .iter()
             .filter(|other| other.file.as_deref() == Some(file))
