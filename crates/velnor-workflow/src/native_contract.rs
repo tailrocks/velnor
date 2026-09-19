@@ -468,8 +468,10 @@ pub(crate) struct HostedAppleOffer {
     pub(crate) build_arches: &'static [AppleArch],
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 const UNIVERSAL_BUILD_ARCHES: &[AppleArch] = &[AppleArch::Arm64, AppleArch::X86_64];
 const ARM64_BUILD_ARCHES: &[AppleArch] = &[AppleArch::Arm64];
+#[cfg_attr(not(test), allow(dead_code))]
 const MACOS_26_SDKS: &[(AppleSdkFamily, AppleVersion)] = &[
     (AppleSdkFamily::Macos, AppleVersion::new(26, 5, 0)),
     (AppleSdkFamily::IosDevice, AppleVersion::new(26, 5, 0)),
@@ -485,6 +487,7 @@ pub(crate) const LATEST_HOSTED_APPLE_RUNNER: &str = "xcode-27";
 
 /// Current GitHub-hosted macOS 26 offers, verified from the public runner and
 /// image readmes. The image ships Xcode 26.6 and macOS/iOS SDK 26.5 families.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn hosted_apple_offer(label: &str) -> Option<HostedAppleOffer> {
     let common = |label, execution_arch, build_arches| HostedAppleOffer {
         label,
@@ -500,15 +503,7 @@ pub(crate) fn hosted_apple_offer(label: &str) -> Option<HostedAppleOffer> {
         // macOS 27, Xcode 27, and the macOS 27 SDK; it does not prove Intel
         // execution or a universal output contract, so build output remains
         // arm64 until a compiler probe proves another architecture.
-        LATEST_HOSTED_APPLE_RUNNER => Some(HostedAppleOffer {
-            label: LATEST_HOSTED_APPLE_RUNNER,
-            host_macos: AppleVersion::new(27, 0, 0),
-            xcode: AppleVersion::new(27, 0, 0),
-            sdk_versions: MACOS_27_SDKS,
-            swift: None,
-            execution_arch: AppleArch::Arm64,
-            build_arches: ARM64_BUILD_ARCHES,
-        }),
+        LATEST_HOSTED_APPLE_RUNNER => Some(latest_hosted_apple_offer()),
         "macos-26" => Some(common("macos-26", AppleArch::Arm64, UNIVERSAL_BUILD_ARCHES)),
         "macos-26-intel" => Some(common(
             "macos-26-intel",
@@ -520,8 +515,15 @@ pub(crate) fn hosted_apple_offer(label: &str) -> Option<HostedAppleOffer> {
 }
 
 pub(crate) fn latest_hosted_apple_offer() -> HostedAppleOffer {
-    hosted_apple_offer(LATEST_HOSTED_APPLE_RUNNER)
-        .expect("LATEST_HOSTED_APPLE_RUNNER must have a verified offer")
+    HostedAppleOffer {
+        label: LATEST_HOSTED_APPLE_RUNNER,
+        host_macos: AppleVersion::new(27, 0, 0),
+        xcode: AppleVersion::new(27, 0, 0),
+        sdk_versions: MACOS_27_SDKS,
+        swift: None,
+        execution_arch: AppleArch::Arm64,
+        build_arches: ARM64_BUILD_ARCHES,
+    }
 }
 
 /// Check a requirement against a verified hosted image. Returns actionable
