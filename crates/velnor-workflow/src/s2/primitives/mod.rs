@@ -14,6 +14,7 @@ mod aggregate;
 mod cache;
 pub(crate) mod check_profiles;
 pub(crate) mod docs_site;
+mod github_action;
 mod ir;
 mod pipeline;
 mod plan;
@@ -67,6 +68,11 @@ pub(crate) const OPENTOFU: &str = "opentofu-pipeline";
 pub(crate) const DOCKER_IMAGE: &str = "docker-image-pipeline";
 pub(crate) const HOMEBREW_TAP: &str = "homebrew-tap-pipeline";
 pub(crate) const DOCS_LINT: &str = "docs-lint-pipeline";
+/// The generic GitHub Action metadata and entrypoint verification pipeline.
+pub(crate) const GITHUB_ACTION: &str = "github-action-pipeline";
+/// A unit contract that appends checked-in consumer success/failure fixtures
+/// to a scanned GitHub Action unit.
+pub(crate) const ACTION_FIXTURES: &str = "github-action-fixtures";
 /// The `docs.yml` documentation-site pipeline: build, link checks, spelling,
 /// Pages deployment, and post-deployment verification from one `[docs]`
 /// consumer contract.
@@ -583,6 +589,7 @@ pub(crate) fn pipeline_id(kind: UnitKind) -> &'static str {
         UnitKind::Docker => DOCKER_IMAGE,
         UnitKind::Homebrew => HOMEBREW_TAP,
         UnitKind::Docs => DOCS_LINT,
+        UnitKind::GithubAction => GITHUB_ACTION,
     }
 }
 
@@ -604,6 +611,8 @@ pub(crate) fn registry() -> Vec<Box<dyn Primitive>> {
         Box::new(pipeline::DockerImage),
         Box::new(pipeline::HomebrewTap),
         Box::new(pipeline::DocsLint),
+        Box::new(pipeline::GithubAction),
+        Box::new(github_action::GithubActionFixtures),
         Box::new(release::Release),
         Box::new(release::Preview),
         Box::new(release::Maintenance),
@@ -1060,6 +1069,7 @@ const PIPELINES: &[&str] = &[
     DOCKER_IMAGE,
     HOMEBREW_TAP,
     DOCS_LINT,
+    GITHUB_ACTION,
 ];
 
 fn is_pipeline(primitive: &str) -> bool {
@@ -1068,7 +1078,10 @@ fn is_pipeline(primitive: &str) -> bool {
 
 /// Contract rows mutate unit contracts before any file is rendered.
 fn is_unit_contract(primitive: &str) -> bool {
-    matches!(primitive, WATCH_GRAPH | REGEN_GATE | PREPARED_TOOL)
+    matches!(
+        primitive,
+        WATCH_GRAPH | REGEN_GATE | PREPARED_TOOL | ACTION_FIXTURES
+    )
 }
 
 #[derive(Clone, Debug)]

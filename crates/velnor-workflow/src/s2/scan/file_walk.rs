@@ -33,7 +33,9 @@ pub(crate) fn repository_files(
         files
     } else {
         let mut files = Vec::new();
-        collect_files(root, root, &mut files)?;
+        let mut action_roots = BTreeSet::new();
+        discover_action_roots(root, root, &mut action_roots)?;
+        collect_files(root, root, &mut files, &action_roots)?;
         files
     };
     let excludes = exclude_set(exclude)?;
@@ -95,7 +97,7 @@ fn tracked_files(root: &Path) -> Result<Option<Vec<String>>, GeneratorError> {
         }
         return Ok(None);
     }
-    let mut files = Vec::new();
+    let mut tracked = Vec::new();
     for raw in output.stdout.split(|byte| *byte == 0) {
         if raw.is_empty() {
             continue;
@@ -104,14 +106,6 @@ fn tracked_files(root: &Path) -> Result<Option<Vec<String>>, GeneratorError> {
             GeneratorError::usage(format!("repository path is not utf-8: {error}"))
         })?;
         let relative = Path::new(relative);
-        let Some(Component::Normal(leading)) = relative.components().next() else {
-            return Ok(None);
-        };
-        // Generated `.github` content is output, not project input, and the
-        // remaining directories are tool or package-manager output.
-        if is_excluded_directory(&leading.to_string_lossy()) {
-            continue;
-        }
         let absolute = root.join(relative);
         let Ok(metadata) = fs::symlink_metadata(&absolute) else {
             // Staged but deleted in the work tree: the detectors cannot read
@@ -123,7 +117,26 @@ fn tracked_files(root: &Path) -> Result<Option<Vec<String>>, GeneratorError> {
             // like their walked counterparts.
             continue;
         }
-        files.push(normalize_relative_path(relative)?);
+        tracked.push(normalize_relative_path(relative)?);
+    }
+    let action_roots = tracked
+        .iter()
+        .filter(|file| {
+            matches!(file.rsplit('/').next(), Some("action.yml" | "action.yaml"))
+                && !is_test_support_path(file)
+        })
+        .map(|file| parent_path(file))
+        .collect::<BTreeSet<_>>();
+    let mut files = Vec::new();
+    for normalized in tracked {
+        // Generated `.github` content is output, not project input, and the
+        // remaining directories are tool or package-manager output. The
+        // `dist` exception is deliberately narrow: only a checked-in `dist`
+        // subtree belonging to a detected local action is project input.
+        if is_excluded_path(&normalized, &action_roots) {
+            continue;
+        }
+        files.push(normalized);
     }
     if files.is_empty() && !in_git {
         return Ok(None);
@@ -138,6 +151,7 @@ fn is_excluded_directory(name: &str) -> bool {
         name,
         ".git"
             | ".github"
+            | ".github-gen"
             | ".output"
             | "target"
             | "node_modules"
@@ -153,6 +167,7 @@ fn collect_files(
     root: &Path,
     directory: &Path,
     files: &mut Vec<String>,
+    action_roots: &BTreeSet<String>,
 ) -> Result<(), GeneratorError> {
     let entries = fs::read_dir(directory)
         .map_err(|error| GeneratorError::io("read directory", directory, &error))?;
@@ -169,18 +184,101 @@ fn collect_files(
             continue;
         }
         if kind.is_dir() {
-            if is_excluded_directory(name.as_ref()) {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|error| {
+                    GeneratorError::usage(format!("make directory path relative: {error}"))
+                })
+                .and_then(normalize_relative_path)?;
+            if is_excluded_directory(name.as_ref())
+                && !(name == "dist" && path_is_inside_action(&relative, action_roots))
+            {
                 continue;
             }
-            collect_files(root, &path, files)?;
+            collect_files(root, &path, files, action_roots)?;
         } else if kind.is_file() {
             let relative = path.strip_prefix(root).map_err(|error| {
                 GeneratorError::usage(format!("make repository path relative: {error}"))
             })?;
-            files.push(normalize_relative_path(relative)?);
+            let normalized = normalize_relative_path(relative)?;
+            if !is_excluded_path(&normalized, action_roots) {
+                files.push(normalized);
+            }
         }
     }
     Ok(())
+}
+
+/// Find local action roots before the physical walk applies package-output
+/// exclusions. This permits an action's checked-in `dist/` entrypoint without
+/// making every repository `dist/` file generation input.
+fn discover_action_roots(
+    root: &Path,
+    directory: &Path,
+    action_roots: &mut BTreeSet<String>,
+) -> Result<(), GeneratorError> {
+    let entries = fs::read_dir(directory)
+        .map_err(|error| GeneratorError::io("read directory", directory, &error))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| GeneratorError::io("read directory entry", directory, &error))?;
+        let path = entry.path();
+        let kind = entry
+            .file_type()
+            .map_err(|error| GeneratorError::io("read file type", &path, &error))?;
+        if kind.is_symlink() {
+            continue;
+        }
+        if kind.is_dir() {
+            let name = entry.file_name();
+            // `.github` is intentionally never scanned as project input, but
+            // `dist` must be traversed here so a local action there can opt in
+            // its own metadata and entrypoints.
+            if is_excluded_directory(&name.to_string_lossy()) && name != "dist" {
+                continue;
+            }
+            discover_action_roots(root, &path, action_roots)?;
+        } else if kind.is_file()
+            && matches!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some("action.yml" | "action.yaml")
+            )
+        {
+            let relative = path.strip_prefix(root).map_err(|error| {
+                GeneratorError::usage(format!("make action path relative: {error}"))
+            })?;
+            let relative = normalize_relative_path(relative)?;
+            if !is_test_support_path(&relative) {
+                action_roots.insert(parent_path(&relative));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn path_is_inside_action(path: &str, action_roots: &BTreeSet<String>) -> bool {
+    action_roots.iter().any(|root| {
+        root == "."
+            || path == root
+            || path
+                .strip_prefix(root)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+    })
+}
+
+fn is_excluded_path(path: &str, action_roots: &BTreeSet<String>) -> bool {
+    let components = path.split('/').collect::<Vec<_>>();
+    for (index, component) in components.iter().enumerate() {
+        if index + 1 == components.len() {
+            break;
+        }
+        if is_excluded_directory(component)
+            && !(component == &"dist" && path_is_inside_action(path, action_roots))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn normalize_relative_path(path: &Path) -> Result<String, GeneratorError> {
@@ -441,5 +539,49 @@ mod tests {
             files,
             vec!["nested/deep.txt".to_owned(), "present.txt".to_owned()]
         );
+    }
+
+    #[test]
+    fn only_local_action_dist_is_project_input() {
+        let root = scratch("action-dist");
+        must(
+            fs::create_dir_all(root.join("actions/example/dist")),
+            "create action dist",
+        );
+        must(
+            fs::write(
+                root.join("actions/example/action.yml"),
+                "runs:\n  using: node20\n  main: dist/index.js\n",
+            ),
+            "write action metadata",
+        );
+        must(
+            fs::write(root.join("actions/example/dist/index.js"), "entrypoint\n"),
+            "write action dist",
+        );
+        must(
+            fs::create_dir_all(root.join("dist")),
+            "create repository dist",
+        );
+        must(
+            fs::write(root.join("dist/generated.js"), "generated\n"),
+            "write repository dist",
+        );
+        must(
+            fs::create_dir_all(root.join(".github-gen/sources/actions/example")),
+            "create generated action source",
+        );
+        must(
+            fs::write(
+                root.join(".github-gen/sources/actions/example/action.yml"),
+                "runs:\n  using: composite\n  steps:\n    - run: echo generated\n",
+            ),
+            "write generated action source",
+        );
+
+        let files = must(repository_files(&root, &[]), "scan action dist fixture");
+        assert!(files.contains(&"actions/example/dist/index.js".to_owned()));
+        assert!(!files.contains(&"dist/generated.js".to_owned()));
+        assert!(!files.iter().any(|file| file.starts_with(".github-gen/")));
     }
 }
