@@ -8,7 +8,7 @@
 use super::{
     Args, CacheBackend, GraphNode, Primitive, RenderCtx, Rendered, UnitContract, BUN_PACKAGE,
     DEFAULT_UNIT_TIMEOUT_MINUTES, DOCKER_IMAGE, DOCS_LINT, GRADLE_PROJECT, HOMEBREW_TAP,
-    NODE_PACKAGE, OPENTOFU, RUST_CRATE, SWIFT_PACKAGE,
+    NODE_PACKAGE, OPENTOFU, RUST_CRATE, SKILLS_PLUGIN, SWIFT_PACKAGE,
 };
 use crate::s2::{GeneratorError, UnitKind};
 
@@ -212,4 +212,10 @@ pipeline!(
     DOCS_LINT,
     UnitKind::Docs,
     "Render one documentation unit's verification surface."
+);
+pipeline!(
+    SkillsPlugin,
+    SKILLS_PLUGIN,
+    UnitKind::Skills,
+    "Render one skills/plugin repository's metadata, documentation, and helper verification surface."
 );

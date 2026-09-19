@@ -544,6 +544,7 @@ pub enum UnitKind {
     Docker,
     Homebrew,
     Docs,
+    Skills,
 }
 
 impl UnitKind {
@@ -559,6 +560,7 @@ impl UnitKind {
             "docker" => Self::Docker,
             "homebrew" => Self::Homebrew,
             "docs" => Self::Docs,
+            "skills" => Self::Skills,
             _ => return None,
         })
     }
@@ -574,6 +576,7 @@ impl UnitKind {
             Self::Docker => "docker",
             Self::Homebrew => "homebrew",
             Self::Docs => "docs",
+            Self::Skills => "skills",
         }
     }
 
@@ -588,6 +591,7 @@ impl UnitKind {
             Self::Docker => "Docker",
             Self::Homebrew => "Homebrew",
             Self::Docs => "Documentation",
+            Self::Skills => "Skills / Plugins",
         }
     }
 }
@@ -3060,6 +3064,7 @@ pub(crate) fn unit_group(kind: UnitKind) -> &'static str {
         UnitKind::Homebrew => "Homebrew",
         UnitKind::Swift => "Swift / Packages",
         UnitKind::Gradle => "Gradle / Projects",
+        UnitKind::Skills => "Skills / Plugins",
     }
 }
 
@@ -6244,6 +6249,15 @@ fn generation_reasons(config: &ProjectConfig) -> Vec<String> {
     {
         reasons.push(
             "package.json scripts and lockfiles select the native package manager, install mode, cache, and package job.".to_owned(),
+        );
+    }
+    if config
+        .units
+        .iter()
+        .any(|unit| unit.kind == UnitKind::Skills)
+    {
+        reasons.push(
+            "Skills/plugin metadata, frontmatter, generated documentation, references, templates, and bundled helpers share one statically validated repository job.".to_owned(),
         );
     }
     if config
