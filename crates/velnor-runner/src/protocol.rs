@@ -1346,6 +1346,43 @@ pub(crate) struct GithubHttpResponse {
     pub(crate) headers: HeaderMap,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum GithubContentsRequestError {
+    /// Sending a request or reading its response stream failed.
+    Transport(String),
+    /// The response body exceeds the caller's bounded-read limit.
+    BodyTooLarge { max_body_bytes: usize },
+    /// The response body is not UTF-8, so the caller cannot parse its text format.
+    BodyInvalidUtf8,
+    /// Local configuration or response framing failed before a usable response existed.
+    Internal(String),
+}
+
+impl fmt::Display for GithubContentsRequestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Transport(detail) => {
+                write!(formatter, "GitHub Contents transport failed: {detail}")
+            }
+            Self::BodyTooLarge { max_body_bytes } => write!(
+                formatter,
+                "GitHub Contents response body exceeds {max_body_bytes} bytes"
+            ),
+            Self::BodyInvalidUtf8 => {
+                formatter.write_str("GitHub Contents response body is not valid UTF-8")
+            }
+            Self::Internal(detail) => {
+                write!(
+                    formatter,
+                    "GitHub Contents request failed internally: {detail}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for GithubContentsRequestError {}
+
 /// Read an authenticated raw GitHub Contents response through the selected
 /// host transport. Native mode keeps the existing blocking client; curl mode
 /// uses the typed argv/header-pipe path and never falls back to native.
@@ -1354,9 +1391,11 @@ pub(crate) fn github_contents_request(
     url: &str,
     bearer_token: &str,
     max_body_bytes: usize,
-) -> Result<GithubHttpResponse> {
-    let transport = github_http_transport()?;
-    validate_authenticated_url(url)?;
+) -> std::result::Result<GithubHttpResponse, GithubContentsRequestError> {
+    let transport = github_http_transport()
+        .map_err(|error| GithubContentsRequestError::Internal(format!("{error:#}")))?;
+    validate_authenticated_url(url)
+        .map_err(|error| GithubContentsRequestError::Internal(format!("{error:#}")))?;
     match transport {
         "native" => {
             let response = client
@@ -1366,11 +1405,11 @@ pub(crate) fn github_contents_request(
                 .header("X-GitHub-Api-Version", "2026-03-10")
                 .timeout(Duration::from_secs(GITHUB_CONTENTS_MAX_TIME_SECS))
                 .send()
-                .with_context(|| {
-                    format!(
-                        "send native GitHub Contents request {}",
+                .map_err(|error| {
+                    GithubContentsRequestError::Transport(format!(
+                        "send native GitHub Contents request {}: {error}",
                         redacted_authenticated_url(url)
-                    )
+                    ))
                 })?;
             let status = response.status().as_u16();
             let headers = response.headers().clone();
@@ -1393,15 +1432,16 @@ pub(crate) fn github_contents_request(
                 "application/vnd.github.raw+json",
                 Some("2026-03-10"),
             )
-            .with_context(|| format!("build curl GitHub Contents request {redacted_url}"))?;
-            let response = run_curl_command(spec)
-                .with_context(|| format!("send curl GitHub Contents request {redacted_url}"))?;
-            if response.body.len() > max_body_bytes {
-                anyhow::bail!("GitHub Contents response exceeds {max_body_bytes} bytes");
-            }
-            Ok(response)
+            .map_err(|error| {
+                GithubContentsRequestError::Internal(format!(
+                    "build curl GitHub Contents request {redacted_url}: {error:#}"
+                ))
+            })?;
+            run_curl_contents_command(spec, max_body_bytes)
         }
-        other => bail!("github HTTP transport selector returned an unknown value: {other}"),
+        other => Err(GithubContentsRequestError::Internal(format!(
+            "github HTTP transport selector returned an unknown value: {other}"
+        ))),
     }
 }
 
@@ -1409,20 +1449,27 @@ pub(crate) fn read_bounded_http_body<R: Read>(
     reader: R,
     content_length: Option<u64>,
     max_body_bytes: usize,
-) -> Result<String> {
-    let max_body_bytes = u64::try_from(max_body_bytes).context("metadata body limit overflows")?;
-    if content_length.is_some_and(|length| length > max_body_bytes) {
-        anyhow::bail!("GitHub response body exceeds {max_body_bytes} bytes");
+) -> std::result::Result<String, GithubContentsRequestError> {
+    let max_body_bytes_u64 = u64::try_from(max_body_bytes).map_err(|error| {
+        GithubContentsRequestError::Internal(format!("metadata body limit overflows: {error}"))
+    })?;
+    if content_length.is_some_and(|length| length > max_body_bytes_u64) {
+        return Err(GithubContentsRequestError::BodyTooLarge { max_body_bytes });
     }
     let mut body =
-        Vec::with_capacity(content_length.unwrap_or_default().min(max_body_bytes) as usize);
+        Vec::with_capacity(content_length.unwrap_or_default().min(max_body_bytes_u64) as usize);
     reader
-        .take(max_body_bytes.saturating_add(1))
-        .read_to_end(&mut body)?;
-    if body.len() > max_body_bytes as usize {
-        anyhow::bail!("GitHub response body exceeds {max_body_bytes} bytes");
+        .take(max_body_bytes_u64.saturating_add(1))
+        .read_to_end(&mut body)
+        .map_err(|error| {
+            GithubContentsRequestError::Transport(format!(
+                "read GitHub Contents response body: {error}"
+            ))
+        })?;
+    if body.len() > max_body_bytes {
+        return Err(GithubContentsRequestError::BodyTooLarge { max_body_bytes });
     }
-    String::from_utf8(body).context("decode GitHub response body as UTF-8")
+    String::from_utf8(body).map_err(|_| GithubContentsRequestError::BodyInvalidUtf8)
 }
 
 fn github_error_from_response(action: &str, response: GithubHttpResponse) -> anyhow::Error {
@@ -1723,6 +1770,21 @@ fn run_curl_oauth_form_command(args: Vec<OsString>, body: Vec<u8>) -> Result<Git
 }
 
 fn run_curl_command(spec: CurlCommandSpec) -> Result<GithubHttpResponse> {
+    let output = run_curl_command_output(spec).map_err(anyhow::Error::new)?;
+    parse_curl_response(&output)
+}
+
+fn run_curl_contents_command(
+    spec: CurlCommandSpec,
+    max_body_bytes: usize,
+) -> std::result::Result<GithubHttpResponse, GithubContentsRequestError> {
+    let output = run_curl_command_output(spec)?;
+    parse_curl_response_with_body_limit(&output, Some(max_body_bytes))
+}
+
+fn run_curl_command_output(
+    spec: CurlCommandSpec,
+) -> std::result::Result<Vec<u8>, GithubContentsRequestError> {
     let mut child = Command::new("curl")
         .args(spec.args)
         // The curl child does not need the operator token in its environment;
@@ -1733,48 +1795,79 @@ fn run_curl_command(spec: CurlCommandSpec) -> Result<GithubHttpResponse> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .context("spawn curl GitHub request")?;
+        .map_err(|error| {
+            GithubContentsRequestError::Internal(format!("spawn curl GitHub request: {error}"))
+        })?;
 
-    let mut header_stdin = child
-        .stdin
-        .take()
-        .context("open curl GitHub request header pipe")?;
+    let mut header_stdin = child.stdin.take().ok_or_else(|| {
+        GithubContentsRequestError::Internal(
+            "open curl GitHub request header pipe: stdin pipe is unavailable".to_string(),
+        )
+    })?;
     if let Err(error) = header_stdin.write_all(&spec.header_stdin) {
         let _ = child.kill();
         let _ = child.wait();
-        return Err(error).context("write curl GitHub request headers");
+        return Err(GithubContentsRequestError::Transport(format!(
+            "write curl GitHub request headers: {error}"
+        )));
     }
     drop(header_stdin);
 
-    let output = child
-        .wait_with_output()
-        .context("wait for curl GitHub request")?;
+    let output = child.wait_with_output().map_err(|error| {
+        GithubContentsRequestError::Transport(format!("wait for curl GitHub request: {error}"))
+    })?;
     if !output.status.success() {
         let exit = output
             .status
             .code()
             .map_or_else(|| "signal".to_owned(), |code| code.to_string());
-        bail!("curl GitHub request exited with status {exit}");
+        return Err(GithubContentsRequestError::Transport(format!(
+            "curl GitHub request exited with status {exit}"
+        )));
     }
-    parse_curl_response(&output.stdout)
+    Ok(output.stdout)
 }
 
 fn parse_curl_response(output: &[u8]) -> Result<GithubHttpResponse> {
+    parse_curl_response_with_body_limit(output, None).map_err(anyhow::Error::new)
+}
+
+fn parse_curl_response_with_body_limit(
+    output: &[u8],
+    max_body_bytes: Option<usize>,
+) -> std::result::Result<GithubHttpResponse, GithubContentsRequestError> {
     if output.len() > GITHUB_CURL_MAX_RESPONSE_BYTES {
-        bail!("curl GitHub response exceeded {GITHUB_CURL_MAX_RESPONSE_BYTES} bytes");
+        return Err(match max_body_bytes {
+            Some(max_body_bytes) => GithubContentsRequestError::BodyTooLarge { max_body_bytes },
+            None => GithubContentsRequestError::Internal(format!(
+                "curl GitHub response exceeded {GITHUB_CURL_MAX_RESPONSE_BYTES} bytes"
+            )),
+        });
     }
 
     let mut offset = 0;
     let (status, headers) = loop {
-        let remaining = output
-            .get(offset..)
-            .context("curl GitHub response ended before headers")?;
+        let remaining = output.get(offset..).ok_or_else(|| {
+            GithubContentsRequestError::Internal(
+                "curl GitHub response ended before headers".to_string(),
+            )
+        })?;
         if !remaining.starts_with(b"HTTP/") {
-            bail!("curl GitHub response is missing an HTTP status line");
+            return Err(GithubContentsRequestError::Internal(
+                "curl GitHub response is missing an HTTP status line".to_string(),
+            ));
         }
-        let (header_end, separator_len) = curl_header_terminator(remaining)
-            .context("curl GitHub response headers are not terminated")?;
-        let (status, headers) = parse_curl_header_block(&remaining[..header_end])?;
+        let (header_end, separator_len) = curl_header_terminator(remaining).ok_or_else(|| {
+            GithubContentsRequestError::Internal(
+                "curl GitHub response headers are not terminated".to_string(),
+            )
+        })?;
+        let (status, headers) =
+            parse_curl_header_block(&remaining[..header_end]).map_err(|error| {
+                GithubContentsRequestError::Internal(format!(
+                    "parse curl GitHub response headers: {error:#}"
+                ))
+            })?;
         offset = offset
             .saturating_add(header_end)
             .saturating_add(separator_len);
@@ -1784,13 +1877,18 @@ fn parse_curl_response(output: &[u8]) -> Result<GithubHttpResponse> {
         break (status, headers);
     };
 
-    let body = String::from_utf8(
-        output
-            .get(offset..)
-            .context("curl GitHub response body offset is invalid")?
-            .to_vec(),
-    )
-    .context("decode curl GitHub response body as UTF-8")?;
+    let body = output.get(offset..).ok_or_else(|| {
+        GithubContentsRequestError::Internal(
+            "curl GitHub response body offset is invalid".to_string(),
+        )
+    })?;
+    if let Some(max_body_bytes) = max_body_bytes
+        && body.len() > max_body_bytes
+    {
+        return Err(GithubContentsRequestError::BodyTooLarge { max_body_bytes });
+    }
+    let body = String::from_utf8(body.to_vec())
+        .map_err(|_| GithubContentsRequestError::BodyInvalidUtf8)?;
     Ok(GithubHttpResponse {
         status,
         body,
@@ -7689,6 +7787,106 @@ mod tests {
                 .unwrap(),
             "2"
         );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn contents_request_types_native_and_curl_failures() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _transport_guard = runtime.block_on(crate::test_support::github_http_transport_env());
+        let client = reqwest::blocking::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let serve_response = |status: u16, body: Vec<u8>| {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = [0_u8; 4096];
+                let _ = stream.read(&mut request).unwrap();
+                let reason = match status {
+                    200 => "OK",
+                    503 => "Service Unavailable",
+                    _ => "Test Response",
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                let _ = stream.write_all(&body);
+            });
+            (format!("http://{address}/contents"), server)
+        };
+
+        for transport in ["native", "curl"] {
+            // The test owns the process-wide environment lock.
+            unsafe { std::env::set_var(GITHUB_HTTP_TRANSPORT_ENV, transport) };
+
+            let closed_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let closed_url = format!("http://{}/contents", closed_listener.local_addr().unwrap());
+            drop(closed_listener);
+            let transport_error = match github_contents_request(&client, &closed_url, "token", 4) {
+                Err(error) => error,
+                Ok(_) => panic!("{transport} request to a closed port unexpectedly succeeded"),
+            };
+            assert!(
+                matches!(&transport_error, GithubContentsRequestError::Transport(_)),
+                "{transport} transport error: {transport_error}"
+            );
+
+            let (status_url, status_server) = serve_response(503, b"unavailable".to_vec());
+            let status_response =
+                github_contents_request(&client, &status_url, "token", 16).unwrap();
+            status_server.join().unwrap();
+            assert_eq!(status_response.status, 503, "{transport} status response");
+
+            let (large_url, large_server) = serve_response(200, b"12345".to_vec());
+            let large_error = match github_contents_request(&client, &large_url, "token", 4) {
+                Err(error) => error,
+                Ok(_) => panic!("{transport} oversized response unexpectedly succeeded"),
+            };
+            large_server.join().unwrap();
+            assert_eq!(
+                large_error,
+                GithubContentsRequestError::BodyTooLarge { max_body_bytes: 4 },
+                "{transport} body limit"
+            );
+
+            let (utf8_url, utf8_server) = serve_response(200, vec![0xff]);
+            let utf8_error = match github_contents_request(&client, &utf8_url, "token", 4) {
+                Err(error) => error,
+                Ok(_) => panic!("{transport} invalid UTF-8 response unexpectedly succeeded"),
+            };
+            utf8_server.join().unwrap();
+            assert_eq!(
+                utf8_error,
+                GithubContentsRequestError::BodyInvalidUtf8,
+                "{transport} invalid UTF-8"
+            );
+        }
+
+        // Invalid local transport configuration stays an internal failure.
+        unsafe { std::env::set_var(GITHUB_HTTP_TRANSPORT_ENV, "unsupported") };
+        let internal_error = match github_contents_request(&client, "not a URL", "token", 4) {
+            Err(error) => error,
+            Ok(_) => panic!("invalid transport configuration unexpectedly succeeded"),
+        };
+        assert!(matches!(
+            &internal_error,
+            GithubContentsRequestError::Internal(_)
+        ));
     }
 
     #[tokio::test]
