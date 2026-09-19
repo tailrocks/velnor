@@ -2863,6 +2863,8 @@ pub(crate) struct PublishInputs<'a> {
     pub(crate) backend: DebBackend,
     /// Test-only `PATH` overlay resolving fixed tool names.
     pub(crate) path_overlay: Option<&'a Path>,
+    /// The immutable application selection which produced these inputs.
+    pub(crate) selection: Option<&'a DiscoverySelection>,
 }
 
 /// Publish a suite into the staging tree: deterministic pool, per-arch
