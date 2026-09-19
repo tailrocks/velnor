@@ -22,7 +22,7 @@ unknown observation into a success.
 The external session and ownership record is
 `/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/session.json`.
 After the G0 records amendment its SHA-256 is
-`e983845204a3075b104dd95ed2a556658411d583ebfc0ad37106347a4d18ccc4`.
+`ad9686d74a38bcf7293497e6a6ca463c9b2a7aafff5c9acb388cb2f1b89a8c11`.
 It records the orchestrator, assigned agents, worktree ownership, current
 gate, and the Velnor ruleset snapshot. Amendments to that record are durable
 outside the source checkout and must retain an amendment history.
@@ -446,3 +446,13 @@ PRs #952-954, runtime/product release mix-up, Homebrew omissions, scanner
 omissions, and native Apple routing) are leads to revalidate, not acceptance
 evidence. This specification deliberately records them as hypotheses until
 the relevant task attaches durable source/run evidence.
+
+Read-only category evidence now attached under the external ledger is still
+preparatory: `G0/skills-adapter/report.md`,
+`G0/action-roles/findings.md`, `G0/rust-consumers/report.md`,
+`G0/distribution-consumers/report.md`, and
+`G0/distribution-review/report.md`. These reports identify scanner, product,
+publication, and native-install gaps; they do not pass G0/G2/G3. The external
+`G1/reviews/seed-pin.md` report keeps exact PR-head test evidence separate from
+integrated-source verification, and `G1/reviews/bootstrap-hosted.md` is a
+checkpoint only. No dirty owner worktree is approval evidence.

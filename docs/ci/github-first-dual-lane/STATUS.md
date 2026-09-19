@@ -42,6 +42,17 @@ required-check success, migration, or a gate exit.
 - Native-routing report found Tablerock/playground Apple workloads incorrectly
   routed to Ubuntu; Jackin macOS routing is available. Central shape-based
   scanner work is isolated and cannot roll out before G2.
+- Early read-only category audits are now durable externally: skills at
+  `G0/skills-adapter/report.md`, action/roles at `G0/action-roles/findings.md`,
+  Rust consumers plus inventory at `G0/rust-consumers/{report.md,inventory.tsv}`,
+  distribution consumers plus inventory at
+  `G0/distribution-consumers/{report.md,consumer-inventory.json}`, and the
+  independent distribution review at `G0/distribution-review/report.md`.
+  They record blockers and missing proof; none is a gate pass.
+- G1 seed/pin chronology is external at `G1/reviews/seed-pin.md`: 1858 tests
+  belong to exact PR head `a5c1c0bd` before regeneration, while 1736 tests,
+  fmt, and clippy belong to integrated source `12cc87b`; these counts are not
+  combined. `G1/reviews/bootstrap-hosted.md` is a checkpoint only.
 
 These are documentation/setup facts only. They do not establish hosted CI,
 package delivery, fleet migration, Mac operation, or any gate exit.
@@ -56,8 +67,9 @@ package delivery, fleet migration, Mac operation, or any gate exit.
 | Generated state SHA-256 | `2643fad3e4943262ceeb47b888b451119998c2ea14114dd86b27cc29a2647646` | Observed locally |
 | Current ruleset | `19573071`, `DCO`, `ci-required`, `Policy`, active | External baseline; no change claimed |
 | Evidence root | `/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/` | Policy; live records pending |
+| Session registry | `session.json`, SHA-256 `ad9686d74a38bcf7293497e6a6ca463c9b2a7aafff5c9acb388cb2f1b89a8c11` | Actual Luna/max worker threads and evidence paths recorded; no gate pass |
 | Final ledger | Immutable artifact/evidence ref outside source | Pending |
-| PR952 integration finding | Source `12cc87b629802c294da9840325cb21087c020df`; 1736 tests, fmt, and clippy pass; generated snapshot failure remains until regeneration | Observed; not a gate pass |
+| PR952 source/integration chronology | Exact PR head `a5c1c0bd5c92c4c52d58ccb21042b1b2c0b08637` had 1858 tests before regeneration; integrated source `12cc87b629802c294da9840325cb21087c020df` has 1736 tests, fmt, and clippy pass; generated snapshot failure remains until regeneration | Separate observations; not a gate pass |
 | PR954 current head | `f16592ea165ced141bf0bb1c43466a95d7df8b2e` | Observed; current run still pending/partial |
 | PR953 cache result | Run `35453601367` failed cache contract | Observed; cache diagnosis reopened |
 | G0-runtime | Read-only report persisted at external `G0/runtime/report.md`; actual Mac not operated before G3 | Completed investigation; G4/G5 pending |
@@ -65,6 +77,7 @@ package delivery, fleet migration, Mac operation, or any gate exit.
 | G2 native package compile | Three required ARM64 macOS binaries compile/smoke at `abe9ad82`; nothing installed or published | Preliminary only; G2 remains pending |
 | G2 product identity | Application/native asset/component identity contract is missing | Blocker for package acceptance; owned by G2-native-product |
 | G1 scan integrity | Source task assigned to remove generated-output self-invalidation while preserving drift checks | Pending reviewed source change |
+| Early category audits | Skills, action/roles, Rust consumers, distribution consumers, and independent distribution review reports | Read-only evidence written; scanner/publication/native proof gaps remain |
 
 ## Model and runtime evidence
 
@@ -88,35 +101,40 @@ unknown.
 | G0-distribution | Assigned; result pending | Revalidate product/runtime discovery and both channels |
 | G0-fleet | 32-row inventory complete; workload matrix/review pending | Build workload/platform/category matrix |
 | G0-runtime | Read-only report complete; actual Mac deferred until G3 | Reuse report for G4/G5 design |
-| G0-records | In progress | Commit this canonical records set; retain unknowns |
+| G0-records | Docs commit complete; external registry amended | Preserve unknowns; await independent review |
 | G0-checker | Assigned; result pending | Consume manifest schema; add deterministic fixtures/checks |
 | G0-reviewer | Assigned; result pending | Independently review docs and raw evidence |
-| G1-cache-semantics | Follow-up queued | Assign/verify Luna/max thread and run bounded cache tests |
-| G1-hosted-config | Follow-up queued | Use hosted worktree; repair typed hosted-first config |
-| G1-review952 | Follow-up queued | Refresh PRs #952–954 and dependencies |
-| G1-run-operations | Follow-up queued | Own `G0/stale-runs.json`; trace failed child runs |
-| G1-seed-pin | Follow-up queued | Reuse G0-inventory findings for generator seed/pin |
+| G1-cache-semantics | Evidence written; PR953 diagnosis reopened | Thread `01a0ba76-f725-7022-9cfa-f28456ab67b2`; retain external cache findings |
+| G1-hosted-config | In progress; candidate remains unverified | Thread `01a0ba77-5222-7e63-97fa-553849b96d7b`; recheck clean exact commit/output |
+| G1-review952 | Assigned; refresh pending | Thread `01a0ba77-dd88-7ac2-9fb7-118f3c09d1af`; review #952–954 without combining test counts |
+| G1-run-operations | In progress; stale-runs evidence updated | Thread `01a0ba7a-9d5d-7291-a2f5-357ff78dba5e`; trace child outcomes |
+| G1-seed-pin | Source review written; pin adoption pending | Thread `01a0ba72-3925-7141-b1f7-5529a5cf6c98`; clean regeneration remains required |
 | G1-scan-integrity | Assigned; result pending | Repair scan/output integrity in `dual-lane-scan-integrity`; review by `g1_review952` |
-| G2-native-packages | Follow-up queued | Verify hosted native package prerequisites |
-| G2-native-product | Assigned; result pending | Define application/runtime component identity and authoritative package manifest |
-| G2-distribution-review | Follow-up queued | Independently review APT/Homebrew product contract |
-| g3-skills-adapter | Read-only audit queued | Inspect eight skills repositories; write only external G0 evidence |
-| g3-native-routing | Read-only audit queued | Inspect Tablerock, playground, and Jackin native capabilities |
-| g3-action-roles | Read-only audit queued | Inspect Jackin action and two role-image repositories |
-| g3-rust-consumers | Read-only audit queued | Inspect eight named Rust/product consumers |
-| g3-distribution-consumers | Read-only audit queued | Inspect six non-Velnor feeds/taps |
+| G2-native-packages | Compile/smoke observed; product identity missing | Thread `01a0ba7a-328e-7282-943e-5b54c2ac209d`; no install/publication claim |
+| G2-homebrew-contract | Assigned; producer contract coordination pending | Thread `01a0ba80-8408-7380-8ac2-b743eb4494a5`; coordinate with native packages |
+| G2-native-product | Source implementation assigned; thread metadata pending | `/root/g2_native_product` owns `dual-lane-native-product`; define application/runtime component identity and authoritative package manifest |
+| G2-distribution-review | Independent evidence written; acceptance blockers recorded | Thread `01a0ba81-1af6-7f11-9f24-3ff115b8f314`; no publication approval |
+| g3-skills-adapter | Read-only evidence written; central scanner fix required | Thread `01a0ba7b-0152-7a70-8d18-c2387f1c9469`; external report only, no rollout |
+| g3-native-routing | Read-only evidence written; rollout blocked until G2 | Thread `01a0ba7b-32f1-7af1-a25f-4cde73f1f075`; native routing report only |
+| g3-action-roles | Read-only evidence written; G3 contract incomplete | Thread `01a0ba7b-57a5-7623-bd92-d0666a02b96e`; reusable publisher/runtime gaps remain |
+| g3-rust-consumers | Read-only evidence written; scanner/release gaps recorded | Thread `01a0ba7d-bb3f-78c3-84c8-eb0b2d75e5d0`; termrock central fix pending |
+| g3-distribution-consumers | Read-only evidence written; G3 blocked/incomplete | Thread `01a0ba7d-e457-7723-81ba-1f7ed038212c`; native install/feed proof missing |
+| g3-native-review | Independent review active | Thread `01a0ba8a-5bef-7d71-9a17-1d082a4f122a`; result not observed |
 
-Agent IDs/worktrees for follow-up rows are intentionally unknown until assigned
-and checked from actual turn metadata. No task result is inferred from assignment.
+Actual thread IDs are recorded for assigned follow-up/category workers above;
+remaining unknown worktrees or result states are deliberate. No task result is
+inferred from assignment.
 
 ## Blockers and access gaps
 
-1. Live inventory for 31 repositories and current PR/check/workflow evidence is
-   not yet attached.
-2. Generator/bootstrap/distribution/runtime investigations are pending.
+1. Live workload/check/migration evidence for the fleet is not yet attached;
+   inventory rows are not acceptance proof.
+2. Generator/bootstrap/distribution investigations remain incomplete; the
+   external category audits expose missing typed scanner/publication/runtime
+   contracts.
 3. Checker implementation and fixtures are pending.
 4. No hosted recovery, package publication/install, fleet migration, actual
- Mac/OrbStack pilot, dual-provider run, or final audit is proven.
+   Mac/OrbStack pilot, dual-provider run, or final audit is proven.
 5. Required-check transition and App binding remain unchanged/unknown beyond
    the recorded Velnor ruleset snapshot.
 
@@ -128,8 +146,8 @@ G3 barrier.
 
 ## Exact next actions
 
-1. Merge/verify the eight G0 task records into the external ledger without
-   rewriting unknown rows as success.
+1. Reconcile the eight G0 task records plus the completed early category
+   reports into the external ledger without rewriting unknown rows as success.
 2. Let the checker agent validate manifest count/uniqueness and schema shape.
 3. Refresh live GitHub inventory and attach source/run/check evidence.
 4. Reconcile bootstrap, distribution, fleet, runtime, and failed-run findings.
