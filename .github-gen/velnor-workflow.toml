@@ -39,6 +39,7 @@ version_bump_units = ["docker", "rust-velnor-bench", "rust-velnor-runner", "rust
 
 [workflow.selectors.github-hosted]
 runs_on = ["ubuntu-24.04"]
+arm64_runs_on = ["ubuntu-24.04-arm"]
 
 # Recovery: repository-scoped macOS/Linux hosts claim Velnor-lane jobs with
 # these labels without joining an org pool.

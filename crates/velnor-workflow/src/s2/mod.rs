@@ -3382,6 +3382,36 @@ fn validate_release_targets_are_pinned(config: &ProjectConfig) -> Result<(), Gen
     Ok(())
 }
 
+/// A hosted arm64 release lane must name the native arm64 selector explicitly.
+/// A repository that omits hosted from its provider universe keeps its local
+/// cross-compilation contract and does not need this hosted-only placement.
+fn validate_release_arm64_selector(config: &ProjectConfig) -> Result<(), GeneratorError> {
+    let Some(release) = &config.release else {
+        return Ok(());
+    };
+    if !release
+        .targets
+        .iter()
+        .any(|target| target == "aarch64-unknown-linux-gnu")
+        || !config
+            .providers
+            .contains(&provider::ProviderId::GithubHosted)
+    {
+        return Ok(());
+    }
+    let Some(selector) = config.selectors.get(&provider::ProviderId::GithubHosted) else {
+        return Err(GeneratorError::usage(
+            "a hosted arm64 release target requires [workflow.selectors.github-hosted]",
+        ));
+    };
+    if selector.arm64_runs_on.is_empty() {
+        return Err(GeneratorError::usage(
+            "a hosted arm64 release target requires [workflow.selectors.github-hosted] arm64_runs_on",
+        ));
+    }
+    Ok(())
+}
+
 /// # Errors
 /// Returns a usage error when the template declares the pinned-toolchain
 /// contract and the repository records no Rust pin.
@@ -5087,6 +5117,13 @@ pub(crate) fn selector_runs_on_yaml(selector: &provider::ProviderSelector) -> St
     runs_on_labels_yaml(&selector.runs_on)
 }
 
+/// The native Linux arm64 `runs-on:` value for one provider selector. This
+/// is deliberately separate from the provider's default labels: a matrix row
+/// cannot express x86 and arm64 alternatives as one GitHub runner label set.
+pub(crate) fn selector_arm64_runs_on_yaml(selector: &provider::ProviderSelector) -> Option<String> {
+    (!selector.arm64_runs_on.is_empty()).then(|| runs_on_labels_yaml(&selector.arm64_runs_on))
+}
+
 /// The `runs-on:` YAML value for a label slice: a bare scalar for a single
 /// label, a flow list otherwise.
 pub(crate) fn runs_on_labels_yaml(labels: &[String]) -> String {
@@ -5636,6 +5673,7 @@ fn generated_files_with_surface(
     validate_workflow_revision(&config)?;
     validate_rust_units_are_pinned(&config)?;
     validate_release_targets_are_pinned(&config)?;
+    validate_release_arm64_selector(&config)?;
     validate_unit_provider_coverage(&config)?;
     let mut files = BTreeMap::new();
     files.insert(
@@ -8017,6 +8055,7 @@ mod tests {
                     .iter()
                     .map(|label| (*label).to_owned())
                     .collect(),
+                arm64_runs_on: Vec::new(),
             },
         );
         config
@@ -11107,6 +11146,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             ProviderId::Velnor,
             provider::ProviderSelector {
                 runs_on: vec!["self-hosted".to_owned(), "example-runner".to_owned()],
+                arm64_runs_on: Vec::new(),
             },
         );
         let files = must(generated_files(&config), "generate the nextest surface");
@@ -11202,6 +11242,7 @@ const INCLUDED: &str = include_str!("fixture.txt");
             ProviderId::Velnor,
             provider::ProviderSelector {
                 runs_on: vec!["self-hosted".to_owned(), "example-runner".to_owned()],
+                arm64_runs_on: Vec::new(),
             },
         );
         let files = must(generated_files(&config), "generate the velnor surface");
@@ -13270,7 +13311,7 @@ lockfile = true
                 "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
                  [workflow]\nproviders = [\"github-hosted\", \"velnor\"]\n\
                  files = [\"ci-pr.yml\", \"release.yml\", \"ci-release-package-signer.yml\"]\n\n\
-                 [workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n\
+                 [workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\narm64_runs_on = [\"ubuntu-24.04-arm\"]\n\n\
                  [workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"example-lane\"]\n\n\
                  [release]\nenabled = true\nkind = \"native\"\npackage = \"example\"\n\
                  binary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\", \"aarch64-unknown-linux-gnu\"]\n\
@@ -13533,6 +13574,7 @@ lockfile = true
             ProviderId::Velnor,
             provider::ProviderSelector {
                 runs_on: vec!["self-hosted".to_owned(), "pool".to_owned()],
+                arm64_runs_on: Vec::new(),
             },
         );
         config.providers = all_providers();
@@ -14958,6 +15000,7 @@ lockfile = true
                     .iter()
                     .map(|label| (*label).to_owned())
                     .collect(),
+                arm64_runs_on: Vec::new(),
             },
         );
         let rust = must_some(
@@ -16428,6 +16471,7 @@ lockfile = true
             ProviderId::GithubHosted,
             provider::ProviderSelector {
                 runs_on: vec!["ubuntu-22.04".to_owned()],
+                arm64_runs_on: Vec::new(),
             },
         );
         let custom_files = must(generated_files(&apt), "generate");

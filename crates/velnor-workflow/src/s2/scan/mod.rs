@@ -243,18 +243,21 @@ pub(crate) fn default_selectors() -> crate::s2::provider::SelectorMap {
             ProviderId::GithubHosted,
             ProviderSelector {
                 runs_on: vec!["ubuntu-24.04".to_owned()],
+                arm64_runs_on: vec!["ubuntu-24.04-arm".to_owned()],
             },
         ),
         (
             ProviderId::GithubSelfHosted,
             ProviderSelector {
                 runs_on: vec!["bastion-scale-set".to_owned()],
+                arm64_runs_on: Vec::new(),
             },
         ),
         (
             ProviderId::Velnor,
             ProviderSelector {
                 runs_on: vec!["velnor-native".to_owned()],
+                arm64_runs_on: Vec::new(),
             },
         ),
     ]

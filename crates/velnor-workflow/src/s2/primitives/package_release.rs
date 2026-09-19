@@ -1940,6 +1940,7 @@ concurrency_group = "package-release-preview"
                 ProviderId::GithubHosted,
                 crate::s2::provider::ProviderSelector {
                     runs_on: vec!["ubuntu-24.04".to_owned()],
+                    arm64_runs_on: Vec::new(),
                 },
             )]),
             release_enabled: false,

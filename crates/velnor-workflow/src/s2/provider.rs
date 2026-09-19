@@ -131,6 +131,12 @@ pub(crate) fn require_subset(
 pub(crate) struct ProviderSelector {
     #[serde(default)]
     pub(crate) runs_on: Vec<String>,
+    /// Optional native Linux arm64 selector. An empty value means that the
+    /// provider does not advertise a distinct arm64 placement; release
+    /// validation requires this field when a hosted release targets arm64,
+    /// while local providers may intentionally keep their cross toolchain.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) arm64_runs_on: Vec<String>,
 }
 
 /// Per-provider selectors keyed by provider ID.
@@ -152,10 +158,10 @@ pub(crate) fn parse_selectors(
                 "[workflow.selectors.{key}] runs_on must name at least one label"
             )));
         }
-        for label in &selector.runs_on {
+        for label in selector.runs_on.iter().chain(selector.arm64_runs_on.iter()) {
             if label.is_empty() || label.chars().any(char::is_control) {
                 return Err(GeneratorError::usage(format!(
-                    "[workflow.selectors.{key}] runs_on labels must be non-empty and contain no control characters"
+                    "[workflow.selectors.{key}] selector labels must be non-empty and contain no control characters"
                 )));
             }
         }

@@ -289,18 +289,21 @@ mod tests {
                 ProviderId::GithubHosted,
                 ProviderSelector {
                     runs_on: vec!["ubuntu-24.04".to_owned(), "macos-15".to_owned()],
+                    arm64_runs_on: Vec::new(),
                 },
             ),
             (
                 ProviderId::GithubSelfHosted,
                 ProviderSelector {
                     runs_on: vec!["velnor-official".to_owned()],
+                    arm64_runs_on: Vec::new(),
                 },
             ),
             (
                 ProviderId::Velnor,
                 ProviderSelector {
                     runs_on: vec!["velnor-native".to_owned()],
+                    arm64_runs_on: Vec::new(),
                 },
             ),
         ])

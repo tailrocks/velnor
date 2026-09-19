@@ -886,6 +886,7 @@ mod tests {
                 crate::s2::provider::ProviderId::GithubHosted,
                 crate::s2::provider::ProviderSelector {
                     runs_on: vec!["ubuntu-24.04".to_owned()],
+                    arm64_runs_on: Vec::new(),
                 },
             )]),
             release_enabled: false,
@@ -1321,6 +1322,7 @@ mod tests {
             crate::s2::provider::ProviderId::Velnor,
             crate::s2::provider::ProviderSelector {
                 runs_on: vec!["self-hosted".to_owned(), "example-fleet".to_owned()],
+                arm64_runs_on: Vec::new(),
             },
         )]);
         let runner = must_ok(docs_runner(&config), "docs test runner resolves");

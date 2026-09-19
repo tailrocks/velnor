@@ -18,8 +18,8 @@ use super::{
 };
 use crate::s2::provider::{runs_on_for, ProviderId, ProviderSet};
 use crate::s2::{
-    github_expression, provider_supports_unit, rendered_cache_values, selector_runs_on_yaml,
-    shell_quote, unit_display_label, workflow_runtime_setup,
+    github_expression, provider_supports_unit, rendered_cache_values, selector_arm64_runs_on_yaml,
+    selector_runs_on_yaml, shell_quote, unit_display_label, workflow_runtime_setup,
     workflow_runtime_setup_with_install_rev, workflow_setup_install_rev, yaml_scalar, ActionPin,
     GeneratorError, ProjectConfig, ReleaseJobSpec, ReleaseSpec, Unit, UnitKind, GENERATED_HEADER,
     MACOS_HOSTED_RUNS_ON, VELNOR_RELEASE_PACKAGE_SIGNER_TEMPLATE,
@@ -55,14 +55,16 @@ pub(crate) fn is_release_side(primitive: &str) -> bool {
 /// and the package consumer refuse any other tag.
 const RELEASE_RECORD_SCHEMA: &str = "velnor.release-record/v1";
 const ARM64_LINUX_TARGET: &str = "aarch64-unknown-linux-gnu";
-const ARM64_HOSTED_RUNS_ON: &str = "ubuntu-24.04-arm";
 
 /// Pin the C compiler and Rust linker to the native arm64 toolchain before a
 /// target build. `cc`-based dependencies such as aws-lc/openssl otherwise
 /// infer the cross-prefix `aarch64-linux-gnu-gcc`, which is absent on the
 /// native GitHub arm64 image. The probe fails before a long Cargo build and
 /// makes the exact compiler/linker contract visible in the job log.
-fn native_arm64_toolchain_steps(target_expr: &str) -> String {
+fn native_arm64_toolchain_steps(target_expr: &str, enabled: bool) -> String {
+    if !enabled {
+        return String::new();
+    }
     let condition = format!("${{{{ {target_expr} == '{ARM64_LINUX_TARGET}' }}}}");
     let script = format!(
         "      - name: Verify native arm64 C and OpenSSL toolchain\n        if: {condition}\n        shell: bash\n        run: |\n          set -euo pipefail\n          test \"$(uname -m)\" = aarch64 || {{ echo \"::error::aarch64 target requires an arm64 runner\" >&2; exit 1; }}\n          cc=\"$(command -v cc)\"\n          cxx=\"$(command -v c++)\"\n          ar=\"$(command -v ar)\"\n          machine=\"$(\"$cc\" -dumpmachine)\"\n          case \"$machine\" in\n            aarch64-*|arm64-*) ;;\n            *) echo \"::error::native arm64 compiler reports unsupported target $machine\" >&2; exit 1 ;;\n          esac\n          \"$cc\" -x c -o \"$RUNNER_TEMP/velnor-arm64-c-probe\" - <<'EOF'\n          int main(void) {{ return 0; }}\n          EOF\n          \"$RUNNER_TEMP/velnor-arm64-c-probe\"\n          \"$cxx\" --version >/dev/null\n          \"$ar\" --version >/dev/null\n          printf 'CC_aarch64_unknown_linux_gnu=%s\\n' \"$cc\" >> \"$GITHUB_ENV\"\n          printf 'CXX_aarch64_unknown_linux_gnu=%s\\n' \"$cxx\" >> \"$GITHUB_ENV\"\n          printf 'AR_aarch64_unknown_linux_gnu=%s\\n' \"$ar\" >> \"$GITHUB_ENV\"\n          printf 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=%s\\n' \"$cc\" >> \"$GITHUB_ENV\"\n          printf 'CROSS_COMPILE=\\n' >> \"$GITHUB_ENV\"\n          if command -v openssl >/dev/null 2>&1; then\n            openssl version\n          else\n            echo 'host openssl CLI absent; vendored OpenSSL/aws-lc will use the verified native compiler'\n          fi\n          echo \"native arm64 compiler=$cc linker=$cc; vendored OpenSSL/aws-lc target builds use these settings\"\n",
@@ -73,12 +75,12 @@ fn native_arm64_toolchain_steps(target_expr: &str) -> String {
     )
 }
 
-fn add_native_arm64_toolchain_steps(steps: &str) -> String {
+fn add_native_arm64_toolchain_steps(steps: &str, enabled: bool) -> String {
     steps.replace(
         "      - name: Set up sccache\n",
         &format!(
             "{}      - name: Set up sccache\n",
-            native_arm64_toolchain_steps("matrix.target")
+            native_arm64_toolchain_steps("matrix.target", enabled)
         ),
     )
 }
@@ -1263,13 +1265,15 @@ fn guest_arch_matrix(config: &ProjectConfig) -> String {
         ("x86_64", "x86_64-unknown-linux-gnu"),
         ("aarch64", ARM64_LINUX_TARGET),
     ] {
-        // aarch64 guest-agent + aws-lc/openssl need native headers. Crossing
-        // on ubuntu-24.04 with only gcc-aarch64-linux-gnu fails closed
-        // (bits/libc-header-start.h / sys/types.h). The image lane already
-        // names GitHub's hosted arm64 label for the same reason.
-        let runner = match arch {
-            "aarch64" => ARM64_HOSTED_RUNS_ON.to_owned(),
-            _ => hosted_selector_runs_on(config),
+        // Hosted arm64 guest-agent + aws-lc/openssl need native headers.
+        // Local-only release configurations retain their configured runner
+        // and cross toolchain; the native preflight is hosted-only.
+        let runner = if arch == "aarch64" && release_provider(config) == ProviderId::GithubHosted {
+            hosted_arm64_selector_runs_on(config)
+        } else if release_provider(config) == ProviderId::GithubHosted {
+            hosted_selector_runs_on(config)
+        } else {
+            selected_runner(config)
         };
         let _ = writeln!(
             matrix,
@@ -1327,7 +1331,10 @@ fn render_guest_payload_job(
           fi
 "#,
     );
-    setup.push_str(&native_arm64_toolchain_steps("matrix.target"));
+    setup.push_str(&native_arm64_toolchain_steps(
+        "matrix.target",
+        release_provider(config) == ProviderId::GithubHosted,
+    ));
     // The agent ships inside the deb, so it carries release identity exactly
     // when the lane packages identity debs; otherwise the plain build stays.
     let identity = native_debian_release(config, release);
@@ -1740,7 +1747,10 @@ fn render_identity_debian_job(
     let mut steps = format!(
         "      - name: Checkout\n        uses: {checkout}\n        with:\n{checkout_ref}          persist-credentials: false\n{setup}      - name: Add Rust target\n        run: rustup target add \"$TARGET\"\n      - name: Set up sccache\n        uses: {sccache}\n        with:\n          version: v0.16.0\n      - name: Install cargo-deb\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: |\n          set -euo pipefail\n          cargo install cargo-deb --version 3.7.0 --locked\n          cargo-deb --version\n      - name: Download release metadata\n        uses: {download}\n        with:\n          name: {metadata_artifact}\n          path: metadata\n",
     );
-    steps = add_native_arm64_toolchain_steps(&steps);
+    steps = add_native_arm64_toolchain_steps(
+        &steps,
+        release_provider(config) == ProviderId::GithubHosted,
+    );
     if preview {
         let _ = writeln!(
             steps,
@@ -1852,9 +1862,7 @@ fn image_platform_matrix(config: &ProjectConfig, targets: &[String]) -> Option<S
     for (arch, _) in &arches {
         let runner = match *arch {
             "amd64" => hosted_selector_runs_on(config),
-            // GitHub's hosted arm64 label; the release contract names it and
-            // no second hosted label exists to configure.
-            _ => ARM64_HOSTED_RUNS_ON.to_owned(),
+            _ => hosted_arm64_selector_runs_on(config),
         };
         let _ = writeln!(
             matrix,
@@ -2422,10 +2430,16 @@ fn inject_native_preview_bindings(
 fn release_runner(config: &ProjectConfig, target: &str) -> String {
     if target.ends_with("-apple-darwin") {
         yaml_scalar(MACOS_HOSTED_RUNS_ON)
-    } else if target == ARM64_LINUX_TARGET && release_provider(config) == ProviderId::GithubHosted {
-        ARM64_HOSTED_RUNS_ON.to_owned()
-    } else {
+    } else if target == ARM64_LINUX_TARGET {
+        if release_provider(config) == ProviderId::GithubHosted {
+            hosted_arm64_selector_runs_on(config)
+        } else {
+            selected_runner(config)
+        }
+    } else if release_provider(config) == ProviderId::GithubHosted {
         hosted_selector_runs_on(config)
+    } else {
+        selected_runner(config)
     }
 }
 
@@ -2436,6 +2450,18 @@ fn hosted_selector_runs_on(config: &ProjectConfig) -> String {
         .get(&ProviderId::GithubHosted)
         .map(selector_runs_on_yaml)
         .unwrap_or_default()
+}
+
+/// The configured native Linux arm64 selector for the hosted provider. Real
+/// generation validates this is present when the release contract targets
+/// arm64; the fallback keeps direct renderer fixtures useful and never
+/// invents a generic runner label.
+fn hosted_arm64_selector_runs_on(config: &ProjectConfig) -> String {
+    config
+        .selectors
+        .get(&ProviderId::GithubHosted)
+        .and_then(selector_arm64_runs_on_yaml)
+        .unwrap_or_else(|| hosted_selector_runs_on(config))
 }
 
 /// Release-side builders are one writer on the release-side provider:
@@ -2996,7 +3022,10 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
         ),
     )
     .replace("run: cargo build ", "run: mbx build ");
-    let arm_toolchain = native_arm64_toolchain_steps("matrix.target");
+    let arm_toolchain = native_arm64_toolchain_steps(
+        "matrix.target",
+        release_provider(config) == ProviderId::GithubHosted,
+    );
     output = output.replace(
         "      - name: Build preview binary\n",
         &format!("{arm_toolchain}      - name: Build preview binary\n"),
@@ -4036,7 +4065,10 @@ fn render_binary_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         publish_checkout = ActionPin::Checkout.reference(),
         tag_check = TAG_IMMUTABILITY_STEP,
     );
-    let arm_toolchain = native_arm64_toolchain_steps("matrix.target");
+    let arm_toolchain = native_arm64_toolchain_steps(
+        "matrix.target",
+        release_provider(config) == ProviderId::GithubHosted,
+    );
     output = output.replace(
         "      - name: Build release binary\n",
         &format!("{arm_toolchain}      - name: Build release binary\n"),
@@ -4360,16 +4392,19 @@ fn docker_cache_scope(image: &str) -> String {
 }
 
 /// The multi-arch platform matrix: one native builder per declared
-/// platform. Arm64 builders run on the hosted arm64 label; anything else
-/// would silently emulate under QEMU, so there is no fallback.
+/// platform. Hosted arm64 builders use the configured native selector;
+/// local-only release configurations retain their configured runner.
 fn docker_platform_matrix(config: &ProjectConfig, release: &ReleaseSpec) -> String {
     let mut matrix = String::new();
     for (arch, platform) in docker_platform_arches(release) {
-        let runner = match arch {
-            "amd64" => hosted_selector_runs_on(config),
-            // GitHub's hosted arm64 label; the release contract names it and
-            // no second hosted label exists to configure.
-            _ => ARM64_HOSTED_RUNS_ON.to_owned(),
+        let runner = if release_provider(config) == ProviderId::GithubHosted {
+            if arch == "arm64" {
+                hosted_arm64_selector_runs_on(config)
+            } else {
+                hosted_selector_runs_on(config)
+            }
+        } else {
+            selected_runner(config)
         };
         let _ = writeln!(
             matrix,
@@ -5801,6 +5836,7 @@ mod tests {
             crate::s2::provider::ProviderId::Velnor,
             crate::s2::provider::ProviderSelector {
                 runs_on: vec!["self-hosted".to_owned(), "example-runner".to_owned()],
+                arm64_runs_on: Vec::new(),
             },
         );
         crate::s2::ProjectConfig {
@@ -6109,6 +6145,10 @@ mod tests {
             assert!(workflow.contains("runs-on: [self-hosted, example-runner]"));
             assert!(!workflow.contains("runs-on: ubuntu-24.04"), "{workflow}");
             assert!(!workflow.contains("github-hosted"), "{workflow}");
+            assert!(
+                !workflow.contains("Verify native arm64 C and OpenSSL toolchain"),
+                "local-only release keeps its configured cross-toolchain contract: {workflow}"
+            );
         }
     }
 
@@ -6126,6 +6166,7 @@ mod tests {
             ProviderId::GithubHosted,
             crate::s2::provider::ProviderSelector {
                 runs_on: vec!["ubuntu-custom".to_owned()],
+                arm64_runs_on: vec!["ubuntu-custom-arm".to_owned()],
             },
         );
         let Some(release) = cfg.release.as_ref() else {
@@ -6144,11 +6185,29 @@ mod tests {
                 "apple builders use the fixed GitHub-owned macos image: {workflow}"
             );
             assert!(
-                workflow.contains("runner: ubuntu-24.04-arm")
+                workflow.contains("runner: ubuntu-custom-arm")
                     && workflow.contains("runs-on: ${{ matrix.runner }}"),
-                "aarch64 builders must use the native hosted arm64 matrix row: {workflow}"
+                "aarch64 builders must use the configured native hosted arm64 matrix row: {workflow}"
             );
         }
+    }
+
+    #[test]
+    fn hosted_arm64_release_requires_an_explicit_native_selector() {
+        let mut cfg = config(&["preview.yml", "release.yml"], Some(binary_spec()));
+        cfg.selectors
+            .get_mut(&ProviderId::GithubHosted)
+            .expect("fixture hosted selector")
+            .arm64_runs_on
+            .clear();
+        let error = crate::s2::validate_release_arm64_selector(&cfg)
+            .expect_err("hosted arm64 must not fall back to an x86 selector");
+        assert!(
+            error
+                .to_string()
+                .contains("requires [workflow.selectors.github-hosted] arm64_runs_on"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -6620,6 +6679,7 @@ mod tests {
             ProviderId::GithubHosted,
             crate::s2::provider::ProviderSelector {
                 runs_on: vec!["ubuntu-22.04".to_owned()],
+                arm64_runs_on: Vec::new(),
             },
         );
         cfg.default_branch = "trunk".to_owned();

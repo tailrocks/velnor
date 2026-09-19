@@ -613,12 +613,14 @@ mod tests {
                     crate::s2::provider::ProviderId::GithubHosted,
                     crate::s2::provider::ProviderSelector {
                         runs_on: vec!["ubuntu-24.04".to_owned()],
+                        arm64_runs_on: Vec::new(),
                     },
                 ),
                 (
                     crate::s2::provider::ProviderId::Velnor,
                     crate::s2::provider::ProviderSelector {
                         runs_on: vec!["self-hosted".to_owned(), "example-lane".to_owned()],
+                        arm64_runs_on: Vec::new(),
                     },
                 ),
             ]),
