@@ -4078,6 +4078,7 @@ dependencies = [
  "clap",
  "crossterm",
  "globset",
+ "libc",
  "noyalib",
  "ratatui",
  "serde",

@@ -21,10 +21,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::io::Write as _;
+use std::fs::{File, OpenOptions};
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 
 use sha2::{Digest as _, Sha256};
 
@@ -53,6 +57,15 @@ pub(crate) const PREVIEW_SOURCE_REF: &str = "refs/heads/main";
 pub(crate) const SENTINEL_FILE: &str = ".reprepro-ok";
 /// The exact architecture set a coherent release covers.
 pub(crate) const REQUIRED_ARCHES: [&str; 2] = ["amd64", "arm64"];
+/// The canonical product target census shared by the native producer and
+/// distribution projections. APT consumes only the two Linux rows but must
+/// reject a parent manifest that silently drops either Apple target.
+const PRODUCT_TARGETS: [&str; 4] = [
+    "aarch64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+];
 /// The stable suite identity.
 pub(crate) const STABLE_SUITE: &str = "stable";
 /// The preview suite identity.
@@ -865,15 +878,13 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 
 /// The hex SHA-256 of a file.
 pub(crate) fn sha256_file(path: &Path) -> Result<String, GeneratorError> {
-    require_file(path)?;
-    let bytes = std::fs::read(path).map_err(|error| GeneratorError::io("read", path, &error))?;
+    let bytes = read_regular_file(path)?;
     Ok(sha256_hex(&bytes))
 }
 
 /// Read a JSON document, failing closed on IO or syntax errors.
 fn read_json(path: &Path) -> Result<serde_json::Value, GeneratorError> {
-    require_file(path)?;
-    let bytes = std::fs::read(path).map_err(|error| GeneratorError::io("read", path, &error))?;
+    let bytes = read_regular_file(path)?;
     serde_json::from_slice(&bytes).map_err(|error| {
         GeneratorError::usage(format!("{} is not valid JSON: {error}", path.display()))
     })
@@ -904,8 +915,7 @@ fn positive_field(document: &serde_json::Value, name: &str) -> Result<u64, Gener
 /// The bare digest a detached sidecar carries: the first whitespace-separated
 /// field, which must be 64 lowercase hex.
 fn sidecar_digest(path: &Path) -> Result<String, GeneratorError> {
-    require_file(path)?;
-    let bytes = std::fs::read(path).map_err(|error| GeneratorError::io("read", path, &error))?;
+    let bytes = read_regular_file(path)?;
     let text = String::from_utf8(bytes)
         .map_err(|_| GeneratorError::usage(format!("{} is not UTF-8", path.display())))?;
     let digest = text
@@ -923,42 +933,33 @@ fn sidecar_digest(path: &Path) -> Result<String, GeneratorError> {
 
 /// Require a coherence input to exist.
 fn require_file(path: &Path) -> Result<(), GeneratorError> {
-    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            GeneratorError::usage(format!("required file missing: {}", path.display()))
-        } else {
-            GeneratorError::io("stat required file", path, &error)
-        }
-    })?;
-    if metadata.file_type().is_symlink() {
-        return Err(GeneratorError::usage(format!(
-            "required file is a symlink: {}",
-            path.display()
-        )));
-    }
-    if !metadata.is_file() {
-        return Err(GeneratorError::usage(format!(
-            "required path is not a regular file: {}",
-            path.display()
-        )));
-    }
+    let _ = open_regular_file(path)?;
     Ok(())
 }
 
 fn require_directory(path: &Path) -> Result<(), GeneratorError> {
-    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let file = options.open(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             GeneratorError::usage(format!("required directory missing: {}", path.display()))
+        } else if std::fs::symlink_metadata(path)
+            .ok()
+            .is_some_and(|metadata| metadata.file_type().is_symlink())
+        {
+            GeneratorError::usage(format!(
+                "required directory is a symlink: {}",
+                path.display()
+            ))
         } else {
-            GeneratorError::io("stat required directory", path, &error)
+            GeneratorError::io("open required directory", path, &error)
         }
     })?;
-    if metadata.file_type().is_symlink() {
-        return Err(GeneratorError::usage(format!(
-            "required directory is a symlink: {}",
-            path.display()
-        )));
-    }
+    let metadata = file
+        .metadata()
+        .map_err(|error| GeneratorError::io("stat required directory", path, &error))?;
     if !metadata.is_dir() {
         return Err(GeneratorError::usage(format!(
             "required path is not a directory: {}",
@@ -968,11 +969,198 @@ fn require_directory(path: &Path) -> Result<(), GeneratorError> {
     Ok(())
 }
 
-fn regular_file_size(path: &Path) -> Result<u64, GeneratorError> {
-    require_file(path)?;
-    Ok(std::fs::symlink_metadata(path)
-        .map_err(|error| GeneratorError::io("stat regular file", path, &error))?
-        .len())
+/// Open one input once, without following the final path component. The
+/// verifier consumes the returned descriptor, not a later path reopen. A
+/// selected artifact must be owned by this handoff directory (`nlink == 1`);
+/// accepting a hard link would let an outside writer mutate bytes after the
+/// path check and before verification.
+fn open_regular_file(path: &Path) -> Result<File, GeneratorError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let file = options.open(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            GeneratorError::usage(format!("required file missing: {}", path.display()))
+        } else if std::fs::symlink_metadata(path)
+            .ok()
+            .is_some_and(|metadata| metadata.file_type().is_symlink())
+        {
+            GeneratorError::usage(format!("required file is a symlink: {}", path.display()))
+        } else {
+            GeneratorError::io("open required file", path, &error)
+        }
+    })?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| GeneratorError::io("stat required file", path, &error))?;
+    if !metadata.is_file() {
+        return Err(GeneratorError::usage(format!(
+            "required path is not a regular file: {}",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    if metadata.nlink() != 1 {
+        return Err(GeneratorError::usage(format!(
+            "required file has multiple links: {}",
+            path.display()
+        )));
+    }
+    Ok(file)
+}
+
+/// Read one regular input through the descriptor that was validated for it.
+fn read_regular_file(path: &Path) -> Result<Vec<u8>, GeneratorError> {
+    let mut file = open_regular_file(path)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| GeneratorError::io("read required file", path, &error))?;
+    Ok(bytes)
+}
+
+/// The sentinel is a fresh proof for one incoming handoff. Schema-2 binds it
+/// to the exact persisted selection bytes; legacy APT verification has no
+/// selection and uses the fixed marker. A pre-existing marker is never
+/// overwritten, so failed or stale verification cannot arm publication.
+fn expected_sentinel(incoming: &Path) -> Result<Vec<u8>, GeneratorError> {
+    let selection = incoming.join(DISCOVERY_SELECTION_FILE);
+    match std::fs::symlink_metadata(&selection) {
+        Ok(_) => Ok(format!(
+            "selection:{}\n",
+            sha256_hex(&read_regular_file(&selection)?)
+        )
+        .into_bytes()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(b"verified\n".to_vec()),
+        Err(error) => Err(GeneratorError::io(
+            "stat discovery selection",
+            &selection,
+            &error,
+        )),
+    }
+}
+
+fn check_sentinel(incoming: &Path) -> Result<(), GeneratorError> {
+    let path = incoming.join(SENTINEL_FILE);
+    let actual = read_regular_file(&path)?;
+    if actual != expected_sentinel(incoming)? {
+        return Err(GeneratorError::usage(
+            "APT verification sentinel is stale or bound to a different selection",
+        ));
+    }
+    Ok(())
+}
+
+fn arm_sentinel(incoming: &Path) -> Result<(), GeneratorError> {
+    let path = incoming.join(SENTINEL_FILE);
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let mut file = options.open(&path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists
+            || std::fs::symlink_metadata(&path).is_ok()
+        {
+            GeneratorError::usage(
+                "APT verification sentinel already exists; refusing to reuse stale proof",
+            )
+        } else {
+            GeneratorError::io("create verification sentinel", &path, &error)
+        }
+    })?;
+    file.write_all(&expected_sentinel(incoming)?)
+        .map_err(|error| GeneratorError::io("write verification sentinel", &path, &error))?;
+    file.sync_all()
+        .map_err(|error| GeneratorError::io("sync verification sentinel", &path, &error))?;
+    #[cfg(unix)]
+    if file
+        .metadata()
+        .map(|metadata| metadata.nlink())
+        .unwrap_or(0)
+        != 1
+    {
+        return Err(GeneratorError::usage(
+            "APT verification sentinel has multiple links",
+        ));
+    }
+    Ok(())
+}
+
+fn create_new_regular_file(
+    path: &Path,
+    bytes: &[u8],
+    operation: &'static str,
+) -> Result<(), GeneratorError> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let mut file = options.open(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists
+            || std::fs::symlink_metadata(path).is_ok()
+        {
+            GeneratorError::usage(format!("{operation} destination already exists"))
+        } else {
+            GeneratorError::io(operation, path, &error)
+        }
+    })?;
+    file.write_all(bytes)
+        .map_err(|error| GeneratorError::io(operation, path, &error))?;
+    file.sync_all()
+        .map_err(|error| GeneratorError::io("sync file", path, &error))?;
+    #[cfg(unix)]
+    if file
+        .metadata()
+        .map(|metadata| metadata.nlink())
+        .unwrap_or(0)
+        != 1
+    {
+        return Err(GeneratorError::usage(format!(
+            "{operation} destination has multiple links"
+        )));
+    }
+    Ok(())
+}
+
+/// Install bytes without following a pre-existing destination link. A staged
+/// immutable asset may already be present only when its bytes are identical;
+/// every other existing destination is a collision or an unsafe path.
+fn install_regular_file(
+    path: &Path,
+    bytes: &[u8],
+    operation: &'static str,
+) -> Result<(), GeneratorError> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            create_new_regular_file(path, bytes, operation)
+        }
+        Err(error) => Err(GeneratorError::io("stat destination", path, &error)),
+        Ok(_) => {
+            let existing = read_regular_file(path)?;
+            if existing == bytes {
+                Ok(())
+            } else {
+                Err(GeneratorError::usage(format!(
+                    "{operation} destination differs from immutable input"
+                )))
+            }
+        }
+    }
+}
+
+/// Materialize a descriptor-verified input inside a private scratch directory
+/// before handing it to a pathname-based archive tool. The tool therefore
+/// cannot reopen the caller's mutable incoming path.
+fn materialize_verified_file(path: &Path) -> Result<(PathBuf, PathBuf), GeneratorError> {
+    let bytes = read_regular_file(path)?;
+    let scratch = scratch_dir("verified-input")?;
+    let materialized = scratch.join("input");
+    if let Err(error) = create_new_regular_file(&materialized, &bytes, "materialize verified input")
+    {
+        let _ = std::fs::remove_dir_all(&scratch);
+        return Err(error);
+    }
+    Ok((scratch, materialized))
 }
 
 /// Whether a directory entry is a `.deb` file. The match is deliberately
@@ -1381,9 +1569,9 @@ fn validate_product_manifest_selection(
         .get("components")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| GeneratorError::usage("discovery components are not an array"))?;
-    if components.is_empty() {
+    if components.len() != 3 {
         return Err(GeneratorError::usage(
-            "discovery product manifest has no component inventory",
+            "discovery product manifest must carry exactly three components",
         ));
     }
     let mut component_names = BTreeSet::new();
@@ -1406,11 +1594,8 @@ fn validate_product_manifest_selection(
             || !valid_binary_name(binary)
             || name != crate_name
             || name != binary
-            || version.is_empty()
-            || version
-                .bytes()
-                .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
-            || targets.is_empty()
+            || !is_bare_version(version)
+            || targets.len() != PRODUCT_TARGETS.len()
             || !component_names.insert(name)
         {
             return Err(GeneratorError::usage(
@@ -1421,15 +1606,24 @@ fn validate_product_manifest_selection(
             let target = target.as_str().ok_or_else(|| {
                 GeneratorError::usage("discovery component target is not a string")
             })?;
-            if target.is_empty()
-                || target
-                    .bytes()
-                    .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
-            {
+            if !PRODUCT_TARGETS.contains(&target) {
                 return Err(GeneratorError::usage(
-                    "discovery component target is invalid",
+                    "discovery component target is outside the canonical product census",
                 ));
             }
+        }
+        let target_set = targets
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<BTreeSet<_>>();
+        if target_set.len() != PRODUCT_TARGETS.len()
+            || PRODUCT_TARGETS
+                .iter()
+                .any(|target| !target_set.contains(target))
+        {
+            return Err(GeneratorError::usage(
+                "discovery component target census is incomplete",
+            ));
         }
     }
     let artifacts = manifest
@@ -1470,19 +1664,99 @@ fn validate_product_manifest_selection(
         }
         let kind = field(artifact, "kind")?;
         let target = field(artifact, "target")?;
-        if kind.is_empty()
-            || target.is_empty()
-            || kind
-                .bytes()
-                .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
-            || target
-                .bytes()
-                .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+        if !matches!(
+            kind,
+            "binary" | "archive" | "homebrew-archive" | "apt-package"
+        ) || !PRODUCT_TARGETS.contains(&target)
         {
             return Err(GeneratorError::usage(
-                "discovery product artifact identity is empty",
+                "discovery product artifact kind or target is outside the canonical census",
             ));
         }
+    }
+    let component_targets = components
+        .iter()
+        .flat_map(|component| {
+            component
+                .get("targets")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+        })
+        .collect::<BTreeSet<_>>();
+    let artifact_rows = artifacts
+        .iter()
+        .filter_map(|artifact| {
+            Some((
+                field(artifact, "name").ok()?,
+                field(artifact, "kind").ok()?,
+                field(artifact, "target").ok()?,
+            ))
+        })
+        .collect::<Vec<_>>();
+    if component_targets.len() != PRODUCT_TARGETS.len()
+        || PRODUCT_TARGETS
+            .iter()
+            .any(|target| !component_targets.contains(target))
+        || artifact_rows.len() != 18
+        || artifact_rows
+            .iter()
+            .filter(|(_, kind, _)| *kind == "binary")
+            .count()
+            != 12
+        || artifact_rows
+            .iter()
+            .filter(|(_, kind, _)| *kind == "apt-package")
+            .count()
+            != 2
+        || artifact_rows
+            .iter()
+            .filter(|(_, kind, _)| matches!(*kind, "archive" | "homebrew-archive"))
+            .count()
+            != 4
+    {
+        return Err(GeneratorError::usage(
+            "discovery product artifact inventory is not the canonical 18-row census",
+        ));
+    }
+    for component in components {
+        let binary = field(component, "binary")?;
+        for target in PRODUCT_TARGETS {
+            let suffixed = format!("{binary}-{target}");
+            if !artifact_rows.iter().any(|(name, kind, row_target)| {
+                *kind == "binary" && *row_target == target && (*name == binary || *name == suffixed)
+            }) {
+                return Err(GeneratorError::usage(
+                    "discovery product manifest is missing a component binary artifact",
+                ));
+            }
+        }
+    }
+    for target in PRODUCT_TARGETS {
+        let archive_kind = if target.ends_with("-apple-darwin") {
+            "homebrew-archive"
+        } else {
+            "archive"
+        };
+        if artifact_rows
+            .iter()
+            .filter(|(_, kind, row_target)| *kind == archive_kind && *row_target == target)
+            .count()
+            != 1
+        {
+            return Err(GeneratorError::usage(
+                "discovery product manifest is missing a target archive",
+            ));
+        }
+    }
+    if artifact_rows
+        .iter()
+        .any(|(_, kind, target)| *kind == "apt-package" && !target.ends_with("-unknown-linux-gnu"))
+    {
+        return Err(GeneratorError::usage(
+            "discovery APT artifacts must target Linux architectures",
+        ));
     }
     Ok(())
 }
@@ -1561,6 +1835,12 @@ fn validate_source_ref_resolution(
 )]
 pub(crate) fn read_discovery_selection(path: &Path) -> Result<DiscoverySelection, GeneratorError> {
     let document = read_json(path)?;
+    parse_discovery_selection(&document)
+}
+
+fn parse_discovery_selection(
+    document: &serde_json::Value,
+) -> Result<DiscoverySelection, GeneratorError> {
     exact_object_keys(
         &document,
         &[
@@ -1767,6 +2047,30 @@ pub(crate) fn read_discovery_selection(path: &Path) -> Result<DiscoverySelection
             )));
         }
     }
+    let mut allowed_names = manifest_artifacts
+        .iter()
+        .map(|artifact| field(artifact, "name").map(str::to_owned))
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    for artifact in manifest_artifacts {
+        if field(artifact, "kind")? == "apt-package" {
+            allowed_names.insert(format!("{}.sha256", field(artifact, "name")?));
+        }
+    }
+    allowed_names.extend([
+        PRODUCT_MANIFEST_ASSET.to_owned(),
+        "product-manifest.json.sha256".to_owned(),
+        RECORD_FILE.to_owned(),
+        RECORD_SIDECAR.to_owned(),
+        MANIFEST_FILE.to_owned(),
+        MANIFEST_SIDECAR.to_owned(),
+        PREVIEW_MANIFEST_FILE.to_owned(),
+        SHA256SUMS_FILE.to_owned(),
+    ]);
+    if seen_names != allowed_names {
+        return Err(GeneratorError::usage(
+            "discovery release asset census differs from the canonical manifest and allowed subordinate records",
+        ));
+    }
     Ok(DiscoverySelection {
         channel,
         product_id,
@@ -1788,6 +2092,120 @@ pub(crate) fn read_discovery_selection(path: &Path) -> Result<DiscoverySelection
     })
 }
 
+/// Check a subordinate producer record against the externally hashed parent
+/// manifest. The producer owns each subordinate schema; this boundary only
+/// enforces the cross-record edge and its detached digest.
+fn verify_subordinate_record(
+    incoming: &Path,
+    payload_name: &str,
+    sidecar_name: &str,
+    expected_parent: &str,
+) -> Result<(), GeneratorError> {
+    let payload_path = incoming.join(payload_name);
+    let payload_bytes = read_regular_file(&payload_path)?;
+    let sidecar = sidecar_digest(&incoming.join(sidecar_name))?;
+    if sidecar != sha256_hex(&payload_bytes) {
+        return Err(GeneratorError::usage(format!(
+            "discovery subordinate {payload_name} checksum differs from its sidecar"
+        )));
+    }
+    let document =
+        serde_json::from_slice::<serde_json::Value>(&payload_bytes).map_err(|error| {
+            GeneratorError::usage(format!(
+                "discovery subordinate {payload_name} is not valid JSON: {error}"
+            ))
+        })?;
+    if field(&document, "parent_manifest_sha256")? != expected_parent {
+        return Err(GeneratorError::usage(format!(
+            "discovery subordinate {payload_name} does not bind the canonical product manifest"
+        )));
+    }
+    Ok(())
+}
+
+/// Verify the release-owned subordinate byte edges which are not represented
+/// as product artifact rows. This is deliberately a projection check: the
+/// producer remains the authority for each record's full schema.
+fn verify_discovery_subordinates(
+    selection: &DiscoverySelection,
+    incoming: &Path,
+) -> Result<(), GeneratorError> {
+    verify_subordinate_record(
+        incoming,
+        RECORD_FILE,
+        RECORD_SIDECAR,
+        &selection.manifest_sha256,
+    )?;
+    verify_subordinate_record(
+        incoming,
+        MANIFEST_FILE,
+        MANIFEST_SIDECAR,
+        &selection.manifest_sha256,
+    )?;
+    let release_manifest = read_json(&incoming.join(PREVIEW_MANIFEST_FILE))?;
+    if field(&release_manifest, "parent_manifest_sha256")? != selection.manifest_sha256 {
+        return Err(GeneratorError::usage(
+            "discovery release-manifest does not bind the canonical product manifest",
+        ));
+    }
+    let sums_bytes = read_regular_file(&incoming.join(SHA256SUMS_FILE))?;
+    let sums = String::from_utf8(sums_bytes)
+        .map_err(|_| GeneratorError::usage("discovery SHA256SUMS is not UTF-8"))?;
+    let mut sums_by_name = BTreeMap::new();
+    for line in sums.lines().filter(|line| !line.trim().is_empty()) {
+        let mut fields = line.split_whitespace();
+        let digest = fields
+            .next()
+            .ok_or_else(|| GeneratorError::usage("discovery SHA256SUMS has no digest"))?;
+        let name = fields
+            .next()
+            .ok_or_else(|| GeneratorError::usage("discovery SHA256SUMS has no asset name"))?;
+        if fields.next().is_some() || !valid_digest(digest) || !valid_discovery_asset_name(name) {
+            return Err(GeneratorError::usage(
+                "discovery SHA256SUMS has an invalid row",
+            ));
+        }
+        if sums_by_name
+            .insert(name.to_owned(), digest.to_owned())
+            .is_some()
+        {
+            return Err(GeneratorError::usage(
+                "discovery SHA256SUMS names an asset more than once",
+            ));
+        }
+    }
+    let artifacts = selection
+        .manifest
+        .get("artifacts")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| GeneratorError::usage("discovery product artifact inventory is missing"))?;
+    let apt_artifacts = artifacts
+        .iter()
+        .filter(|artifact| field(artifact, "kind").ok() == Some("apt-package"))
+        .collect::<Vec<_>>();
+    if apt_artifacts.len() != 2 || sums_by_name.len() != apt_artifacts.len() {
+        return Err(GeneratorError::usage(
+            "discovery SHA256SUMS is not the exact two-package census",
+        ));
+    }
+    for artifact in apt_artifacts {
+        let name = field(artifact, "name")?;
+        let expected = field(artifact, "sha256")?;
+        if sums_by_name.get(name).map(String::as_str) != Some(expected) {
+            return Err(GeneratorError::usage(format!(
+                "discovery SHA256SUMS does not bind {name}"
+            )));
+        }
+        let sidecar = sidecar_digest(&incoming.join(format!("{name}.sha256")))?;
+        if sidecar != expected {
+            return Err(GeneratorError::usage(format!(
+                "discovery package sidecar does not bind {name}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Download precisely the assets named by a validated discovery result. The
 /// old tag/pointer download selector is intentionally not reachable here:
 /// every request is keyed by the immutable provider asset ID.
@@ -1796,22 +2214,27 @@ pub(crate) fn run_fetch_selection(
     dir: &Path,
     path_overlay: Option<&Path>,
 ) -> Result<DiscoverySelection, GeneratorError> {
-    let selection = read_discovery_selection(selection_path)?;
     let selected_document = read_json(selection_path)?;
+    let selection = parse_discovery_selection(&selected_document)?;
     if dir.exists() {
         require_directory(dir)?;
         let existing = dir_names(dir)?;
+        if existing.iter().any(|name| name == SENTINEL_FILE) {
+            return Err(GeneratorError::usage(
+                "selection fetch refuses a pre-existing verification sentinel",
+            ));
+        }
         if existing.iter().any(|name| name != DISCOVERY_SELECTION_FILE) {
             return Err(GeneratorError::usage(
                 "selection fetch requires an empty incoming directory",
             ));
         }
-        if dir.join(DISCOVERY_SELECTION_FILE).is_file()
-            && read_json(&dir.join(DISCOVERY_SELECTION_FILE))? != selected_document
-        {
-            return Err(GeneratorError::usage(
-                "incoming discovery.json differs from the selected release",
-            ));
+        if dir.join(DISCOVERY_SELECTION_FILE).exists() {
+            if read_json(&dir.join(DISCOVERY_SELECTION_FILE))? != selected_document {
+                return Err(GeneratorError::usage(
+                    "incoming discovery.json differs from the selected release",
+                ));
+            }
         }
     } else {
         std::fs::create_dir_all(dir)
@@ -1840,8 +2263,7 @@ pub(crate) fn run_fetch_selection(
             )));
         }
         let temporary = dir.join(format!(".{}.part", asset.id));
-        std::fs::write(&temporary, &bytes)
-            .map_err(|error| GeneratorError::io("write downloaded asset", &temporary, &error))?;
+        create_new_regular_file(&temporary, &bytes, "write downloaded asset")?;
         std::fs::rename(&temporary, dir.join(&asset.name)).map_err(|error| {
             GeneratorError::io("install downloaded asset", &dir.join(&asset.name), &error)
         })?;
@@ -1849,13 +2271,14 @@ pub(crate) fn run_fetch_selection(
     let persisted = serde_json::to_vec(&selected_document).map_err(|error| {
         GeneratorError::usage(format!("serialize discovery selection: {error}"))
     })?;
-    std::fs::write(dir.join(DISCOVERY_SELECTION_FILE), persisted).map_err(|error| {
-        GeneratorError::io(
+    let selection_destination = dir.join(DISCOVERY_SELECTION_FILE);
+    if !selection_destination.exists() {
+        create_new_regular_file(
+            &selection_destination,
+            &persisted,
             "persist discovery selection",
-            &dir.join(DISCOVERY_SELECTION_FILE),
-            &error,
-        )
-    })?;
+        )?;
+    }
     Ok(selection)
 }
 
@@ -1869,12 +2292,15 @@ pub(crate) fn verify_discovery_incoming(
 ) -> Result<DiscoverySelection, GeneratorError> {
     require_directory(incoming)?;
     let selection_document = read_json(selection_path)?;
-    let selection = read_discovery_selection(selection_path)?;
+    let selection = parse_discovery_selection(&selection_document)?;
     let persisted = incoming.join(DISCOVERY_SELECTION_FILE);
     if read_json(&persisted)? != selection_document {
         return Err(GeneratorError::usage(
             "incoming discovery.json differs from the selected release",
         ));
+    }
+    if std::fs::symlink_metadata(incoming.join(SENTINEL_FILE)).is_ok() {
+        check_sentinel(incoming)?;
     }
     let mut expected = selection
         .release_assets
@@ -1892,8 +2318,7 @@ pub(crate) fn verify_discovery_incoming(
     }
     for asset in &selection.release_assets {
         let path = incoming.join(&asset.name);
-        require_file(&path)?;
-        let observed = regular_file_size(&path)?;
+        let observed = read_regular_file(&path)?.len() as u64;
         if observed != asset.size {
             return Err(GeneratorError::usage(format!(
                 "incoming asset {} size differs from discovery",
@@ -1902,12 +2327,20 @@ pub(crate) fn verify_discovery_incoming(
         }
     }
     let manifest_path = incoming.join(&selection.manifest_asset);
-    if sha256_file(&manifest_path)? != selection.manifest_sha256 {
+    let manifest_bytes = read_regular_file(&manifest_path)?;
+    if sha256_hex(&manifest_bytes) != selection.manifest_sha256 {
         return Err(GeneratorError::usage(
             "incoming canonical product manifest digest differs from discovery",
         ));
     }
-    if read_json(&manifest_path)? != selection.manifest {
+    let manifest_document =
+        serde_json::from_slice::<serde_json::Value>(&manifest_bytes).map_err(|error| {
+            GeneratorError::usage(format!(
+                "{} is not valid JSON: {error}",
+                manifest_path.display()
+            ))
+        })?;
+    if manifest_document != selection.manifest {
         return Err(GeneratorError::usage(
             "incoming canonical product manifest differs from discovery",
         ));
@@ -1926,15 +2359,16 @@ pub(crate) fn verify_discovery_incoming(
     for artifact in artifacts {
         let name = field(artifact, "name")?;
         let path = incoming.join(name);
-        require_file(&path)?;
         let expected_size = positive_field(artifact, "size")?;
-        let observed_size = regular_file_size(&path)?;
-        if observed_size != expected_size || sha256_file(&path)? != field(artifact, "sha256")? {
+        let bytes = read_regular_file(&path)?;
+        let observed_size = bytes.len() as u64;
+        if observed_size != expected_size || sha256_hex(&bytes) != field(artifact, "sha256")? {
             return Err(GeneratorError::usage(format!(
                 "incoming product artifact {name} differs from canonical inventory"
             )));
         }
     }
+    verify_discovery_subordinates(&selection, incoming)?;
     Ok(selection)
 }
 
@@ -1960,63 +2394,68 @@ pub(crate) fn deb_control_field(
             "deb control field is not readable: {field_name}"
         )));
     }
-    let Some(deb_name) = deb.to_str() else {
-        return Err(GeneratorError::usage("deb path is not UTF-8"));
-    };
-    if backend == DebBackend::Auto && tool_present("dpkg-deb", path_overlay) {
-        let stdout = run_fixed(
-            "dpkg-deb",
-            &["-f".to_owned(), deb_name.to_owned(), field_name.to_owned()],
+    let (verified_root, verified_deb) = materialize_verified_file(deb)?;
+    let result = (|| {
+        let Some(deb_name) = verified_deb.to_str() else {
+            return Err(GeneratorError::usage("deb path is not UTF-8"));
+        };
+        if backend == DebBackend::Auto && tool_present("dpkg-deb", path_overlay) {
+            let stdout = run_fixed(
+                "dpkg-deb",
+                &["-f".to_owned(), deb_name.to_owned(), field_name.to_owned()],
+                None,
+                path_overlay,
+            )?;
+            return Ok(String::from_utf8_lossy(&stdout).trim().to_owned());
+        }
+        let members = run_fixed(
+            "ar",
+            &["t".to_owned(), deb_name.to_owned()],
             None,
             path_overlay,
         )?;
-        return Ok(String::from_utf8_lossy(&stdout).trim().to_owned());
-    }
-    let members = run_fixed(
-        "ar",
-        &["t".to_owned(), deb_name.to_owned()],
-        None,
-        path_overlay,
-    )?;
-    let control = String::from_utf8_lossy(&members)
-        .lines()
-        .find(|line| line.starts_with("control.tar"))
-        .ok_or_else(|| {
-            GeneratorError::usage(format!("deb {} has no control.tar member", deb.display()))
-        })?
-        .to_owned();
-    let payload = run_fixed(
-        "ar",
-        &["p".to_owned(), deb_name.to_owned(), control],
-        None,
-        path_overlay,
-    )?;
-    // Full extraction into a scratch directory, exactly like the oracle:
-    // control members name their file `control` with or without a `./`
-    // prefix depending on the producer, and name matching would guess.
-    let scratch = scratch_dir("deb-control")?;
-    let result = run_tar_stdin(
-        &["-x", "-C", scratch.to_str().unwrap_or("."), "-f", "-"],
-        &payload,
-        path_overlay,
-    )
-    .and_then(|()| {
-        let prefix = format!("{field_name}:");
-        std::fs::read_to_string(scratch.join("control"))
-            .map_err(|error| GeneratorError::io("read", &scratch.join("control"), &error))
-            .and_then(|text| {
-                text.lines()
-                    .find_map(|line| line.strip_prefix(prefix.as_str()).map(str::trim))
-                    .map(str::to_owned)
-                    .ok_or_else(|| {
-                        GeneratorError::usage(format!(
-                            "deb {} has no {field_name} control field",
-                            deb.display()
-                        ))
-                    })
-            })
-    });
-    let _ = std::fs::remove_dir_all(&scratch);
+        let control = String::from_utf8_lossy(&members)
+            .lines()
+            .find(|line| line.starts_with("control.tar"))
+            .ok_or_else(|| {
+                GeneratorError::usage(format!("deb {} has no control.tar member", deb.display()))
+            })?
+            .to_owned();
+        let payload = run_fixed(
+            "ar",
+            &["p".to_owned(), deb_name.to_owned(), control],
+            None,
+            path_overlay,
+        )?;
+        // Full extraction into a scratch directory, exactly like the oracle:
+        // control members name their file `control` with or without a `./`
+        // prefix depending on the producer, and name matching would guess.
+        let scratch = scratch_dir("deb-control")?;
+        let result = run_tar_stdin(
+            &["-x", "-C", scratch.to_str().unwrap_or("."), "-f", "-"],
+            &payload,
+            path_overlay,
+        )
+        .and_then(|()| {
+            let control_path = scratch.join("control");
+            let text = String::from_utf8(read_regular_file(&control_path)?).map_err(|_| {
+                GeneratorError::usage(format!("{} is not UTF-8", control_path.display()))
+            })?;
+            let prefix = format!("{field_name}:");
+            text.lines()
+                .find_map(|line| line.strip_prefix(prefix.as_str()).map(str::trim))
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    GeneratorError::usage(format!(
+                        "deb {} has no {field_name} control field",
+                        deb.display()
+                    ))
+                })
+        });
+        let _ = std::fs::remove_dir_all(&scratch);
+        result
+    })();
+    let _ = std::fs::remove_dir_all(&verified_root);
     result
 }
 
@@ -2114,39 +2553,45 @@ pub(crate) fn deb_extract_data(
     backend: DebBackend,
     path_overlay: Option<&Path>,
 ) -> Result<(), GeneratorError> {
-    let (Some(deb_name), Some(dest_name)) = (deb.to_str(), dest.to_str()) else {
-        return Err(GeneratorError::usage("deb path is not UTF-8"));
-    };
-    std::fs::create_dir_all(dest).map_err(|error| GeneratorError::io("create", dest, &error))?;
-    if backend == DebBackend::Auto && tool_present("dpkg-deb", path_overlay) {
-        run_fixed(
-            "dpkg-deb",
-            &["-x".to_owned(), deb_name.to_owned(), dest_name.to_owned()],
+    let (verified_root, verified_deb) = materialize_verified_file(deb)?;
+    let result = (|| {
+        let (Some(deb_name), Some(dest_name)) = (verified_deb.to_str(), dest.to_str()) else {
+            return Err(GeneratorError::usage("deb path is not UTF-8"));
+        };
+        std::fs::create_dir_all(dest)
+            .map_err(|error| GeneratorError::io("create", dest, &error))?;
+        if backend == DebBackend::Auto && tool_present("dpkg-deb", path_overlay) {
+            run_fixed(
+                "dpkg-deb",
+                &["-x".to_owned(), deb_name.to_owned(), dest_name.to_owned()],
+                None,
+                path_overlay,
+            )?;
+            return Ok(());
+        }
+        let members = run_fixed(
+            "ar",
+            &["t".to_owned(), deb_name.to_owned()],
             None,
             path_overlay,
         )?;
-        return Ok(());
-    }
-    let members = run_fixed(
-        "ar",
-        &["t".to_owned(), deb_name.to_owned()],
-        None,
-        path_overlay,
-    )?;
-    let data = String::from_utf8_lossy(&members)
-        .lines()
-        .find(|line| line.starts_with("data.tar"))
-        .ok_or_else(|| {
-            GeneratorError::usage(format!("deb {} has no data.tar member", deb.display()))
-        })?
-        .to_owned();
-    let payload = run_fixed(
-        "ar",
-        &["p".to_owned(), deb_name.to_owned(), data],
-        None,
-        path_overlay,
-    )?;
-    run_tar_stdin(&["-x", "-C", dest_name, "-f", "-"], &payload, path_overlay)
+        let data = String::from_utf8_lossy(&members)
+            .lines()
+            .find(|line| line.starts_with("data.tar"))
+            .ok_or_else(|| {
+                GeneratorError::usage(format!("deb {} has no data.tar member", deb.display()))
+            })?
+            .to_owned();
+        let payload = run_fixed(
+            "ar",
+            &["p".to_owned(), deb_name.to_owned(), data],
+            None,
+            path_overlay,
+        )?;
+        run_tar_stdin(&["-x", "-C", dest_name, "-f", "-"], &payload, path_overlay)
+    })();
+    let _ = std::fs::remove_dir_all(&verified_root);
+    result
 }
 
 /// Inputs to suite verification. `commit` is `None` for a stable run that
@@ -2220,13 +2665,7 @@ pub(crate) fn verify_suite(inputs: &VerifyInputs<'_>) -> Result<(), GeneratorErr
             "APT signer fingerprint does not match the pinned publisher key",
         ));
     }
-    std::fs::write(inputs.incoming.join(SENTINEL_FILE), []).map_err(|error| {
-        GeneratorError::io(
-            "arm the verification sentinel",
-            &inputs.incoming.join(SENTINEL_FILE),
-            &error,
-        )
-    })?;
+    arm_sentinel(inputs.incoming)?;
     Ok(())
 }
 
@@ -2825,8 +3264,7 @@ fn verify_preview(inputs: &VerifyInputs<'_>) -> Result<(), GeneratorError> {
         ));
     }
 
-    let sums_bytes = std::fs::read(&sums_path)
-        .map_err(|error| GeneratorError::io("read", &sums_path, &error))?;
+    let sums_bytes = read_regular_file(&sums_path)?;
     let sums = String::from_utf8(sums_bytes)
         .map_err(|_| GeneratorError::usage(format!("{} is not UTF-8", sums_path.display())))?;
     for arch in REQUIRED_ARCHES {
@@ -2858,8 +3296,7 @@ fn verify_preview_arch(
     let deb = incoming.join(&deb_name);
     let deb_sum = incoming.join(format!("{deb_name}.sha256"));
     require_file(&deb_sum)?;
-    let sidecar_bytes =
-        std::fs::read(&deb_sum).map_err(|error| GeneratorError::io("read", &deb_sum, &error))?;
+    let sidecar_bytes = read_regular_file(&deb_sum)?;
     let sidecar = String::from_utf8(sidecar_bytes)
         .map_err(|_| GeneratorError::usage(format!("{} is not UTF-8", deb_sum.display())))?;
     if sidecar.lines().count() != 1 {
@@ -3024,11 +3461,11 @@ pub(crate) fn publish_suite(inputs: &PublishInputs<'_>) -> Result<(), GeneratorE
             ));
         }
     }
-    if !inputs.incoming.join(SENTINEL_FILE).is_file() {
-        return Err(GeneratorError::usage(
-            "publish: refusing — verify has not armed the reprepro sentinel",
-        ));
-    }
+    check_sentinel(inputs.incoming).map_err(|error| {
+        GeneratorError::usage(format!(
+            "publish: refusing — verify has not armed the reprepro sentinel: {error}"
+        ))
+    })?;
     for tool in ["apt-ftparchive", "gpg"] {
         if !tool_present(tool, inputs.path_overlay) {
             return Err(GeneratorError::usage(format!(
@@ -3155,8 +3592,9 @@ fn stage_package(
         .parent()
         .unwrap_or(destination)
         .join(canonical_pool_name(&contract.package, &version, &arch));
-    if expected.is_file() {
-        if sha256_file(&expected)? != sha256_file(deb)? {
+    let deb_bytes = read_regular_file(deb)?;
+    if std::fs::symlink_metadata(&expected).is_ok() {
+        if sha256_hex(&deb_bytes) != sha256_file(&expected)? {
             return Err(GeneratorError::usage(
                 "publish: canonical package identity collides with different bytes",
             ));
@@ -3166,8 +3604,7 @@ fn stage_package(
             std::fs::create_dir_all(parent)
                 .map_err(|error| GeneratorError::io("create", parent, &error))?;
         }
-        std::fs::copy(deb, &expected)
-            .map_err(|error| GeneratorError::io("stage", &expected, &error))?;
+        install_regular_file(&expected, &deb_bytes, "stage")?;
     }
     Ok((version, arch))
 }
@@ -3188,11 +3625,11 @@ fn stage_dir_debs(
             continue;
         }
         let deb = dir.join(&name);
-        if !deb.is_file() {
+        if read_regular_file(&deb).is_err() {
             continue;
         }
         let candidate = incoming.join(&name);
-        if candidate.is_file() {
+        if std::fs::symlink_metadata(&candidate).is_ok() {
             if sha256_file(&candidate)? != sha256_file(&deb)? {
                 return Err(GeneratorError::usage(format!(
                     "published package name collides with different candidate bytes: {name}"
@@ -3552,15 +3989,16 @@ fn prime_signer_agent(
 /// Copy the keyring into the staging tree when the repository carries one.
 fn stage_keyring(staging: &Path, contract: &AptContract) -> Result<(), GeneratorError> {
     let keyring = Path::new(&contract.keyring);
-    if !keyring.is_file() {
-        return Ok(());
-    }
+    let bytes = match std::fs::symlink_metadata(keyring) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(GeneratorError::io("stat keyring", keyring, &error)),
+        Ok(_) => read_regular_file(keyring)?,
+    };
     let name = keyring
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| GeneratorError::usage("keyring filename is not UTF-8"))?;
-    std::fs::copy(keyring, staging.join(name))
-        .map_err(|error| GeneratorError::io("stage the keyring", staging, &error))?;
+    install_regular_file(&staging.join(name), &bytes, "stage the keyring")?;
     Ok(())
 }
 
@@ -4784,8 +5222,77 @@ mod tests {
         let root = fixture_dir(name);
         let selection_path = root.join("selection.json");
         let incoming = root.join("incoming");
-        let amd64 = b"amd64-deb".to_vec();
-        let arm64 = b"arm64-deb".to_vec();
+        let components = serde_json::json!([
+            {
+                "name": "velnorctl",
+                "crate": "velnorctl",
+                "version": "0.1.0",
+                "binary": "velnorctl",
+                "targets": PRODUCT_TARGETS
+            },
+            {
+                "name": "velnor-runner",
+                "crate": "velnor-runner",
+                "version": "0.1.0",
+                "binary": "velnor-runner",
+                "targets": PRODUCT_TARGETS
+            },
+            {
+                "name": "velnor-workflow",
+                "crate": "velnor-workflow",
+                "version": "0.1.0",
+                "binary": "velnor-workflow",
+                "targets": PRODUCT_TARGETS
+            }
+        ]);
+        let mut artifact_values = Vec::new();
+        let mut artifact_assets = Vec::new();
+        for component in ["velnorctl", "velnor-runner", "velnor-workflow"] {
+            for target in PRODUCT_TARGETS {
+                let asset_name = format!("{component}-{target}");
+                let bytes = format!("binary-{component}-{target}").into_bytes();
+                artifact_values.push(serde_json::json!({
+                    "name": asset_name,
+                    "target": target,
+                    "kind": "binary",
+                    "sha256": sha256_hex(&bytes),
+                    "size": bytes.len()
+                }));
+                artifact_assets.push((asset_name, bytes));
+            }
+        }
+        for target in PRODUCT_TARGETS {
+            let kind = if target.ends_with("-apple-darwin") {
+                "homebrew-archive"
+            } else {
+                "archive"
+            };
+            let asset_name = format!("velnor-{target}.tar");
+            let bytes = format!("archive-{target}").into_bytes();
+            artifact_values.push(serde_json::json!({
+                "name": asset_name,
+                "target": target,
+                "kind": kind,
+                "sha256": sha256_hex(&bytes),
+                "size": bytes.len()
+            }));
+            artifact_assets.push((asset_name, bytes));
+        }
+        for (arch, target) in [
+            ("amd64", "x86_64-unknown-linux-gnu"),
+            ("arm64", "aarch64-unknown-linux-gnu"),
+        ] {
+            let asset_name = format!("example-1.2.3-{arch}.deb");
+            let bytes = format!("{arch}-deb").into_bytes();
+            artifact_values.push(serde_json::json!({
+                "name": asset_name,
+                "target": target,
+                "kind": "apt-package",
+                "sha256": sha256_hex(&bytes),
+                "size": bytes.len()
+            }));
+            artifact_assets.push((asset_name, bytes));
+        }
         let manifest = serde_json::json!({
             "schema": PRODUCT_MANIFEST_SCHEMA,
             "product_id": "velnor",
@@ -4796,75 +5303,82 @@ mod tests {
             "source_commit": FIXTURE_COMMIT,
             "release_tag": "v1.2.3",
             "release_id": "provider/123",
-            "artifacts": [
-                {
-                    "name": "example-1.2.3-amd64.deb",
-                    "target": "x86_64-unknown-linux-gnu",
-                    "kind": "apt-package",
-                    "sha256": sha256_hex(&amd64),
-                    "size": amd64.len()
-                },
-                {
-                    "name": "example-1.2.3-arm64.deb",
-                    "target": "aarch64-unknown-linux-gnu",
-                    "kind": "apt-package",
-                    "sha256": sha256_hex(&arm64),
-                    "size": arm64.len()
-                }
-            ],
-            "components": [
-                {
-                    "name": "velnorctl",
-                    "crate": "velnorctl",
-                    "version": "1.2.3",
-                    "binary": "velnorctl",
-                    "targets": ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
-                },
-                {
-                    "name": "velnor-runner",
-                    "crate": "velnor-runner",
-                    "version": "1.2.3",
-                    "binary": "velnor-runner",
-                    "targets": ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
-                },
-                {
-                    "name": "velnor-workflow",
-                    "crate": "velnor-workflow",
-                    "version": "1.2.3",
-                    "binary": "velnor-workflow",
-                    "targets": ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
-                }
-            ]
+            "artifacts": artifact_values,
+            "components": components
         });
         let manifest_bytes = must(
             serde_json::to_vec(&manifest),
             "serialize discovery product manifest",
         );
         let manifest_sha256 = sha256_hex(&manifest_bytes);
+        let record_bytes = must(
+            serde_json::to_vec(&serde_json::json!({
+                "parent_manifest_sha256": manifest_sha256,
+                "schema": RELEASE_RECORD_SCHEMA
+            })),
+            "serialize fixture release record",
+        );
+        let package_bytes = must(
+            serde_json::to_vec(&serde_json::json!({
+                "parent_manifest_sha256": manifest_sha256,
+                "schema": "velnor.package-release.v1"
+            })),
+            "serialize fixture package record",
+        );
+        let release_manifest_bytes = must(
+            serde_json::to_vec(&serde_json::json!({
+                "parent_manifest_sha256": manifest_sha256,
+                "schema": "velnor.package-release.v1",
+                "assets": artifact_values
+                    .iter()
+                    .filter(|artifact| artifact["kind"] == "apt-package")
+                    .map(|artifact| serde_json::json!({
+                        "name": artifact["name"],
+                        "sha256": artifact["sha256"]
+                    }))
+                    .collect::<Vec<_>>()
+            })),
+            "serialize fixture release manifest",
+        );
+        let sums = artifact_values
+            .iter()
+            .filter(|artifact| artifact["kind"] == "apt-package")
+            .map(|artifact| {
+                format!(
+                    "{}  {}\n",
+                    artifact["sha256"].as_str().unwrap_or_default(),
+                    artifact["name"].as_str().unwrap_or_default()
+                )
+            })
+            .collect::<String>();
         let mut raw_assets = vec![
             (PRODUCT_MANIFEST_ASSET.to_owned(), manifest_bytes),
             (
                 "product-manifest.json.sha256".to_owned(),
                 format!("{manifest_sha256}  product-manifest.json\n").into_bytes(),
             ),
-            ("release-record.json".to_owned(), b"release-record".to_vec()),
+            (RECORD_FILE.to_owned(), record_bytes.clone()),
             (
-                "release-record.json.sha256".to_owned(),
-                b"release-record-sidecar".to_vec(),
+                RECORD_SIDECAR.to_owned(),
+                format!("{}  {RECORD_FILE}\n", sha256_hex(&record_bytes)).into_bytes(),
             ),
-            ("manifest.json".to_owned(), b"manifest".to_vec()),
+            (MANIFEST_FILE.to_owned(), package_bytes.clone()),
             (
-                "manifest.json.sha256".to_owned(),
-                b"manifest-sidecar".to_vec(),
+                MANIFEST_SIDECAR.to_owned(),
+                format!("{}  {MANIFEST_FILE}\n", sha256_hex(&package_bytes)).into_bytes(),
             ),
-            (
-                PREVIEW_MANIFEST_FILE.to_owned(),
-                b"preview-manifest".to_vec(),
-            ),
-            (SHA256SUMS_FILE.to_owned(), b"sha256sums".to_vec()),
-            ("example-1.2.3-amd64.deb".to_owned(), amd64),
-            ("example-1.2.3-arm64.deb".to_owned(), arm64),
+            (PREVIEW_MANIFEST_FILE.to_owned(), release_manifest_bytes),
+            (SHA256SUMS_FILE.to_owned(), sums.into_bytes()),
         ];
+        for (asset_name, bytes) in artifact_assets {
+            raw_assets.push((asset_name.clone(), bytes.clone()));
+            if asset_name.ends_with(".deb") {
+                raw_assets.push((
+                    format!("{asset_name}.sha256"),
+                    format!("{}  {asset_name}\n", sha256_hex(&bytes)).into_bytes(),
+                ));
+            }
+        }
         let mut release_assets = Vec::new();
         let mut assets = Vec::new();
         for (offset, (name, bytes)) in raw_assets.drain(..).enumerate() {
@@ -4915,7 +5429,6 @@ mod tests {
         for (_, name, bytes) in &assets {
             write_bytes(&incoming.join(name), bytes);
         }
-        write_bytes(&incoming.join(SENTINEL_FILE), b"armed\n");
         DiscoveryFixture {
             root,
             selection_path,
@@ -4960,6 +5473,11 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    fn make_hard_link(target: &Path, link: &Path) {
+        must(std::fs::hard_link(target, link), "create fixture hard link");
+    }
+
     #[test]
     fn discovery_selection_binds_asset_ids_and_preserves_hidden_sentinel() {
         let fixture = discovery_fixture("discovery-immutable");
@@ -4981,12 +5499,11 @@ mod tests {
             .join("\n");
         assert_eq!(log.trim_end(), expected);
 
-        write_bytes(&fetched.join(SENTINEL_FILE), b"armed\n");
         must(
             verify_discovery_incoming(&fixture.selection_path, &fetched),
             "verify fetched selection",
         );
-        assert!(fetched.join(SENTINEL_FILE).is_file());
+        assert!(!fetched.join(SENTINEL_FILE).exists());
 
         let mut tampered = fixture.document.clone();
         tampered["release_assets"][0]["id"] = serde_json::json!(9999);
@@ -5058,6 +5575,53 @@ mod tests {
             assert!(error.contains("symlink"), "{error}");
             let _ = std::fs::remove_dir_all(&fixture.root);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_incoming_rejects_hardlinks_and_stale_sentinel() {
+        let fixture = discovery_fixture("discovery-hardlink");
+        let selected_path = fixture.incoming.join(PRODUCT_MANIFEST_ASSET);
+        let outside = fixture.root.join("outside-manifest");
+        let bytes = must(std::fs::read(&selected_path), "read hardlink source");
+        write_bytes(&outside, &bytes);
+        must(
+            std::fs::remove_file(&selected_path),
+            "remove selected regular manifest",
+        );
+        make_hard_link(&outside, &selected_path);
+        let error = must_fail(
+            verify_discovery_incoming(&fixture.selection_path, &fixture.incoming),
+            "reject hardlinked selected manifest",
+        );
+        assert!(error.contains("multiple links"), "{error}");
+        must(
+            std::fs::remove_file(&selected_path),
+            "remove hardlinked selected manifest",
+        );
+        write_bytes(&selected_path, &bytes);
+        write_bytes(&fixture.incoming.join(SENTINEL_FILE), b"verified\n");
+        let error = must_fail(
+            verify_discovery_incoming(&fixture.selection_path, &fixture.incoming),
+            "reject stale sentinel",
+        );
+        assert!(error.contains("stale"), "{error}");
+        let _ = std::fs::remove_dir_all(&fixture.root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_incoming_rejects_hardlinked_sentinel() {
+        let fixture = discovery_fixture("discovery-sentinel-hardlink");
+        let outside = fixture.root.join("outside-sentinel");
+        write_bytes(&outside, b"selection:stale\n");
+        make_hard_link(&outside, &fixture.incoming.join(SENTINEL_FILE));
+        let error = must_fail(
+            verify_discovery_incoming(&fixture.selection_path, &fixture.incoming),
+            "reject hardlinked sentinel",
+        );
+        assert!(error.contains("multiple links"), "{error}");
+        let _ = std::fs::remove_dir_all(&fixture.root);
     }
 
     #[test]
@@ -5168,6 +5732,39 @@ mod tests {
             &must(
                 serde_json::to_vec(&fixture.document),
                 "restore selected release",
+            ),
+        );
+        let mut selected_extra = fixture.document.clone();
+        let assets = selected_extra["release_assets"]
+            .as_array_mut()
+            .ok_or("fixture release assets array");
+        let assets = must(assets, "fixture release assets array");
+        assets.push(serde_json::json!({
+            "id": 999,
+            "name": "unlisted-extra.tar",
+            "size": 1,
+            "state": "uploaded",
+            "browser_download_url": format!(
+                "https://github.com/{FIXTURE_SOURCE}/releases/download/v1.2.3/unlisted-extra.tar"
+            )
+        }));
+        write_bytes(
+            &fixture.selection_path,
+            &must(
+                serde_json::to_vec(&selected_extra),
+                "serialize extra selected asset",
+            ),
+        );
+        let error = must_fail(
+            read_discovery_selection(&fixture.selection_path),
+            "reject extra selected release asset",
+        );
+        assert!(error.contains("census"), "{error}");
+        write_bytes(
+            &fixture.selection_path,
+            &must(
+                serde_json::to_vec(&fixture.document),
+                "restore selected release after census test",
             ),
         );
         let mut persisted = fixture.document.clone();
