@@ -429,6 +429,10 @@ fn analyze_rust_manifests(
         }
     }
 
+    let package_roots = package_facts
+        .iter()
+        .map(|manifest| manifest.root.clone())
+        .collect::<Vec<_>>();
     let workspace_manifest = workspace_root
         .as_deref()
         .map(|workspace| join_repo_path(workspace, "Cargo.toml"));
@@ -551,7 +555,13 @@ fn analyze_rust_manifests(
                 ));
             }
         }
-        watch.extend(include_str_paths(root, files, file_set, &manifest.root)?);
+        watch.extend(include_str_paths_for_package(
+            root,
+            files,
+            file_set,
+            &package_roots,
+            &manifest.root,
+        )?);
         let local_lock = join_repo_path(&manifest.root, "Cargo.lock");
         if file_set.contains(&local_lock) {
             watch.push(local_lock.clone());
@@ -742,10 +752,25 @@ fn include_str_paths(
     file_set: &BTreeSet<String>,
     package_root: &str,
 ) -> Result<Vec<String>, GeneratorError> {
+    include_str_paths_for_package(root, files, file_set, &[], package_root)
+}
+
+fn include_str_paths_for_package(
+    root: &Path,
+    files: &[String],
+    file_set: &BTreeSet<String>,
+    package_roots: &[String],
+    package_root: &str,
+) -> Result<Vec<String>, GeneratorError> {
     let prefix = path_prefix(package_root);
     let mut targets = BTreeSet::new();
     for source in files.iter().filter(|file| {
-        has_extension(file, "rs") && (package_root == "." || file.starts_with(&prefix))
+        has_extension(file, "rs")
+            && (package_root != "." && file.starts_with(&prefix)
+                || package_root == "."
+                    && !package_roots.iter().any(|nested_root| {
+                        nested_root != "." && file.starts_with(&path_prefix(nested_root))
+                    }))
     }) {
         let source_contents = fs::read_to_string(root.join(source))
             .map_err(|error| GeneratorError::io("read Rust source", &root.join(source), &error))?;
@@ -1022,7 +1047,7 @@ pub(crate) fn detect(
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{include_str_paths, parse_cargo_manifest};
+    use super::{include_str_paths, include_str_paths_for_package, parse_cargo_manifest};
     use std::collections::BTreeSet;
     use std::fs;
     use std::os::unix::fs::symlink;
@@ -1160,6 +1185,71 @@ mod tests {
             targets,
             vec!["crates/app/assets/font.ttf", "crates/app/src/lib.rs"]
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn root_package_include_scan_excludes_nested_member_sources() {
+        let root = scratch("manifest-dir-workspace-member");
+        must(
+            fs::create_dir_all(root.join("src")),
+            "create root source directory",
+        );
+        must(
+            fs::create_dir_all(root.join("crates/member/src")),
+            "create member source directory",
+        );
+        must(
+            fs::create_dir_all(root.join("crates/member/assets")),
+            "create member asset directory",
+        );
+        must(
+            fs::write(
+                root.join("src/lib.rs"),
+                "const ROOT: &str = include_str!(\"../root.txt\");\n",
+            ),
+            "write root source",
+        );
+        must(
+            fs::write(root.join("root.txt"), "root\n"),
+            "write root asset",
+        );
+        must(
+            fs::write(
+                root.join("crates/member/src/lib.rs"),
+                "const MEMBER: &str = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/assets/member.txt\"));\n",
+            ),
+            "write member source",
+        );
+        must(
+            fs::write(root.join("crates/member/assets/member.txt"), "member\n"),
+            "write member asset",
+        );
+
+        let files = vec![
+            "crates/member/assets/member.txt".to_owned(),
+            "crates/member/src/lib.rs".to_owned(),
+            "root.txt".to_owned(),
+            "src/lib.rs".to_owned(),
+        ];
+        let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+        let package_roots = vec![".".to_owned(), "crates/member".to_owned()];
+        let root_targets = must(
+            include_str_paths_for_package(&root, &files, &file_set, &package_roots, "."),
+            "resolve root package includes",
+        );
+        assert_eq!(root_targets, vec!["root.txt"]);
+        let member_targets = must(
+            include_str_paths_for_package(
+                &root,
+                &files,
+                &file_set,
+                &package_roots,
+                "crates/member",
+            ),
+            "resolve member package includes",
+        );
+        assert_eq!(member_targets, vec!["crates/member/assets/member.txt"]);
         let _ = fs::remove_dir_all(root);
     }
 
