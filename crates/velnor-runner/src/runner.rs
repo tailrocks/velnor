@@ -7652,21 +7652,47 @@ async fn handle_v2_message(
     }
     let reference: RunnerJobRequestRef =
         serde_json::from_str(&message.body).context("parse RunnerJobRequestRef")?;
-    // Oldest-observed-first admission: record this offer's age before any
-    // fence can skip it, so a redelivery retains the original age even when
-    // this slot shuts down (cordon/drain) before reaching the permit fence.
-    // Best-effort and silent: the fence below re-submits authoritatively.
-    {
-        let ledger_path =
-            crate::permit_guard::resolve_permit_ledger_path(args.permit_ledger.as_deref());
-        if let Ok(mut demand) = crate::native_demand::NativeDemandStore::open(&ledger_path) {
-            let _ = demand.submit_offer(
-                &reference.runner_request_id,
-                &stored.settings.github_url,
-                crate::native_demand::now_unix(),
+    // Persist this observation in the shared permit ledger before any
+    // admission fence can skip it. Redelivery refreshes liveness but keeps
+    // the original first-seen age and host-wide sequence. An unreadable
+    // demand authority must fail closed; acquiring without this observation
+    // could let native work overtake older Scale Set demand.
+    let permit_holder = crate::permit_guard::native_permit_holder(&reference.runner_request_id);
+    let ledger_path =
+        crate::permit_guard::resolve_permit_ledger_path(args.permit_ledger.as_deref());
+    let observed_unix = velnor_control::permit_ledger::unix_now();
+    let mut demand_ledger = match velnor_control::permit_ledger::PermitLedger::open(&ledger_path) {
+        Ok(ledger) => ledger,
+        Err(error) => {
+            forensics.broker(&format!(
+                "admission SKIPPED request={} shared demand ledger unavailable",
+                reference.runner_request_id
+            ));
+            eprintln!(
+                "Warning: skipping broker message {}: shared demand ledger unavailable ({error}); waiting for redelivery.",
+                message.message_id
             );
+            return Ok(V2MessageAction::None);
         }
+    };
+    if let Err(error) = demand_ledger.observe_demand(
+        &permit_holder,
+        velnor_control::permit_ledger::PermitLane::Native,
+        &stored.settings.github_url,
+        observed_unix,
+        observed_unix,
+    ) {
+        forensics.broker(&format!(
+            "admission SKIPPED request={} shared demand observation failed",
+            reference.runner_request_id
+        ));
+        eprintln!(
+            "Warning: skipping broker message {}: failed to persist shared demand observation ({error}); waiting for redelivery.",
+            message.message_id
+        );
+        return Ok(V2MessageAction::None);
     }
+    drop(demand_ledger);
     let acquisition_journal_dir = crate::node::complete::journal_dir_near(config_dir);
     let acquisition_drain_journal = acquisition_journal_dir.join("journal.db");
     // A cordoned slot must leave the broker session before acknowledging or
@@ -7723,47 +7749,9 @@ async fn handle_v2_message(
         ));
         return Ok(V2MessageAction::Shutdown);
     }
-    // Host-wide capacity fence beside the durable intent: one ledger permit
-    // per acquisition attempt, held until owned cleanup is confirmed. A
-    // full ledger (or an unreadable one) skips the acquisition and the
-    // broker redelivers; redelivery of a crashed attempt adopts its row.
-    let permit_holder = crate::permit_guard::native_permit_holder(&reference.runner_request_id);
-    let ledger_path =
-        crate::permit_guard::resolve_permit_ledger_path(args.permit_ledger.as_deref());
-    // Oldest-observed-first admission across every scope: defer while older
-    // fresh eligible demand exists that free permits cannot also cover. The
-    // broker redelivers; no global FIFO is promised.
-    match crate::native_demand::fence_admission(
-        &ledger_path,
-        &reference.runner_request_id,
-        &stored.settings.github_url,
-        crate::native_demand::now_unix(),
-        crate::native_demand::STALE_AFTER_SECS,
-    ) {
-        crate::native_demand::FenceOutcome::Grant => {}
-        crate::native_demand::FenceOutcome::Defer { older } => {
-            forensics.broker(&format!(
-                "admission DEFERRED request={} older_fresh_eligible={older}",
-                reference.runner_request_id
-            ));
-            println!(
-                "Deferring broker message {}: {older} older eligible demand rows hold priority; waiting for redelivery.",
-                message.message_id
-            );
-            return Ok(V2MessageAction::None);
-        }
-        crate::native_demand::FenceOutcome::Blind { reason } => {
-            forensics.broker(&format!(
-                "admission BLIND request={} reason={reason}",
-                reference.runner_request_id
-            ));
-            eprintln!(
-                "Warning: oldest-first ordering blind for broker message {} ({reason}); ledger capacity still enforced.",
-                message.message_id
-            );
-        }
-    }
-    let permit_guard = match crate::permit_guard::NativePermitGuard::acquire(
+    // The ledger compares durable demand age and acquires in one immediate
+    // transaction. The shared decision covers native and Scale Set lanes.
+    let mut permit_guard = match crate::permit_guard::NativePermitGuard::acquire(
         &ledger_path,
         permit_holder,
         &stored.settings.github_url,
@@ -7771,11 +7759,11 @@ async fn handle_v2_message(
         Ok(Some(guard)) => guard,
         Ok(None) => {
             forensics.broker(&format!(
-                "acquire SKIPPED request={} host permit ledger is full",
+                "acquire SKIPPED request={} global admission deferred",
                 reference.runner_request_id
             ));
             println!(
-                "Skipping broker message {}: host permit ledger is full (max_jobs reached); waiting for redelivery.",
+                "Skipping broker message {}: global admission is full or an older eligible demand owns priority; waiting for redelivery.",
                 message.message_id
             );
             return Ok(V2MessageAction::None);
@@ -7809,6 +7797,10 @@ async fn handle_v2_message(
     }
     let pickup_started = Instant::now();
     let pickup_span = tracing::info_span!("job-pickup");
+    // Mark the permit retained before polling the request future: it can be
+    // cancelled or unwound after the server commits but before a result is
+    // delivered to this task.
+    permit_guard.retain_until_terminal();
     let acquire_result = tokio::select! {
         result = run_service
         .acquire_job(
@@ -7823,12 +7815,20 @@ async fn handle_v2_message(
                 "acquire canceled by daemon drain request={}",
                 reference.runner_request_id
             ));
+            // The acquire request may have reached the service before this
+            // future was cancelled. Keep occupancy until the durable intent
+            // recovery proves the request was not assigned or completes it.
+            permit_guard.retain_until_terminal();
             return Ok(V2MessageAction::Shutdown);
         }
     };
     let job_value = match acquire_result {
         Ok(job_value) => job_value,
         Err(error) => {
+            // A lost response does not prove the server rejected the job;
+            // it may have committed the assignment before the connection
+            // failed. Retain the hold for intent recovery.
+            permit_guard.retain_until_terminal();
             if !is_transient_acquire_error(&error) {
                 forensics.broker(&format!(
                     "acquire ERROR request={} permanent; closing session: {}",
@@ -7856,7 +7856,10 @@ async fn handle_v2_message(
         }
     };
     let job_value = match job_value {
-        AcquireJobOutcome::Acquired(value) => value,
+        AcquireJobOutcome::Acquired(value) => {
+            permit_guard.retain_until_terminal();
+            value
+        }
         AcquireJobOutcome::Skipped {
             status,
             request_id,
@@ -7883,7 +7886,11 @@ async fn handle_v2_message(
                         sanitized_retry_error(&error)
                     );
                 }
+                permit_guard.release_cancelled();
             } else {
+                // Conflict does not identify the holder; the service may
+                // have assigned this request before the reply was lost.
+                permit_guard.retain_until_terminal();
                 println!(
                     "Leaving the acquisition intent for request {} in place: the acquire reply does not prove this runner lost the job.",
                     reference.runner_request_id
@@ -7940,7 +7947,7 @@ async fn handle_v2_message(
     let job: AgentJobRequestMessage = match serde_json::from_value(job_value) {
         Ok(job) => job,
         Err(error) => {
-            complete_acquired_job_failure(
+            if let Err(completion_error) = complete_acquired_job_failure(
                 &fallback_run_service_job,
                 &acquired_identity,
                 None,
@@ -7948,7 +7955,16 @@ async fn handle_v2_message(
                 &format!("{error:#}"),
                 FailureRemediation::DaemonApi,
             )
-            .await?;
+            .await
+            {
+                permit_guard.mark_uncertain_and_disarm();
+                return Err(completion_error.context(format!(
+                    "failed to complete malformed acquired job: {error:#}"
+                )));
+            }
+            // No workflow or container was started, and the run service
+            // accepted terminal completion for this acquired job.
+            permit_guard.release();
             return Err(error).context("parse acquired run-service job");
         }
     };
@@ -7960,7 +7976,7 @@ async fn handle_v2_message(
     {
         Ok(client) => client.unwrap_or_else(|| run_service.clone()),
         Err(error) => {
-            complete_acquired_job_failure(
+            if let Err(completion_error) = complete_acquired_job_failure(
                 &fallback_run_service_job,
                 &acquired_identity,
                 Some(&job),
@@ -7968,7 +7984,15 @@ async fn handle_v2_message(
                 &format!("{error:#}"),
                 FailureRemediation::DaemonApi,
             )
-            .await?;
+            .await
+            {
+                permit_guard.mark_uncertain_and_disarm();
+                return Err(completion_error.context(format!(
+                    "failed to complete job after run-service client setup failed: {error:#}"
+                )));
+            }
+            // This failure is before workflow setup or container ownership.
+            permit_guard.release();
             return Err(error).context("build run-service client from acquired job");
         }
     };
@@ -8018,7 +8042,7 @@ async fn handle_job_request(
     job: AgentJobRequestMessage,
     forensics: &SlotForensics,
     pickup_ms: u64,
-    permit_guard: crate::permit_guard::NativePermitGuard,
+    mut permit_guard: crate::permit_guard::NativePermitGuard,
 ) -> Result<()> {
     let capacity_run_root = &storage_layout.run_root;
     let journal_dir = crate::node::complete::journal_dir_near(config_dir);
@@ -8028,6 +8052,9 @@ async fn handle_job_request(
             "Skipping duplicate delivery of run-service job {}; another local slot owns it.",
             job.job_id
         );
+        // The local job claim proves another slot owns this work; this
+        // duplicate request has no independent execution or teardown.
+        permit_guard.release();
         return Ok(());
     };
     println!(
@@ -8926,6 +8953,9 @@ async fn handle_job_request(
                     clear_in_flight_job(&teardown_config_dir)
                         .context("failed to clear acknowledged in-flight job")?;
                 }
+                // Completion and any owned teardown are confirmed. Do not
+                // let Drop requeue this already-served demand.
+                permit_guard.release();
                 return Err(join_error).context("join Docker job execution thread");
             }
         };
@@ -9017,6 +9047,9 @@ async fn handle_job_request(
                         clear_in_flight_job(&teardown_config_dir)
                             .context("failed to clear acknowledged in-flight job")?;
                     }
+                    // Completion and any owned teardown are confirmed. Do
+                    // not let Drop requeue this already-served demand.
+                    permit_guard.release();
                     return Err(error);
                 }
             }
