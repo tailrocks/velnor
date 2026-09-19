@@ -4602,6 +4602,7 @@ fn policy_candidate_step(revision: &str) -> String {
           GH_TOKEN: ${{{{ github.token }}}}
           BASE_SHA: ${{{{ github.event.pull_request.base.sha || github.sha }}}}
           HEAD_SHA: ${{{{ github.event.pull_request.head.sha }}}}
+          PR_NUMBER: ${{{{ github.event.pull_request.number }}}}
           HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name }}}}
           HEAD_REPOSITORY_ID: ${{{{ github.event.pull_request.head.repo.id }}}}
           TARGET_REPOSITORY_ID: ${{{{ github.repository_id }}}}
@@ -4612,6 +4613,7 @@ fn policy_candidate_step(revision: &str) -> String {
           test "$HEAD_REPOSITORY_ID" = "$TARGET_REPOSITORY_ID" || {{ echo "::error::head repository id is not the target repository id" >&2; exit 1; }}
           case "$HEAD_SHA" in [0-9a-f]{{40}}) ;; *) exit 1 ;; esac
           case "$BASE_SHA" in [0-9a-f]{{40}}) ;; *) exit 1 ;; esac
+          case "$PR_NUMBER" in ''|*[!0-9]*) exit 1 ;; esac
           head_tree_sha="$(git rev-parse "$HEAD_SHA^{{tree}}")"
           base_tree_sha="$(git rev-parse "$BASE_SHA^{{tree}}")"
 
@@ -4644,9 +4646,9 @@ fn policy_candidate_step(revision: &str) -> String {
           test "$workflow_id" -gt 0
           runs="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow_id/runs?event=pull_request&head_sha=$HEAD_SHA&per_page=100" \
             | jq -c --arg path ".github/workflows/ci-pr.yml" --argjson workflow_id "$workflow_id" \
-                --arg head "$HEAD_SHA" --arg repo "$GITHUB_REPOSITORY" \
+                --arg head "$HEAD_SHA" --arg base "$BASE_SHA" --argjson pr "$PR_NUMBER" --arg repo "$GITHUB_REPOSITORY" \
                 --argjson target_id "$TARGET_REPOSITORY_ID" --argjson head_id "$HEAD_REPOSITORY_ID" \
-                '[.[][] | select(.path == $path and (.workflow_id | tonumber) == $workflow_id and .event == "pull_request" and .head_sha == $head and .status == "completed" and .conclusion == "success" and (.repository.id | tonumber) == $target_id and (.head_repository.id | tonumber) == $head_id and .repository.full_name == $repo and .head_repository.full_name == $repo and (.run_attempt | tonumber) >= 1)]')"
+                '[.[][] | select(.path == $path and (.workflow_id | tonumber) == $workflow_id and .event == "pull_request" and .head_sha == $head and (.pull_requests | any((.number | tonumber) == $pr and .base.sha == $base)) and .status == "completed" and .conclusion == "success" and (.repository.id | tonumber) == $target_id and (.head_repository.id | tonumber) == $head_id and .repository.full_name == $repo and .head_repository.full_name == $repo and (.run_attempt | tonumber) >= 1)]')"
           test "$(jq -r 'length' <<<"$runs")" = 1
           run="$(jq -c '.[0]' <<<"$runs")"
           run_id="$(jq -er '.id | numbers' <<<"$run")"

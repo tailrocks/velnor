@@ -648,6 +648,8 @@ fn owner_entrypoint_renders_the_isolated_candidate_transport() {
     assert!(job.contains("actions: read\n      contents: read"), "{job}");
     assert!(job.contains("run_attempt"), "{job}");
     assert!(job.contains("target_repository_id"), "{job}");
+    assert!(job.contains("PR_NUMBER:"), "{job}");
+    assert!(job.contains(".pull_requests | any"), "{job}");
     assert!(
         job.contains("PR workflow changed the trusted candidate producer contract"),
         "{job}"
