@@ -34,6 +34,12 @@ enum SkillsCheck {
     HelperSyntax,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FrontmatterMode {
+    LiveDefinition,
+    EmbeddedTemplate,
+}
+
 const SKILLS_CHECKS: [SkillsCheck; 2] = [SkillsCheck::GeneratedDocs, SkillsCheck::HelperSyntax];
 
 impl SkillsCheck {
@@ -115,8 +121,8 @@ pub(crate) fn detect(
     );
     skill_unit.tool_version = Some(SKILLS_BUN_VERSION.to_owned());
     let commands = verification_commands();
-    skill_unit.pr_commands = commands.clone();
-    skill_unit.full_commands.clone_from(&skill_unit.pr_commands);
+    skill_unit.pr_commands.clone_from(&commands);
+    skill_unit.full_commands.clone_from(&commands);
     shape.units.push(skill_unit);
     shape.detected.push("skills-plugin".to_owned());
     shape
@@ -169,8 +175,17 @@ fn read_catalog(context: &ScanContext<'_>) -> Result<Catalog, GeneratorError> {
     }
     let root_plugin = read_json_object(context, "plugin.json")?;
     let plugin_name = string_field(&root_plugin, "name", "plugin.json")?.to_owned();
-    if plugin_name.is_empty() {
-        return Err(GeneratorError::usage("plugin.json name must not be empty"));
+    if plugin_name.is_empty()
+        || plugin_name.trim() != plugin_name
+        || plugin_name.contains('/')
+        || plugin_name.contains('\\')
+        || plugin_name
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err(GeneratorError::usage(
+            "plugin.json name must be a nonempty safe component",
+        ));
     }
     Ok(Catalog { names, plugin_name })
 }
@@ -242,7 +257,7 @@ fn parse_markdown_destination(input: &str) -> Option<(&str, usize)> {
     skip_markdown_whitespace(bytes, &mut index);
     if bytes.get(index) != Some(&b')') {
         match bytes.get(index) {
-            Some(b'"') | Some(b'\'') => {
+            Some(b'"' | b'\'') => {
                 let quote = bytes[index];
                 index += 1;
                 while index < bytes.len() {
@@ -346,9 +361,12 @@ fn hex_value(byte: u8) -> Option<u8> {
 }
 
 fn is_external_uri(target: &str) -> bool {
-    target
-        .split_once(':')
-        .is_some_and(|(scheme, _)| matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https" | "mailto"))
+    target.split_once(':').is_some_and(|(scheme, _)| {
+        matches!(
+            scheme.to_ascii_lowercase().as_str(),
+            "http" | "https" | "mailto"
+        )
+    })
 }
 
 fn has_uri_scheme(target: &str) -> bool {
@@ -356,13 +374,11 @@ fn has_uri_scheme(target: &str) -> bool {
         return false;
     };
     !scheme.is_empty()
-        && scheme
-            .chars()
-            .enumerate()
-            .all(|(index, character)| {
-                character.is_ascii_alphabetic()
-                    || (index > 0 && (character.is_ascii_digit() || matches!(character, '+' | '-' | '.')))
-            })
+        && scheme.chars().enumerate().all(|(index, character)| {
+            character.is_ascii_alphabetic()
+                || (index > 0
+                    && (character.is_ascii_digit() || matches!(character, '+' | '-' | '.')))
+        })
 }
 
 fn validate_plugin_manifests(
@@ -376,6 +392,10 @@ fn validate_plugin_manifests(
     let kimi = read_json_object(context, ".kimi-plugin/plugin.json")?;
     let claude = read_json_object(context, ".claude-plugin/plugin.json")?;
     let marketplace = read_json_object(context, ".claude-plugin/marketplace.json")?;
+    // Provider objects intentionally remain forward-compatible: their
+    // provider-specific fields differ, so only shared compatibility fields
+    // are validated here while recursive duplicate JSON keys are rejected by
+    // the strict parser.
     for (path, object) in [
         (".codex-plugin/plugin.json", &codex),
         (".kimi-plugin/plugin.json", &kimi),
@@ -459,9 +479,14 @@ fn validate_plugin_manifests(
 }
 
 fn validate_provider_version(version: &str, path: &str) -> Result<(), GeneratorError> {
-    let (core, prerelease) = version
+    let (without_build, build) = version
+        .split_once('+')
+        .map_or((version, None), |(version, build)| (version, Some(build)));
+    let (core, prerelease) = without_build
         .split_once('-')
-        .map_or((version, None), |(core, prerelease)| (core, Some(prerelease)));
+        .map_or((without_build, None), |(core, prerelease)| {
+            (core, Some(prerelease))
+        });
     let parts = core.split('.').collect::<Vec<_>>();
     let valid_core = parts.len() == 3
         && parts.iter().all(|part| {
@@ -481,9 +506,16 @@ fn validate_provider_version(version: &str, path: &str) -> Result<(), GeneratorE
                         .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
             })
     });
-    if !valid_core || !valid_prerelease {
+    let valid_build = build.is_none_or(|value| {
+        !value.is_empty()
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'.')
+            && value.split('.').all(|part| !part.is_empty())
+    });
+    if !valid_core || !valid_prerelease || !valid_build {
         return Err(GeneratorError::usage(format!(
-            "{path} version `{version}` must be semantic version `MAJOR.MINOR.PATCH` with an optional prerelease"
+            "{path} version `{version}` must be semantic version `MAJOR.MINOR.PATCH` with optional prerelease/build metadata"
         )));
     }
     Ok(())
@@ -501,7 +533,7 @@ fn validate_skills(
     for path in &expected {
         require_file(context, path)?;
         let text = read_text(&context.root.join(path), "read skill definition")?;
-        let frontmatter = parse_frontmatter(&text, path)?;
+        let frontmatter = parse_frontmatter(&text, path, FrontmatterMode::LiveDefinition)?;
         let expected_name = path
             .strip_prefix("skills/")
             .and_then(|value| value.strip_suffix("/SKILL.md"))
@@ -613,16 +645,16 @@ fn validate_links(context: &ScanContext<'_>) -> Result<(), GeneratorError> {
             if fenced {
                 continue;
             }
-            let mut remaining = line;
-            while let Some(start) = remaining.find("](") {
-                let destination = &remaining[start + 2..];
+            let mut offset = 0;
+            while let Some(start) = find_markdown_link_start(line, offset) {
+                let destination = &line[start + 2..];
                 let Some((raw_target, consumed)) = parse_markdown_destination(destination) else {
                     return Err(GeneratorError::usage(format!(
                         "malformed Markdown link at {file}:{}",
                         line_number + 1
                     )));
                 };
-                remaining = &destination[consumed..];
+                offset = start + 2 + consumed;
                 let target = normalize_markdown_destination(raw_target).ok_or_else(|| {
                     GeneratorError::usage(format!(
                         "unsafe Markdown link {raw_target} at {file}:{}",
@@ -656,6 +688,36 @@ fn validate_links(context: &ScanContext<'_>) -> Result<(), GeneratorError> {
         }
     }
     Ok(())
+}
+
+fn find_markdown_link_start(line: &str, from: usize) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let mut index = from;
+    let mut code_ticks = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' {
+            index = (index + 2).min(bytes.len());
+            continue;
+        }
+        if bytes[index] == b'`' {
+            let start = index;
+            while bytes.get(index) == Some(&b'`') {
+                index += 1;
+            }
+            let run = index - start;
+            if code_ticks == 0 {
+                code_ticks = run;
+            } else if code_ticks == run {
+                code_ticks = 0;
+            }
+            continue;
+        }
+        if code_ticks == 0 && bytes[index] == b']' && bytes.get(index + 1) == Some(&b'(') {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
 }
 
 fn resolve_markdown_path(source: &str, target: &str) -> Option<String> {
@@ -692,7 +754,17 @@ fn is_root_skill_definition(file: &str) -> bool {
 }
 
 fn require_docs_file(context: &ScanContext<'_>, relative: &str) -> Result<(), GeneratorError> {
-    let resolved = resolve_markdown_path(DOCS_INDEX, relative).ok_or_else(|| {
+    let target = normalize_markdown_destination(relative).ok_or_else(|| {
+        GeneratorError::usage(format!(
+            "{DOCS_INDEX} contains unsafe generated-document path {relative}"
+        ))
+    })?;
+    if target.is_empty() || is_external_uri(&target) || is_markdown_placeholder(&target) {
+        return Err(GeneratorError::usage(format!(
+            "{DOCS_INDEX} contains non-local generated-document path {relative}"
+        )));
+    }
+    let resolved = resolve_markdown_path(DOCS_INDEX, &target).ok_or_else(|| {
         GeneratorError::usage(format!(
             "{DOCS_INDEX} contains unsafe generated-document path {relative}"
         ))
@@ -712,7 +784,9 @@ fn is_markdown_placeholder(target: &str) -> bool {
             .and_then(|value| value.strip_suffix('>'));
         inner.is_some_and(|value| {
             let mut characters = value.chars();
-            characters.next().is_some_and(|first| first.is_ascii_alphabetic())
+            characters
+                .next()
+                .is_some_and(|first| first.is_ascii_alphabetic())
                 && characters.all(|character| {
                     character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
                 })
@@ -809,7 +883,7 @@ fn validate_templates(
             .and_then(|extension| extension.to_str())
         {
             Some("md") if file.ends_with("/SKILL.md") => {
-                parse_frontmatter(&text, file)?;
+                parse_frontmatter(&text, file, FrontmatterMode::EmbeddedTemplate)?;
             }
             Some("json") => {
                 parse_json(&text, &path, "JSON template")?;
@@ -830,16 +904,18 @@ fn validate_templates(
     Ok(())
 }
 
-fn parse_frontmatter(text: &str, path: &str) -> Result<Frontmatter, GeneratorError> {
+fn parse_frontmatter(
+    text: &str,
+    path: &str,
+    mode: FrontmatterMode,
+) -> Result<Frontmatter, GeneratorError> {
     let mut lines = text.lines();
     if lines.next().map(str::trim_end) != Some("---") {
         return Err(GeneratorError::usage(format!(
             "{path} is missing opening frontmatter delimiter"
         )));
     }
-    let mut values: BTreeMap<String, String> = BTreeMap::new();
     let mut yaml_lines = Vec::new();
-    let mut active_folded: Option<String> = None;
     let mut closed = false;
     for raw_line in lines {
         let line = raw_line.trim_end_matches('\r');
@@ -848,61 +924,40 @@ fn parse_frontmatter(text: &str, path: &str) -> Result<Frontmatter, GeneratorErr
             break;
         }
         yaml_lines.push(line.to_owned());
-        if line.trim().is_empty() || line.trim_start().starts_with('#') {
-            continue;
-        }
-        if let Some(key) = active_folded.as_ref()
-            && line.chars().next().is_some_and(char::is_whitespace)
-        {
-            let value = values.entry(key.clone()).or_default();
-            if !value.is_empty() {
-                value.push(' ');
-            }
-            value.push_str(line.trim());
-            continue;
-        }
-        active_folded = None;
-        let Some((key, raw_value)) = line.split_once(':') else {
-            return Err(GeneratorError::usage(format!(
-                "{path} has malformed frontmatter line `{line}`"
-            )));
-        };
-        let key = key.trim();
-        if key.is_empty() || key.chars().any(char::is_control) {
-            return Err(GeneratorError::usage(format!(
-                "{path} has an unsafe frontmatter key"
-            )));
-        }
-        if values.contains_key(key) {
-            return Err(GeneratorError::usage(format!(
-                "{path} has duplicate frontmatter key {key}"
-            )));
-        }
-        let value = raw_value.trim().trim_matches(['\"', '\'']);
-        if value == ">" || value == ">-" {
-            values.insert(key.to_owned(), String::new());
-            active_folded = Some(key.to_owned());
-        } else {
-            values.insert(key.to_owned(), value.to_owned());
-        }
     }
     if !closed {
         return Err(GeneratorError::usage(format!(
             "{path} is missing closing frontmatter delimiter"
         )));
     }
+    let parser = serde_yaml::ParserConfig::strict()
+        .max_alias_expansions(0)
+        .merge_key_policy(serde_yaml::MergeKeyPolicy::Error);
     let yaml =
-        serde_yaml::from_str::<serde_yaml::Value>(&yaml_lines.join("\n")).map_err(|error| {
-            GeneratorError::usage(format!("{path} has invalid YAML frontmatter: {error}"))
-        })?;
+        serde_yaml::from_str_with_config::<serde_yaml::Value>(&yaml_lines.join("\n"), &parser)
+            .map_err(|error| {
+                GeneratorError::usage(format!("{path} has invalid YAML frontmatter: {error}"))
+            })?;
+    reject_yaml_tags(&yaml, path)?;
     let mapping = yaml.as_mapping().ok_or_else(|| {
         GeneratorError::usage(format!("{path} frontmatter must contain a YAML mapping"))
     })?;
     validate_frontmatter_mapping(mapping, path)?;
+    if mode == FrontmatterMode::LiveDefinition {
+        let Some(name) = mapping.get("name").and_then(serde_yaml::Value::as_str) else {
+            return Err(GeneratorError::usage(format!(
+                "{path} frontmatter name must be a YAML string"
+            )));
+        };
+        validate_skill_name(name).map_err(|_| {
+            GeneratorError::usage(format!(
+                "{path} frontmatter name {name} is not a safe live skill name"
+            ))
+        })?;
+    }
     let values = mapping
         .iter()
         .filter_map(|(key, value)| {
-            let key = key.as_str()?;
             let value = match value {
                 serde_yaml::Value::String(value) => value.clone(),
                 serde_yaml::Value::Bool(value) => value.to_string(),
@@ -912,6 +967,27 @@ fn parse_frontmatter(text: &str, path: &str) -> Result<Frontmatter, GeneratorErr
         })
         .collect();
     Ok(Frontmatter { values })
+}
+
+fn reject_yaml_tags(value: &serde_yaml::Value, path: &str) -> Result<(), GeneratorError> {
+    match value {
+        serde_yaml::Value::Tagged(_) => Err(GeneratorError::usage(format!(
+            "{path} frontmatter does not allow YAML tags or aliases"
+        ))),
+        serde_yaml::Value::Sequence(values) => {
+            for value in values {
+                reject_yaml_tags(value, path)?;
+            }
+            Ok(())
+        }
+        serde_yaml::Value::Mapping(mapping) => {
+            for (_, value) in mapping {
+                reject_yaml_tags(value, path)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 const FRONTMATTER_KEYS: [&str; 6] = [
@@ -928,16 +1004,13 @@ fn validate_frontmatter_mapping(
     path: &str,
 ) -> Result<(), GeneratorError> {
     for (key, value) in mapping {
-        let key = key.as_str().ok_or_else(|| {
-            GeneratorError::usage(format!("{path} frontmatter keys must be strings"))
-        })?;
+        let key = key.as_str();
         if !FRONTMATTER_KEYS.contains(&key) {
             return Err(GeneratorError::usage(format!(
                 "{path} frontmatter contains unsupported key `{key}`"
             )));
         }
-        if matches!(key, "name" | "description" | "argument-hint" | "license")
-            && !value.is_string()
+        if matches!(key, "name" | "description" | "argument-hint" | "license") && !value.is_string()
         {
             return Err(GeneratorError::usage(format!(
                 "{path} frontmatter {key} must be a YAML string"
@@ -945,23 +1018,36 @@ fn validate_frontmatter_mapping(
         }
     }
     for key in ["name", "description", "argument-hint", "license"] {
-        if !mapping.contains_key(serde_yaml::Value::String(key.to_owned())) {
+        if !mapping.contains_key(key) {
             return Err(GeneratorError::usage(format!(
                 "{path} frontmatter requires {key}"
             )));
         }
+        if mapping
+            .get(key)
+            .and_then(serde_yaml::Value::as_str)
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            return Err(GeneratorError::usage(format!(
+                "{path} frontmatter {key} must not be empty"
+            )));
+        }
     }
-    if !mapping
-        .get(serde_yaml::Value::String("user-invocable".to_owned()))
-        .is_some_and(|value| value.as_bool() == Some(true))
+    if mapping.get("license").and_then(serde_yaml::Value::as_str) != Some("Apache-2.0") {
+        return Err(GeneratorError::usage(format!(
+            "{path} frontmatter license must be Apache-2.0"
+        )));
+    }
+    if mapping
+        .get("user-invocable")
+        .is_none_or(|value| value.as_bool() != Some(true))
     {
         return Err(GeneratorError::usage(format!(
             "{path} frontmatter user-invocable must be the YAML boolean true"
         )));
     }
-    if let Some(value) = mapping.get(serde_yaml::Value::String(
-        "disable-model-invocation".to_owned(),
-    )) && !value.is_bool()
+    if let Some(value) = mapping.get("disable-model-invocation")
+        && !value.is_bool()
     {
         return Err(GeneratorError::usage(format!(
             "{path} frontmatter disable-model-invocation must be a YAML boolean"
@@ -1159,7 +1245,11 @@ fn read_text(path: &Path, operation: &str) -> Result<String, GeneratorError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{detect, is_markdown_placeholder, parse_frontmatter, resolve_markdown_path};
+    use super::{
+        detect, is_markdown_placeholder, normalize_markdown_destination, parse_frontmatter,
+        parse_markdown_destination, resolve_markdown_path, validate_provider_version,
+        FrontmatterMode,
+    };
     use crate::s2::provider::{ProviderId, ProviderSet};
     use crate::s2::scan::{RepositoryShape, ScanContext};
     use crate::s2::{GeneratorError, UnitKind};
@@ -1207,9 +1297,15 @@ mod tests {
                 "skills/example/templates/package.json",
                 "skills/example/templates/Cargo.toml",
                 "skills/example/templates/config.yaml",
+                "skills/example/templates/skill/SKILL.md",
                 "skills/example/helpers/package.json",
+                "skills/example/foo bar.md",
+                "skills/example/diagram_(v1).md",
                 "scripts/generate-docs.ts",
                 "scripts/helper.ts",
+                "scripts/template-helper/install.ts",
+                "scripts/template-helper/package.json",
+                "scripts/template-helper/templates/Cargo.toml",
             ]
             .into_iter()
             .map(str::to_owned)
@@ -1235,7 +1331,17 @@ mod tests {
                     "docs/skills/example/index.md" => "# Example\n",
                     "docs/skills/example/definition.md" => "# Definition\n",
                     "skills/example/SKILL.md" => {
-                        "---\nname: example\ndescription: >-\n  Use the example skill.\nargument-hint: \"<path>\"\nlicense: Apache-2.0\nuser-invocable: true\n---\n# Example\nSee [policy](references/policy.md) and [templates](templates/).\n"
+                        r#"---
+name: example
+description: >-
+  Use the example skill.
+argument-hint: "<path>"
+license: Apache-2.0
+user-invocable: true
+---
+# Example
+See [policy](references/policy.md "title"), [templates](templates/), [diagram](diagram_(v1).md), and [space](foo%20bar.md?view=full#section). External [web](https://example.invalid), [mail](mailto:dev@example.invalid), and [anchor](#section) are non-local. Inline code `[fake](missing.md)` is not a link.
+"#
                     }
                     "skills/example/references/policy.md" => "# Policy\n",
                     "skills/example/templates/package.json" => r#"{"name":"template"}"#,
@@ -1243,10 +1349,24 @@ mod tests {
                         "[package]\nname = \"template\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"
                     }
                     "skills/example/templates/config.yaml" => "name: template\n",
+                    "skills/example/templates/skill/SKILL.md" => {
+                        "---\nname: <skill-name>\ndescription: >-\n  Template skill.\nargument-hint: \"<args>\"\nlicense: Apache-2.0\nuser-invocable: true\n---\n# Template\n"
+                    }
                     "skills/example/helpers/package.json" => {
                         r#"{"name":"helper","packageManager":"bun@1.2.3","scripts":{"check":"bun test"}}"#
                     }
+                    "skills/example/foo bar.md" => "# Space\n",
+                    "skills/example/diagram_(v1).md" => "# Diagram\n",
                     "scripts/generate-docs.ts" | "scripts/helper.ts" => "console.log('ok');\n",
+                    "scripts/template-helper/install.ts" => {
+                        "const template = \"templates/Cargo.toml\";\nconsole.log(template);\n"
+                    }
+                    "scripts/template-helper/package.json" => {
+                        r#"{"name":"template-helper","packageManager":"bun@1.2.3","scripts":{"check":"bun test"}}"#
+                    }
+                    "scripts/template-helper/templates/Cargo.toml" => {
+                        "[package]\nname = \"helper-template\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"
+                    }
                     _ => unreachable!("fixture file has content"),
                 };
                 fixture.write(file, content);
@@ -1272,6 +1392,18 @@ mod tests {
             let mut shape = empty_shape();
             let hidden = detect(&context, &mut shape)?;
             Ok((hidden, shape))
+        }
+
+        fn run_detect_failure(&self) -> (GeneratorError, RepositoryShape) {
+            let file_set = self.files.iter().cloned().collect::<BTreeSet<_>>();
+            let context = ScanContext {
+                root: &self.root,
+                files: &self.files,
+                file_set: &file_set,
+            };
+            let mut shape = empty_shape();
+            let error = detect(&context, &mut shape).expect_err("fixture must be rejected");
+            (error, shape)
         }
 
         fn run_scan(&self) -> Result<RepositoryShape, GeneratorError> {
@@ -1304,8 +1436,9 @@ mod tests {
     #[test]
     fn frontmatter_parser_accepts_folded_descriptions() {
         let parsed = parse_frontmatter(
-            "---\nname: example\ndescription: >-\n  first line\n  second line\nargument-hint: \"<args>\"\n---\n",
+            "---\nname: example\ndescription: >-\n  first line\n  second line\nargument-hint: \"<args>\"\nlicense: Apache-2.0\nuser-invocable: true\n---\n",
             "skills/example/SKILL.md",
+            FrontmatterMode::LiveDefinition,
         )
         .unwrap_or_else(|error| panic!("frontmatter fixture parses: {error}"));
         assert_eq!(parsed.values["name"], "example");
@@ -1314,7 +1447,11 @@ mod tests {
 
     #[test]
     fn frontmatter_parser_rejects_missing_delimiter() {
-        let error = match parse_frontmatter("# not frontmatter\n", "skills/example/SKILL.md") {
+        let error = match parse_frontmatter(
+            "# not frontmatter\n",
+            "skills/example/SKILL.md",
+            FrontmatterMode::LiveDefinition,
+        ) {
             Ok(_) => panic!("missing frontmatter must fail"),
             Err(error) => error,
         };
@@ -1322,15 +1459,163 @@ mod tests {
     }
 
     #[test]
+    fn frontmatter_parser_rejects_missing_closing_delimiter() {
+        let error = match parse_frontmatter(
+            "---\nname: example\ndescription: text\nargument-hint: args\nlicense: Apache-2.0\nuser-invocable: true\n",
+            "skills/example/SKILL.md",
+            FrontmatterMode::LiveDefinition,
+        ) {
+            Ok(_) => panic!("missing closing frontmatter must fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("closing frontmatter"));
+    }
+
+    #[test]
     fn malformed_yaml_frontmatter_is_rejected() {
         let error = match parse_frontmatter(
             "---\nname: example\ndescription: [unterminated\nargument-hint: args\nlicense: Apache-2.0\nuser-invocable: true\n---\n",
             "skills/example/SKILL.md",
+            FrontmatterMode::LiveDefinition,
         ) {
             Ok(_) => panic!("malformed YAML frontmatter must fail"),
             Err(error) => error,
         };
         assert!(error.to_string().contains("invalid YAML frontmatter"));
+    }
+
+    fn reject_skill_frontmatter_variant(rewrite: impl FnOnce(String) -> String, needle: &str) {
+        let fixture = Fixture::new();
+        let skill = must(
+            fs::read_to_string(fixture.root.join("skills/example/SKILL.md")),
+            "read skill fixture",
+        );
+        fixture.write("skills/example/SKILL.md", &rewrite(skill));
+        let (error, shape) = fixture.run_detect_failure();
+        assert!(shape.units.is_empty(), "rejected input must emit no unit");
+        assert!(
+            error.to_string().contains(needle),
+            "{error} does not contain {needle}"
+        );
+    }
+
+    #[test]
+    fn typed_frontmatter_rejects_wrong_yaml_types() {
+        reject_skill_frontmatter_variant(
+            |skill| {
+                skill.replacen(
+                    "argument-hint: \"<path>\"",
+                    "argument-hint: [\"<path>\"]",
+                    1,
+                )
+            },
+            "argument-hint must be a YAML string",
+        );
+        reject_skill_frontmatter_variant(
+            |skill| {
+                skill.replacen(
+                    "description: >-\n  Use the example skill.",
+                    "description:\n  text: invalid",
+                    1,
+                )
+            },
+            "description must be a YAML string",
+        );
+        reject_skill_frontmatter_variant(
+            |skill| skill.replacen("user-invocable: true", "user-invocable: \"true\"", 1),
+            "user-invocable must be the YAML boolean true",
+        );
+    }
+
+    #[test]
+    fn typed_frontmatter_rejects_duplicate_nested_keys_and_unknown_fields() {
+        reject_skill_frontmatter_variant(
+            |skill| {
+                skill.replacen(
+                    "description: >-\n  Use the example skill.",
+                    "description:\n  text: one\n  text: two",
+                    1,
+                )
+            },
+            "duplicate key",
+        );
+        reject_skill_frontmatter_variant(
+            |skill| {
+                skill.replacen(
+                    "user-invocable: true",
+                    "user-invocable: true\nunknown-field: true",
+                    1,
+                )
+            },
+            "unsupported key",
+        );
+    }
+
+    #[test]
+    fn typed_frontmatter_rejects_semantic_invalid_values() {
+        reject_skill_frontmatter_variant(
+            |skill| skill.replacen("license: Apache-2.0", "license: MIT", 1),
+            "license must be Apache-2.0",
+        );
+        reject_skill_frontmatter_variant(
+            |skill| skill.replacen("user-invocable: true", "user-invocable: false", 1),
+            "user-invocable must be the YAML boolean true",
+        );
+        reject_skill_frontmatter_variant(
+            |skill| {
+                skill.replacen(
+                    "description: >-\n  Use the example skill.",
+                    "description: \"\"",
+                    1,
+                )
+            },
+            "description must not be empty",
+        );
+        reject_skill_frontmatter_variant(
+            |skill| {
+                skill.replacen(
+                    "user-invocable: true",
+                    "user-invocable: true\ndisable-model-invocation: maybe",
+                    1,
+                )
+            },
+            "disable-model-invocation must be a YAML boolean",
+        );
+    }
+
+    #[test]
+    fn typed_frontmatter_rejects_aliases_and_tags() {
+        reject_skill_frontmatter_variant(
+            |skill| {
+                skill
+                    .replacen(
+                        "description: >-\n  Use the example skill.",
+                        "description: &description Use the example skill.",
+                        1,
+                    )
+                    .replacen(
+                        "argument-hint: \"<path>\"",
+                        "argument-hint: *description",
+                        1,
+                    )
+            },
+            "invalid YAML frontmatter",
+        );
+        reject_skill_frontmatter_variant(
+            |skill| skill.replacen("name: example", "name: !skill example", 1),
+            "YAML tags or aliases",
+        );
+    }
+
+    #[test]
+    fn embedded_skill_template_is_validated_but_not_catalogued() {
+        let fixture = Fixture::new();
+        let (hidden, shape) = fixture
+            .run_detect()
+            .unwrap_or_else(|error| panic!("template fixture detects: {error}"));
+        assert!(hidden.contains("skills/example/templates/skill/SKILL.md"));
+        assert_eq!(shape.units.len(), 1);
+        assert_eq!(shape.units[0].kind, UnitKind::Skills);
     }
 
     #[test]
@@ -1353,6 +1638,54 @@ mod tests {
     }
 
     #[test]
+    fn markdown_destination_parser_handles_titles_nested_parentheses_and_queries() {
+        let (target, consumed) = parse_markdown_destination("diagram_(v1).md \"title\") trailing")
+            .expect("balanced Markdown destination parses");
+        assert_eq!(target, "diagram_(v1).md");
+        assert_eq!(consumed, "diagram_(v1).md \"title\")".len());
+        assert_eq!(
+            normalize_markdown_destination("foo%20bar.md?view=full#section"),
+            Some("foo bar.md".to_owned())
+        );
+        assert!(normalize_markdown_destination("foo%2Fbar.md").is_none());
+        assert!(normalize_markdown_destination("bad%2.md").is_none());
+    }
+
+    #[test]
+    fn markdown_link_fixtures_resolve_and_skip_inline_code() {
+        let fixture = Fixture::new();
+        let (hidden, shape) = fixture
+            .run_detect()
+            .unwrap_or_else(|error| panic!("Markdown fixture detects: {error}"));
+        assert!(hidden.contains("skills/example/templates/package.json"));
+        assert_eq!(shape.units.len(), 1);
+    }
+
+    #[test]
+    fn markdown_link_failures_are_not_bypassed() {
+        for target in [
+            "missing.md",
+            "../../../outside.md",
+            "/absolute.md",
+            "//host/path",
+            "..\\outside.md",
+            "bad%2.md",
+            "%2e%2e/%2foutside.md",
+            "unknown-scheme:value",
+            "topic<name>/README.md",
+        ] {
+            let fixture = Fixture::new();
+            fixture.write(
+                "skills/example/references/policy.md",
+                &format!("[bad]({target})\n"),
+            );
+            let (error, shape) = fixture.run_detect_failure();
+            assert!(shape.units.is_empty(), "unsafe link must emit no unit");
+            assert!(error.to_string().contains("Markdown"), "{target}: {error}");
+        }
+    }
+
+    #[test]
     fn valid_plugin_shape_hides_only_metadata_declared_templates() {
         let fixture = Fixture::new();
         let (hidden, shape) = fixture
@@ -1361,21 +1694,22 @@ mod tests {
         assert!(hidden.contains("skills/example/templates/package.json"));
         assert!(hidden.contains("skills/example/templates/Cargo.toml"));
         assert!(hidden.contains("skills/example/templates/config.yaml"));
+        assert!(hidden.contains("skills/example/templates/skill/SKILL.md"));
+        assert!(hidden.contains("scripts/template-helper/templates/Cargo.toml"));
         assert!(!hidden.contains("skills/example/helpers/package.json"));
         assert_eq!(shape.units.len(), 1);
         assert_eq!(shape.units[0].kind, UnitKind::Skills);
-        assert!(shape
-            .limitations
-            .iter()
-            .any(|limitation| limitation.contains("no repository-proven Bun version")));
+        assert_eq!(shape.units[0].tool_version.as_deref(), Some("1.4.0"));
         assert!(shape.units[0]
             .pr_commands
             .iter()
             .any(|command| command.contains("generate-docs.ts")));
-        assert!(shape.units[0]
-            .pr_commands
-            .iter()
-            .any(|command| command.contains("find scripts") && command.contains("bun build")));
+        assert!(shape.units[0].pr_commands.iter().any(|command| {
+            command.contains("find scripts")
+                && command.contains("bun build")
+                && command.contains("test \"$(bun --version)\" = \"1.4.0\"")
+                && command.contains("-not -path '*/templates/*'")
+        }));
     }
 
     #[test]
@@ -1389,6 +1723,10 @@ mod tests {
             .units
             .iter()
             .any(|unit| { unit.kind == UnitKind::Bun && unit.root == "skills/example/helpers" }));
+        assert!(shape
+            .units
+            .iter()
+            .any(|unit| { unit.kind == UnitKind::Bun && unit.root == "scripts/template-helper" }));
         assert!(!shape.units.iter().any(|unit| {
             unit.root.contains("/templates") || unit.root.starts_with("skills/example/templates")
         }));
@@ -1408,6 +1746,35 @@ mod tests {
     }
 
     #[test]
+    fn provider_versions_use_strict_semver() {
+        for version in [
+            "0.28.0",
+            "1.2.3-alpha.1",
+            "1.2.3+build.7",
+            "1.2.3-alpha+build.7",
+        ] {
+            assert!(
+                validate_provider_version(version, "provider.json").is_ok(),
+                "{version} should be valid SemVer"
+            );
+        }
+        for version in [
+            "1.0",
+            "01.0.0",
+            "1.0.0-",
+            "1.0.0-alpha.01",
+            "1.0.0+",
+            "1.0.0+.",
+            "1.0.0+build+extra",
+        ] {
+            assert!(
+                validate_provider_version(version, "provider.json").is_err(),
+                "{version} should be invalid SemVer"
+            );
+        }
+    }
+
+    #[test]
     fn duplicate_frontmatter_key_is_rejected() {
         let fixture = Fixture::new();
         let skill = must(
@@ -1421,7 +1788,7 @@ mod tests {
         let error = fixture
             .run_detect()
             .expect_err("duplicate frontmatter key must fail");
-        assert!(error.to_string().contains("duplicate frontmatter key"));
+        assert!(error.to_string().contains("duplicate key"));
     }
 
     #[test]
@@ -1440,8 +1807,11 @@ mod tests {
     #[test]
     fn placeholder_links_require_an_explicit_component_marker() {
         assert!(is_markdown_placeholder("research/<topic>/README.md"));
+        assert!(is_markdown_placeholder("<topic>"));
         assert!(!is_markdown_placeholder("pure-rust-macos-ui/README.md"));
         assert!(!is_markdown_placeholder("reference/topic<name>/README.md"));
+        assert!(!is_markdown_placeholder("research/<topic.name>/README.md"));
+        assert!(!is_markdown_placeholder("research/<1topic>/README.md"));
     }
 
     #[test]
