@@ -18,6 +18,19 @@ compile_error!("test-support is forbidden in release-profile builds");
 // for integration fixtures.
 
 mod action;
+/// Runner-owned action expansion contract exposed only to generator tests.
+/// Production callers continue to use the runner's internal action planner;
+/// the workflow generator uses this narrow feature to prove its consumer
+/// fixtures against the same composite semantics.
+#[cfg(feature = "test-support")]
+pub mod action_contract {
+    pub use crate::action::{
+        composite_action_invocations, parse_action_metadata, ActionInput, ActionMetadata,
+        ActionOutput, ActionRuns, ActionRuntime, CompositeActionInvocation, CompositeActionOutputs,
+        CompositeActionStep, LocalActionPlan, RepositoryActionPlan,
+    };
+    pub use crate::script_step::ScriptStep;
+}
 mod admission;
 pub mod args;
 mod attestation;

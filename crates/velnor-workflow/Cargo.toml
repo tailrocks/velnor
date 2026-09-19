@@ -36,7 +36,7 @@ sha2 = { workspace = true }
 # Contract tests prove emitted `install_args` pass the runner's own lock gate.
 # Dev-only: the shipped generator never links the runner.
 [dev-dependencies]
-velnor-runner = { path = "../velnor-runner" }
+velnor-runner = { path = "../velnor-runner", features = ["test-support"] }
 
 [lints.rust]
 unsafe_code = "forbid"

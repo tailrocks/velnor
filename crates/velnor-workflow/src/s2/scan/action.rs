@@ -6,14 +6,27 @@
 //! Repository-owned consumer fixtures are attached later through the generic
 //! `github-action-fixtures` unit contract.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde::Deserialize;
 
 use super::file_walk::is_test_support_path;
 use super::{unit, RepositoryShape, ScanContext};
-use crate::s2::{parent_path, shell_quote, UnitKind};
+use crate::s2::{is_full_revision, parent_path, shell_quote, UnitKind};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActionSourceKind {
+    Metadata,
+    Dockerfile,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ActionSource {
+    root: String,
+    path: String,
+    kind: ActionSourceKind,
+}
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -77,22 +90,11 @@ pub(crate) fn detect(
     context: &ScanContext<'_>,
     shape: &mut RepositoryShape,
 ) -> Result<(), crate::s2::GeneratorError> {
-    let mut seen_roots = BTreeSet::new();
-    for metadata_path in context.files.iter().filter(|file| {
-        matches!(file.rsplit('/').next(), Some("action.yml" | "action.yaml"))
-            && !is_test_support_path(file)
-    }) {
-        let action_root = parent_path(metadata_path);
-        if !seen_roots.insert(action_root.clone()) {
-            return Err(crate::s2::GeneratorError::usage(format!(
-                "action directory `{action_root}` contains both action.yml and action.yaml; keep one metadata entrypoint"
-            )));
-        }
-        let metadata = parse_metadata(context.root, metadata_path)?;
-        let references = local_references(&metadata.runs, &action_root, context.files)?;
+    for source in discover_action_sources(context.files) {
+        let (metadata, references) = inspect_action_source(&source, context.root, context.files)?;
         let mut commands = vec![format!(
             "velnor-workflow verify-action --path {}",
-            shell_quote(metadata_path)
+            shell_quote(&source.path)
         )];
         commands.extend(
             references
@@ -101,16 +103,20 @@ pub(crate) fn detect(
         );
         let mut action = unit(
             UnitKind::GithubAction,
-            &action_root,
-            vec![if action_root == "." {
+            &source.root,
+            vec![if source.root == "." {
                 "**".to_owned()
             } else {
-                format!("{action_root}/**")
+                format!("{}/**", source.root)
             }],
             commands,
             None,
         );
-        if metadata.runs.using.eq_ignore_ascii_case("docker") {
+        if source.kind == ActionSourceKind::Dockerfile
+            || metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.runs.using.eq_ignore_ascii_case("docker"))
+        {
             action.capabilities.docker = true;
         }
         shape.units.push(action);
@@ -123,27 +129,95 @@ pub(crate) fn detect(
 /// metadata or any local entrypoint changes between scan and execution.
 pub(crate) fn verify_action(
     root: &Path,
-    metadata_path: &str,
+    source_path: &str,
 ) -> Result<(), crate::s2::GeneratorError> {
-    let metadata = Path::new(metadata_path);
-    if metadata.is_absolute()
-        || metadata
+    let source = Path::new(source_path);
+    if source.is_absolute()
+        || source
             .components()
             .any(|component| matches!(component, std::path::Component::ParentDir))
     {
         return Err(crate::s2::GeneratorError::usage(format!(
-            "GitHub Action metadata path `{metadata_path}` must be repository-relative"
+            "GitHub Action source path `{source_path}` must be repository-relative"
         )));
     }
     let files = super::file_walk::repository_files(root, &[])?;
-    if !files.iter().any(|file| file == metadata_path) {
+    let Some(canonical) = discover_action_sources(&files)
+        .into_iter()
+        .find(|candidate| candidate.path == source_path)
+    else {
         return Err(crate::s2::GeneratorError::usage(format!(
-            "GitHub Action metadata `{metadata_path}` is not a tracked repository file"
+            "GitHub Action source `{source_path}` is not the canonical action entrypoint"
         )));
+    };
+    inspect_action_source(&canonical, root, &files).map(|_| ())
+}
+
+/// Discover the entrypoint that actions/runner would prepare for every action
+/// directory.  `action.yml` wins over `action.yaml`; a bare Dockerfile is the
+/// fallback only when neither metadata file exists.  Keeping this decision in
+/// one function prevents generation and runtime verification from auditing
+/// different files.
+fn discover_action_sources(files: &[String]) -> Vec<ActionSource> {
+    let mut metadata_yml = BTreeMap::new();
+    let mut metadata_yaml = BTreeMap::new();
+    let mut dockerfiles = BTreeMap::new();
+    for file in files.iter().filter(|file| !is_test_support_path(file)) {
+        let root = parent_path(file);
+        match file.rsplit('/').next() {
+            Some("action.yml") => {
+                metadata_yml.insert(root, file.clone());
+            }
+            Some("action.yaml") => {
+                metadata_yaml.insert(root, file.clone());
+            }
+            Some("Dockerfile") => {
+                dockerfiles.insert(root, file.clone());
+            }
+            Some("dockerfile") => {
+                dockerfiles.entry(root).or_insert_with(|| file.clone());
+            }
+            _ => {}
+        }
     }
-    let action_root = parent_path(metadata_path);
-    let metadata = parse_metadata(root, metadata_path)?;
-    local_references(&metadata.runs, &action_root, &files).map(|_| ())
+    let roots = metadata_yml
+        .keys()
+        .chain(metadata_yaml.keys())
+        .chain(dockerfiles.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    roots
+        .into_iter()
+        .filter_map(|root| {
+            if let Some(path) = metadata_yml.get(&root).or_else(|| metadata_yaml.get(&root)) {
+                return Some(ActionSource {
+                    root,
+                    path: path.clone(),
+                    kind: ActionSourceKind::Metadata,
+                });
+            }
+            dockerfiles.get(&root).map(|path| ActionSource {
+                root,
+                path: path.clone(),
+                kind: ActionSourceKind::Dockerfile,
+            })
+        })
+        .collect()
+}
+
+fn inspect_action_source(
+    source: &ActionSource,
+    root: &Path,
+    files: &[String],
+) -> Result<(Option<ActionMetadata>, Vec<String>), crate::s2::GeneratorError> {
+    match source.kind {
+        ActionSourceKind::Dockerfile => Ok((None, Vec::new())),
+        ActionSourceKind::Metadata => {
+            let metadata = parse_metadata(root, &source.path)?;
+            let references = local_references(&metadata.runs, &source.root, files)?;
+            Ok((Some(metadata), references))
+        }
+    }
 }
 
 fn parse_metadata(
@@ -209,7 +283,8 @@ fn local_references(
                             "GitHub composite action run step must declare shell",
                         ));
                     }
-                    for reference in shell_references(run) {
+                    let run = resolve_action_path_expression(run);
+                    for reference in shell_references(&run) {
                         add_local_reference(&mut references, &reference, action_root, files)?;
                     }
                 }
@@ -220,10 +295,15 @@ fn local_references(
                         "GitHub composite action uses value must not be empty",
                     ));
                 }
-                if let Some(uses) = &step.uses
-                    && uses.trim_start().starts_with("./")
-                {
-                    add_local_action_reference(&mut references, uses, action_root, files)?;
+                if let Some(uses) = &step.uses {
+                    let uses = uses.trim();
+                    if uses.starts_with('.') {
+                        add_local_action_reference(&mut references, uses, action_root, files)?;
+                    } else if !is_full_sha_action_reference(uses) {
+                        return Err(crate::s2::GeneratorError::usage(format!(
+                            "GitHub composite external action `{uses}` must use a full 40-character SHA pin"
+                        )));
+                    }
                 }
             }
         }
@@ -246,7 +326,12 @@ fn local_references(
                     "GitHub Docker action metadata must declare runs.image",
                 )
             })?;
-            if !image.contains("://") && !image.contains(':') {
+            if image.trim().is_empty() {
+                return Err(crate::s2::GeneratorError::usage(
+                    "GitHub Docker action metadata `runs.image` must not be empty",
+                ));
+            }
+            if is_dockerfile_reference(image) {
                 add_local_reference(&mut references, image, action_root, files)?;
             }
             // Docker action entrypoints are resolved inside the image. They
@@ -259,6 +344,56 @@ fn local_references(
         }
     }
     Ok(references.into_iter().collect())
+}
+
+fn is_full_sha_action_reference(value: &str) -> bool {
+    value.split_once('@').is_some_and(|(action, revision)| {
+        !action.is_empty() && !action.contains(char::is_whitespace) && is_full_revision(revision)
+    })
+}
+
+/// Match actions/runner's Dockerfile test instead of guessing from an image
+/// tag.  An ordinary image such as `ubuntu` is resolved by the container
+/// runtime; only a basename named `Dockerfile` or beginning `Dockerfile.` is
+/// a host-side build source.
+fn is_dockerfile_reference(value: &str) -> bool {
+    let value = value.trim();
+    if value.starts_with("docker://") {
+        return false;
+    }
+    let basename = value.rsplit('/').next().unwrap_or(value);
+    let basename = basename.to_ascii_lowercase();
+    basename == "dockerfile"
+        || basename.starts_with("dockerfile.")
+        || basename.ends_with("dockerfile")
+}
+
+/// Resolve the one host-local expression actions/runner makes available to a
+/// composite action.  Other expressions stay opaque and are rejected if they
+/// would be used as a local entrypoint, so dynamic paths cannot become an
+/// accidental host-file dependency.
+fn resolve_action_path_expression(value: &str) -> String {
+    let mut resolved = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while let Some(relative_start) = value[cursor..].find("${{") {
+        let start = cursor + relative_start;
+        resolved.push_str(&value[cursor..start]);
+        let expression_start = start + 3;
+        let Some(relative_end) = value[expression_start..].find("}}") else {
+            resolved.push_str(&value[start..]);
+            return resolved;
+        };
+        let end = expression_start + relative_end + 2;
+        let expression = value[expression_start..end - 2].trim();
+        if expression == "github.action_path" {
+            resolved.push('.');
+        } else {
+            resolved.push_str(&value[start..end]);
+        }
+        cursor = end;
+    }
+    resolved.push_str(&value[cursor..]);
+    resolved
 }
 
 fn validate_composite_step(step: &ActionStep) -> Result<(), crate::s2::GeneratorError> {
@@ -298,7 +433,12 @@ fn add_local_reference(
     files: &[String],
 ) -> Result<(), crate::s2::GeneratorError> {
     let reference = reference.trim().trim_matches(['"', '\'']);
-    if reference.is_empty() || reference.contains("${{") || reference.contains('$') {
+    if reference.is_empty()
+        || reference.contains("${{")
+        || reference.contains("{{")
+        || reference.contains("}}")
+        || reference.contains('$')
+    {
         return Err(crate::s2::GeneratorError::usage(format!(
             "GitHub Action local entrypoint `{reference}` must be a static relative path"
         )));
@@ -362,15 +502,15 @@ fn add_local_action_reference(
         .collect::<Vec<_>>()
         .join("/");
     let directory = super::file_walk::join_repo_path(action_root, &normalized);
-    for metadata in ["action.yml", "action.yaml"] {
-        let candidate = super::file_walk::join_repo_path(&directory, metadata);
-        if files.iter().any(|file| file == &candidate) {
-            references.insert(candidate);
-            return Ok(());
-        }
+    if let Some(source) = discover_action_sources(files)
+        .into_iter()
+        .find(|source| source.root == directory)
+    {
+        references.insert(source.path);
+        return Ok(());
     }
     Err(crate::s2::GeneratorError::usage(format!(
-        "GitHub composite local action `{reference}` has no action.yml or action.yaml under `{directory}`"
+        "GitHub composite local action `{reference}` has no action metadata or Dockerfile under `{directory}`"
     )))
 }
 
@@ -680,6 +820,163 @@ mod tests {
     }
 
     #[test]
+    fn action_entrypoint_precedence_and_bare_dockerfile_match_runner() {
+        let root = fixture("entrypoints");
+        must(
+            fs::write(
+                root.join("action.yml"),
+                "runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo selected\n",
+            ),
+            "write preferred action metadata",
+        );
+        must(
+            fs::write(
+                root.join("action.yaml"),
+                "runs:\n  using: unsupported\n  main: missing\n",
+            ),
+            "write shadowed action metadata",
+        );
+        must(
+            fs::create_dir_all(root.join("actions/bare")),
+            "create bare Docker action",
+        );
+        must(
+            fs::write(root.join("actions/bare/dockerfile"), "FROM scratch\n"),
+            "write lowercase Dockerfile fallback",
+        );
+        must(
+            fs::create_dir_all(root.join("actions/shadowed")),
+            "create Docker metadata action",
+        );
+        must(
+            fs::write(
+                root.join("actions/shadowed/action.yml"),
+                "runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo metadata\n",
+            ),
+            "write metadata action",
+        );
+        must(
+            fs::write(root.join("actions/shadowed/Dockerfile"), "FROM scratch\n"),
+            "write shadowed Dockerfile",
+        );
+        let providers = providers();
+        let shape = must(
+            super::super::scan_shape(&root, &providers, "main", &[]),
+            "scan action entrypoints",
+        );
+        let root_action = shape
+            .units
+            .iter()
+            .find(|unit| unit.root == "." && unit.kind == crate::s2::UnitKind::GithubAction)
+            .unwrap_or_else(|| panic!("preferred metadata action missing"));
+        assert!(root_action
+            .pr_commands
+            .iter()
+            .any(|command| command == "velnor-workflow verify-action --path 'action.yml'"));
+        assert!(!shape.units.iter().any(|unit| {
+            unit.kind == crate::s2::UnitKind::GithubAction
+                && unit
+                    .pr_commands
+                    .iter()
+                    .any(|command| command.contains("action.yaml"))
+        }));
+        let bare = shape
+            .units
+            .iter()
+            .find(|unit| unit.root == "actions/bare")
+            .unwrap_or_else(|| panic!("bare Dockerfile action missing"));
+        assert_eq!(bare.kind, crate::s2::UnitKind::GithubAction);
+        assert!(bare.capabilities.docker);
+        assert!(bare
+            .pr_commands
+            .iter()
+            .any(|command| command
+                == "velnor-workflow verify-action --path 'actions/bare/dockerfile'"));
+        let error = super::verify_action(&root, "action.yaml")
+            .err()
+            .unwrap_or_else(|| panic!("shadowed action.yaml must not be canonical"));
+        assert!(
+            error.to_string().contains("canonical action entrypoint"),
+            "{error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn docker_images_and_action_path_are_classified_like_runner() {
+        let root = fixture("docker-and-action-path");
+        must(
+            fs::write(
+                root.join("action.yml"),
+                "runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: ${{ github.action_path }}/scripts/check.sh && ${{ github.action_path }}/scripts/next.sh\n    - uses: actions/example@0123456789abcdef0123456789abcdef01234567\n",
+            ),
+            "write action_path metadata",
+        );
+        must(
+            fs::write(root.join("scripts/check.sh"), "exit 0\n"),
+            "write canonical action_path script",
+        );
+        must(
+            fs::write(root.join("scripts/next.sh"), "exit 0\n"),
+            "write second action_path script",
+        );
+        must(
+            fs::create_dir_all(root.join("actions/images")),
+            "create image action directory",
+        );
+        must(
+            fs::write(
+                root.join("actions/images/action.yml"),
+                "runs:\n  using: docker\n  image: ubuntu\n  entrypoint: /container-entrypoint.sh\n  pre-entrypoint: /container-pre.sh\n  post-entrypoint: /container-post.sh\n",
+            ),
+            "write ordinary image metadata",
+        );
+        let providers = providers();
+        let shape = must(
+            super::super::scan_shape(&root, &providers, "main", &[]),
+            "scan Docker image action",
+        );
+        let root_action = shape
+            .units
+            .iter()
+            .find(|unit| unit.root == ".")
+            .unwrap_or_else(|| panic!("action_path action missing"));
+        assert!(root_action
+            .pr_commands
+            .iter()
+            .any(|command| command == "test -f 'scripts/check.sh'"));
+        assert!(root_action
+            .pr_commands
+            .iter()
+            .any(|command| command == "test -f 'scripts/next.sh'"));
+        let image_action = shape
+            .units
+            .iter()
+            .find(|unit| unit.root == "actions/images")
+            .unwrap_or_else(|| panic!("ordinary image action missing"));
+        assert!(image_action.capabilities.docker);
+        assert_eq!(image_action.pr_commands.len(), 1);
+        let _ = fs::remove_dir_all(root);
+
+        let mutable = fixture("mutable-uses");
+        must(
+            fs::write(
+                mutable.join("action.yml"),
+                "runs:\n  using: composite\n  steps:\n    - uses: actions/example@main\n",
+            ),
+            "write mutable action metadata",
+        );
+        let error = super::super::scan_shape(&mutable, &providers, "main", &[])
+            .err()
+            .unwrap_or_else(|| panic!("mutable external uses must fail"));
+        assert!(
+            error.to_string().contains("full 40-character SHA pin"),
+            "{error}"
+        );
+        let _ = fs::remove_dir_all(mutable);
+    }
+
+    #[test]
     fn composite_semantics_are_parsed_without_rewriting_uses_conditions_or_io() {
         let root = fixture("composite-semantics");
         must(
@@ -689,7 +986,7 @@ mod tests {
         must(
             fs::write(
                 root.join("action.yml"),
-                "name: consumer\ninputs:\n  enabled:\n    default: true\noutputs:\n  result:\n    value: ${{ steps.local.outputs.result }}\nruns:\n  using: composite\n  steps:\n    - id: local\n      if: ${{ inputs.enabled }}\n      uses: ./nested\n      with:\n        value: ${{ inputs.enabled }}\n      env:\n        ACTION_MODE: checked\n    - name: external\n      if: always()\n      uses: actions/checkout@v4\n",
+            "name: consumer\ninputs:\n  enabled:\n    default: true\noutputs:\n  result:\n    value: ${{ steps.local.outputs.result }}\nruns:\n  using: composite\n  steps:\n    - id: local\n      if: ${{ inputs.enabled }}\n      uses: ./nested\n      with:\n        value: ${{ inputs.enabled }}\n      env:\n        ACTION_MODE: checked\n    - name: external\n      if: always()\n      uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332\n",
             ),
             "write semantic action metadata",
         );
