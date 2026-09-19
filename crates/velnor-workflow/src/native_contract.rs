@@ -469,11 +469,19 @@ pub(crate) struct HostedAppleOffer {
 }
 
 const UNIVERSAL_BUILD_ARCHES: &[AppleArch] = &[AppleArch::Arm64, AppleArch::X86_64];
+const ARM64_BUILD_ARCHES: &[AppleArch] = &[AppleArch::Arm64];
 const MACOS_26_SDKS: &[(AppleSdkFamily, AppleVersion)] = &[
     (AppleSdkFamily::Macos, AppleVersion::new(26, 5, 0)),
     (AppleSdkFamily::IosDevice, AppleVersion::new(26, 5, 0)),
     (AppleSdkFamily::IosSimulator, AppleVersion::new(26, 5, 0)),
 ];
+const MACOS_27_SDKS: &[(AppleSdkFamily, AppleVersion)] =
+    &[(AppleSdkFamily::Macos, AppleVersion::new(27, 0, 0))];
+
+/// The latest verified GitHub-hosted Apple label. This is intentionally an
+/// exact label, not `macos-latest`: the alias is provider policy, not an
+/// attestation of the image major or architecture.
+pub(crate) const LATEST_HOSTED_APPLE_RUNNER: &str = "xcode-27";
 
 /// Current GitHub-hosted macOS 26 offers, verified from the public runner and
 /// image readmes. The image ships Xcode 26.6 and macOS/iOS SDK 26.5 families.
@@ -488,6 +496,19 @@ pub(crate) fn hosted_apple_offer(label: &str) -> Option<HostedAppleOffer> {
         build_arches,
     };
     match label {
+        // The current public-preview image is arm64-only. Its README proves
+        // macOS 27, Xcode 27, and the macOS 27 SDK; it does not prove Intel
+        // execution or a universal output contract, so build output remains
+        // arm64 until a compiler probe proves another architecture.
+        LATEST_HOSTED_APPLE_RUNNER => Some(HostedAppleOffer {
+            label: LATEST_HOSTED_APPLE_RUNNER,
+            host_macos: AppleVersion::new(27, 0, 0),
+            xcode: AppleVersion::new(27, 0, 0),
+            sdk_versions: MACOS_27_SDKS,
+            swift: None,
+            execution_arch: AppleArch::Arm64,
+            build_arches: ARM64_BUILD_ARCHES,
+        }),
         "macos-26" => Some(common("macos-26", AppleArch::Arm64, UNIVERSAL_BUILD_ARCHES)),
         "macos-26-intel" => Some(common(
             "macos-26-intel",
@@ -496,6 +517,11 @@ pub(crate) fn hosted_apple_offer(label: &str) -> Option<HostedAppleOffer> {
         )),
         _ => None,
     }
+}
+
+pub(crate) fn latest_hosted_apple_offer() -> HostedAppleOffer {
+    hosted_apple_offer(LATEST_HOSTED_APPLE_RUNNER)
+        .expect("LATEST_HOSTED_APPLE_RUNNER must have a verified offer")
 }
 
 /// Check a requirement against a verified hosted image. Returns actionable
@@ -646,6 +672,7 @@ fail() {
   exit 1
 }
 version_at_least() {
+  version_valid "$1" && version_valid "$2" || return 1
   awk -F. -v actual="$1" -v required="$2" '
     BEGIN {
       for (i = 1; i <= 3; i++) {
@@ -657,11 +684,15 @@ version_at_least() {
       exit 0
     }'
 }
+version_valid() {
+  [[ "$1" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]
+}
 version_exact() {
   version_at_least "$1" "$2" && version_at_least "$2" "$1"
 }
 require_version() {
   local label="$1" actual="$2" minimum="$3" exact="$4"
+  version_valid "$actual" || fail "$label reported malformed version: ${actual:-<empty>}"
   if [[ -n "$minimum" ]] && ! version_at_least "$actual" "$minimum"; then
     fail "$label $actual is below required minimum $minimum"
   fi
@@ -674,6 +705,7 @@ command -v sw_vers >/dev/null || fail "macOS sw_vers is unavailable; native work
 command -v xcode-select >/dev/null || fail "xcode-select is unavailable; install full Xcode"
 command -v xcodebuild >/dev/null || fail "xcodebuild is unavailable; install full Xcode"
 command -v xcrun >/dev/null || fail "xcrun is unavailable; install full Xcode"
+command -v swift >/dev/null || fail "swift is unavailable; install full Xcode"
 
 actual_arch="$(uname -m)"
 [[ "$actual_arch" == "$APPLE_EXECUTION_ARCH" ]] \
@@ -708,10 +740,7 @@ xcode_version="$(xcodebuild -version | awk '$1 == "Xcode" { print $2; exit }')"
 [[ -n "$xcode_version" ]] || fail "xcodebuild did not report an Xcode version"
 require_version "Xcode" "$xcode_version" "$APPLE_XCODE_MINIMUM" "$APPLE_XCODE_EXACT"
 swift_version="$(swift --version 2>/dev/null | awk '$1 == "Apple" && $2 == "Swift" && $3 == "version" { print $4; exit } $1 == "Swift" && $2 == "version" { print $3; exit }')"
-if [[ -n "$APPLE_SWIFT_MINIMUM" || -n "$APPLE_SWIFT_EXACT" ]]; then
-  [[ -n "$swift_version" ]] || fail "swift --version did not report a Swift toolchain version"
-  require_version "Swift toolchain" "$swift_version" "$APPLE_SWIFT_MINIMUM" "$APPLE_SWIFT_EXACT"
-fi
+require_version "Swift toolchain" "$swift_version" "$APPLE_SWIFT_MINIMUM" "$APPLE_SWIFT_EXACT"
 sdk_listing="$(xcodebuild -showsdks)"
 grep -F "$APPLE_SDK_NAME" <<<"$sdk_listing" >/dev/null \
   || fail "selected Xcode does not list required $APPLE_SDK_FAMILY SDK ($APPLE_SDK_NAME)"
@@ -741,7 +770,7 @@ mod tests {
 
     use super::{
         hosted_apple_offer, offer_mismatches, render_preflight_step, AppleArch,
-        AppleNativeContract, AppleSdkFamily, AppleVersion,
+        AppleNativeContract, AppleSdkFamily, AppleVersion, LATEST_HOSTED_APPLE_RUNNER,
     };
     use std::collections::BTreeSet;
 
@@ -757,7 +786,23 @@ mod tests {
         assert!(offer_mismatches(&contract, intel)
             .iter()
             .any(|message| { message.contains("execution architecture arm64") }));
+        let mut latest =
+            AppleNativeContract::new(AppleSdkFamily::Macos, Some(AppleVersion::new(27, 0, 0)));
+        latest.xcode = super::AppleVersionConstraint::exact(AppleVersion::new(27, 0, 0));
+        assert!(offer_mismatches(
+            &latest,
+            hosted_apple_offer(LATEST_HOSTED_APPLE_RUNNER).expect("latest verified image")
+        )
+        .is_empty());
+        latest.build_arches.insert(AppleArch::X86_64);
+        assert!(offer_mismatches(
+            &latest,
+            hosted_apple_offer(LATEST_HOSTED_APPLE_RUNNER).expect("latest verified image")
+        )
+        .iter()
+        .any(|message| message.contains("build architectures")));
         assert!(hosted_apple_offer("macos-15").is_none());
+        assert!(hosted_apple_offer("macos-27").is_none());
     }
 
     #[test]
@@ -846,6 +891,24 @@ mod tests {
         };
         assert!(command().is_ok_and(|status| status.success()));
         assert!(fs::write(root.join("bin/uname"), "#!/bin/sh\necho x86_64\n").is_ok());
+        assert!(command().is_ok_and(|status| !status.success()));
+        assert!(fs::write(root.join("bin/uname"), "#!/bin/sh\necho arm64\n").is_ok());
+        assert!(fs::write(
+            root.join("bin/sw_vers"),
+            "#!/bin/sh\n[ \"$1\" = \"-productVersion\" ] && echo\n"
+        )
+        .is_ok());
+        assert!(command().is_ok_and(|status| !status.success()));
+        assert!(fs::write(
+            root.join("bin/sw_vers"),
+            "#!/bin/sh\n[ \"$1\" = \"-productVersion\" ] && echo 26.6.1\n"
+        )
+        .is_ok());
+        assert!(fs::write(
+            root.join("bin/xcrun"),
+            "#!/bin/sh\ncase \"$*\" in *--show-sdk-version*) echo 26.beta;; *--show-sdk-path*) echo $SDK_PATH;; *) exit 0;; esac\n"
+        )
+        .is_ok());
         assert!(command().is_ok_and(|status| !status.success()));
         assert!(fs::remove_dir_all(root).is_ok());
     }

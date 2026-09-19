@@ -142,13 +142,30 @@ pub(crate) fn package_evidence(
 
 fn manifest_native_contract(contents: &str) -> AppleNativeContract {
     let code = strip_swift_comments_and_strings(contents);
-    let family = if code.contains(".iOS(") {
-        AppleSdkFamily::IosSimulator
-    } else {
-        AppleSdkFamily::Macos
-    };
+    let platforms = manifest_platforms(&code);
+    let family = platforms
+        .iter()
+        .find_map(|(_, family)| *family)
+        .unwrap_or(AppleSdkFamily::Macos);
     let minimum = platform_version(&code, family);
     let mut contract = AppleNativeContract::new(family, minimum);
+    if platforms.len() > 1 {
+        contract.conflicts.push(format!(
+            "manifest declares multiple Apple SDK families: {}",
+            platforms
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    for (name, family) in &platforms {
+        if family.is_none() {
+            contract.conflicts.push(format!(
+                "unsupported Apple SDK family {name}; declare a supported destination explicitly"
+            ));
+        }
+    }
     if let Some(version) = swift_tools_version(contents) {
         contract.swift = crate::native_contract::AppleVersionConstraint::minimum(version);
     }
@@ -161,6 +178,15 @@ fn manifest_native_contract(contents: &str) -> AppleNativeContract {
 
 fn project_native_contract(contents: &str) -> Option<AppleNativeContract> {
     let code = strip_non_code_comments(contents);
+    let unsupported = [
+        ("appletvos", "tvOS device"),
+        ("appletvsimulator", "tvOS simulator"),
+        ("watchos", "watchOS device"),
+        ("watchsimulator", "watchOS simulator"),
+        ("xros", "visionOS device"),
+        ("xrsimulator", "visionOS simulator"),
+        ("MACCATALYST", "Mac Catalyst"),
+    ];
     let family = if code.contains("iphonesimulator") {
         AppleSdkFamily::IosSimulator
     } else if code.contains("iphoneos") || code.contains("IPHONEOS_DEPLOYMENT_TARGET") {
@@ -169,6 +195,11 @@ fn project_native_contract(contents: &str) -> Option<AppleNativeContract> {
         || code.contains("macOS")
         || code.contains("MACOSX_DEPLOYMENT_TARGET")
     {
+        AppleSdkFamily::Macos
+    } else if unsupported.iter().any(|(marker, _)| code.contains(marker)) {
+        // Keep the typed value renderable only long enough for the routing
+        // validator to reject the unsupported destination with its source
+        // evidence. Never reinterpret it as macOS success.
         AppleSdkFamily::Macos
     } else {
         return None;
@@ -189,7 +220,33 @@ fn project_native_contract(contents: &str) -> Option<AppleNativeContract> {
     if let Some(version) = setting_version(&code, "xcodeVersion") {
         contract.xcode = crate::native_contract::AppleVersionConstraint::exact(version);
     }
+    for (marker, name) in unsupported {
+        if code.contains(marker) {
+            contract.conflicts.push(format!(
+                "unsupported Apple SDK family {name} ({marker}); declare a supported destination explicitly"
+            ));
+        }
+    }
     Some(contract)
+}
+
+/// Return every PackageDescription Apple platform declaration together with
+/// the destination families this generator can verify. Unsupported families
+/// stay as explicit evidence and become a generation error; they never fall
+/// through to the macOS SDK merely because the package is Apple-bound.
+fn manifest_platforms(code: &str) -> Vec<(&'static str, Option<AppleSdkFamily>)> {
+    [
+        ("macOS", ".macOS(", Some(AppleSdkFamily::Macos)),
+        ("iOS", ".iOS(", Some(AppleSdkFamily::IosSimulator)),
+        ("tvOS", ".tvOS(", None),
+        ("watchOS", ".watchOS(", None),
+        ("visionOS", ".visionOS(", None),
+        ("Mac Catalyst", ".macCatalyst(", None),
+    ]
+    .into_iter()
+    .filter(|(_, marker, _)| code.contains(marker))
+    .map(|(name, _, family)| (name, family))
+    .collect()
 }
 
 fn swift_tools_version(contents: &str) -> Option<AppleVersion> {
@@ -293,16 +350,7 @@ fn manifest_declares_apple_platform(contents: &str) -> bool {
     // PackageDescription's platform spellings are stable API. Remove comments
     // and string literals so prose or a fixture string cannot change routing.
     let code = strip_swift_comments_and_strings(contents);
-    [
-        ".macOS(",
-        ".iOS(",
-        ".tvOS(",
-        ".watchOS(",
-        ".visionOS(",
-        ".macCatalyst(",
-    ]
-    .iter()
-    .any(|marker| code.contains(marker))
+    !manifest_platforms(&code).is_empty()
 }
 
 fn manifest_uses_apple_linker(contents: &str) -> bool {
@@ -673,8 +721,9 @@ mod tests {
     )]
 
     use super::{
-        is_package_source, manifest_declares_apple_platform, manifest_uses_apple_linker,
-        manifest_uses_xcframework, source_imports_apple_module, xcode_native_contract,
+        is_package_source, manifest_declares_apple_platform, manifest_native_contract,
+        manifest_uses_apple_linker, manifest_uses_xcframework, source_imports_apple_module,
+        xcode_native_contract,
     };
     use crate::native_contract::{AppleArch, AppleSdkFamily, AppleVersion};
     use std::collections::BTreeSet;
@@ -748,6 +797,34 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_apple_platforms_do_not_fall_through_to_macos() {
+        for marker in [
+            ".tvOS(.v26)",
+            ".watchOS(.v26)",
+            ".visionOS(.v26)",
+            ".macCatalyst(.v26)",
+        ] {
+            let contract =
+                manifest_native_contract(&format!("let package = Package(platforms: [{marker}])"));
+            assert_eq!(contract.sdk.family, AppleSdkFamily::Macos);
+            assert!(contract
+                .conflicts
+                .iter()
+                .any(|conflict| conflict.contains("unsupported Apple SDK family")));
+        }
+    }
+
+    #[test]
+    fn supported_manifest_destinations_remain_typed() {
+        let macos = manifest_native_contract("let package = Package(platforms: [.macOS(.v26)])");
+        assert_eq!(macos.sdk.family, AppleSdkFamily::Macos);
+        assert!(macos.conflicts.is_empty());
+        let ios = manifest_native_contract("let package = Package(platforms: [.iOS(.v26)])");
+        assert_eq!(ios.sdk.family, AppleSdkFamily::IosSimulator);
+        assert!(ios.conflicts.is_empty());
+    }
+
+    #[test]
     fn native_contract_reads_tools_sdk_xcode_and_architecture_facts() {
         let package = r"// swift-tools-version: 6.2
 let package = Package(platforms: [.macOS(.v26)])
@@ -814,5 +891,24 @@ settings:
             "SDKROOT = iphoneos; IPHONEOS_DEPLOYMENT_TARGET = 26.0;\nxcodeVersion: \"26.6\"\n";
         let contract = xcode_native_contract(project, Some(config)).expect("conflict evidence");
         assert!(!contract.conflicts.is_empty());
+    }
+
+    #[test]
+    fn unsupported_xcode_sdk_families_are_conflicts() {
+        for sdk in [
+            "appletvos",
+            "appletvsimulator",
+            "watchos",
+            "watchsimulator",
+            "xros",
+            "xrsimulator",
+        ] {
+            let contract = xcode_native_contract(&format!("SDKROOT = {sdk};"), None)
+                .expect("unsupported Apple SDK remains native evidence");
+            assert!(contract
+                .conflicts
+                .iter()
+                .any(|conflict| conflict.contains("unsupported Apple SDK family")));
+        }
     }
 }
