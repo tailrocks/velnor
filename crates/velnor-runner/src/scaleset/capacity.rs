@@ -1,13 +1,10 @@
 //! Shared-grant capacity authority (§5.1 steps 3 + 8).
 //!
 //! The one host-wide `max_jobs=N` ledger lives in `velnor-control`
-//! (`PermitLedger`, C2). This branch predates that merge, so the adapter
-//! programs against [`CapacityLedger`]: a method-for-method mirror of the
-//! C2 API (`acquire`/`transition`/`release`/`reconcile`/
-//! `advertised_free`/`generation`/`occupied`/`holder_state`, same outcome
-//! enums, same generation-fencing and reconcile-before-advertise rules).
-//! Integration swaps [`MemLedger`] for a thin `PermitLedger` adapter with
-//! no call-site changes.
+//! (`PermitLedger`, C2). [`CapacityLedger`] is the Scale Set lane interface
+//! for that authority; [`SharedLedger`](crate::scaleset::SharedLedger)
+//! adapts its permit and demand-ordering operations, while [`MemLedger`]
+//! keeps unit tests independent of SQLite.
 //!
 //! Advertisement rule (step 8): per poll, per session, `free = N −
 //! occupied_global` across BOTH lanes; `None` (unreconciled or
@@ -109,6 +106,24 @@ pub trait CapacityLedger {
     fn holders(&self) -> Result<Vec<LedgerHolder>, Self::Error>;
     /// Current state of one holder's permit, if held.
     fn holder_state(&self, holder: &str) -> Result<Option<LedgerPermitState>, Self::Error>;
+    /// Observe durable lane demand before any permit acquire attempt. The
+    /// global implementation preserves `first_seen_unix` and its sequence
+    /// across redelivery; lightweight ledgers may omit ordering.
+    fn observe_demand(
+        &mut self,
+        _holder: &str,
+        _lane: LedgerLane,
+        _scope: &str,
+        _first_seen_unix: u64,
+        _observed_unix: u64,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+    /// Close unheld upstream demand that the lane confirmed is no longer
+    /// eligible. A held permit must use one of the cleanup release methods.
+    fn cancel_demand(&mut self, _holder: &str) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
     /// Acquire one permit for `holder`, fenced on `generation`. Idempotent
     /// per holder: duplicates report [`AcquireOutcome::AlreadyHeld`].
     fn acquire(
@@ -128,6 +143,19 @@ pub trait CapacityLedger {
     /// Release one holder's permit. Unfenced by design; freeing capacity is
     /// always safe. Returns whether a row was removed.
     fn release(&mut self, holder: &str) -> Result<bool, Self::Error>;
+    /// Confirm a retry/handoff: free occupancy and put the same demand back
+    /// into the eligible queue without changing its original age.
+    fn release_to_eligible(&mut self, holder: &str) -> Result<bool, Self::Error> {
+        self.release(holder)
+    }
+    /// Confirm upstream cancellation: free occupancy and close its demand.
+    fn release_cancelled(&mut self, holder: &str) -> Result<bool, Self::Error> {
+        self.release(holder)
+    }
+    /// Keep occupancy and close demand after cleanup could not be confirmed.
+    fn retain_uncertain(&mut self, holder: &str, generation: u64) -> Result<(), Self::Error> {
+        self.transition(holder, LedgerPermitState::Uncertain, generation)
+    }
     /// Reconcile durable occupancy against the attested live set and mark
     /// this epoch reconciled. Never deletes: observed-but-unrecorded work
     /// is adopted, recorded-but-unobserved work is marked uncertain.

@@ -25,6 +25,7 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -262,6 +263,8 @@ pub enum ListenerError<SE, WE> {
     Ledger(anyhow::Error),
     Reconcile(anyhow::Error),
     MissingSessionStats,
+    /// The in-flight long poll was cancelled because the daemon is draining.
+    ShuttingDown,
 }
 
 impl<SE: std::fmt::Display, WE: std::fmt::Display> std::fmt::Display for ListenerError<SE, WE> {
@@ -274,6 +277,7 @@ impl<SE: std::fmt::Display, WE: std::fmt::Display> std::fmt::Display for Listene
             Self::Ledger(error) => write!(f, "scale-set ledger: {error}"),
             Self::Reconcile(error) => write!(f, "scale-set reconcile: {error}"),
             Self::MissingSessionStats => write!(f, "session carries no statistics"),
+            Self::ShuttingDown => write!(f, "scale-set listener is shutting down"),
         }
     }
 }
@@ -336,8 +340,15 @@ impl<S: LoopSession, L: CapacityLedger, W: WorkerLane> Listener<S, L, W> {
     /// One poll iteration: initial handshake once, reconcile-before-
     /// advertise on every new epoch, poll, Scale, ACK-after-success.
     pub async fn run_once(&mut self) -> Result<ScaleOutcome, ListenerError<S::Error, W::Error>> {
+        self.run_once_with_shutdown(None).await
+    }
+
+    async fn run_once_with_shutdown(
+        &mut self,
+        shutdown: Option<&AtomicBool>,
+    ) -> Result<ScaleOutcome, ListenerError<S::Error, W::Error>> {
         self.metrics.inc_polls();
-        let outcome = self.run_once_inner().await;
+        let outcome = self.run_once_inner(shutdown).await;
         match &outcome {
             Ok(_) => self.consecutive_errors = 0,
             Err(_) => self.consecutive_errors = self.consecutive_errors.saturating_add(1),
@@ -345,7 +356,10 @@ impl<S: LoopSession, L: CapacityLedger, W: WorkerLane> Listener<S, L, W> {
         outcome
     }
 
-    async fn run_once_inner(&mut self) -> Result<ScaleOutcome, ListenerError<S::Error, W::Error>> {
+    async fn run_once_inner(
+        &mut self,
+        shutdown: Option<&AtomicBool>,
+    ) -> Result<ScaleOutcome, ListenerError<S::Error, W::Error>> {
         let set = self.config.scale_set_id;
         if !self.started {
             self.handshake().await?;
@@ -372,11 +386,25 @@ impl<S: LoopSession, L: CapacityLedger, W: WorkerLane> Listener<S, L, W> {
             .map_err(ListenerError::Store)?
             .map_or(0, |cursor| cursor.last_message_id);
         let capacity_i32 = i32::try_from(capacity).unwrap_or(i32::MAX);
-        let polled = self
-            .session
-            .get_message(last_id, capacity_i32)
-            .await
-            .map_err(ListenerError::Poll)?;
+        let polled = if let Some(shutdown) = shutdown {
+            tokio::select! {
+                biased;
+                () = wait_for_shutdown(shutdown) => return Err(ListenerError::ShuttingDown),
+                result = self.session.get_message(last_id, capacity_i32) => {
+                    result.map_err(ListenerError::Poll)?
+                }
+            }
+        } else {
+            self.session
+                .get_message(last_id, capacity_i32)
+                .await
+                .map_err(ListenerError::Poll)?
+        };
+        // Close the race where the poll and drain become ready together.
+        // Leave a returned message unacked so the next process can replay it.
+        if shutdown.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return Err(ListenerError::ShuttingDown);
+        }
         match polled {
             None => self.scale_nil(generation).await,
             Some(message) => self.scale_message(message, generation).await,
@@ -423,17 +451,16 @@ impl<S: LoopSession, L: CapacityLedger, W: WorkerLane> Listener<S, L, W> {
         generation: u64,
     ) -> Result<ScaleOutcome, ListenerError<S::Error, W::Error>> {
         self.metrics.inc_nil_polls();
-        let outcome = self
-            .processor
-            .scale(None)
-            .await
-            .map_err(ListenerError::Scale)?;
-        debug_assert!(matches!(outcome.kind, ScaleKind::Nil));
         if let Some(stats) = self.session.session_statistics().await {
             self.cursors
                 .save_stats(self.config.scale_set_id, &stats, generation)
                 .map_err(ListenerError::Store)?;
+            self.processor.set_cached_stats(stats);
         }
+        self.processor
+            .lane_mut()
+            .idle_tick()
+            .map_err(|error| ListenerError::Scale(ScaleError::Lane(error)))?;
         let (ledger, demand, batches) = self.processor.parts_mut();
         idle_poll(
             &self.session,
@@ -446,6 +473,14 @@ impl<S: LoopSession, L: CapacityLedger, W: WorkerLane> Listener<S, L, W> {
         )
         .await
         .map_err(ListenerError::Reconcile)?;
+        // Uncertain resolution can promote rows to Acquired; the same nil
+        // pass must provision those rows and drain any older Granted work.
+        let outcome = self
+            .processor
+            .scale(None)
+            .await
+            .map_err(ListenerError::Scale)?;
+        debug_assert!(matches!(outcome.kind, ScaleKind::Nil));
         Ok(outcome)
     }
 
@@ -490,11 +525,12 @@ impl<S: LoopSession, L: CapacityLedger, W: WorkerLane> Listener<S, L, W> {
             if shutdown.load(Ordering::Relaxed) {
                 return;
             }
-            let class = match self.run_once().await {
+            let class = match self.run_once_with_shutdown(Some(shutdown)).await {
                 Ok(outcome) => match outcome.kind {
                     ScaleKind::Message { .. } | ScaleKind::Initial => PollOutcomeClass::Message,
                     ScaleKind::Nil => PollOutcomeClass::Nil,
                 },
+                Err(ListenerError::ShuttingDown) => return,
                 Err(error) => {
                     tracing::warn!(
                         error = error.to_string(),
@@ -511,6 +547,15 @@ impl<S: LoopSession, L: CapacityLedger, W: WorkerLane> Listener<S, L, W> {
                 tokio::time::sleep(delay).await;
             }
         }
+    }
+}
+
+async fn wait_for_shutdown(shutdown: &AtomicBool) {
+    loop {
+        if shutdown.load(Ordering::Acquire) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 

@@ -565,7 +565,7 @@ async fn uncertain_acquire_resolves_on_idle_reacquire() {
     let server = MockServer::start().await;
     let db = temp_db("uncertain");
     let fixtures = Fixtures::load(&fixture_dir()).unwrap();
-    let (mut listener, _lane, metrics) = listener(&server, &db, 2).await;
+    let (mut listener, lane, metrics) = listener(&server, &db, 2).await;
 
     Mock::given(method("GET"))
         .and(path(queue_path()))
@@ -620,13 +620,14 @@ async fn uncertain_acquire_resolves_on_idle_reacquire() {
         .unwrap();
     let idle = listener.run_once().await.unwrap();
     assert_eq!(idle.kind, ScaleKind::Nil);
+    assert_eq!(idle.provisioned, vec![4244]);
     let demand = DemandStore::open(&db).unwrap();
     assert_eq!(
         demand.get(4244).unwrap().unwrap().state,
-        DemandState::Acquired
+        DemandState::ProvisionIntent
     );
-    // Second poll did not provision (provisioning runs on messages); the
-    // next message provisions the resolved row. Occupancy stayed 1 throughout.
+    assert_eq!(lane.state.provisioned.lock().unwrap().len(), 1);
+    // Idle work resumes acquisition and provisioning. Occupancy stays 1.
     assert_eq!(listener.processor().ledger_ref().occupied().unwrap(), 1);
 }
 
