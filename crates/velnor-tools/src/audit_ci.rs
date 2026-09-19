@@ -12,6 +12,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command};
 
 use crate::fleet_policy::{generate_policies_from_ledger, ReleaseRefLedger};
+use crate::strict_json;
 
 const INLINE_MATRIX_MARKERS: [&str; 2] = ["inputs.lanes == 'both'", "inputs.lane == 'both'"];
 const VELNOR_GUEST_IMAGE_REQUIREMENT: &str = "guest-image-build.user-namespace";
@@ -363,7 +364,7 @@ fn canonical_auxiliary_manifest(root: &Path) -> Result<EstateManifest> {
     let path = root.join(ESTATE_MANIFEST_FILE);
     let text = fs::read_to_string(&path)
         .with_context(|| format!("read estate manifest {}", path.display()))?;
-    let manifest: EstateManifest = serde_json::from_str(&text)
+    let manifest: EstateManifest = strict_json::from_str(&text)
         .with_context(|| format!("parse estate manifest {}", path.display()))?;
     validate_estate_scope_metadata(&manifest.scope)?;
     validate_auxiliary_repository_scope(&manifest.repositories)?;
@@ -681,7 +682,7 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
         let text = fs::read_to_string(estate)
             .with_context(|| format!("read estate file {}", estate.display()))?;
         Some(
-            serde_json::from_str::<EstateManifest>(&text)
+            strict_json::from_str::<EstateManifest>(&text)
                 .with_context(|| format!("parse estate manifest {}", estate.display()))?,
         )
     } else {
