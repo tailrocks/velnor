@@ -87,10 +87,13 @@ const GOAL_FLEET_REPOSITORIES: [&str; 32] = [
 const ESTATE_SCOPE_ROLE: &str = "auxiliary-concern-projection";
 const ESTATE_SCOPE_AUTHORITY: &str = "velnor-github-first-dual-lane-goal.md";
 const ESTATE_SCOPE_AUTHORITY_SECTION: &str = "2. Fixed repository manifest";
+// SHA-256 of the newline-joined identities in the goal's fixed §2 manifest.
+const GOAL_FLEET_REPOSITORIES_SHA256: &str =
+    "ef6fa934b7b0431579aad8c92e2c5386b48e49210055249113659a03099b1f79";
 // This digest binds the concern/default projection to the reviewed auxiliary
 // source.  The goal manifest remains the independent scope authority above.
 const ACCEPTED_AUXILIARY_CONTRACT_SHA256: &str =
-    "34e4f06de9d5b7c88549328c9365feae3b8927844f3645922883f15a4a8a00b0";
+    "b9b7b43d2ab562bec802f7aca3f85c2e7f7aba1f5da92d762e083e59271c94b8";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -257,7 +260,19 @@ struct EstateAuditResult {
 #[derive(Debug, Serialize)]
 struct EstateAuditOutput {
     schema_version: &'static str,
+    canonical_scope: Vec<String>,
+    auxiliary_metadata: AuxiliaryMetadataOutput,
     repositories: BTreeMap<String, EstateAuditResult>,
+}
+
+#[derive(Debug, Serialize)]
+struct AuxiliaryMetadataOutput {
+    role: &'static str,
+    accepted_contract_sha256: &'static str,
+    present: Vec<String>,
+    missing: Vec<String>,
+    out_of_scope: Vec<String>,
+    diagnostics: Vec<&'static str>,
 }
 
 struct GeneratedCallerSample {
@@ -320,13 +335,22 @@ fn canonical_fleet_map(root: &Path) -> Result<BTreeMap<String, GeneratedCallerCl
 #[derive(Serialize)]
 struct AuxiliaryEstateContract<'a> {
     defaults: &'a BTreeMap<String, ConcernContract>,
-    repositories: &'a [EstateRepository],
+    repositories: BTreeMap<&'a str, &'a BTreeMap<String, ConcernContract>>,
 }
 
 fn auxiliary_contract_digest(manifest: &EstateManifest) -> Result<String> {
+    let expected = goal_fleet_repository_names();
+    let repositories = manifest
+        .repositories
+        .iter()
+        .filter(|repository| {
+            expected.contains(repository.name.as_str()) && !repository.concerns.is_empty()
+        })
+        .map(|repository| (repository.name.as_str(), &repository.concerns))
+        .collect();
     let payload = AuxiliaryEstateContract {
         defaults: &manifest.defaults,
-        repositories: &manifest.repositories,
+        repositories,
     };
     let bytes = serde_json::to_vec(&payload).context("serialize auxiliary estate contract")?;
     Ok(Sha256::digest(bytes)
@@ -348,6 +372,7 @@ fn canonical_auxiliary_manifest(root: &Path) -> Result<EstateManifest> {
 }
 
 fn fixed_goal_classes() -> Result<BTreeMap<String, GeneratedCallerClass>> {
+    validate_goal_fleet_digest(&GOAL_FLEET_REPOSITORIES)?;
     let mut map = BTreeMap::new();
     for repository in GOAL_FLEET_REPOSITORIES {
         let class = generated_class_for_repository(repository);
@@ -379,6 +404,24 @@ fn goal_fleet_repository_names() -> BTreeSet<&'static str> {
     GOAL_FLEET_REPOSITORIES.into_iter().collect()
 }
 
+fn goal_fleet_digest(names: &[&str]) -> String {
+    let payload = names.join("\n");
+    Sha256::digest(payload.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn validate_goal_fleet_digest(names: &[&str]) -> Result<()> {
+    let observed = goal_fleet_digest(names);
+    if observed != GOAL_FLEET_REPOSITORIES_SHA256 {
+        bail!(
+            "canonical goal fleet digest mismatch (authority-digest-mismatch): expected {GOAL_FLEET_REPOSITORIES_SHA256}, observed {observed}"
+        );
+    }
+    Ok(())
+}
+
 fn validate_accepted_auxiliary_contract(manifest: &EstateManifest, context: &str) -> Result<()> {
     let observed = auxiliary_contract_digest(manifest)?;
     if observed != ACCEPTED_AUXILIARY_CONTRACT_SHA256 {
@@ -397,10 +440,51 @@ fn validate_auxiliary_contract_binding(
     let accepted_digest = auxiliary_contract_digest(accepted)?;
     if observed_digest != accepted_digest {
         bail!(
-            "estate manifest auxiliary contract digest mismatch: accepted {accepted_digest}, observed {observed_digest}; external concern rewrites cannot downgrade required concerns"
+            "estate manifest auxiliary contract digest mismatch (caller-plan-not-authority, concern-plan-mismatch): accepted {accepted_digest}, observed {observed_digest}; external concern rewrites cannot downgrade required concerns"
         );
     }
     Ok(())
+}
+
+fn authoritative_auxiliary_repository<'a>(
+    accepted: &'a EstateManifest,
+    name: &str,
+) -> Option<&'a EstateRepository> {
+    accepted
+        .repositories
+        .iter()
+        .find(|repository| repository.name == name)
+}
+
+fn auxiliary_metadata_output(manifest: &EstateManifest) -> AuxiliaryMetadataOutput {
+    let expected = goal_fleet_repository_names();
+    let observed = manifest
+        .repositories
+        .iter()
+        .map(|repository| repository.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let out_of_scope = observed
+        .difference(&expected)
+        .map(|name| (*name).to_string())
+        .collect::<Vec<_>>();
+    AuxiliaryMetadataOutput {
+        role: ESTATE_SCOPE_ROLE,
+        accepted_contract_sha256: ACCEPTED_AUXILIARY_CONTRACT_SHA256,
+        present: observed
+            .intersection(&expected)
+            .map(|name| (*name).to_string())
+            .collect(),
+        missing: expected
+            .difference(&observed)
+            .map(|name| (*name).to_string())
+            .collect(),
+        diagnostics: if out_of_scope.is_empty() {
+            Vec::new()
+        } else {
+            vec!["auxiliary-out-of-scope"]
+        },
+        out_of_scope,
+    }
 }
 
 fn validate_auxiliary_repository_scope(repositories: &[EstateRepository]) -> Result<()> {
@@ -410,13 +494,8 @@ fn validate_auxiliary_repository_scope(repositories: &[EstateRepository]) -> Res
         .collect::<Vec<_>>();
     let observed = names.iter().copied().collect::<BTreeSet<_>>();
     if observed.len() != names.len() {
-        bail!("auxiliary estate manifest contains duplicate repository names");
-    }
-    let expected = goal_fleet_repository_names();
-    let extra = observed.difference(&expected).copied().collect::<Vec<_>>();
-    if !extra.is_empty() {
         bail!(
-            "auxiliary estate manifest contains out-of-scope repositories: {extra:?}; fixed goal scope remains authoritative"
+            "auxiliary estate manifest contains duplicate repository names (duplicate-auxiliary)"
         );
     }
     Ok(())
@@ -463,20 +542,53 @@ fn validate_fixed_repository_scope(context: &str, repositories: &[EstateReposito
         .map(|repository| repository.name.clone())
         .collect::<Vec<_>>();
     let observed = names.iter().map(String::as_str).collect::<BTreeSet<_>>();
-    if observed.len() != names.len() {
-        bail!("{context} contains duplicate repository names");
-    }
     let expected = goal_fleet_repository_names();
-    if observed != expected {
-        let missing = expected.difference(&observed).copied().collect::<Vec<_>>();
-        let extra = observed.difference(&expected).copied().collect::<Vec<_>>();
+    let duplicate = observed.len() != names.len();
+    let missing = expected.difference(&observed).copied().collect::<Vec<_>>();
+    let extra = observed.difference(&expected).copied().collect::<Vec<_>>();
+    let identity_diagnostics = identity_diagnostic_tags(&extra, &expected);
+    if duplicate || !missing.is_empty() || !extra.is_empty() {
         bail!(
-            "{context} scope mismatch: expected exactly {} fixed-goal repositories; observed {}; missing={missing:?}; extra={extra:?}",
+            "{context} scope mismatch: expected exactly {} fixed-goal repositories; observed {}; duplicate={duplicate}; missing={missing:?}; extra={extra:?}; unexpected={extra:?}; diagnostics={identity_diagnostics:?}",
             GOAL_FLEET_REPOSITORIES.len(),
             names.len()
         );
     }
     Ok(())
+}
+
+fn identity_diagnostic_tags(
+    extra: &[&str],
+    expected: &BTreeSet<&'static str>,
+) -> Vec<&'static str> {
+    let mut tags = BTreeSet::new();
+    for value in extra {
+        let alias_like = expected.iter().any(|candidate| {
+            value.eq_ignore_ascii_case(candidate) || value.trim_end_matches('/') == *candidate
+        });
+        if alias_like {
+            tags.insert("alias-not-normalized");
+        }
+        if let Some((owner, repository)) = value.split_once('/')
+            && expected.contains(format!("{repository}/{owner}").as_str())
+        {
+            tags.insert("malformed-identity");
+        }
+        if !alias_like
+            && (value.matches('/').count() != 1
+                || value.split('/').any(|part| {
+                    part.is_empty()
+                        || part.chars().any(|character| {
+                            !(character.is_ascii_lowercase()
+                                || character.is_ascii_digit()
+                                || character == '-')
+                        })
+                }))
+        {
+            tags.insert("malformed-identity");
+        }
+    }
+    tags.into_iter().collect()
 }
 
 fn generated_caller_sample(
@@ -594,16 +706,14 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
             bail!("estate audit cannot skip delivered-default freshness checks");
         }
         for repo in &estate.repositories {
-            let authoritative_repo = accepted_auxiliary
-                .repositories
-                .iter()
-                .find(|candidate| candidate.name == repo.name)
-                .with_context(|| {
-                    format!(
-                        "accepted auxiliary contract has no concern plan for {}",
-                        repo.name
-                    )
-                })?;
+            let accepted_repo = authoritative_auxiliary_repository(accepted_auxiliary, &repo.name);
+            let fallback_repo = EstateRepository {
+                name: repo.name.clone(),
+                path: None,
+                concerns: BTreeMap::new(),
+            };
+            let authoritative_repo = accepted_repo.unwrap_or(&fallback_repo);
+            let missing_auxiliary = accepted_repo.is_none();
             let expected_class = canonical_classes
                 .get(&repo.name)
                 .copied()
@@ -670,6 +780,14 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
                 false,
                 Some(expected_class),
             )?;
+            if missing_auxiliary {
+                findings.push(Finding::error(
+                    "missing-auxiliary",
+                    ESTATE_MANIFEST_FILE,
+                    format!("$.repositories[{}]", repo.name),
+                    "fixed-scope repository has no accepted auxiliary concern projection; dependent concern checks are blocked",
+                ));
+            }
             findings.extend(audit_concern_contract(
                 authoritative_repo,
                 &accepted_auxiliary.defaults,
@@ -752,6 +870,15 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
                 "{}",
                 serde_json::to_string_pretty(&EstateAuditOutput {
                     schema_version: "velnor.audit-ci.estate.v2",
+                    canonical_scope: GOAL_FLEET_REPOSITORIES
+                        .iter()
+                        .map(|repository| (*repository).to_string())
+                        .collect(),
+                    auxiliary_metadata: auxiliary_metadata_output(
+                        accepted_auxiliary
+                            .as_ref()
+                            .context("estate output has no accepted auxiliary contract")?,
+                    ),
                     repositories: estate_results,
                 })?
             );
@@ -800,8 +927,12 @@ fn validate_estate_scope(
     estate: &EstateManifest,
     canonical_classes: &BTreeMap<String, GeneratedCallerClass>,
 ) -> Result<()> {
+    validate_goal_fleet_digest(&GOAL_FLEET_REPOSITORIES)?;
     validate_estate_scope_metadata(&estate.scope)?;
-    validate_fixed_repository_scope("estate manifest", &estate.repositories)?;
+    validate_fixed_repository_scope(
+        "caller estate manifest (caller-input-not-authority)",
+        &estate.repositories,
+    )?;
     let canonical_repositories = canonical_classes
         .keys()
         .cloned()
@@ -3556,7 +3687,7 @@ mod tests {
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("duplicate repository names"), "{error}");
+        assert!(error.contains("duplicate=true"), "{error}");
     }
 
     #[test]
@@ -3573,6 +3704,239 @@ mod tests {
 
         assert!(error.contains("observed 33"), "{error}");
         assert!(error.contains("tailrocks/out-of-scope"), "{error}");
+    }
+
+    #[test]
+    fn fixture_exact32_accepts_immutable_fixed_scope() {
+        validate_estate_scope(
+            &scope_manifest(
+                GOAL_FLEET_REPOSITORIES
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            ),
+            &canonical_goal_classes(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn fixture_duplicate_missing_reports_both_diagnostics() {
+        let mut names = GOAL_FLEET_REPOSITORIES
+            .into_iter()
+            .filter(|name| *name != "tailrocks/termpane")
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        names.push("tailrocks/velnor".to_string());
+
+        let error = validate_estate_scope(&scope_manifest(names), &canonical_goal_classes())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("duplicate=true"), "{error}");
+        assert!(error.contains("tailrocks/termpane"), "{error}");
+    }
+
+    #[test]
+    fn fixture_case_alias_is_rejected_without_normalization() {
+        let mut names = GOAL_FLEET_REPOSITORIES
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        names[0] = "Tailrocks/velnor".to_string();
+
+        let error = validate_estate_scope(&scope_manifest(names), &canonical_goal_classes())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("alias-not-normalized"), "{error}");
+        assert!(error.contains("missing"), "{error}");
+        assert!(error.contains("extra"), "{error}");
+    }
+
+    #[test]
+    fn fixture_trailing_slash_alias_is_rejected_without_normalization() {
+        let mut names = GOAL_FLEET_REPOSITORIES
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        names[0] = "tailrocks/velnor/".to_string();
+
+        let error = validate_estate_scope(&scope_manifest(names), &canonical_goal_classes())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("alias-not-normalized"), "{error}");
+        assert!(error.contains("tailrocks/velnor"), "{error}");
+    }
+
+    #[test]
+    fn fixture_owner_repo_swap_is_rejected_as_malformed_identity() {
+        let mut names = GOAL_FLEET_REPOSITORIES
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        names[0] = "velnor/tailrocks".to_string();
+
+        let error = validate_estate_scope(&scope_manifest(names), &canonical_goal_classes())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("malformed-identity"), "{error}");
+        assert!(error.contains("missing"), "{error}");
+        assert!(error.contains("extra"), "{error}");
+    }
+
+    #[test]
+    fn fixture_auxiliary_28_rows_cannot_define_scope() {
+        let omitted = [
+            "tailrocks/termpane",
+            "tailrocks/homebrew-velnor",
+            "tailrocks/tailrocks-typescript-skills",
+            "tailrocks/tailrocks-skill-authoring-skills",
+            "tailrocks/tailrocks-rust-skills",
+            "tailrocks/tailrocks-roadmap-skills",
+            "tailrocks/tailrocks-pull-request-skills",
+            "tailrocks/tailrocks-open-source-skills",
+            "tailrocks/tailrocks-macos-skills",
+            "tailrocks/tailrocks-code-quality-skills",
+        ];
+        let extras = [
+            "ChainArgos/java-monorepo",
+            "ChainArgos/blockchain-nodes",
+            "ChainArgos/jackin-agent-brown",
+            "tailrocks/velnor-actions-fixture",
+            "jackin-project/jackin-dev",
+            "tailrocks/tailrocks-skills",
+        ];
+        let mut names = GOAL_FLEET_REPOSITORIES
+            .into_iter()
+            .filter(|name| !omitted.contains(name))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        names.extend(extras.into_iter().map(str::to_string));
+
+        let error = validate_estate_scope(&scope_manifest(names), &canonical_goal_classes())
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("missing"), "{error}");
+        assert!(
+            error.contains("unexpected") || error.contains("extra"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn fixture_auxiliary_extra_is_reported_without_scope_promotion() {
+        let mut manifest = reviewed_auxiliary_manifest();
+        manifest.repositories.push(EstateRepository {
+            name: "tailrocks/not-in-scope".to_string(),
+            path: None,
+            concerns: BTreeMap::new(),
+        });
+
+        validate_auxiliary_repository_scope(&manifest.repositories).unwrap();
+        validate_accepted_auxiliary_contract(&manifest, "extra-row fixture").unwrap();
+        let report = auxiliary_metadata_output(&manifest);
+        assert_eq!(report.out_of_scope, ["tailrocks/not-in-scope"]);
+        assert_eq!(report.present.len(), 32);
+        assert!(report.missing.is_empty());
+        assert_eq!(report.diagnostics, ["auxiliary-out-of-scope"]);
+    }
+
+    #[test]
+    fn fixture_auxiliary_duplicate_is_rejected() {
+        let rows = vec![
+            EstateRepository {
+                name: "tailrocks/velnor".to_string(),
+                path: None,
+                concerns: BTreeMap::new(),
+            },
+            EstateRepository {
+                name: "tailrocks/velnor".to_string(),
+                path: None,
+                concerns: BTreeMap::new(),
+            },
+        ];
+        let error = validate_auxiliary_repository_scope(&rows)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("duplicate"), "{error}");
+    }
+
+    #[test]
+    fn missing_auxiliary_projection_does_not_shrink_fixed_scope() {
+        let mut manifest = reviewed_auxiliary_manifest();
+        manifest
+            .repositories
+            .retain(|repository| repository.name != "tailrocks/termpane");
+
+        validate_accepted_auxiliary_contract(&manifest, "missing-row fixture").unwrap();
+        let report = auxiliary_metadata_output(&manifest);
+        assert_eq!(report.missing, ["tailrocks/termpane"]);
+        assert_eq!(fixed_goal_classes().unwrap().len(), 32);
+    }
+
+    #[test]
+    fn fixture_caller_substitution_is_rejected_against_fixed_scope() {
+        let names = [
+            "tailrocks/velnor",
+            "tailrocks/velnor-apt",
+            "tailrocks/parallax",
+            "tailrocks/tracing-request-level",
+            "tailrocks/termrock",
+            "tailrocks/termpane",
+            "tailrocks/tablerock",
+            "tailrocks/schemalane",
+            "tailrocks/ruxel",
+            "tailrocks/pg-bigdecimal",
+            "tailrocks/parallax-telemetry-playground",
+            "tailrocks/homebrew-tablerock",
+            "tailrocks/homebrew-ruxel",
+            "tailrocks/homebrew-parallax",
+            "tailrocks/homebrew-holla",
+            "tailrocks/holla-apt",
+            "tailrocks/holla",
+            "tailrocks/homebrew-velnor",
+            "tailrocks/tailrocks-typescript-skills",
+            "tailrocks/tailrocks-skill-authoring-skills",
+            "tailrocks/tailrocks-rust-skills",
+            "tailrocks/tailrocks-roadmap-skills",
+            "tailrocks/tailrocks-pull-request-skills",
+            "tailrocks/tailrocks-open-source-skills",
+            "tailrocks/tailrocks-macos-skills",
+            "tailrocks/tailrocks-code-quality-skills",
+            "jackin-project/jackin",
+            "jackin-project/jackin-agent-smith",
+        ];
+        let error = validate_estate_scope(
+            &scope_manifest(names.into_iter().map(str::to_string).collect()),
+            &canonical_goal_classes(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("missing"), "{error}");
+        assert!(error.contains("extra"), "{error}");
+    }
+
+    #[test]
+    fn fixture_canonical_digest_mismatch_rejects_changed_fixed_identity() {
+        let mut names = GOAL_FLEET_REPOSITORIES.into_iter().collect::<Vec<_>>();
+        names[0] = "tailrocks/velnor-renamed";
+
+        let error = validate_goal_fleet_digest(&names).unwrap_err().to_string();
+        assert!(
+            error.contains("canonical goal fleet digest mismatch"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn compiled_goal_fleet_digest_matches_pinned_identity_set() {
+        validate_goal_fleet_digest(&GOAL_FLEET_REPOSITORIES).unwrap();
+        assert_eq!(GOAL_FLEET_REPOSITORIES.len(), 32);
+        assert_eq!(goal_fleet_repository_names().len(), 32);
     }
 
     #[test]
@@ -4362,7 +4726,7 @@ jobs:
     #[test]
     fn estate_manifest_parses_classified_repository() {
         let manifest: EstateManifest = serde_json::from_str(
-            r#"{"version":2,"scope":{"role":"auxiliary-concern-projection","authority":"velnor-github-first-dual-lane-goal.md","authority_section":"2. Fixed repository manifest","expected_repository_count":32,"contract_sha256":"34e4f06de9d5b7c88549328c9365feae3b8927844f3645922883f15a4a8a00b0"},"defaults":{},"repositories":[{"name":"one","path":"/one","concerns":{}}]}"#,
+            r#"{"version":2,"scope":{"role":"auxiliary-concern-projection","authority":"velnor-github-first-dual-lane-goal.md","authority_section":"2. Fixed repository manifest","expected_repository_count":32,"contract_sha256":"b9b7b43d2ab562bec802f7aca3f85c2e7f7aba1f5da92d762e083e59271c94b8"},"defaults":{},"repositories":[{"name":"one","path":"/one","concerns":{}}]}"#,
         )
         .unwrap();
         assert_eq!(manifest.repositories.len(), 1);
@@ -4372,7 +4736,7 @@ jobs:
     #[test]
     fn estate_manifest_rejects_unknown_admission_fields() {
         let error = serde_json::from_str::<EstateManifest>(
-            r#"{"version":2,"scope":{"role":"auxiliary-concern-projection","authority":"velnor-github-first-dual-lane-goal.md","authority_section":"2. Fixed repository manifest","expected_repository_count":32,"contract_sha256":"34e4f06de9d5b7c88549328c9365feae3b8927844f3645922883f15a4a8a00b0"},"defaults":{},"repositories":[],"hostile":"ignored?"}"#,
+            r#"{"version":2,"scope":{"role":"auxiliary-concern-projection","authority":"velnor-github-first-dual-lane-goal.md","authority_section":"2. Fixed repository manifest","expected_repository_count":32,"contract_sha256":"b9b7b43d2ab562bec802f7aca3f85c2e7f7aba1f5da92d762e083e59271c94b8"},"defaults":{},"repositories":[],"hostile":"ignored?"}"#,
         )
         .unwrap_err()
         .to_string();
@@ -4413,6 +4777,48 @@ jobs:
             error.contains("cannot downgrade required concerns"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn fixture_caller_concern_substitution_uses_accepted_plan_at_runtime() {
+        let accepted = reviewed_auxiliary_manifest();
+        let mut caller = accepted.clone();
+        for concern in caller.defaults.values_mut() {
+            if matches!(
+                concern.classification,
+                ConcernClassification::Required | ConcernClassification::Applicable
+            ) {
+                concern.classification = ConcernClassification::NonApplicable;
+                concern.implementations.clear();
+            }
+        }
+        for repository in &mut caller.repositories {
+            for concern in repository.concerns.values_mut() {
+                if matches!(
+                    concern.classification,
+                    ConcernClassification::Required | ConcernClassification::Applicable
+                ) {
+                    concern.classification = ConcernClassification::NonApplicable;
+                    concern.implementations.clear();
+                }
+            }
+        }
+        let accepted_repository =
+            authoritative_auxiliary_repository(&accepted, "tailrocks/velnor").unwrap();
+        let caller_repository = caller
+            .repositories
+            .iter()
+            .find(|repository| repository.name == "tailrocks/velnor")
+            .unwrap();
+        assert!(matches!(
+            caller_repository.concerns["rust-ci"].classification,
+            ConcernClassification::NonApplicable
+        ));
+        assert!(matches!(
+            accepted_repository.concerns["rust-ci"].classification,
+            ConcernClassification::Required
+        ));
+        assert!(validate_auxiliary_contract_binding(&caller, &accepted).is_err());
     }
 
     #[test]

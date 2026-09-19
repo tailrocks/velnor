@@ -5,7 +5,7 @@
     "authority":"velnor-github-first-dual-lane-goal.md",
     "authority_section":"2. Fixed repository manifest",
     "expected_repository_count":32,
-    "contract_sha256":"34e4f06de9d5b7c88549328c9365feae3b8927844f3645922883f15a4a8a00b0"
+    "contract_sha256":"b9b7b43d2ab562bec802f7aca3f85c2e7f7aba1f5da92d762e083e59271c94b8"
   },
   "defaults": {
     "lane-selection": {"classification":"required","evidence":"Every in-scope repository exposes explicit GitHub, Velnor, and both choices; jackin-project automatic events default to GitHub, tailrocks automatic events default to Velnor, and public unmerged execution remains GitHub-hosted.","implementations":[{"workflow":"ci.yml","canonical_markers":["type: choice","default: velnor","- github","- both","github.event_name == 'workflow_dispatch' && inputs.lanes","github.repository_owner == 'jackin-project'"]}]},
