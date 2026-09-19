@@ -342,31 +342,34 @@ pub(crate) fn evaluate(options: &PolicyOptions) -> Result<PolicyReport, Generato
     Ok(report)
 }
 
-/// `pin-declared`: the generator commit the tree names, from the generation
-/// config or, failing that, the entrypoint literal.
+/// `pin-declared`: the generator commit the tree names in its generation
+/// config. The policy entrypoint pin identifies the validator, never the
+/// generator, and cannot supply a missing generator declaration.
 fn declared_pin_rule(declared: &DeclaredTree, report: &mut PolicyReport) -> Option<String> {
     match &declared.pin {
         Some(DeclaredPin::Config(pin)) => {
-            report.rules.push(RuleReport::pass(
-                "pin-declared",
-                format!("{GENERATION_CONFIG} [generator] revision = {pin}"),
-            ));
-            Some(pin.clone())
-        }
-        Some(DeclaredPin::Entrypoint(pin)) => {
-            report.rules.push(RuleReport::pass(
-                "pin-declared",
-                format!(
-                    "{POLICY_ENTRYPOINT} {BASE_REVISION_ENV}: {pin} ({GENERATION_CONFIG} declares no [generator] revision, so the generator rendered its own)"
-                ),
-            ));
-            Some(pin.clone())
+            if super::is_full_revision(pin) {
+                report.rules.push(RuleReport::pass(
+                    "pin-declared",
+                    format!("{GENERATION_CONFIG} [generator] revision = {pin}"),
+                ));
+                Some(pin.clone())
+            } else {
+                report.rules.push(RuleReport::fail(
+                    "pin-declared",
+                    format!("{GENERATION_CONFIG} declares an invalid generator revision"),
+                    vec![format!(
+                        "expected a full 40-character commit SHA, found {pin:?}"
+                    )],
+                ));
+                None
+            }
         }
         None => {
             report.rules.push(RuleReport::fail(
                 "pin-declared",
                 format!(
-                    "neither {GENERATION_CONFIG} `[generator] revision` nor {POLICY_ENTRYPOINT} `{BASE_REVISION_ENV}:` names the velnor-workflow commit that rendered this tree"
+                    "{GENERATION_CONFIG} must declare `[generator] revision`; {POLICY_ENTRYPOINT} `{BASE_REVISION_ENV}:` identifies only the validator and cannot establish generator provenance"
                 ),
                 Vec::new(),
             ));
@@ -598,11 +601,6 @@ enum DeclaredPin {
     /// required in the generator's own repository so every binary renders
     /// the same pins.
     Config(String),
-    /// The `VELNOR_WORKFLOW_POLICY_REVISION:` literal in the entrypoint: what
-    /// `pull_request_target` runs after merge. A tree without a configured
-    /// revision was rendered by a generator naming its own commit, which is
-    /// exactly this literal.
-    Entrypoint(String),
 }
 
 /// What the audited tree says about itself.
@@ -625,9 +623,7 @@ impl DeclaredTree {
         let pin = generation
             .as_ref()
             .and_then(|generation| generation.revision())
-            .filter(|revision| super::is_full_revision(revision))
-            .map(|revision| DeclaredPin::Config(revision.to_owned()))
-            .or_else(|| entrypoint_policy_revision(root).map(DeclaredPin::Entrypoint));
+            .map(|revision| DeclaredPin::Config(revision.to_owned()));
         let excludes = generation
             .as_ref()
             .map(config::RepoGenerationConfig::effective_policy_exclude_workflows)
@@ -689,23 +685,6 @@ fn pin_source(root: &Path, repository: Option<&str>) -> PinSource {
     } else {
         PinSource::Remote(super::VELNOR_WORKFLOW_INSTALL_GIT_URL.to_owned())
     }
-}
-
-/// The `VELNOR_WORKFLOW_POLICY_REVISION:` literal the entrypoint exports,
-/// when it is a full SHA.
-fn entrypoint_policy_revision(root: &Path) -> Option<String> {
-    let content = fs::read_to_string(root.join(POLICY_ENTRYPOINT)).ok()?;
-    let marker = format!("{BASE_REVISION_ENV}: ");
-    content
-        .lines()
-        .filter_map(|line| line.trim_start().strip_prefix(marker.as_str()))
-        .map(|value| {
-            value
-                .trim()
-                .trim_matches(|character| character == '"' || character == '\'')
-        })
-        .find(|value| super::is_full_revision(value))
-        .map(str::to_owned)
 }
 
 // ---------------------------------------------------------------------------
