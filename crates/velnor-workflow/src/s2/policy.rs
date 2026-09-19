@@ -42,8 +42,9 @@ use std::env;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use serde_yaml::{Mapping, Value};
 
@@ -1504,10 +1505,6 @@ fn render_with_candidate(
     // snapshot to scan and render, while `tree` remains the authoritative
     // checkout used for comparison. A candidate can mutate its snapshot
     // without changing the bytes the trusted comparison reads.
-    // Candidate code is untrusted PR output. Give it a clean git-object
-    // snapshot to scan and render, while `tree` remains the authoritative
-    // checkout used for comparison. A candidate can mutate its snapshot
-    // without changing the bytes the trusted comparison reads.
     let candidate_source = scratch.with_file_name(format!(
         "{}-candidate-source",
         scratch
@@ -1585,6 +1582,46 @@ fn render_with_candidate(
     }
     let _ = fs::remove_dir_all(&candidate_source);
     Ok(None)
+}
+
+/// Materialize the audited `HEAD` from git objects into a disposable tree.
+/// Candidate code receives this tree only; the authoritative checkout stays
+/// outside its writable working directory and is never passed to it.
+fn immutable_git_snapshot(checkout: &Path, destination: &Path) -> Result<(), GeneratorError> {
+    fs::create_dir_all(destination).map_err(|error| {
+        GeneratorError::io("create candidate source snapshot", destination, &error)
+    })?;
+    let archive = Command::new("git")
+        .args(["archive", "--format=tar", "HEAD"])
+        .current_dir(checkout)
+        .output()
+        .map_err(|error| GeneratorError::usage(format!("archive candidate source: {error}")))?;
+    if !archive.status.success() {
+        return Err(GeneratorError::usage(format!(
+            "archive candidate source failed: {}",
+            String::from_utf8_lossy(&archive.stderr).trim()
+        )));
+    }
+    let mut extract = Command::new("tar")
+        .args(["-xf", "-", "-C"])
+        .arg(destination)
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|error| GeneratorError::usage(format!("extract candidate source: {error}")))?;
+    if let Some(stdin) = extract.stdin.as_mut() {
+        stdin.write_all(&archive.stdout).map_err(|error| {
+            GeneratorError::usage(format!("write candidate source archive: {error}"))
+        })?;
+    }
+    let status = extract
+        .wait()
+        .map_err(|error| GeneratorError::usage(format!("extract candidate source: {error}")))?;
+    if !status.success() {
+        return Err(GeneratorError::usage(
+            "extract candidate source archive failed",
+        ));
+    }
+    Ok(())
 }
 
 fn render_and_compare(
