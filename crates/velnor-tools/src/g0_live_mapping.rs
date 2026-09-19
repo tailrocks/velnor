@@ -130,6 +130,11 @@ pub fn map_g0_inventory_with_supplement(
         .iter()
         .map(|raw| (raw.raw_id.clone(), raw))
         .collect::<BTreeMap<_, _>>();
+    let request_by_id = live
+        .requests
+        .iter()
+        .map(|request| (request.request_id.clone(), request))
+        .collect::<BTreeMap<_, _>>();
     let requests = live
         .requests
         .iter()
@@ -159,11 +164,13 @@ pub fn map_g0_inventory_with_supplement(
                 repository,
                 manifest_repository,
                 &raw_by_id,
+                &request_by_id,
                 &live.observed_at_utc,
             )
         })
         .collect::<Result<Vec<_>>>()?;
-    let dependency_graph = map_dependency_graph(live, manifest, bindings, &raw_by_id)?;
+    let dependency_graph =
+        map_dependency_graph(live, manifest, bindings, &raw_by_id, &request_by_id)?;
     let reconciliation = map_reconciliation(live, &raw_by_id)?;
     let auth = map_auth(live)?;
     let collector = G0CollectorIdentity {
@@ -481,6 +488,7 @@ fn map_repository(
     repository: &LiveRepository,
     manifest: &ManifestRepository,
     raw_by_id: &BTreeMap<String, &RawObjectRef>,
+    request_by_id: &BTreeMap<String, &RequestRecord>,
     observed_at_utc: &str,
 ) -> Result<G0RepositoryInventory> {
     if repository.repository_id == 0
@@ -499,6 +507,13 @@ fn map_repository(
             repository.repository
         );
     }
+    validate_raw_references(
+        &repository.raw_object_refs,
+        raw_by_id,
+        request_by_id,
+        &format!("repository {}", repository.repository),
+        &[],
+    )?;
     let rulesets = repository
         .rulesets
         .iter()
@@ -541,7 +556,15 @@ fn map_repository(
     let workflows = repository
         .workflows
         .iter()
-        .map(|workflow| map_workflow(workflow, repository, raw_by_id, observed_at_utc))
+        .map(|workflow| {
+            map_workflow(
+                workflow,
+                repository,
+                raw_by_id,
+                request_by_id,
+                observed_at_utc,
+            )
+        })
         .collect::<Result<Vec<_>>>()?;
     let open_prs = repository
         .open_prs
@@ -576,8 +599,16 @@ fn map_workflow(
     workflow: &LiveWorkflow,
     repository: &LiveRepository,
     raw_by_id: &BTreeMap<String, &RawObjectRef>,
+    request_by_id: &BTreeMap<String, &RequestRecord>,
     observed_at_utc: &str,
 ) -> Result<G0WorkflowInventory> {
+    validate_raw_references(
+        &workflow.raw_object_refs,
+        raw_by_id,
+        request_by_id,
+        &format!("workflow {}", workflow.path),
+        &["workflows", "workflow.source"],
+    )?;
     let source_raw = workflow
         .raw_object_refs
         .iter()
@@ -588,6 +619,23 @@ fn map_workflow(
                 .filter(|raw| raw.object_kind == "workflow.source")
         })
         .ok_or_else(|| anyhow!("workflow {} lacks source raw object", workflow.path))?;
+    for dependency in workflow
+        .reusable_workflows
+        .iter()
+        .chain(workflow.actions.iter())
+        .chain(workflow.scanners.iter())
+    {
+        validate_raw_references(
+            &dependency.raw_object_refs,
+            raw_by_id,
+            request_by_id,
+            &format!(
+                "workflow dependency {}/{}@{}",
+                dependency.repository, dependency.path, dependency.revision
+            ),
+            &["workflow.dependency"],
+        )?;
+    }
     let generated_state = G0ArtifactReference {
         name: workflow.path.clone(),
         schema: "github.workflow-source.v1".to_owned(),
@@ -640,6 +688,52 @@ fn map_dependency(dependency: &LiveDependency) -> Result<G0WorkflowDependency> {
         revision: dependency.revision.clone(),
         raw_object_refs: dependency.raw_object_refs.clone(),
     })
+}
+
+fn validate_raw_references(
+    raw_ids: &[String],
+    raw_by_id: &BTreeMap<String, &RawObjectRef>,
+    request_by_id: &BTreeMap<String, &RequestRecord>,
+    label: &str,
+    allowed_kinds: &[&str],
+) -> Result<()> {
+    if raw_ids.is_empty() {
+        bail!("{label} lacks raw object references");
+    }
+    for raw_id in raw_ids {
+        let raw = raw_by_id
+            .get(raw_id)
+            .copied()
+            .ok_or_else(|| anyhow!("{label} references missing raw object {raw_id}"))?;
+        if !allowed_kinds.is_empty() && !allowed_kinds.contains(&raw.object_kind.as_str()) {
+            bail!(
+                "{label} raw object {raw_id} has unexpected kind {}",
+                raw.object_kind
+            );
+        }
+        let request = request_by_id
+            .get(&raw.request_id)
+            .copied()
+            .ok_or_else(|| anyhow!("{label} raw object {raw_id} has missing request"))?;
+        if !request.complete
+            || !matches!(
+                request.state,
+                AcquisitionState::Complete | AcquisitionState::EmptyComplete
+            )
+        {
+            bail!(
+                "{label} raw object {raw_id} is bound to incomplete request {}",
+                request.request_id
+            );
+        }
+        if request.response_raw_ref.as_deref() != Some(raw_id.as_str()) {
+            bail!(
+                "{label} raw object {raw_id} is not the request response for {}",
+                request.request_id
+            );
+        }
+    }
+    Ok(())
 }
 
 fn map_pull_request(
@@ -857,6 +951,7 @@ fn map_dependency_graph(
     manifest: &ManifestDocument,
     bindings: &G0MappingBindings,
     raw_by_id: &BTreeMap<String, &RawObjectRef>,
+    request_by_id: &BTreeMap<String, &RequestRecord>,
 ) -> Result<G0DependencyGraph> {
     let mut nodes = Vec::new();
     let mut edges = Vec::new();
@@ -875,14 +970,25 @@ fn map_dependency_graph(
         let workflow = repository
             .workflows
             .iter()
-            .find(|workflow| workflow.path == manifest_repository.workflow_path)
+            .find(|workflow| {
+                workflow.path == manifest_repository.workflow_path
+                    && workflow.revision == manifest_repository.workflow_revision
+            })
             .ok_or_else(|| {
                 anyhow!(
-                    "{} reviewed workflow {} absent from live collection",
+                    "{} reviewed workflow {}@{} absent from live collection",
                     manifest_repository.repository,
-                    manifest_repository.workflow_path
+                    manifest_repository.workflow_path,
+                    manifest_repository.workflow_revision
                 )
             })?;
+        validate_raw_references(
+            &workflow.raw_object_refs,
+            raw_by_id,
+            request_by_id,
+            &format!("dependency graph source {}", manifest_repository.repository),
+            &["workflows", "workflow.source"],
+        )?;
         let workloads = bindings
             .workflow_workloads
             .get(&(
@@ -936,6 +1042,16 @@ fn map_dependency_graph(
                 .chain(workflow.actions.iter())
                 .chain(workflow.scanners.iter())
             {
+                validate_raw_references(
+                    &dependency.raw_object_refs,
+                    raw_by_id,
+                    request_by_id,
+                    &format!(
+                        "dependency graph edge {}/{}@{}",
+                        dependency.repository, dependency.path, dependency.revision
+                    ),
+                    &["workflow.dependency"],
+                )?;
                 if !is_sha(&dependency.revision) {
                     bail!(
                         "dependency {}/{} has unresolved revision {}",
@@ -975,7 +1091,6 @@ fn map_dependency_graph(
     if nodes.is_empty() || edges.is_empty() {
         bail!("live workflow graph has no source-bound dependency edges");
     }
-    let _ = raw_by_id;
     Ok(G0DependencyGraph {
         nodes,
         edges,

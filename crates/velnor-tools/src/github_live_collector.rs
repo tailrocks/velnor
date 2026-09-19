@@ -1022,6 +1022,28 @@ where
             source_sha,
             &content_raw_ids,
         )?;
+        let dependencies = bind_workflow_dependencies(
+            WorkflowDependencyContext {
+                transport,
+                store,
+                auth,
+                manifest,
+                workflow_path: &path,
+                source_sha,
+                ledger,
+            },
+            WorkflowDependencyGroups {
+                reusable: reusable_workflows,
+                actions,
+                scanners,
+            },
+        )
+        .await?;
+        let WorkflowDependencyGroups {
+            reusable: reusable_workflows,
+            actions,
+            scanners,
+        } = dependencies;
         let mut raw_ids = list_raw_ids.clone();
         raw_ids.extend(content_raw_ids);
         workflows.push(LiveWorkflow {
@@ -1079,6 +1101,28 @@ where
         source_sha,
         &content_raw_ids,
     )?;
+    let dependencies = bind_workflow_dependencies(
+        WorkflowDependencyContext {
+            transport,
+            store,
+            auth,
+            manifest,
+            workflow_path: path,
+            source_sha,
+            ledger,
+        },
+        WorkflowDependencyGroups {
+            reusable: reusable_workflows,
+            actions,
+            scanners,
+        },
+    )
+    .await?;
+    let WorkflowDependencyGroups {
+        reusable: reusable_workflows,
+        actions,
+        scanners,
+    } = dependencies;
     Ok(LiveWorkflow {
         path: path.to_owned(),
         revision,
@@ -2075,6 +2119,142 @@ fn parse_workflow_dependencies(
     Ok((reusable, actions, scanners))
 }
 
+struct WorkflowDependencyContext<'a, T: ?Sized, S> {
+    transport: &'a T,
+    store: &'a mut S,
+    auth: &'a AuthIdentity,
+    manifest: &'a ManifestRepository,
+    workflow_path: &'a str,
+    source_sha: &'a str,
+    ledger: &'a mut Ledger,
+}
+
+struct WorkflowDependencyGroups {
+    reusable: Vec<LiveDependency>,
+    actions: Vec<LiveDependency>,
+    scanners: Vec<LiveDependency>,
+}
+
+async fn bind_workflow_dependencies<T, S>(
+    context: WorkflowDependencyContext<'_, T, S>,
+    groups: WorkflowDependencyGroups,
+) -> Result<WorkflowDependencyGroups>
+where
+    T: super::AcquisitionTransport + ?Sized,
+    S: RawObjectStore,
+{
+    let WorkflowDependencyContext {
+        transport,
+        store,
+        auth,
+        manifest,
+        workflow_path,
+        source_sha,
+        ledger,
+    } = context;
+    let mut dependencies = groups
+        .reusable
+        .into_iter()
+        .chain(groups.actions)
+        .chain(groups.scanners)
+        .enumerate()
+        .collect::<Vec<_>>();
+    for (index, dependency) in &mut dependencies {
+        if !is_hex_revision(&dependency.revision, 40) {
+            bail!(
+                "workflow dependency {}/{} remains unresolved at {}",
+                dependency.repository,
+                dependency.path,
+                dependency.revision
+            );
+        }
+        let (tree, raw_ids) = collect_one(
+            transport,
+            store,
+            auth,
+            ledger,
+            github_single_object_request(
+                collection_id(
+                    &manifest.repository,
+                    &format!(
+                        "workflow-dependency-{}-{}-{}",
+                        safe_id(workflow_path),
+                        safe_id(source_sha),
+                        index
+                    ),
+                ),
+                format!(
+                    "/repos/{}/git/trees/{}?recursive=1",
+                    dependency.repository, dependency.revision
+                ),
+                "workflow.dependency",
+            ),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "workflow dependency tree {}/{}@{}",
+                dependency.repository, dependency.path, dependency.revision
+            )
+        })?;
+        validate_dependency_tree(&tree, &dependency.repository, &dependency.path)?;
+        dependency.raw_object_refs = raw_ids;
+    }
+    let mut reusable = Vec::new();
+    let mut actions = Vec::new();
+    let mut scanners = Vec::new();
+    for (_, dependency) in dependencies {
+        if dependency.kind == "reusable_workflow" {
+            reusable.push(dependency);
+        } else if dependency.kind == "scanner" {
+            scanners.push(dependency);
+        } else {
+            actions.push(dependency);
+        }
+    }
+    Ok(WorkflowDependencyGroups {
+        reusable,
+        actions,
+        scanners,
+    })
+}
+
+fn validate_dependency_tree(value: &Value, repository: &str, path: &str) -> Result<()> {
+    if value.get("truncated").and_then(Value::as_bool) != Some(false) {
+        bail!("dependency tree {repository}@{path} is truncated");
+    }
+    let tree = value
+        .get("tree")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("dependency tree {repository}@{path} lacks tree entries"))?;
+    let requested = path
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .trim_end_matches('/');
+    let mut candidates = Vec::new();
+    if requested.is_empty() || requested == "." {
+        candidates.push("action.yml".to_owned());
+        candidates.push("action.yaml".to_owned());
+    } else if requested.ends_with(".yml") || requested.ends_with(".yaml") {
+        candidates.push(requested.to_owned());
+    } else {
+        candidates.push(format!("{requested}/action.yml"));
+        candidates.push(format!("{requested}/action.yaml"));
+    }
+    let found = tree.iter().any(|entry| {
+        let Some(entry_path) = entry.get("path").and_then(Value::as_str) else {
+            return false;
+        };
+        candidates.iter().any(|candidate| {
+            entry_path == candidate && entry.get("type").and_then(Value::as_str) == Some("blob")
+        })
+    });
+    if !found {
+        bail!("dependency target {repository}/{requested} is absent from immutable tree");
+    }
+    Ok(())
+}
+
 fn collect_uses(value: &serde_yaml::Value, output: &mut Vec<String>) {
     match value {
         serde_yaml::Value::Mapping(map) => {
@@ -2100,7 +2280,7 @@ fn parse_dependency(
     uses: &str,
     current_repository: &str,
     local_revision: &str,
-    raw_ids: &[String],
+    _raw_ids: &[String],
 ) -> Result<LiveDependency> {
     let (target, revision) = if let Some((target, revision)) = uses.rsplit_once('@') {
         (target, revision.to_owned())
@@ -2111,6 +2291,9 @@ fn parse_dependency(
     };
     if target.trim().is_empty() || revision.trim().is_empty() {
         bail!("workflow dependency {uses} has empty target or revision");
+    }
+    if !is_hex_revision(&revision, 40) {
+        bail!("workflow dependency {uses} is not pinned to an immutable 40-hex revision");
     }
     let (repository, path) = if target.starts_with("./") {
         (current_repository.to_owned(), target.to_owned())
@@ -2143,7 +2326,7 @@ fn parse_dependency(
         repository,
         path,
         revision,
-        raw_object_refs: raw_ids.to_vec(),
+        raw_object_refs: Vec::new(),
     })
 }
 
@@ -2311,11 +2494,11 @@ mod tests {
 on: [push]
 jobs:
   build:
-    uses: ./.github/workflows/reusable.yml@abc123
+    uses: ./.github/workflows/reusable.yml@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   scan:
     steps:
-      - uses: github/codeql-action/init@v3
-      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      - uses: actions/checkout@cccccccccccccccccccccccccccccccccccccccc
 "#;
         let (reusable, actions, scanners) = parse_workflow_dependencies(
             yaml,
@@ -2327,7 +2510,10 @@ jobs:
         assert_eq!(reusable.len(), 1);
         assert_eq!(actions.len(), 1);
         assert_eq!(scanners.len(), 1);
-        assert_eq!(reusable[0].revision, "abc123");
+        assert_eq!(
+            reusable[0].revision,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
         let (_, local_actions, _) = parse_workflow_dependencies(
             "jobs: {build: {steps: [{uses: ./.github/actions/setup}]}}",
             "tailrocks/example",
@@ -2346,6 +2532,29 @@ jobs:
             &["raw".to_owned()]
         )
         .is_err());
+        assert!(parse_workflow_dependencies(
+            "jobs: {build: {steps: [{uses: actions/checkout@v4}]}}",
+            "tailrocks/example",
+            "0123456789012345678901234567890123456789",
+            &["raw".to_owned()]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn dependency_tree_requires_untruncated_blob_target() {
+        let tree = serde_json::json!({
+            "truncated": false,
+            "tree": [
+                {"path": "action.yml", "type": "blob"},
+                {"path": "docs/action.yml", "type": "tree"}
+            ]
+        });
+        validate_dependency_tree(&tree, "actions/checkout", ".").expect("root action");
+        assert!(validate_dependency_tree(&tree, "actions/checkout", "docs").is_err());
+        let mut truncated = tree.clone();
+        truncated["truncated"] = serde_json::json!(true);
+        assert!(validate_dependency_tree(&truncated, "actions/checkout", ".").is_err());
     }
 
     #[test]
