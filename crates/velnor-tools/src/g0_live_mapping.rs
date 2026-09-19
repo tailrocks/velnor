@@ -361,6 +361,15 @@ fn map_raw_object(raw: &RawObjectRef) -> Result<G0RawObjectRef> {
             raw.raw_id
         );
     }
+    if !is_sha256_digest(&raw.sha256)
+        || !is_sha256_digest(&raw.original_sha256)
+        || raw.storage_ref != canonical_storage_ref(&raw.sha256)
+    {
+        bail!(
+            "raw object {} has a non-canonical storage binding",
+            raw.raw_id
+        );
+    }
     Ok(G0RawObjectRef {
         raw_id: raw.raw_id.clone(),
         request_id: raw.request_id.clone(),
@@ -371,6 +380,17 @@ fn map_raw_object(raw: &RawObjectRef) -> Result<G0RawObjectRef> {
         media_type: raw.media_type.clone(),
         storage_ref: raw.storage_ref.clone(),
     })
+}
+
+fn is_sha256_digest(value: &str) -> bool {
+    value
+        .strip_prefix("sha256:")
+        .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+fn canonical_storage_ref(digest: &str) -> String {
+    let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
+    format!("artifact://sha256/{hex}")
 }
 
 fn map_supplement(live: &LiveCollection, canonical: &[u8]) -> G0MappingSupplement {
@@ -460,6 +480,16 @@ fn map_repository(
     raw_by_id: &BTreeMap<String, &RawObjectRef>,
     observed_at_utc: &str,
 ) -> Result<G0RepositoryInventory> {
+    if repository.repository_id == 0
+        || repository.closing_repository_id == 0
+        || repository.closing_default_branch.is_empty()
+        || repository.closing_default_branch_sha.is_empty()
+    {
+        bail!(
+            "repository {} lacks opening/closing head proof",
+            repository.repository
+        );
+    }
     if repository.source_invalidated {
         bail!(
             "repository {} changed during live collection",
