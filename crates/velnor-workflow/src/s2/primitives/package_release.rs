@@ -496,7 +496,9 @@ actual_files="$(mktemp)"
 expected_names="$(mktemp)"
 actual_names="$(mktemp)"
 checksum_names="$(mktemp)"
-trap 'rm -f -- "$expected_files" "$actual_files" "$expected_names" "$actual_names" "$checksum_names"' EXIT
+expected_supporting_names="$(mktemp)"
+actual_supporting_names="$(mktemp)"
+trap 'rm -f -- "$expected_files" "$actual_files" "$expected_names" "$actual_names" "$checksum_names" "$expected_supporting_names" "$actual_supporting_names"' EXIT
 {
   printf '%s\n' "release-manifest.json" "identity.json"
 "#,
@@ -519,10 +521,23 @@ if ! cmp -s "$expected_files" "$actual_files"; then
   diff -u "$expected_files" "$actual_files" >&2 || true
   exit 1
 fi
+source_checkout="${VELNOR_SOURCE_CHECKOUT_DIR:-$GITHUB_WORKSPACE}"
+actual_source_commit="$(git -C "$source_checkout" rev-parse HEAD)"
+[[ "$actual_source_commit" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::source checkout HEAD is not 40 lowercase hex" >&2; exit 1; }
+[ "$actual_source_commit" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::source checkout HEAD does not match the expected source commit" >&2; exit 1; }
+source_remote="$(git -C "$source_checkout" remote get-url origin)"
+case "$source_remote" in
+  https://github.com/*|http://github.com/*) actual_source_repository="${source_remote#*github.com/}" ;;
+  ssh://git@github.com/*) actual_source_repository="${source_remote#ssh://git@github.com/}" ;;
+  git@github.com:*) actual_source_repository="${source_remote#git@github.com:}" ;;
+  *) echo "::error::source checkout origin is not a GitHub repository URL" >&2; exit 1 ;;
+esac
+actual_source_repository="${actual_source_repository%.git}"
+[ "$actual_source_repository" = "$EXPECTED_SOURCE_REPOSITORY" ] || { echo "::error::source checkout repository does not match the declared repository" >&2; exit 1; }
 source_commit="$(jq -er '.source_commit | strings' "$manifest")"
 version="$(jq -er '.version | strings' "$manifest")"
 [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::manifest source_commit is not 40 lowercase hex" >&2; exit 1; }
-[ "$source_commit" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::manifest source_commit is not the checked-out commit" >&2; exit 1; }
+[ "$source_commit" = "$actual_source_commit" ] || { echo "::error::manifest source_commit is not the checked-out commit" >&2; exit 1; }
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]+\+[0-9a-f]{7}$ ]] || { echo "::error::manifest version is not a preview version" >&2; exit 1; }
 short_commit="$(printf '%s' "$source_commit" | cut -c1-7)"
 version_suffix="$(printf '%s' "$version" | awk -F+ '{print $2}')"
@@ -533,10 +548,14 @@ jq -e \
   --arg source_ref "$EXPECTED_SOURCE_REF" \
   --arg commit "$source_commit" \
   --slurpfile package_manifest "$manifest" \
-  'keys == ["assets","schema","source_commit","source_ref","source_repository","version"] and
+  'keys == ["assets","schema","source_commit","source_ref","source_repository","supporting_assets","version"] and
    .schema == $schema and .source_repository == $repository and
    .source_ref == $source_ref and .source_commit == $commit and
    (.assets | type == "array" and length == 6 and
+    all(.[]; type == "object" and (keys == ["name","sha256"]) and
+      (.name | strings | length > 0) and
+      (.sha256 | strings | test("^[0-9a-f]{64}$")))) and
+   (.supporting_assets | type == "array" and
     all(.[]; type == "object" and (keys == ["name","sha256"]) and
       (.name | strings | length > 0) and
       (.sha256 | strings | test("^[0-9a-f]{64}$"))))' "$manifest" >/dev/null
@@ -579,6 +598,37 @@ for name in \
   expected="$(jq -er --arg name "$name" '[.assets[] | select(.name == $name)] | select(length == 1) | .[0].sha256 | select(test("^[0-9a-f]{64}$"))' "$manifest")"
   actual="$(sha256sum "$dir/$name" | awk '{print $1}')"
   [ "$actual" = "$expected" ] || { echo "::error::payload checksum mismatch: $name" >&2; exit 1; }
+ done
+{
+"#,
+    );
+    for name in &spec.supporting_assets {
+        let _ = writeln!(script, "  printf '%s\\n' {}", shell_quote(name));
+    }
+    script.push_str(
+        r#"} | LC_ALL=C sort > "$expected_supporting_names"
+jq -r '.supporting_assets[].name' "$manifest" | LC_ALL=C sort > "$actual_supporting_names"
+if ! cmp -s "$expected_supporting_names" "$actual_supporting_names"; then
+  echo "::error::manifest supporting assets do not equal the declared supporting assets" >&2
+  exit 1
+fi
+for name in \
+"#,
+    );
+    for (index, name) in spec.supporting_assets.iter().enumerate() {
+        let suffix = if index + 1 == spec.supporting_assets.len() {
+            ""
+        } else {
+            " \\\n"
+        };
+        let _ = write!(script, "  {}{}", shell_quote(name), suffix);
+    }
+    script.push_str(
+        r#"; do
+  test -s "$dir/$name"
+  expected="$(jq -er --arg name "$name" '[.supporting_assets[] | select(.name == $name)] | select(length == 1) | .[0].sha256 | select(test("^[0-9a-f]{64}$"))' "$manifest")"
+  actual="$(sha256sum "$dir/$name" | awk '{print $1}')"
+  [ "$actual" = "$expected" ] || { echo "::error::supporting asset checksum mismatch: $name" >&2; exit 1; }
 done
 for name in \
 "#,
@@ -754,15 +804,19 @@ fn render_workflow(config: &ProjectConfig, spec: &PackageReleaseSpec) -> String 
         let _ = writeln!(tasks, "          mise run {}", shell_quote(task));
     }
     let mut attestation_subjects = String::new();
-    for name in &spec.payloads {
+    let mut attested_assets = spec.payloads.clone();
+    attested_assets.extend(spec.supporting_assets.iter().cloned());
+    attested_assets.push("release-manifest.json".to_owned());
+    attested_assets.push("identity.json".to_owned());
+    for name in &attested_assets {
         let _ = writeln!(
             attestation_subjects,
             "            {workspace_expr}/{package_dir}/{name}"
         );
     }
     let mut publish_attestation_targets = String::new();
-    for (index, name) in spec.payloads.iter().enumerate() {
-        let suffix = if index + 1 == spec.payloads.len() {
+    for (index, name) in attested_assets.iter().enumerate() {
+        let suffix = if index + 1 == attested_assets.len() {
             ""
         } else {
             " \\"
@@ -772,11 +826,6 @@ fn render_workflow(config: &ProjectConfig, spec: &PackageReleaseSpec) -> String 
             "            \"$PACKAGE_DIR/{name}\"{suffix}",
         );
     }
-    let assets = release_asset_names(spec)
-        .iter()
-        .map(|name| format!("\"$PACKAGE_DIR/{name}\""))
-        .collect::<Vec<_>>()
-        .join(" \\\n              ");
     let attestation_flags = "--repo \"$GITHUB_REPOSITORY\" --signer-workflow \"$GITHUB_REPOSITORY/.github/workflows/preview.yml\" --source-ref \"$EXPECTED_SOURCE_REF\" --source-digest \"$EXPECTED_SOURCE_COMMIT\"";
 
     let mut output = String::new();
@@ -803,10 +852,17 @@ fn render_workflow(config: &ProjectConfig, spec: &PackageReleaseSpec) -> String 
         github_expression("steps.verify.outputs.version"),
         github_expression("steps.verify.outputs.source_commit"),
     );
+    output = output.replace(
+        &format!("      EXPECTED_SOURCE_COMMIT: {source_commit_expr}\n"),
+        &format!(
+            "      EXPECTED_SOURCE_COMMIT: {source_commit_expr}\n      VELNOR_SOURCE_CHECKOUT_DIR: {workspace_expr}\n"
+        ),
+    );
     let _ = writeln!(
         output,
         "    steps:\n      - name: Checkout source\n        uses: {checkout}\n        with:\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false\n      - name: Enforce workflow policy\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Build verified package directory\n        env:\n          VELNOR_SOURCE_COMMIT: {source_commit_expr}\n          VELNOR_SOURCE_REF: {source_shell}\n        run: |\n          set -euo pipefail\n          mkdir -p \"$VELNOR_VERIFIED_PACKAGE_DIR\"\n{tasks}      - name: Verify manifest, identity, checksums, and exact file set\n        id: verify\n        run: |\n{build_verify}      - name: Attest declared payloads\n        uses: {attest}\n        with:\n          subject-path: |\n{attestation_subjects}      - name: Upload verified package handoff\n        uses: {upload}\n        with:\n          name: package-release\n          path: {workspace_expr}/{package_dir}\n          if-no-files-found: error\n          retention-days: 2\n",
     );
+    output = output.replace("Attest declared payloads", "Attest declared package assets");
     output = output.replace(
         "          install: false\n      - name: Enforce workflow policy",
         "          install: false\n      - name: Install locked build tools\n        run: mise --yes install --locked --include-task-tools\n      - name: Enforce workflow policy",
@@ -823,7 +879,6 @@ fn render_workflow(config: &ProjectConfig, spec: &PackageReleaseSpec) -> String 
         download,
         &publish_verify,
         &publish_attestation_targets,
-        &assets,
         attestation_flags,
         &workspace_expr,
         &updater_token_expr,
@@ -1282,6 +1337,164 @@ done
     script
 }
 
+/// Stage the immutable source-bound release as a draft, verify every staged
+/// byte, then make the complete asset set public in one visibility transition.
+/// Existing public releases are read-only: a partial or divergent one fails
+/// closed instead of being repaired with an overwrite.
+fn render_immutable_publish_script(spec: &PackageReleaseSpec) -> String {
+    let mut script = String::from(
+        r#"set -euo pipefail
+tag="$RELEASE_TAG-$EXPECTED_SOURCE_COMMIT"
+version="$(jq -er '.version | strings' "$PACKAGE_DIR/release-manifest.json")"
+title="$RELEASE_TITLE_PREFIX $version"
+transaction_dir="$(mktemp -d)"
+release_json="$transaction_dir/release-response"
+expected_assets="$transaction_dir/expected-assets"
+existing_assets="$transaction_dir/existing-assets"
+download_dir="$transaction_dir/download"
+immutable_public=0
+trap 'rm -rf -- "$transaction_dir"' EXIT
+
+remote_tag_sha() {
+  local tag_name="$1"
+  local sha
+  sha="$(git -C source ls-remote origin "refs/tags/$tag_name^{}" | awk 'NR == 1 {print $1}')"
+  if [ -z "$sha" ]; then
+    sha="$(git -C source ls-remote origin "refs/tags/$tag_name" | awk 'NR == 1 {print $1}')"
+  fi
+  printf '%s\n' "$sha"
+}
+
+verify_asset_bytes() {
+  local release_tag="$1"
+  local names_file="$2"
+  local source_dir="$3"
+  local target_dir="$4"
+  local downloaded_assets name expected actual
+  rm -rf -- "$target_dir"
+  mkdir -p "$target_dir"
+  gh release download "$release_tag" --repo "$GITHUB_REPOSITORY" --dir "$target_dir"
+  downloaded_assets="$target_dir/.asset-names"
+  find "$target_dir" -maxdepth 1 -type f ! -name '.asset-names' -printf '%f\n' | LC_ALL=C sort > "$downloaded_assets"
+  cmp -s "$names_file" "$downloaded_assets" || {
+    echo "::error::immutable release downloaded asset set differs from its API asset set" >&2
+    return 1
+  }
+  while IFS= read -r name; do
+    test -n "$name"
+    test -s "$source_dir/$name"
+    test -s "$target_dir/$name"
+    expected="$(sha256sum -- "$source_dir/$name" | awk '{print $1}')"
+    actual="$(sha256sum -- "$target_dir/$name" | awk '{print $1}')"
+    [ "$actual" = "$expected" ] || {
+      echo "::error::immutable release asset bytes differ: $name" >&2
+      return 1
+    }
+  done < "$names_file"
+}
+
+{
+"#,
+    );
+    for name in release_asset_names(spec) {
+        let _ = writeln!(script, "  printf '%s\\n' {}", shell_quote(&name));
+    }
+    script.push_str(
+        r#"} | LC_ALL=C sort > "$expected_assets"
+
+tag_sha="$(remote_tag_sha "$tag")"
+if [ -n "$tag_sha" ] && [ "$tag_sha" != "$EXPECTED_SOURCE_COMMIT" ]; then
+  echo "::error::immutable release tag resolves to an unexpected source commit" >&2
+  exit 1
+fi
+
+if ! gh api --repo "$GITHUB_REPOSITORY" -i "repos/$GITHUB_REPOSITORY/releases/tags/$tag" > "$release_json" 2>/dev/null; then
+  :
+fi
+response_http="$(awk 'NR == 1 {print $2; exit}' "$release_json")"
+case "$response_http" in
+  404)
+    if [ -n "$tag_sha" ]; then
+      gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --prerelease --latest=false --title "$title" --notes "Verified immutable package release $version from $EXPECTED_SOURCE_COMMIT"
+    else
+      gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$EXPECTED_SOURCE_COMMIT" --draft --prerelease --latest=false --title "$title" --notes "Verified immutable package release $version from $EXPECTED_SOURCE_COMMIT"
+    fi
+    tag_sha="$(remote_tag_sha "$tag")"
+    [ "$tag_sha" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::new immutable release tag does not resolve to the verified source commit" >&2; exit 1; }
+    ;;
+  200)
+    live_body="$(awk 'body {print; next} /^\r?$/ {body = 1}' "$release_json")"
+    jq -e --arg tag "$tag" --arg title "$title" \
+      '.tag_name == $tag and .name == $title and .prerelease == true' <<<"$live_body" >/dev/null \
+      || { echo "::error::immutable release identity does not match the verified candidate" >&2; exit 1; }
+    test -n "$tag_sha" || { echo "::error::existing immutable release has no exact source tag" >&2; exit 1; }
+    [ "$tag_sha" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::existing immutable release tag moved" >&2; exit 1; }
+    jq -r '.assets[].name' <<<"$live_body" | LC_ALL=C sort > "$existing_assets"
+    if comm -23 "$existing_assets" "$expected_assets" | grep -q .; then
+      echo "::error::immutable release contains an undeclared asset" >&2
+      exit 1
+    fi
+    if jq -e '.draft == true' <<<"$live_body" >/dev/null; then
+      if [ -s "$existing_assets" ]; then
+        verify_asset_bytes "$tag" "$existing_assets" "$PACKAGE_DIR" "$download_dir"
+      fi
+    else
+      cmp -s "$expected_assets" "$existing_assets" || {
+        echo "::error::immutable release is already public but incomplete; refusing to mutate it" >&2
+        exit 1
+      }
+      verify_asset_bytes "$tag" "$expected_assets" "$PACKAGE_DIR" "$download_dir" || {
+        echo "::error::immutable release is already public but its bytes differ; refusing to mutate it" >&2
+        exit 1
+      }
+      immutable_public=1
+    fi
+    ;;
+  *)
+    echo "::error::release preflight failed; refusing publication" >&2
+    exit 1
+    ;;
+esac
+
+if [ "$immutable_public" = 0 ]; then
+  while IFS= read -r asset_name; do
+    if ! grep -Fqx -- "$asset_name" "$existing_assets"; then
+      gh release upload "$tag" --repo "$GITHUB_REPOSITORY" "$PACKAGE_DIR/$asset_name"
+    fi
+  done < "$expected_assets"
+
+  staged_body="$(gh api --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/tags/$tag")"
+  jq -e --arg tag "$tag" --arg title "$title" \
+    '.draft == true and .prerelease == true and .tag_name == $tag and .name == $title' <<<"$staged_body" >/dev/null \
+    || { echo "::error::immutable staging release is not still a draft with the expected identity" >&2; exit 1; }
+  jq -r '.assets[].name' <<<"$staged_body" | LC_ALL=C sort > "$existing_assets"
+  cmp -s "$expected_assets" "$existing_assets" || {
+    echo "::error::immutable staging release asset set is not exact" >&2
+    exit 1
+  }
+  verify_asset_bytes "$tag" "$expected_assets" "$PACKAGE_DIR" "$download_dir"
+  gh api --method PATCH --repo "$GITHUB_REPOSITORY" \
+    "repos/$GITHUB_REPOSITORY/releases/$(jq -er '.id' <<<"$staged_body")" \
+    -F draft=false -F prerelease=true -F make_latest=false >/dev/null
+fi
+
+immutable_body="$(gh api --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/tags/$tag")"
+jq -e --arg tag "$tag" --arg title "$title" \
+  '(.draft | not) and .prerelease == true and .tag_name == $tag and .name == $title' <<<"$immutable_body" >/dev/null \
+  || { echo "::error::immutable release was not published with the expected identity" >&2; exit 1; }
+jq -r '.assets[].name' <<<"$immutable_body" | LC_ALL=C sort > "$existing_assets"
+cmp -s "$expected_assets" "$existing_assets" || {
+  echo "::error::immutable release asset set is not exact after publication" >&2
+  exit 1
+}
+final_tag_sha="$(remote_tag_sha "$tag")"
+[ "$final_tag_sha" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::immutable tag does not resolve to the verified source commit" >&2; exit 1; }
+printf 'immutable_tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+"#,
+    );
+    script
+}
+
 /// Render the publication half separately from the build half.  The release
 /// tag is source-bound and immutable: the configured tag is only a namespace
 /// prefix.  This keeps a failed candidate from deleting or partially replacing
@@ -1294,7 +1507,6 @@ fn render_publish_job(
     download: &str,
     publish_verify: &str,
     publish_attestation_targets: &str,
-    assets: &str,
     attestation_flags: &str,
     workspace_expr: &str,
     updater_token_expr: &str,
@@ -1326,14 +1538,6 @@ fn render_publish_job(
         let _ = writeln!(
             expected_asset_names,
             "  printf '%s\\n' {}",
-            shell_quote(&name)
-        );
-    }
-    let mut immutable_expected_asset_names = String::new();
-    for name in release_asset_names(spec) {
-        let _ = writeln!(
-            immutable_expected_asset_names,
-            "            printf '%s\\n' {}",
             shell_quote(&name)
         );
     }
@@ -1415,6 +1619,9 @@ fn render_publish_job(
     output.push_str(schema_yaml);
     output.push_str("\n      EXPECTED_SOURCE_COMMIT: ");
     output.push_str(publish_source_commit_expr);
+    output.push_str("\n      VELNOR_SOURCE_CHECKOUT_DIR: ");
+    output.push_str(workspace_expr);
+    output.push_str("/source");
     output.push_str("\n      RELEASE_TAG: ");
     output.push_str(tag_yaml);
     output.push_str("\n      RELEASE_TITLE_PREFIX: ");
@@ -1481,17 +1688,8 @@ fn render_publish_job(
 
     output.push_str("      - name: Publish immutable source-bound release\n        id: publish\n        env:\n          GH_TOKEN: ");
     output.push_str(github_token_expr);
-    output.push_str(
-        "\n        run: |\n          set -euo pipefail\n          tag=\"$RELEASE_TAG-$EXPECTED_SOURCE_COMMIT\"\n          version=\"$(jq -er '.version' \"$PACKAGE_DIR/release-manifest.json\")\"\n          title=\"$RELEASE_TITLE_PREFIX $version\"\n          tag_sha=\"$(git -C source ls-remote origin \"refs/tags/$tag^{}\" | awk 'NR == 1 {print $1}')\"\n          if [ -z \"$tag_sha\" ]; then\n            tag_sha=\"$(git -C source ls-remote origin \"refs/tags/$tag\" | awk 'NR == 1 {print $1}')\"\n          fi\n          if [ -n \"$tag_sha\" ] && [ \"$tag_sha\" != \"$EXPECTED_SOURCE_COMMIT\" ]; then\n            echo \"::error::immutable release tag resolves to an unexpected source commit\" >&2\n            exit 1\n          fi\n          release_json=\"$(mktemp)\"\n          expected_assets=\"$(mktemp)\"\n          existing_assets=\"$(mktemp)\"\n          trap 'rm -f -- \"$release_json\" \"$expected_assets\" \"$existing_assets\"' EXIT\n          {\n",
-    );
-    output.push_str(&immutable_expected_asset_names);
-    output.push_str(
-        "          } | LC_ALL=C sort > \"$expected_assets\"\n          if ! gh api --repo \"$GITHUB_REPOSITORY\" -i \"repos/$GITHUB_REPOSITORY/releases/tags/$tag\" > \"$release_json\" 2>/dev/null; then\n            :\n          fi\n          response_http=\"$(awk 'NR == 1 {print $2; exit}' \"$release_json\")\"\n          if [ \"$response_http\" = 404 ]; then\n            if [ -n \"$tag_sha\" ]; then\n              gh release create \"$tag\" --repo \"$GITHUB_REPOSITORY\" --verify-tag --prerelease --latest=false --title \"$title\" --notes \"Verified immutable package release $version from $EXPECTED_SOURCE_COMMIT\"\n            else\n              gh release create \"$tag\" --repo \"$GITHUB_REPOSITORY\" --target \"$EXPECTED_SOURCE_COMMIT\" --prerelease --latest=false --title \"$title\" --notes \"Verified immutable package release $version from $EXPECTED_SOURCE_COMMIT\"\n            fi\n          elif [ \"$response_http\" = 200 ]; then\n            live_body=\"$(awk 'body {print; next} /^\\r?$/ {body = 1}' \"$release_json\")\"\n            jq -e --arg tag \"$tag\" --arg title \"$title\" '(.draft | not) and .prerelease == true and .tag_name == $tag and .name == $title' <<<\"$live_body\" >/dev/null\n            test -n \"$tag_sha\" || { echo \"::error::existing release has no exact source tag\" >&2; exit 1; }\n            jq -r '.assets[].name' <<<\"$live_body\" | LC_ALL=C sort > \"$existing_assets\"\n            if comm -23 \"$existing_assets\" \"$expected_assets\" | grep -q .; then\n              echo \"::error::immutable release contains an undeclared asset\" >&2\n              exit 1\n            fi\n          else\n            echo \"::error::release preflight failed; refusing publication\" >&2\n            exit 1\n          fi\n          # Create first, upload second: a failed upload leaves a valid, resumable\n          # immutable release instead of an unrecoverable partial create.\n          gh release upload \"$tag\" --repo \"$GITHUB_REPOSITORY\" --clobber ",
-    );
-    output.push_str(assets);
-    output.push_str(
-        "\n          immutable_body=\"$(gh api --repo \"$GITHUB_REPOSITORY\" \"repos/$GITHUB_REPOSITORY/releases/tags/$tag\")\"\n          jq -e --arg tag \"$tag\" --arg title \"$title\" '(.draft | not) and .prerelease == true and .tag_name == $tag and .name == $title' <<<\"$immutable_body\" >/dev/null\n          jq -r '.assets[].name' <<<\"$immutable_body\" | LC_ALL=C sort > \"$existing_assets\"\n          cmp -s \"$expected_assets\" \"$existing_assets\" || { echo \"::error::immutable release asset set is not exact after publication\" >&2; exit 1; }\n          final_tag_sha=\"$(git -C source ls-remote origin \"refs/tags/$tag^{}\" | awk 'NR == 1 {print $1}')\"\n          if [ -z \"$final_tag_sha\" ]; then\n            final_tag_sha=\"$(git -C source ls-remote origin \"refs/tags/$tag\" | awk 'NR == 1 {print $1}')\"\n          fi\n          [ \"$final_tag_sha\" = \"$EXPECTED_SOURCE_COMMIT\" ] || { echo \"::error::immutable tag does not resolve to the verified source commit\" >&2; exit 1; }\n          printf 'immutable_tag=%s\\n' \"$tag\" >> \"$GITHUB_OUTPUT\"\n",
-    );
+    output.push_str("\n        run: |\n");
+    output.push_str(&indent_script(&render_immutable_publish_script(spec), 10));
 
     let immutable_tag_output = github_expression("steps.publish.outputs.immutable_tag");
     output.push_str("      - name: Download and re-verify published release\n        env:\n          GH_TOKEN: ");
@@ -1537,6 +1735,22 @@ fn render_publish_job(
     output.push_str(updater_token_expr);
     output.push_str(
         "\n        run: |\n          set -euo pipefail\n          cd consumer\n          git config user.name \"github-actions[bot]\"\n          git config user.email \"41898282+github-actions[bot]@users.noreply.github.com\"\n          automation_branch=\"automation/package-release-$RELEASE_TAG\"\n          remote_branch_sha=\"$(git ls-remote origin \"refs/heads/$automation_branch\" | awk 'NR == 1 {print $1}')\"\n          git switch --force-create \"$automation_branch\" \"origin/$CONSUMER_BRANCH\"\n          VELNOR_PACKAGE_CHANNEL=\"$VELNOR_PACKAGE_CHANNEL\" VELNOR_PACKAGE_RELEASE_TAG=\"$RELEASE_ASSET_TAG\" VELNOR_VERIFIED_PACKAGE_DIR=\"$GITHUB_WORKSPACE/published-package\" bash -c \"$UPDATER\"\n          git diff --check\n          if git diff --quiet; then\n            echo \"consumer already references the verified release\"\n          else\n            git add -A\n            git commit -s -m \"$UPDATE_COMMIT_MESSAGE\"\n            if [ -n \"$remote_branch_sha\" ]; then\n              git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" push --force-with-lease=refs/heads/$automation_branch:$remote_branch_sha origin \"HEAD:refs/heads/$automation_branch\"\n            else\n              git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" push origin \"HEAD:refs/heads/$automation_branch\"\n            fi\n          fi\n          pr_url=\"$(gh pr list --repo \"$CONSUMER_REPOSITORY\" --head \"$automation_branch\" --base \"$CONSUMER_BRANCH\" --state open --json url --jq '.[0].url // empty')\"\n          if [ -z \"$pr_url\" ] && ! git diff --quiet HEAD \"origin/$CONSUMER_BRANCH\"; then\n            pr_url=\"$(gh pr create --repo \"$CONSUMER_REPOSITORY\" --head \"$automation_branch\" --base \"$CONSUMER_BRANCH\" --title \"$UPDATE_COMMIT_MESSAGE ($RELEASE_ASSET_TAG)\" --body \"Automated verified package update. Review and merge this PR; the publisher never merges consumer changes.\")\"\n          fi\n          printf 'pr_url=%s\\n' \"$pr_url\" >> \"$GITHUB_OUTPUT\"\n          if [ -n \"$pr_url\" ]; then echo \"::notice::Consumer update PR: $pr_url\"; else echo \"::notice::Consumer update PR: none\"; fi\n",
+    );
+    output = output.replace(
+        "          automation_branch=\"automation/package-release-$RELEASE_TAG\"\n          remote_branch_sha=\"$(git ls-remote origin \"refs/heads/$automation_branch\" | awk 'NR == 1 {print $1}')\"\n          git switch --force-create \"$automation_branch\" \"origin/$CONSUMER_BRANCH\"\n",
+        "          stale_branch=\"automation/package-release-$RELEASE_TAG\"\n          automation_branch=\"automation/package-release-$RELEASE_ASSET_TAG\"\n          while IFS= read -r stale_pr_url; do\n            if [ -n \"$stale_pr_url\" ]; then\n              gh pr close \"$stale_pr_url\" --repo \"$CONSUMER_REPOSITORY\" --comment \"Superseded by immutable package release $RELEASE_ASSET_TAG\"\n            fi\n          done < <(gh pr list --repo \"$CONSUMER_REPOSITORY\" --head \"$stale_branch\" --base \"$CONSUMER_BRANCH\" --state open --json url --jq '.[].url')\n          remote_branch_sha=\"$(git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" ls-remote origin \"refs/heads/$automation_branch\" | awk 'NR == 1 {print $1}')\"\n          if [ -n \"$remote_branch_sha\" ]; then\n            git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" fetch origin \"refs/heads/$automation_branch:refs/remotes/origin/$automation_branch\"\n            git switch --detach \"origin/$automation_branch\"\n          else\n            git switch --create \"$automation_branch\" \"origin/$CONSUMER_BRANCH\"\n          fi\n",
+    );
+    output = output.replace(
+        "          git diff --check\n          if git diff --quiet; then",
+        "          untracked_files=\"$(git ls-files --others --exclude-standard)\"\n          if [ -n \"$untracked_files\" ]; then\n            echo \"::error::consumer updater produced untracked files:\" >&2\n            printf '%s\\n' \"$untracked_files\" >&2\n            exit 1\n          fi\n          git diff --check\n          if git diff --quiet; then",
+    );
+    output = output.replace(
+        "            if [ -n \"$remote_branch_sha\" ]; then\n              git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" push --force-with-lease=refs/heads/$automation_branch:$remote_branch_sha origin \"HEAD:refs/heads/$automation_branch\"\n            else\n              git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" push origin \"HEAD:refs/heads/$automation_branch\"\n            fi",
+        "            git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" push origin \"HEAD:refs/heads/$automation_branch\"",
+    );
+    output = output.replace(
+        "          else\n            git add -A\n            git commit -s -m \"$UPDATE_COMMIT_MESSAGE\"\n            git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" push origin \"HEAD:refs/heads/$automation_branch\"\n          fi",
+        "          else\n            if [ -n \"$remote_branch_sha\" ]; then\n              echo \"::error::immutable consumer branch already exists and would need rewriting; refusing to mutate it\" >&2\n              exit 1\n            fi\n            git add -A\n            git commit -s -m \"$UPDATE_COMMIT_MESSAGE\"\n            git -c \"http.extraheader=AUTHORIZATION: bearer $UPDATER_TOKEN\" push origin \"HEAD:refs/heads/$automation_branch\"\n          fi",
     );
     output = output.replace(
         "          git diff --check\n          if git diff --quiet; then",
@@ -1813,11 +2027,15 @@ concurrency_group = "package-release-preview"
         let spec = parse_spec(&Args(&args())).expect("valid fixture");
         let script = verification_script(&spec);
         assert!(script.contains(
-            "keys == [\"assets\",\"schema\",\"source_commit\",\"source_ref\",\"source_repository\",\"version\"]"
+            "keys == [\"assets\",\"schema\",\"source_commit\",\"source_ref\",\"source_repository\",\"supporting_assets\",\"version\"]"
         ));
         assert!(script.contains(".manifest == $package_manifest[0]"));
         assert!(script.contains("cmp -s \"$expected_files\" \"$actual_files\""));
         assert!(script.contains("sha256sum \"$dir/$name\""));
+        assert!(script.contains("git -C \"$source_checkout\" rev-parse HEAD"));
+        assert!(script.contains("source checkout repository does not match"));
+        assert!(script.contains(".supporting_assets | type == \"array\""));
+        assert!(script.contains("supporting asset checksum mismatch"));
         assert!(script.contains("contains a non-file entry"));
         assert!(script.contains("sha256sum --check --strict SHA256SUMS"));
         assert!(script.contains("SHA256SUMS does not name exactly the six declared payloads"));
@@ -1908,7 +2126,7 @@ concurrency_group = "package-release-preview"
     }
 
     #[test]
-    fn rendered_workflow_rechecks_published_dir_and_attests_declared_payloads() {
+    fn rendered_workflow_rechecks_published_dir_and_attests_declared_assets() {
         let spec = parse_spec(&Args(&args())).expect("valid fixture");
         let workflow = render_workflow(&render_config(), &spec);
         assert!(
@@ -1949,7 +2167,24 @@ concurrency_group = "package-release-preview"
         assert!(workflow.contains("--source-digest \"$EXPECTED_SOURCE_COMMIT\""));
         assert!(workflow.contains("gh pr create --repo \"$CONSUMER_REPOSITORY\""));
         assert!(workflow.contains("automation/package-release-$RELEASE_TAG"));
-        assert!(workflow.contains("--force-with-lease=refs/heads/$automation_branch"));
+        assert!(workflow.contains("automation/package-release-$RELEASE_ASSET_TAG"));
+        assert!(workflow.contains("gh pr close \"$stale_pr_url\""));
+        assert!(workflow.contains("git ls-files --others --exclude-standard"));
+        assert!(!workflow.contains("--force-with-lease=refs/heads/$automation_branch"));
+        let untracked_check = workflow
+            .find("git ls-files --others --exclude-standard")
+            .expect("untracked output check");
+        let diff_check = workflow
+            .find("git diff --check")
+            .expect("consumer diff check");
+        assert!(untracked_check < diff_check);
+        let branch_rewrite_guard = workflow
+            .find("immutable consumer branch already exists and would need rewriting")
+            .expect("immutable branch rewrite guard");
+        let consumer_commit = workflow
+            .find("git commit -s -m \"$UPDATE_COMMIT_MESSAGE\"")
+            .expect("consumer commit");
+        assert!(branch_rewrite_guard < consumer_commit);
         assert!(workflow.contains("PACKAGE_DIR: published-package"));
         assert!(workflow.contains("Refresh rolling preview release"));
         assert!(workflow.contains(
@@ -1963,6 +2198,9 @@ concurrency_group = "package-release-preview"
             .contains("candidate preview version is not newer than the live rolling version"));
         assert!(workflow
             .contains("immutable staging tag does not resolve to the verified source commit"));
+        assert!(workflow.contains("--draft --prerelease"));
+        assert!(workflow.contains("immutable release is already public but incomplete"));
+        assert!(workflow.contains("verify_asset_bytes \"$tag\" \"$expected_assets\""));
         assert!(workflow.contains("-F draft=true -F prerelease=true"));
         assert!(workflow.contains("staged rolling release asset set is not exact"));
         assert!(workflow.contains("-F draft=false -F prerelease=true"));
@@ -1983,8 +2221,10 @@ concurrency_group = "package-release-preview"
         assert!(rolling_upload < rolling_check);
         assert!(rolling_check < rolling_publish);
         let immutable_upload = workflow
-            .find("gh release upload \"$tag\" --repo \"$GITHUB_REPOSITORY\" --clobber")
+            .find("gh release upload \"$tag\" --repo \"$GITHUB_REPOSITORY\" \"$PACKAGE_DIR/$asset_name\"")
             .expect("immutable resumable upload");
+        assert!(!workflow
+            .contains("gh release upload \"$tag\" --repo \"$GITHUB_REPOSITORY\" --clobber"));
         let immutable_check = workflow
             .find("immutable release asset set is not exact after publication")
             .expect("immutable asset check");
