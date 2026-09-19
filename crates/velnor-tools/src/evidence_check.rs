@@ -1708,6 +1708,17 @@ fn check_g0_inventory(
             );
         }
     }
+    // Counts and caller-provided digests are not the required authoritative
+    // G0 proof. Until the collector records typed workflow/PR/check,
+    // dependency-graph, and access/model observations, G0 must remain
+    // fail-closed instead of treating this summary as a completed gate.
+    finding(
+        findings,
+        "g0-authoritative-proof-missing",
+        "",
+        "evidence.g0_inventory",
+        "G0 requires independently collected typed workflow, PR/check, dependency-graph, access, and model evidence; summary counts/digests are insufficient",
+    );
 }
 
 fn check_pull_requests(repo: &SnapshotRepository, findings: &mut Vec<Finding>) {
@@ -2239,6 +2250,8 @@ fn check_record(
         &record.workload_platform_architecture,
         findings,
     );
+    check_eligibility(repo, &record.provider_eligibility, findings);
+    check_record_completion(stage, record, findings);
     if stage == Stage::G0 {
         check_g0_record(record, findings);
         return;
@@ -2309,24 +2322,28 @@ fn check_record(
             );
         }
     }
-    // gate_status is a report field, never an authorization input. A claimed
-    // pass cannot hide any finding collected above.
-    if record.gate_status != "pass" {
+}
+
+fn check_record_completion(stage: Stage, record: &EvidenceRecord, findings: &mut Vec<Finding>) {
+    // These fields are report metadata, never authorization input. Validate
+    // them before the G0 inventory branch so that its early return cannot
+    // hide an unresolved blocker or next action.
+    if stage != Stage::G0 && record.gate_status != "pass" {
         finding(
             findings,
             "gate-status",
-            repo,
+            &record.repository,
             "gate_status",
-            "record must declare pass after independently verified facts",
+            "execution record must declare pass only after independently verified facts",
         );
     }
     if record.blocker.is_some() || record.next_action.is_some() {
         finding(
             findings,
             "unfinished-record",
-            repo,
+            &record.repository,
             "blocker/next_action",
-            "a passing record cannot carry an unresolved blocker or next action",
+            "a record with an unresolved blocker or next action cannot pass",
         );
     }
 }
@@ -3883,6 +3900,20 @@ fn check_eligibility(
     eligibility: &BTreeMap<String, Eligibility>,
     findings: &mut Vec<Finding>,
 ) {
+    let expected = BTreeSet::from(["github", "velnor"]);
+    let actual = eligibility
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if actual != expected {
+        finding(
+            findings,
+            "provider-keyset",
+            repository,
+            "provider_eligibility",
+            "provider eligibility must contain exactly github and velnor keys",
+        );
+    }
     for provider in ["github", "velnor"] {
         if !eligibility.contains_key(provider) {
             finding(
@@ -4145,20 +4176,22 @@ fn valid_sha(value: &str) -> bool {
 }
 
 fn valid_digest(value: &str) -> bool {
-    let value = value.strip_prefix("sha256:").unwrap_or(value);
-    value.len() == DIGEST_LENGTH && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    let Some(value) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    value.len() == DIGEST_LENGTH
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 fn digest_equal(left: &str, right: &str) -> bool {
-    let left = left.strip_prefix("sha256:").unwrap_or(left);
-    let right = right.strip_prefix("sha256:").unwrap_or(right);
-    valid_digest(left) && valid_digest(right) && left.eq_ignore_ascii_case(right)
+    valid_digest(left) && valid_digest(right) && left == right
 }
 
 fn valid_target(value: &str) -> bool {
-    let normalized = value.trim().to_ascii_lowercase().replace(['_', '.'], "-");
     matches!(
-        normalized.as_str(),
+        value,
         "linux-x64"
             | "linux-amd64"
             | "linux-arm64"
@@ -4286,6 +4319,188 @@ mod tests {
         assert!(findings
             .iter()
             .any(|finding| finding.code == "manifest-scope"));
+    }
+
+    #[test]
+    fn fixed_scope_positive_control_has_exact_membership() {
+        let repositories = CANONICAL_REPOSITORIES
+            .iter()
+            .map(|repository| ManifestRepository {
+                repository: (*repository).to_owned(),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let manifest = ManifestDocument {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            manifest_id: REVIEWED_MANIFEST_ID.to_owned(),
+            source: SourceIdentity {
+                repository: REVIEWED_SOURCE_REPOSITORY.to_owned(),
+                revision: REVIEWED_SOURCE_REVISION.to_owned(),
+                digest: REVIEWED_SOURCE_DIGEST.to_owned(),
+                reviewed_by: "reviewer".to_owned(),
+            },
+            repositories,
+        };
+        let mut findings = Vec::new();
+        check_manifest(&manifest, &mut findings);
+        assert_eq!(manifest.repositories.len(), REQUIRED_REPOSITORIES);
+        assert!(!findings
+            .iter()
+            .any(|finding| matches!(finding.code.as_str(), "manifest-count" | "manifest-scope" | "manifest-duplicate")));
+    }
+
+    #[test]
+    fn fixed_scope_rejects_same_count_substitution() {
+        let mut repositories = CANONICAL_REPOSITORIES
+            .iter()
+            .map(|repository| ManifestRepository {
+                repository: (*repository).to_owned(),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        repositories[0].repository = "unreviewed/substitute".to_owned();
+        let manifest = ManifestDocument {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            manifest_id: REVIEWED_MANIFEST_ID.to_owned(),
+            source: SourceIdentity {
+                repository: REVIEWED_SOURCE_REPOSITORY.to_owned(),
+                revision: REVIEWED_SOURCE_REVISION.to_owned(),
+                digest: REVIEWED_SOURCE_DIGEST.to_owned(),
+                reviewed_by: "reviewer".to_owned(),
+            },
+            repositories,
+        };
+        let mut findings = Vec::new();
+        check_manifest(&manifest, &mut findings);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "manifest-scope"));
+    }
+
+    #[test]
+    fn exact_provider_keyset_positive_and_third_provider_negative() {
+        let valid = BTreeMap::from([
+            ("github".to_owned(), Eligibility::Eligible),
+            ("velnor".to_owned(), Eligibility::Eligible),
+        ]);
+        let mut findings = Vec::new();
+        check_eligibility("owner/repo", &valid, &mut findings);
+        assert!(!findings
+            .iter()
+            .any(|finding| finding.code == "provider-keyset"));
+
+        let mut extra = valid;
+        extra.insert("third_party".to_owned(), Eligibility::Eligible);
+        findings.clear();
+        check_eligibility("owner/repo", &extra, &mut findings);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "provider-keyset"));
+    }
+
+    #[test]
+    fn g0_completion_rejects_blocker_before_inventory_return() {
+        let manifest = ManifestRepository::default();
+        let snapshot = SnapshotRepository {
+            repository: "owner/repo".to_owned(),
+            repository_id: 0,
+            default_branch: String::new(),
+            default_branch_sha: String::new(),
+            ruleset: RulesetObservation {
+                required_checks: Vec::new(),
+                source_url: String::new(),
+                pages_complete: false,
+            },
+            workflows: Vec::new(),
+            main_executions: Vec::new(),
+            open_prs: Vec::new(),
+        };
+        let mut record = EvidenceRecord {
+            repository: "owner/repo".to_owned(),
+            blocker: Some("collector incomplete".to_owned()),
+            ..Default::default()
+        };
+        record.provider_eligibility = BTreeMap::from([
+            ("github".to_owned(), Eligibility::Eligible),
+            ("velnor".to_owned(), Eligibility::Eligible),
+        ]);
+        let mut findings = Vec::new();
+        check_record(
+            Stage::G0,
+            RepositoryIndex {
+                manifest: &manifest,
+                snapshot: &snapshot,
+            },
+            &record,
+            None,
+            &mut findings,
+        );
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "unfinished-record"));
+    }
+
+    #[test]
+    fn summary_inventory_positive_shape_stays_fail_closed_without_typed_proof() {
+        let snapshot = SnapshotDocument {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            snapshot_id: "snapshot".to_owned(),
+            manifest_id: REVIEWED_MANIFEST_ID.to_owned(),
+            observed_at_utc: "2026-09-20T00:00:00Z".to_owned(),
+            source: SnapshotSource {
+                collector: "fixture".to_owned(),
+                collector_revision: sha('a'),
+                api_base: "https://api.github.com".to_owned(),
+                captured_at_utc: "2026-09-20T00:00:00Z".to_owned(),
+                read_only: true,
+                page_count: 1,
+                permission_scopes: vec!["metadata:read".to_owned()],
+            },
+            repositories: Vec::new(),
+        };
+        let inventory = G0InventoryEvidence {
+            source_url: "https://github.com/tailrocks/velnor/blob/reviewed".to_owned(),
+            repository_count: REQUIRED_REPOSITORIES as u32,
+            open_pr_count: 0,
+            workflow_repository_count: 0,
+            ruleset_repository_count: 0,
+            workload_matrix_digest: digest('a'),
+            dependency_graph_digest: digest('a'),
+            access_scopes: vec!["metadata:read".to_owned()],
+            access_gaps: Vec::new(),
+            orchestrator_model: EXPECTED_ORCHESTRATOR_MODEL.to_owned(),
+            orchestrator_effort: EXPECTED_ORCHESTRATOR_EFFORT.to_owned(),
+            agent_model: EXPECTED_AGENT_MODEL.to_owned(),
+            agent_effort: EXPECTED_AGENT_EFFORT.to_owned(),
+        };
+        let mut findings = Vec::new();
+        check_g0_inventory(&snapshot, Some(&inventory), &mut findings);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "g0-authoritative-proof-missing"));
+    }
+
+    #[test]
+    fn strict_schema_rejects_flat_release_alias_and_unknown_nested_field() {
+        let mut record = serde_json::to_value(EvidenceRecord::default()).unwrap();
+        record["release_applicability"] = json!("required");
+        assert!(serde_json::from_value::<EvidenceRecord>(record).is_err());
+
+        let nested = json!({
+            "applicability": "required",
+            "legacy_install": true
+        });
+        assert!(serde_json::from_value::<InstallEvidence>(nested).is_err());
+    }
+
+    #[test]
+    fn strict_digest_and_target_parsing_rejects_coercion() {
+        assert!(valid_digest(&digest('a')));
+        assert!(!valid_digest(&"a".repeat(DIGEST_LENGTH)));
+        assert!(!valid_digest(&format!("SHA256:{}", "a".repeat(DIGEST_LENGTH))));
+        assert!(valid_target("linux-amd64"));
+        assert!(!valid_target("linux_amd64"));
+        assert!(!valid_target(" LINUX-AMD64"));
     }
 
     #[test]

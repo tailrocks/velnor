@@ -75,10 +75,7 @@ enum CommandKind {
     /// Compare GitHub and Velnor lanes (promoted alias of lane-compare).
     Compare(lane_compare::LaneCompareArgs),
     /// Validate an external manifest, authoritative snapshot, and evidence envelope.
-    #[command(
-        name = "evidence-check",
-        aliases = ["check-evidence", "evidence-verify", "verify-evidence"]
-    )]
+    #[command(name = "evidence-check")]
     EvidenceCheck(evidence_check::EvidenceCheckArgs),
     /// Diff the GitHub-hosted and Velnor lanes of one run via the GitHub API (equal-or-better gate).
     LaneCompare(lane_compare::LaneCompareArgs),
@@ -4768,6 +4765,33 @@ fn find_hardcoded_lane_strings(steps_yaml: &str, ctx: &str) -> Vec<String> {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn evidence_check_has_one_canonical_cli_name() {
+        let canonical = [
+            "velnor-tools",
+            "evidence-check",
+            "--stage",
+            "G0",
+            "--manifest",
+            "manifest.json",
+            "--snapshot",
+            "snapshot.json",
+            "--evidence",
+            "evidence.json",
+        ];
+        assert!(matches!(
+            Cli::try_parse_from(canonical),
+            Ok(Cli {
+                command: CommandKind::EvidenceCheck(_)
+            })
+        ));
+        for legacy in ["check-evidence", "evidence-verify", "verify-evidence"] {
+            let mut args = canonical.to_vec();
+            args[1] = legacy;
+            assert!(Cli::try_parse_from(args).is_err(), "legacy command accepted: {legacy}");
+        }
+    }
 
     #[test]
     fn hardcoded_lane_context_window_survives_multibyte_chars() {
