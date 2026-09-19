@@ -850,13 +850,14 @@ fn filter_privileged_container_options(
 /// `--shm-size` stays allowed: shared-memory sizing is not a CPU/RAM
 /// ceiling, and browsers need it larger than Docker's default. (Accepted
 /// risk, audit F4: unbounded is spec-mandated; see `QUOTA_FLAGS`.)
-const QUOTA_CONTAINER_OPTIONS: [&str; 11] = [
+const QUOTA_CONTAINER_OPTIONS: [&str; 12] = [
     "--cpus",
     "--cpu-period",
     "--cpu-quota",
     "--cpu-shares",
     "--cpuset-cpus",
     "--cpuset-mems",
+    "-m",
     "--memory",
     "--memory-reservation",
     "--memory-swap",
@@ -2165,6 +2166,9 @@ mod tests {
                 "--cpus".to_string(),
                 "2".to_string(),
                 "--memory=4g".to_string(),
+                "-m".to_string(),
+                "4g".to_string(),
+                "-m=8g".to_string(),
                 "--cpu-quota".to_string(),
                 "50000".to_string(),
                 "--cpuset-cpus".to_string(),
