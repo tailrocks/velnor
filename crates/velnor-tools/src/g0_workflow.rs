@@ -37,10 +37,15 @@ pub(crate) struct DerivedWorkflowJob {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DerivedChildEdge {
     pub workload_id: String,
+    pub root_workload_id: String,
     pub repository: String,
     pub workflow_path: String,
     pub event: String,
     pub relation: String,
+    pub source_sha: String,
+    pub parent_repository: String,
+    pub parent_workflow_path: String,
+    pub parent_source_sha: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -74,7 +79,7 @@ pub(crate) fn derive_workflow_plan(
         path: normalize_path(&root.path)?,
     };
     let mut stack = BTreeSet::new();
-    derive_source(root, &sources, &root_key, &mut stack, 0)
+    derive_source(root, &sources, &root_key, &mut stack, 0, None)
 }
 
 fn derive_source(
@@ -83,6 +88,7 @@ fn derive_source(
     source_key: &SourceKey,
     stack: &mut BTreeSet<SourceKey>,
     depth: usize,
+    root_workload_id: Option<String>,
 ) -> Result<DerivedWorkflowPlan> {
     if depth > MAX_RECURSION {
         bail!(
@@ -131,6 +137,7 @@ fn derive_source(
             bail!("workflow job key must be a non-empty string");
         }
         let job_id = job_id.to_owned();
+        let root_for_job = root_workload_id.clone().unwrap_or_else(|| job_id.clone());
         let job = job_value
             .as_mapping()
             .ok_or_else(|| anyhow!("workflow job {job_id} must be a mapping"))?;
@@ -158,7 +165,14 @@ fn derive_source(
                     dependency.source_sha
                 );
             }
-            let child_plan = derive_source(dependency, sources, &target, stack, depth + 1)?;
+            let child_plan = derive_source(
+                dependency,
+                sources,
+                &target,
+                stack,
+                depth + 1,
+                Some(root_for_job.clone()),
+            )?;
             let child_job = child_plan.jobs.first().cloned().ok_or_else(|| {
                 anyhow!(
                     "reusable workflow {}/{} has no derived jobs",
@@ -180,10 +194,15 @@ fn derive_source(
             plan.child_edges.extend(child_plan.child_edges);
             plan.child_edges.push(DerivedChildEdge {
                 workload_id: job_id.clone(),
+                root_workload_id: root_for_job.clone(),
                 repository: target.repository,
                 workflow_path: target.path,
                 event: "workflow_call".to_owned(),
                 relation: "reusable_workflow".to_owned(),
+                source_sha: dependency.source_sha.clone(),
+                parent_repository: source.repository.clone(),
+                parent_workflow_path: source.path.clone(),
+                parent_source_sha: source.source_sha.clone(),
             });
             Some((
                 child_job.provider,
@@ -224,10 +243,17 @@ fn derive_source(
         for job in &plan.jobs {
             plan.child_edges.push(DerivedChildEdge {
                 workload_id: job.job_id.clone(),
+                root_workload_id: root_workload_id
+                    .clone()
+                    .unwrap_or_else(|| job.job_id.clone()),
                 repository: source.repository.clone(),
                 workflow_path: source.path.clone(),
                 event: "workflow_run".to_owned(),
                 relation: "workflow_run".to_owned(),
+                source_sha: source.source_sha.clone(),
+                parent_repository: source.repository.clone(),
+                parent_workflow_path: source.path.clone(),
+                parent_source_sha: source.source_sha.clone(),
             });
         }
     }
@@ -235,10 +261,17 @@ fn derive_source(
         for job in &plan.jobs {
             plan.child_edges.push(DerivedChildEdge {
                 workload_id: job.job_id.clone(),
+                root_workload_id: root_workload_id
+                    .clone()
+                    .unwrap_or_else(|| job.job_id.clone()),
                 repository: source.repository.clone(),
                 workflow_path: source.path.clone(),
                 event: "workflow_dispatch".to_owned(),
                 relation: "dispatch".to_owned(),
+                source_sha: source.source_sha.clone(),
+                parent_repository: source.repository.clone(),
+                parent_workflow_path: source.path.clone(),
+                parent_source_sha: source.source_sha.clone(),
             });
         }
     }
@@ -560,7 +593,7 @@ mod tests {
             sha256: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 .to_owned(),
             storage_ref:
-                "artifact://sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                "sha256://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     .to_owned(),
             byte_length: yaml.len() as u64,
             bytes_base64: BASE64.encode(yaml.as_bytes()),
@@ -635,7 +668,10 @@ jobs:
             edge.relation == "reusable_workflow" && edge.workflow_path.ends_with("reusable.yml")
         }));
         assert!(plan.child_edges.iter().any(|edge| {
-            edge.relation == "reusable_workflow" && edge.workflow_path.ends_with("deep.yml")
+            edge.relation == "reusable_workflow"
+                && edge.workflow_path.ends_with("deep.yml")
+                && edge.source_sha == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                && edge.parent_workflow_path.ends_with("reusable.yml")
         }));
         assert!(plan
             .child_edges

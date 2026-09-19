@@ -178,9 +178,7 @@ fn digest_hex(value: &str) -> Option<&str> {
 }
 
 fn valid_storage_ref(value: &str, hex: &str) -> bool {
-    ["artifact://sha256/", "cas://sha256/"]
-        .iter()
-        .any(|prefix| value.strip_prefix(prefix) == Some(hex))
+    value.strip_prefix("sha256://") == Some(hex)
 }
 
 fn sha256_digest(bytes: &[u8]) -> String {
@@ -265,7 +263,7 @@ mod tests {
         let read = store
             .read_verified(
                 &format!(
-                    "artifact://sha256/{}",
+                    "sha256://{}",
                     digest.strip_prefix("sha256:").expect("digest")
                 ),
                 &digest,
@@ -285,6 +283,17 @@ mod tests {
             .read_verified("https://example.test/object", &digest, 17)
             .expect_err("network references are not local CAS refs");
         assert!(matches!(error, RawStoreError::InvalidReference));
+        let alias_error = store
+            .read_verified(
+                &format!(
+                    "artifact://sha256/{}",
+                    digest.strip_prefix("sha256:").expect("digest")
+                ),
+                &digest,
+                17,
+            )
+            .expect_err("legacy CAS aliases are not accepted");
+        assert!(matches!(alias_error, RawStoreError::InvalidReference));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -306,7 +315,7 @@ mod tests {
         let error = store
             .read_verified(
                 &format!(
-                    "cas://sha256/{}",
+                    "sha256://{}",
                     digest.strip_prefix("sha256:").expect("digest")
                 ),
                 &digest,
@@ -337,7 +346,7 @@ mod tests {
         let error = store
             .read_verified(
                 &format!(
-                    "artifact://sha256/{}",
+                    "sha256://{}",
                     digest.strip_prefix("sha256:").expect("digest")
                 ),
                 &digest,

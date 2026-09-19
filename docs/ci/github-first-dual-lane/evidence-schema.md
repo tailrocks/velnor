@@ -26,7 +26,7 @@ are not accepted. Parse failure is failure. No credentials, bearer tokens, or
 authentication headers may occur in any source/provenance field.
 
 `--evidence-root` is an explicit local immutable CAS root. The checker resolves
-only `artifact://sha256/<hex>` and `cas://sha256/<hex>` references beneath
+only `sha256://<hex>` references beneath
 `<root>/sha256/<hex>`, reopens each regular file, and recomputes its measured
 bytes and SHA-256. It never treats a URI or caller digest as proof, follows
 symlinks outside the root, or fetches arbitrary network URLs.
@@ -196,7 +196,7 @@ scalar inventory fields, aliases, and opaque success booleans are rejected.
 `collector_snapshot` (sorted object keys), and
 `collector_snapshot_sha256` is recomputed from those supplied bytes. The
 `collector_snapshot_storage_ref` must be an immutable content-addressed
-`artifact://sha256/<hex>` or `cas://sha256/<hex>` reference to those exact
+`sha256://<hex>` reference to those exact
 bytes. The digest stays outside the object to avoid a hash cycle; a digest or
 storage path over a parsed caller object, without the supplied bytes, is not
 accepted.
@@ -219,8 +219,8 @@ canonical query/variables, recomputable query/variables digests, API request
 identity, the canonical `collector.auth` and `collector.rate_limit`
 references, page metadata, and a raw response object. Raw object bytes are
 supplied in base64 and their byte length and digest are recomputed; every raw
-object storage reference is digest-addressed (`artifact://sha256/<hex>` or
-`cas://sha256/<hex>`) and must match the measured bytes. `has_next_page`
+object storage reference is digest-addressed (`sha256://<hex>`) and must match
+the measured bytes. `has_next_page`
 requires the next captured page in the same canonical stream, with contiguous
 page number/cursor and an exact `https://api.github.com` URL/path/query link;
 forbidden, rate-limited, malformed, truncated, unknown, or missing pages fail

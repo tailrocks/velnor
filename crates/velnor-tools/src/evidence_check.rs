@@ -1149,6 +1149,7 @@ fn check_documents(
                 },
                 record,
                 release,
+                evidence.g0_inventory.as_ref(),
                 &mut findings,
             ),
             (None, _) => finding(
@@ -2746,9 +2747,7 @@ fn g0_storage_ref(value: &str, digest: &str) -> bool {
     let Some(hex) = digest.strip_prefix("sha256:") else {
         return false;
     };
-    ["artifact://sha256/", "cas://sha256/"]
-        .iter()
-        .any(|prefix| value.strip_prefix(prefix) == Some(hex))
+    value.strip_prefix("sha256://") == Some(hex)
 }
 
 fn digest_bytes(bytes: &[u8]) -> String {
@@ -2762,6 +2761,20 @@ fn digest_bytes(bytes: &[u8]) -> String {
 
 fn g0_repo_source_url(repository: &str, value: &str) -> bool {
     nonempty_url(value) && value.starts_with(&format!("https://github.com/{repository}/"))
+}
+
+fn run_url_matches_repository(value: &str, repository: &str, run_id: u64) -> bool {
+    let Ok(url) = Url::parse(value) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str() == Some("github.com")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.path() == format!("/{repository}/actions/runs/{run_id}")
 }
 
 fn g0_context_pairs(contexts: &[RequiredContext]) -> BTreeSet<(String, String)> {
@@ -3005,7 +3018,7 @@ fn check_g0_derived_plan(
         .iter()
         .map(|edge| {
             (
-                edge.workload_id.clone(),
+                edge.root_workload_id.clone(),
                 edge.repository.clone(),
                 edge.workflow_path.clone(),
                 edge.event.clone(),
@@ -3016,7 +3029,7 @@ fn check_g0_derived_plan(
         let Some(expected) = manifest
             .expected_jobs
             .iter()
-            .find(|job| job.job_id == edge.workload_id)
+            .find(|job| job.job_id == edge.root_workload_id)
         else {
             finding(
                 findings,
@@ -3024,17 +3037,21 @@ fn check_g0_derived_plan(
                 repository,
                 "workflow.source/child_edges",
                 format!(
-                    "source-derived child edge has no reviewed workload {}",
-                    edge.workload_id
+                    "source-derived child edge has no reviewed root workload {}",
+                    edge.root_workload_id
                 ),
             );
             continue;
         };
-        let matches = expected.child_workflow.as_ref().is_some_and(|child| {
-            child.repository == edge.repository
-                && child.workflow_path == edge.workflow_path
-                && child.event == edge.event
-        });
+        let matches = if edge.workload_id == edge.root_workload_id {
+            expected.child_workflow.as_ref().is_some_and(|child| {
+                child.repository == edge.repository
+                    && child.workflow_path == edge.workflow_path
+                    && child.event == edge.event
+            })
+        } else {
+            expected.child_workflow.is_some()
+        };
         if !matches {
             finding(
                 findings,
@@ -3043,7 +3060,7 @@ fn check_g0_derived_plan(
                 "manifest.expected_jobs.child_workflow",
                 format!(
                     "reviewed child obligation for {} does not match source-derived {} edge",
-                    edge.workload_id, edge.relation
+                    edge.root_workload_id, edge.relation
                 ),
             );
         }
@@ -4050,7 +4067,7 @@ fn g0_source_child_workloads(
                 .collect::<Vec<_>>();
             if let Ok(plan) = derive_workflow_plan(&workflow.source, &dependencies) {
                 for edge in plan.child_edges {
-                    result.insert((repository.repository.clone(), edge.workload_id));
+                    result.insert((repository.repository.clone(), edge.root_workload_id));
                 }
             }
         }
@@ -5036,6 +5053,7 @@ fn check_record(
     index: RepositoryIndex<'_>,
     record: &EvidenceRecord,
     release: Option<&CanonicalReleaseDocument>,
+    g0_inventory: Option<&G0InventoryEvidence>,
     findings: &mut Vec<Finding>,
 ) {
     let repo = &record.repository;
@@ -5198,7 +5216,7 @@ fn check_record(
                 ),
             );
         }
-        check_execution_record(stage, index, record, findings);
+        check_execution_record(stage, index, record, g0_inventory, findings);
     }
     if stage.needs_release() && record.pr_number.is_none() {
         check_release_install(index, record, release, findings);
@@ -5368,6 +5386,7 @@ fn check_execution_record(
     stage: Stage,
     index: RepositoryIndex<'_>,
     record: &EvidenceRecord,
+    g0_inventory: Option<&G0InventoryEvidence>,
     findings: &mut Vec<Finding>,
 ) {
     let repo = &record.repository;
@@ -5483,7 +5502,13 @@ fn check_execution_record(
     check_host_binding(index.manifest, record, execution, findings);
     check_authoritative_jobs(index.manifest, record, execution, findings);
     check_authoritative_checks(index.snapshot, record, execution, findings);
-    check_authoritative_children(index.manifest, record, execution, findings);
+    check_authoritative_children_from_source(
+        index.manifest,
+        g0_inventory,
+        record,
+        execution,
+        findings,
+    );
     if record.logs.is_empty() || record.logs.iter().any(|url| !nonempty_url(url)) {
         finding(
             findings,
@@ -5972,41 +5997,132 @@ fn check_authoritative_checks(
     }
 }
 
-fn check_authoritative_children(
+fn check_authoritative_children_from_source(
     manifest: &ManifestRepository,
+    inventory: Option<&G0InventoryEvidence>,
     record: &EvidenceRecord,
     execution: &ExecutionObservation,
     findings: &mut Vec<Finding>,
 ) {
     let repo = &record.repository;
-    let expected = manifest
-        .expected_jobs
+    let Some(inventory) = inventory else {
+        finding(
+            findings,
+            "authoritative-child-source-missing",
+            repo,
+            "evidence.g0_inventory",
+            "child expectations require the independently captured immutable workflow source",
+        );
+        return;
+    };
+    let Some(repository) = inventory
+        .collector_snapshot
+        .repositories
         .iter()
-        .filter(|job| job.provider == record.provider && job.required)
-        .filter_map(|job| job.child_workflow.as_ref())
-        .count();
-    if expected != execution.child_runs.len() || expected != record.child_run_links.len() {
+        .find(|candidate| candidate.repository == record.repository)
+    else {
+        finding(
+            findings,
+            "authoritative-child-source-missing",
+            repo,
+            "evidence.g0_inventory.collector_snapshot.repositories",
+            "child expectations require a source inventory row for the executed repository",
+        );
+        return;
+    };
+    let Some(workflow) = repository.workflows.iter().find(|workflow| {
+        workflow.source.path == manifest.workflow_path
+            && workflow.source.revision == manifest.workflow_revision
+            && workflow.source.source_sha == repository.default_branch_sha
+    }) else {
+        finding(
+            findings,
+            "authoritative-child-source-missing",
+            repo,
+            "evidence.g0_inventory.collector_snapshot.repositories.workflows",
+            "child expectations require the executed workflow source at the observed default-branch SHA",
+        );
+        return;
+    };
+    let dependencies = workflow
+        .reusable_workflows
+        .iter()
+        .chain(workflow.actions.iter())
+        .chain(workflow.scanners.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    let plan = match derive_workflow_plan(&workflow.source, &dependencies) {
+        Ok(plan) => plan,
+        Err(error) => {
+            finding(
+                findings,
+                "authoritative-child-source-invalid",
+                repo,
+                "evidence.g0_inventory.collector_snapshot.repositories.workflows",
+                format!("cannot derive child obligations from immutable workflow source: {error}"),
+            );
+            return;
+        }
+    };
+    let expected = plan
+        .child_edges
+        .iter()
+        .filter(|edge| {
+            manifest.expected_jobs.iter().any(|job| {
+                job.job_id == edge.root_workload_id
+                    && job.provider == record.provider
+                    && job.required
+            })
+        })
+        .collect::<Vec<_>>();
+    if expected.len() != execution.child_runs.len()
+        || expected.len() != record.child_run_links.len()
+    {
         finding(
             findings,
             "child-run-inventory",
             repo,
-            "child_run_links",
-            "child-run graph must equal the reviewed recursive workflow plan",
+            "execution.child_runs",
+            "child-run graph must exactly cover source-derived recursive workflow obligations",
         );
     }
-    let child_specs = manifest
-        .expected_jobs
-        .iter()
-        .filter(|job| job.provider == record.provider && job.required)
-        .filter_map(|job| job.child_workflow.as_ref())
-        .collect::<Vec<_>>();
     for child in &execution.child_runs {
-        if !child_specs.iter().any(|spec| {
-            spec.repository == child.repository
-                && spec.workflow_path == child.workflow_path
-                && spec.event == child.event
-        }) || (child.source_sha != record.trigger_source_sha
-            && child.source_sha != record.actual_checkout_sha)
+        let matching_edges = expected
+            .iter()
+            .filter(|edge| {
+                edge.repository == child.repository
+                    && edge.workflow_path == child.workflow_path
+                    && edge.event == child.event
+                    && edge.source_sha == child.source_sha
+            })
+            .collect::<Vec<_>>();
+        let parent_matches = matching_edges.iter().any(|edge| {
+            if edge.parent_repository == repository.repository
+                && edge.parent_workflow_path == execution.workflow_path
+                && (edge.parent_source_sha == execution.workflow_revision
+                    || edge.parent_source_sha == execution.trigger_source_sha
+                    || edge.parent_source_sha == execution.actual_checkout_sha)
+            {
+                child.parent_run_id == execution.run_id
+            } else {
+                execution.child_runs.iter().any(|parent| {
+                    parent.run_id == child.parent_run_id
+                        && parent.repository == edge.parent_repository
+                        && parent.workflow_path == edge.parent_workflow_path
+                        && parent.source_sha == edge.parent_source_sha
+                })
+            }
+        });
+        if matching_edges.len() != 1
+            || !parent_matches
+            || child.provider != record.provider
+            || child.parent_run_id == child.run_id
+            || child.run_id == 0
+            || child.run_attempt == 0
+            || child.status != "completed"
+            || child.conclusion != "success"
+            || !valid_sha(&child.source_sha)
+            || !run_url_matches_repository(&child.source_url, &child.repository, child.run_id)
         {
             finding(
                 findings,
@@ -6014,7 +6130,7 @@ fn check_authoritative_children(
                 repo,
                 "execution.child_runs",
                 format!(
-                    "child run {} is not in the reviewed recursive workflow plan",
+                    "child run {} lacks exact parent, source, event, status, or URL binding",
                     child.run_id
                 ),
             );
@@ -7373,7 +7489,7 @@ mod tests {
                     .to_owned(),
                 sha256: digest_bytes(b"{}"),
                 storage_ref: format!(
-                    "artifact://sha256/{}",
+                    "sha256://{}",
                     digest_bytes(b"{}")
                         .strip_prefix("sha256:")
                         .expect("digest has prefix")
@@ -7394,7 +7510,7 @@ mod tests {
             collector_snapshot_bytes_base64: BASE64.encode(&bytes),
             collector_snapshot_sha256: digest_bytes(&bytes),
             collector_snapshot_storage_ref: format!(
-                "artifact://sha256/{}",
+                "sha256://{}",
                 digest_bytes(&bytes)
                     .strip_prefix("sha256:")
                     .expect("digest has sha256 prefix")
@@ -7450,7 +7566,7 @@ mod tests {
                 bytes_base64: BASE64.encode(&raw_bytes),
                 media_type: "application/json".to_owned(),
                 storage_ref: format!(
-                    "artifact://sha256/{}",
+                    "sha256://{}",
                     raw_digest
                         .strip_prefix("sha256:")
                         .expect("digest has prefix")
@@ -7468,7 +7584,7 @@ mod tests {
                 bytes_base64: BASE64.encode(workflow_bytes),
                 media_type: "text/yaml".to_owned(),
                 storage_ref: format!(
-                    "artifact://sha256/{}",
+                    "sha256://{}",
                     workflow_raw_digest
                         .strip_prefix("sha256:")
                         .expect("digest has prefix")
@@ -7691,7 +7807,7 @@ mod tests {
                 source_url: workflow_url,
                 sha256: raw_digest.clone(),
                 storage_ref: format!(
-                    "artifact://sha256/{}",
+                    "sha256://{}",
                     raw_digest
                         .strip_prefix("sha256:")
                         .expect("digest has prefix")
@@ -7713,7 +7829,7 @@ mod tests {
                 canonicalization: "raw-utf8".to_owned(),
                 sha256: digest_bytes(workflow_bytes),
                 storage_ref: format!(
-                    "artifact://sha256/{}",
+                    "sha256://{}",
                     digest_bytes(workflow_bytes)
                         .strip_prefix("sha256:")
                         .expect("digest has prefix")
@@ -7955,7 +8071,7 @@ mod tests {
                     .to_owned(),
                 sha256: first_raw_digest.clone(),
                 storage_ref: format!(
-                    "artifact://sha256/{}",
+                    "sha256://{}",
                     first_raw_digest
                         .strip_prefix("sha256:")
                         .expect("digest has prefix")
@@ -8009,7 +8125,7 @@ mod tests {
         inventory.collector_snapshot_bytes_base64 = BASE64.encode(&bytes);
         inventory.collector_snapshot_sha256 = digest_bytes(&bytes);
         inventory.collector_snapshot_storage_ref = format!(
-            "artifact://sha256/{}",
+            "sha256://{}",
             inventory
                 .collector_snapshot_sha256
                 .strip_prefix("sha256:")
@@ -8345,6 +8461,156 @@ mod tests {
             .iter()
             .any(|finding| finding.code == "g0-storage-mismatch"));
         std::fs::remove_dir_all(directory).expect("remove fixture directory");
+    }
+
+    #[test]
+    fn nested_child_runs_require_source_derived_parent_edges() {
+        let (mut manifest, _snapshot, mut inventory) = complete_g0_fixture();
+        let manifest_repo = &mut manifest.repositories[0];
+        let repository = manifest_repo.repository.clone();
+        manifest_repo.expected_jobs[0].child_workflow = Some(ChildWorkflowSpec {
+            repository: repository.clone(),
+            workflow_path: ".github/workflows/reusable.yml".to_owned(),
+            event: "workflow_call".to_owned(),
+        });
+
+        let workflow = &mut inventory.collector_snapshot.repositories[0].workflows[0];
+        let root_source = &mut workflow.source;
+        let root_yaml = b"on: [push]\njobs:\n  scan:\n    uses: ./.github/workflows/reusable.yml@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n";
+        root_source.bytes_base64 = BASE64.encode(root_yaml);
+        root_source.byte_length = root_yaml.len() as u64;
+        root_source.sha256 = digest_bytes(root_yaml);
+        root_source.source_url = format!(
+            "https://github.com/{repository}/blob/{}/{}",
+            root_source.source_sha, root_source.path
+        );
+
+        let mut reusable = root_source.clone();
+        reusable.path = ".github/workflows/reusable.yml".to_owned();
+        reusable.revision = sha('b');
+        reusable.source_sha = sha('b');
+        reusable.source_url = format!(
+            "https://github.com/{repository}/blob/{}/{}",
+            reusable.source_sha, reusable.path
+        );
+        let reusable_yaml = b"on: {workflow_call: {}}\njobs:\n  nested:\n    uses: ./.github/workflows/deep.yml@cccccccccccccccccccccccccccccccccccccccc\n";
+        reusable.bytes_base64 = BASE64.encode(reusable_yaml);
+        reusable.byte_length = reusable_yaml.len() as u64;
+        reusable.sha256 = digest_bytes(reusable_yaml);
+
+        let mut deep = reusable.clone();
+        deep.path = ".github/workflows/deep.yml".to_owned();
+        deep.revision = sha('c');
+        deep.source_sha = sha('c');
+        deep.source_url = format!(
+            "https://github.com/{repository}/blob/{}/{}",
+            deep.source_sha, deep.path
+        );
+        let deep_yaml =
+            b"on: {workflow_call: {}}\njobs:\n  deep:\n    runs-on: ubuntu-24.04\n    steps: []\n";
+        deep.bytes_base64 = BASE64.encode(deep_yaml);
+        deep.byte_length = deep_yaml.len() as u64;
+        deep.sha256 = digest_bytes(deep_yaml);
+        workflow.reusable_workflows = vec![
+            G0WorkflowDependency {
+                kind: "reusable_workflow".to_owned(),
+                source: reusable,
+            },
+            G0WorkflowDependency {
+                kind: "reusable_workflow".to_owned(),
+                source: deep,
+            },
+        ];
+
+        let mut child_execution = ExecutionObservation {
+            run_id: 101,
+            run_attempt: 1,
+            run_url: format!("https://github.com/{repository}/actions/runs/101"),
+            workflow_path: manifest_repo.workflow_path.clone(),
+            workflow_revision: sha('a'),
+            event: "push".to_owned(),
+            trigger_source_sha: sha('a'),
+            actual_checkout_sha: sha('a'),
+            status: "completed".to_owned(),
+            conclusion: "success".to_owned(),
+            provider: "github".to_owned(),
+            ..Default::default()
+        };
+        let child_a = ChildRunObservation {
+            parent_run_id: child_execution.run_id,
+            run_id: 102,
+            run_attempt: 1,
+            repository: repository.clone(),
+            workflow_path: ".github/workflows/reusable.yml".to_owned(),
+            event: "workflow_call".to_owned(),
+            source_sha: sha('b'),
+            provider: "github".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: "success".to_owned(),
+            source_url: format!("https://github.com/{repository}/actions/runs/102"),
+        };
+        let child_b = ChildRunObservation {
+            parent_run_id: child_a.run_id,
+            run_id: 103,
+            run_attempt: 1,
+            repository: repository.clone(),
+            workflow_path: ".github/workflows/deep.yml".to_owned(),
+            event: "workflow_call".to_owned(),
+            source_sha: sha('c'),
+            provider: "github".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: "success".to_owned(),
+            source_url: format!("https://github.com/{repository}/actions/runs/103"),
+        };
+        child_execution.child_runs = vec![child_a.clone(), child_b.clone()];
+        let links = [child_a, child_b]
+            .into_iter()
+            .map(|child| ChildRunLink {
+                parent_run_id: child.parent_run_id,
+                run_id: child.run_id,
+                run_attempt: child.run_attempt,
+                repository: child.repository,
+                workflow_path: child.workflow_path,
+                event: child.event,
+                source_sha: child.source_sha,
+                provider: child.provider,
+                status: child.status,
+                conclusion: child.conclusion,
+                run_url: child.source_url,
+            })
+            .collect();
+        let record = EvidenceRecord {
+            repository: repository.clone(),
+            provider: "github".to_owned(),
+            child_run_links: links,
+            ..Default::default()
+        };
+        let mut findings = Vec::new();
+        check_authoritative_children_from_source(
+            manifest_repo,
+            Some(&inventory),
+            &record,
+            &child_execution,
+            &mut findings,
+        );
+        assert!(
+            findings.is_empty(),
+            "valid nested graph rejected: {findings:?}"
+        );
+
+        let mut wrong_parent = child_execution;
+        wrong_parent.child_runs[1].parent_run_id = wrong_parent.run_id;
+        findings.clear();
+        check_authoritative_children_from_source(
+            manifest_repo,
+            Some(&inventory),
+            &record,
+            &wrong_parent,
+            &mut findings,
+        );
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "child-run-mismatch"));
     }
 
     fn minimal_execution() -> ExecutionObservation {
@@ -8730,6 +8996,7 @@ mod tests {
             },
             &record,
             None,
+            None,
             &mut findings,
         );
         assert!(findings
@@ -8887,7 +9154,7 @@ mod tests {
             bytes_base64: BASE64.encode(b"{}"),
             media_type: "application/json".to_owned(),
             storage_ref: format!(
-                "artifact://sha256/{}",
+                "sha256://{}",
                 digest_bytes(b"{}")
                     .strip_prefix("sha256:")
                     .expect("digest has prefix")
@@ -8915,7 +9182,7 @@ mod tests {
             bytes_base64: BASE64.encode(second_bytes),
             media_type: "application/json".to_owned(),
             storage_ref: format!(
-                "artifact://sha256/{}",
+                "sha256://{}",
                 second_digest
                     .strip_prefix("sha256:")
                     .expect("digest has prefix")
