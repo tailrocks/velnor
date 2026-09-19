@@ -68,7 +68,7 @@ impl RawObjectFileStore {
             ));
         }
 
-        #[cfg(unix)]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             let root_directory = open_secure_directory(&root)?;
             let objects = open_directory_at(&root_directory, "sha256", true)?;
@@ -81,12 +81,12 @@ impl RawObjectFileStore {
             })
         }
 
-        #[cfg(not(unix))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             let _ = root;
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "raw store requires descriptor-relative Unix filesystem primitives",
+                "raw store requires tested macOS or Linux atomic publication primitives",
             ))
         }
     }
@@ -101,6 +101,10 @@ impl RawObjectFileStore {
             return Err(RawStorageError::Refused);
         }
 
+        // One directory FD lock serializes sidecar observation, object
+        // publication, and sidecar publication across store instances and
+        // processes. This is the transaction boundary for the bundle.
+        let _publication_lock = DirectoryLock::acquire(&self.refs)?;
         let sidecar_name = raw_id_name(&object.raw_id)?;
         let safe_digest = sha256_digest(&object.bytes);
         let safe_length =
@@ -120,6 +124,9 @@ impl RawObjectFileStore {
             media_type: object.media_type,
             storage_ref: content_addressed_storage_ref(&safe_digest),
         };
+        if !sidecar_size_within_limit(&reference) {
+            return Err(RawStorageError::Refused);
+        }
         let sidecar_bytes = sidecar_bytes(&reference)?;
         if sidecar_bytes.len() > MAX_RAW_SIDECAR_BYTES {
             return Err(RawStorageError::Refused);
@@ -150,6 +157,13 @@ impl RawObjectFileStore {
         {
             return Err(RawStorageError::Unbound);
         }
+        if !sidecar_size_within_limit(reference) {
+            return Err(RawStorageError::Unbound);
+        }
+        let expected_sidecar = sidecar_bytes(reference)?;
+        if expected_sidecar.len() > MAX_RAW_SIDECAR_BYTES {
+            return Err(RawStorageError::Unbound);
+        }
         let object_name = digest_name(&reference.sha256)?;
         let safe_bytes = read_named(&self.objects, &object_name, MAX_RAW_OBJECT_BYTES)?;
         if safe_bytes.len() as u64 != reference.byte_length
@@ -161,7 +175,6 @@ impl RawObjectFileStore {
 
         let sidecar_name = raw_id_name(&reference.raw_id)?;
         let actual_sidecar = read_named(&self.refs, &sidecar_name, MAX_RAW_SIDECAR_BYTES)?;
-        let expected_sidecar = sidecar_bytes(reference)?;
         if actual_sidecar != expected_sidecar {
             return Err(RawStorageError::Unbound);
         }
@@ -216,6 +229,37 @@ fn sidecar_bytes(reference: &RawObjectRef) -> Result<Vec<u8>, RawStorageError> {
         "storage_ref": reference.storage_ref,
     }))
     .map_err(|_| RawStorageError::Refused)
+}
+
+fn sidecar_size_within_limit(reference: &RawObjectRef) -> bool {
+    // JSON string escaping can expand arbitrary metadata by at most six bytes
+    // per source byte. Base64 is already restricted to one-byte alphabet
+    // characters and is the largest normal field at the 64 MiB payload cap.
+    let escaped_fields = [
+        reference.raw_id.as_str(),
+        reference.request_id.as_str(),
+        reference.object_kind.as_str(),
+        reference.canonicalization.as_str(),
+        reference.sha256.as_str(),
+        reference.original_sha256.as_str(),
+        reference.media_type.as_str(),
+        reference.storage_ref.as_str(),
+    ];
+    let Some(escaped_bytes) = escaped_fields.iter().try_fold(256_usize, |total, field| {
+        total.checked_add(field.len().checked_mul(6)?)
+    }) else {
+        return false;
+    };
+    if !reference
+        .bytes_base64
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
+    {
+        return false;
+    }
+    escaped_bytes
+        .checked_add(reference.bytes_base64.len())
+        .is_some_and(|size| size <= MAX_RAW_SIDECAR_BYTES)
 }
 
 #[cfg(unix)]
@@ -402,7 +446,7 @@ fn open_named(directory: &File, name: &CStr) -> Result<Option<File>, RawStorageE
         libc::openat(
             directory.as_raw_fd(),
             name.as_ptr(),
-            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            libc::O_RDONLY | libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_NOFOLLOW,
         )
     };
     if fd < 0 {
@@ -476,6 +520,11 @@ fn publish_if_absent(
     if bytes.len() > max_bytes {
         return Err(RawStorageError::Refused);
     }
+    match read_named_if_present(directory, name, max_bytes)? {
+        Some(existing) if existing == bytes => return Ok(()),
+        Some(_) => return Err(RawStorageError::Refused),
+        None => {}
+    }
     let mut temporary = TemporaryFile::create(directory)?;
     (|| {
         temporary
@@ -498,7 +547,6 @@ fn publish_if_absent(
             Ok(()) => {
                 // Atomic rename/link moved the temporary name to the final
                 // name. There is no cleanup pathname left to race.
-                temporary.name_removed = true;
                 sync_directory(directory)?;
                 let final_identity = stat_at(directory, name)?;
                 let temporary_identity = stat_fd(&temporary.file).map_err(storage_io)?;
@@ -518,9 +566,12 @@ fn publish_if_absent(
                 Ok(())
             }
             Err(error) if error.raw_os_error() == Some(libc::EEXIST) => {
-                temporary.remove_name(1)?;
-                sync_directory(directory)?;
-                read_existing_published(directory, name, bytes, max_bytes)
+                // A trusted publisher cannot reach this branch while the
+                // refs-directory transaction lock is held. An external
+                // writer raced the immutable install; leave the private temp
+                // for bounded reconciliation instead of unlinking a pathname
+                // whose identity may have changed.
+                Err(RawStorageError::Refused)
             }
             Err(error) => Err(storage_io(error)),
         }
@@ -553,16 +604,17 @@ fn install_no_clobber(directory: &File, temporary: &CStr, final_name: &CStr) -> 
     };
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let result = unsafe {
-        libc::linkat(
-            directory.as_raw_fd(),
-            temporary.as_ptr(),
-            directory.as_raw_fd(),
-            final_name.as_ptr(),
-            0,
-        )
-    };
+    let _ = (directory, temporary, final_name);
 
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "raw store atomic publication is unsupported on this Unix target",
+        ));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     if result < 0 {
         Err(io::Error::last_os_error())
     } else {
@@ -571,45 +623,42 @@ fn install_no_clobber(directory: &File, temporary: &CStr, final_name: &CStr) -> 
 }
 
 #[cfg(unix)]
-fn read_existing_published(
-    directory: &File,
-    name: &CStr,
-    expected: &[u8],
-    max_bytes: usize,
-) -> Result<(), RawStorageError> {
-    // A concurrent publisher briefly leaves two links to the winner's inode:
-    // its private temporary name and the final content-addressed name.  Wait
-    // for that bounded commit window, but never relax the single-link check.
-    for attempt in 0..1024 {
-        match read_named(directory, name, max_bytes) {
-            Ok(existing) if existing == expected => return Ok(()),
-            Ok(_) => return Err(RawStorageError::Refused),
-            Err(RawStorageError::Refused | RawStorageError::Unbound) if attempt < 1023 => {
-                std::thread::yield_now()
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    Err(RawStorageError::Refused)
-}
-
-#[cfg(unix)]
 fn sync_directory(directory: &File) -> Result<(), RawStorageError> {
     directory.sync_all().map_err(storage_io)
 }
 
 #[cfg(unix)]
-struct TemporaryFile<'a> {
+struct DirectoryLock<'a> {
     directory: &'a File,
-    name: CString,
-    identity: FileIdentity,
-    file: File,
-    name_removed: bool,
 }
 
 #[cfg(unix)]
-impl<'a> TemporaryFile<'a> {
-    fn create(directory: &'a File) -> Result<Self, RawStorageError> {
+impl<'a> DirectoryLock<'a> {
+    fn acquire(directory: &'a File) -> Result<Self, RawStorageError> {
+        let result = unsafe { libc::flock(directory.as_raw_fd(), libc::LOCK_EX) };
+        if result < 0 {
+            return Err(storage_io(io::Error::last_os_error()));
+        }
+        Ok(Self { directory })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for DirectoryLock<'_> {
+    fn drop(&mut self) {
+        let _ = unsafe { libc::flock(self.directory.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+#[cfg(unix)]
+struct TemporaryFile {
+    name: CString,
+    file: File,
+}
+
+#[cfg(unix)]
+impl TemporaryFile {
+    fn create(directory: &File) -> Result<Self, RawStorageError> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
         for attempt in 0..64_u32 {
@@ -642,64 +691,9 @@ impl<'a> TemporaryFile<'a> {
             if !identity.is_regular_single_link() {
                 return Err(RawStorageError::Refused);
             }
-            return Ok(Self {
-                directory,
-                name,
-                identity,
-                file,
-                name_removed: false,
-            });
+            return Ok(Self { name, file });
         }
         Err(RawStorageError::Unavailable)
-    }
-
-    fn remove_name(&mut self, expected_links: u64) -> Result<(), RawStorageError> {
-        let Some(named_file) = open_named(self.directory, &self.name)? else {
-            return Err(RawStorageError::Refused);
-        };
-        let named_identity = stat_fd(&named_file).map_err(storage_io)?;
-        let current_identity = stat_fd(&self.file).map_err(storage_io)?;
-        if !named_identity.same_inode(self.identity)
-            || !current_identity.same_inode(self.identity)
-            || named_identity.nlink != expected_links
-            || current_identity.nlink != expected_links
-        {
-            return Err(RawStorageError::Refused);
-        }
-        let result = unsafe { libc::unlinkat(self.directory.as_raw_fd(), self.name.as_ptr(), 0) };
-        if result < 0 {
-            return Err(storage_io(io::Error::last_os_error()));
-        }
-        self.name_removed = true;
-        sync_directory(self.directory)?;
-        Ok(())
-    }
-}
-
-#[cfg(unix)]
-impl Drop for TemporaryFile<'_> {
-    fn drop(&mut self) {
-        if self.name_removed {
-            return;
-        }
-        let Ok(Some(named_file)) = open_named(self.directory, &self.name) else {
-            return;
-        };
-        let Ok(named_identity) = stat_fd(&named_file) else {
-            return;
-        };
-        let Ok(current_identity) = stat_fd(&self.file) else {
-            return;
-        };
-        if !named_identity.same_inode(self.identity)
-            || !current_identity.same_inode(self.identity)
-            || named_identity.nlink > 2
-            || current_identity.nlink > 2
-        {
-            return;
-        }
-        let _ = unsafe { libc::unlinkat(self.directory.as_raw_fd(), self.name.as_ptr(), 0) };
-        let _ = self.directory.sync_all();
     }
 }
 

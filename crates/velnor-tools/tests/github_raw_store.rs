@@ -72,6 +72,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
+use std::time::Instant;
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
@@ -230,6 +231,22 @@ fn accepts_exact_max_payload_but_rejects_max_plus_one_without_publish() {
     remove_fixture(&root);
 }
 
+#[test]
+fn rejects_oversized_sidecar_fields_before_serializing_them() {
+    let root = fixture("sidecar-bound");
+    let mut store = must(RawObjectFileStore::new(&root), "open sidecar-bound store");
+    let reference = must(
+        store.store(capture("sidecar-bound", b"original", b"safe")),
+        "seed sidecar-bound object",
+    );
+    let mut oversized = reference.clone();
+    oversized.request_id = "r".repeat(24 * 1024 * 1024);
+    let started = Instant::now();
+    assert!(store.verify(&oversized).is_err());
+    assert!(started.elapsed().as_secs() < 2);
+    remove_fixture(&root);
+}
+
 #[cfg(unix)]
 #[test]
 fn refuses_root_ancestor_and_child_symlinks() {
@@ -291,6 +308,11 @@ fn refuses_hardlinked_objects_and_sidecars() {
     must(fs::remove_file(&object), "remove object before hardlink");
     must(fs::hard_link(&outside_object, &object), "hardlink object");
     assert!(store.verify(&reference).is_err());
+    let started = Instant::now();
+    assert!(store
+        .store(capture("hardlink-object", b"source-object", safe))
+        .is_err());
+    assert!(started.elapsed().as_secs() < 5);
     must(fs::remove_file(&object), "remove object hardlink");
     must(fs::remove_file(&outside_object), "remove outside object");
 
@@ -347,6 +369,62 @@ fn concurrent_publish_is_no_clobber() {
     }
     let verifier = must(RawObjectFileStore::new(&root), "reopen concurrent store");
     must(verifier.verify(&references[0]), "verify concurrent object");
+    remove_fixture(&root);
+}
+
+#[test]
+fn concurrent_different_payloads_same_raw_id_publish_one_bundle() {
+    let root = fixture("concurrent-collision");
+    let workers = 16;
+    let barrier = Arc::new(Barrier::new(workers));
+    let mut joins = Vec::with_capacity(workers);
+    for worker in 0..workers {
+        let root = root.clone();
+        let barrier = Arc::clone(&barrier);
+        joins.push(thread::spawn(move || {
+            barrier.wait();
+            let mut store = RawObjectFileStore::new(&root)
+                .unwrap_or_else(|error| panic!("open concurrent collision store: {error}"));
+            let source = format!("source-{worker}");
+            let safe = format!("safe-{worker}");
+            store.store(capture("same-raw-id", source.as_bytes(), safe.as_bytes()))
+        }));
+    }
+
+    let mut successes = Vec::new();
+    for join in joins {
+        let result = join
+            .join()
+            .unwrap_or_else(|_| panic!("concurrent collision publisher panicked"));
+        if let Ok(reference) = result {
+            successes.push(reference);
+        }
+    }
+    assert_eq!(successes.len(), 1);
+    assert_eq!(
+        must(
+            fs::read_dir(root.join("sha256")),
+            "read concurrent collision objects",
+        )
+        .count(),
+        1
+    );
+    assert_eq!(
+        must(
+            fs::read_dir(root.join("refs")),
+            "read concurrent collision sidecars",
+        )
+        .count(),
+        1
+    );
+    let verifier = must(
+        RawObjectFileStore::new(&root),
+        "reopen concurrent collision store",
+    );
+    must(
+        verifier.verify(&successes[0]),
+        "verify winning collision bundle",
+    );
     remove_fixture(&root);
 }
 
@@ -420,15 +498,18 @@ fn verification_survives_symlink_and_hardlink_replacement_race() {
 
 #[cfg(unix)]
 #[test]
-fn cleanup_leaves_replaced_temporary_name_instead_of_unlinking_attacker_path() {
-    use std::os::unix::fs::symlink;
-
+fn cleanup_leaves_replaced_regular_temporary_name_instead_of_unlinking_it() {
     let root = fixture("cleanup-race");
     let safe = vec![b'z'; 1024 * 1024];
     let mut store = must(RawObjectFileStore::new(&root), "open cleanup store");
-    must(
+    let reference = must(
         store.store(capture("cleanup-race", b"source", &safe)),
         "seed cleanup object",
+    );
+    let object = object_path(&root, &reference);
+    must(
+        fs::remove_file(&object),
+        "remove object before publication race",
     );
     let object_directory = root.join("sha256");
     let outside = root.join("outside-cleanup");
@@ -442,7 +523,7 @@ fn cleanup_leaves_replaced_temporary_name_instead_of_unlinking_attacker_path() {
     let attacker_stop = Arc::clone(&stop);
     let attacker_replaced = Arc::clone(&replaced);
     let attacker_directory = object_directory.clone();
-    let attacker_outside = outside.clone();
+    let attacker_replacement = object_directory.join("cleanup-attacker-replacement");
     let attacker = thread::spawn(move || {
         while !attacker_stop.load(Ordering::Relaxed) {
             let Ok(entries) = fs::read_dir(&attacker_directory) else {
@@ -455,7 +536,10 @@ fn cleanup_leaves_replaced_temporary_name_instead_of_unlinking_attacker_path() {
                     continue;
                 }
                 let path = entry.path();
-                if fs::remove_file(&path).is_ok() && symlink(&attacker_outside, &path).is_ok() {
+                let _ = fs::remove_file(&attacker_replacement);
+                if fs::write(&attacker_replacement, b"attacker-temporary-file").is_ok()
+                    && fs::rename(&attacker_replacement, &path).is_ok()
+                {
                     attacker_replaced.store(true, Ordering::Relaxed);
                     return;
                 }
@@ -480,16 +564,51 @@ fn cleanup_leaves_replaced_temporary_name_instead_of_unlinking_attacker_path() {
         must(fs::read(&outside), "read cleanup attacker file"),
         b"attacker-bytes"
     );
-    let temporary_symlink = must(
-        fs::read_dir(&object_directory),
-        "read cleanup object directory",
-    )
-    .flatten()
-    .map(|entry| entry.path())
-    .find(|path| {
-        path.file_name()
-            .is_some_and(|name| name.to_string_lossy().starts_with(".velnor-raw-"))
-    });
-    assert!(temporary_symlink.is_some_and(|path| path.is_symlink()));
+    if object.exists() {
+        assert_eq!(
+            must(fs::read(&object), "read replaced final object"),
+            b"attacker-temporary-file"
+        );
+    } else {
+        let temporary = must(fs::read_dir(&object_directory), "read cleanup directory")
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(".velnor-raw-"))
+            })
+            .unwrap_or_else(|| panic!("replaced temporary missing"));
+        assert!(temporary.is_file());
+        assert_eq!(
+            must(fs::read(temporary), "read replaced temporary"),
+            b"attacker-temporary-file"
+        );
+    }
+    remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_fifo_sidecar_without_blocking() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let root = fixture("fifo-sidecar");
+    let mut store = must(RawObjectFileStore::new(&root), "open FIFO store");
+    let reference = must(
+        store.store(capture("fifo-sidecar", b"source", b"safe")),
+        "seed FIFO object",
+    );
+    let sidecar = sidecar_path(&root, &reference);
+    must(fs::remove_file(&sidecar), "remove sidecar for FIFO");
+    let sidecar_c = must(
+        CString::new(sidecar.as_os_str().as_bytes()),
+        "encode FIFO path",
+    );
+    let result = unsafe { libc::mkfifo(sidecar_c.as_ptr(), 0o600) };
+    assert_eq!(result, 0);
+    let started = Instant::now();
+    assert!(store.verify(&reference).is_err());
+    assert!(started.elapsed().as_secs() < 2);
     remove_fixture(&root);
 }
