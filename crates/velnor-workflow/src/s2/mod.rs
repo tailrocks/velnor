@@ -4548,6 +4548,11 @@ pub(crate) struct PolicyJobSpec<'a> {
     /// Declared `[policy]` contexts passed to `--ruleset-contexts` when the
     /// rulesets API answers 403 on private repositories.
     pub(crate) declared_ruleset_contexts: &'a str,
+    /// Whether this is the pull-request-target policy entrypoint that may
+    /// acquire the same-repository candidate producer artifact. Aggregate
+    /// push/schedule policy jobs must never poll a pull-request run for the
+    /// same SHA: those events have no PR association to produce one.
+    pub(crate) acquire_pull_request_candidate: bool,
 }
 
 /// Shell fragment reading the audited tree's declared generator pin into
@@ -4733,6 +4738,7 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
         trusted_gate,
         default_branch,
         declared_ruleset_contexts,
+        acquire_pull_request_candidate,
     } = *spec;
     let trusted_gate = trusted_gate.unwrap_or_default();
     let hosted = cache_backend == "github";
@@ -4782,7 +4788,7 @@ pub(crate) fn policy_job(spec: &PolicyJobSpec<'_>) -> String {
         String::new()
     };
     let renderer = if hosted {
-        if owner {
+        if owner && acquire_pull_request_candidate {
             policy_candidate_step(revision)
         } else {
             policy_renderer_steps(repository, revision)
@@ -4873,6 +4879,7 @@ pub(crate) fn render_policy_entrypoint(config: &ProjectConfig) -> String {
         trusted_gate: None,
         default_branch: &config.default_branch,
         declared_ruleset_contexts: &declared_ruleset_contexts,
+        acquire_pull_request_candidate: true,
     });
     let concurrency = policy_concurrency_block(config);
     // `workflow_dispatch` lets a maintainer prove the validator the base
@@ -14627,6 +14634,7 @@ lockfile = true
             trusted_gate: None,
             default_branch: "main",
             declared_ruleset_contexts: "ci-required,DCO,Policy",
+            acquire_pull_request_candidate: true,
         })
     }
 
@@ -14640,6 +14648,7 @@ lockfile = true
             trusted_gate: None,
             default_branch: "main",
             declared_ruleset_contexts: "ci-required,DCO,Policy",
+            acquire_pull_request_candidate: false,
         })
     }
 
@@ -15591,6 +15600,27 @@ lockfile = true
             !consumer.contains("Acquire candidate generator product"),
             "{consumer}"
         );
+    }
+
+    #[test]
+    fn aggregate_owner_policy_does_not_poll_a_pull_request_run() {
+        let job = policy_job(&PolicyJobSpec {
+            name: "Policy",
+            revision: "abc123",
+            runner: "ubuntu-24.04",
+            repository: workflow_setup_action_repository(),
+            cache_backend: "github",
+            trusted_gate: None,
+            default_branch: "main",
+            declared_ruleset_contexts: "ci-required,DCO,Policy",
+            acquire_pull_request_candidate: false,
+        });
+        assert!(
+            !job.contains("Acquire candidate generator product"),
+            "{job}"
+        );
+        assert!(!job.contains("event=pull_request"), "{job}");
+        assert!(job.contains("Read declared generator pin"), "{job}");
     }
 
     #[test]

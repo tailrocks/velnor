@@ -601,6 +601,7 @@ fn owner_entrypoint_pin_ignores_variable_references() {
         trusted_gate: None,
         default_branch: "main",
         declared_ruleset_contexts: "ci-required,Policy",
+        acquire_pull_request_candidate: true,
     });
     assert!(job.contains("--rev=\"$pin\""), "{job}");
     assert!(
@@ -700,6 +701,7 @@ fn velnor_entrypoint_is_gated_and_never_builds_the_pin() {
         trusted_gate: Some(&crate::s2::control_plane_trusted_gate("main")),
         default_branch: "main",
         declared_ruleset_contexts: "ci-required,Policy",
+        acquire_pull_request_candidate: false,
     });
     assert!(!job.contains("--pin-build"), "{job}");
     assert!(job.contains("    if: ${{ github.event_name == 'pull_request_target' ||"));
@@ -1401,6 +1403,7 @@ fn rendered_entrypoints_pass_the_legacy_space_marker_scan() {
             trusted_gate: None,
             default_branch: "main",
             declared_ruleset_contexts: "ci-required,Policy",
+            acquire_pull_request_candidate: false,
         });
         let mut values = Vec::new();
         for line in job.lines() {

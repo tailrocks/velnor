@@ -4671,6 +4671,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             trusted_gate: None,
             default_branch: &self.default_branch,
             declared_ruleset_contexts: &self.declared_ruleset_contexts,
+            acquire_pull_request_candidate: false,
         }));
     }
 
