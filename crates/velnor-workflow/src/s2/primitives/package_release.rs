@@ -18,6 +18,20 @@ use crate::s2::{
     GeneratorError, ProjectConfig, GENERATED_HEADER,
 };
 
+const GLOBAL_PUBLISH_CONCURRENCY_GROUP: &str = "package-release-global-publish";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VersionFormat {
+    Channel,
+    Semver,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ManifestFormat {
+    CoreV1,
+    SupportingAssetsV1,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PackageReleaseSpec {
     build_tasks: Vec<String>,
@@ -28,6 +42,8 @@ struct PackageReleaseSpec {
     payloads: Vec<String>,
     supporting_assets: Vec<String>,
     channel: String,
+    manifest_format: ManifestFormat,
+    version_format: VersionFormat,
     release_tag: String,
     github_release_type: String,
     publish_environment: String,
@@ -56,6 +72,7 @@ impl Primitive for PackageRelease {
             "consumer_repository",
             "github_release_type",
             "manifest_schema",
+            "manifest_format",
             "package_dir",
             "payloads",
             "publish_environment",
@@ -67,6 +84,7 @@ impl Primitive for PackageRelease {
             "update_commit_message",
             "updater",
             "updater_token_secret",
+            "version_format",
         ]
     }
 
@@ -77,6 +95,7 @@ impl Primitive for PackageRelease {
                 "package-release requires the github-hosted provider for GitHub release and attestation APIs",
             ));
         }
+        validate_release_runner(ctx.config)?;
         if !ctx.config.repository.is_empty() && ctx.config.repository != spec.source_repository {
             return Err(GeneratorError::usage(format!(
                 "package-release source_repository {} must match scanned repository {}",
@@ -105,6 +124,14 @@ fn validate_one_line(key: &str, value: &str) -> Result<(), GeneratorError> {
         )));
     }
     Ok(())
+}
+
+fn default_release_title_prefix(channel: &str) -> String {
+    let mut prefix = channel.to_owned();
+    if let Some(first) = prefix.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    prefix
 }
 
 fn validate_repository(key: &str, value: &str) -> Result<(), GeneratorError> {
@@ -307,11 +334,6 @@ fn parse_spec(args: &Args<'_>) -> Result<PackageReleaseSpec, GeneratorError> {
     }
 
     let supporting_assets = args.strings("supporting_assets")?.unwrap_or_default();
-    if supporting_assets.is_empty() {
-        return Err(GeneratorError::usage(
-            "package-release needs non-empty supporting_assets for sidecars and provenance",
-        ));
-    }
     for asset in &supporting_assets {
         validate_asset_name("supporting_assets", asset)?;
         if !names.insert(asset.clone()) {
@@ -332,6 +354,24 @@ fn parse_spec(args: &Args<'_>) -> Result<PackageReleaseSpec, GeneratorError> {
             "package-release channel must be a portable release-channel token",
         ));
     }
+    let version_format = match required_string(args, "version_format")?.as_str() {
+        "channel" => VersionFormat::Channel,
+        "semver" => VersionFormat::Semver,
+        _ => {
+            return Err(GeneratorError::usage(
+                "package-release version_format must be `channel` or `semver`",
+            ));
+        }
+    };
+    let manifest_format = match required_string(args, "manifest_format")?.as_str() {
+        "core-v1" => ManifestFormat::CoreV1,
+        "supporting-assets-v1" => ManifestFormat::SupportingAssetsV1,
+        _ => {
+            return Err(GeneratorError::usage(
+                "package-release manifest_format must be `core-v1` or `supporting-assets-v1`",
+            ));
+        }
+    };
     let release_tag = required_string(args, "release_tag")?;
     if !crate::s2::runtime::valid_package(&release_tag) {
         return Err(GeneratorError::usage(
@@ -342,6 +382,53 @@ fn parse_spec(args: &Args<'_>) -> Result<PackageReleaseSpec, GeneratorError> {
     if !matches!(github_release_type.as_str(), "prerelease" | "release") {
         return Err(GeneratorError::usage(
             "package-release github_release_type must be `prerelease` or `release` from the target repository policy",
+        ));
+    }
+    match (github_release_type.as_str(), version_format) {
+        ("prerelease", VersionFormat::Channel) | ("release", VersionFormat::Semver) => {}
+        ("prerelease", VersionFormat::Semver) => {
+            return Err(GeneratorError::usage(
+                "package-release prerelease lanes require version_format = `channel`",
+            ));
+        }
+        ("release", VersionFormat::Channel) => {
+            return Err(GeneratorError::usage(
+                "package-release release lanes require version_format = `semver`",
+            ));
+        }
+        _ => {
+            return Err(GeneratorError::usage(
+                "package-release release type and version format are not a supported pair",
+            ));
+        }
+    }
+    match (manifest_format, supporting_assets.is_empty()) {
+        (ManifestFormat::CoreV1, true) | (ManifestFormat::SupportingAssetsV1, false) => {}
+        (ManifestFormat::CoreV1, false) => {
+            return Err(GeneratorError::usage(
+                "package-release manifest_format = `core-v1` requires an empty supporting_assets list",
+            ));
+        }
+        (ManifestFormat::SupportingAssetsV1, true) => {
+            return Err(GeneratorError::usage(
+                "package-release manifest_format = `supporting-assets-v1` requires supporting_assets",
+            ));
+        }
+    }
+    if github_release_type == "prerelease" && manifest_format != ManifestFormat::SupportingAssetsV1
+    {
+        return Err(GeneratorError::usage(
+            "package-release prerelease lanes require manifest_format = `supporting-assets-v1`",
+        ));
+    }
+    if channel == "preview" && github_release_type != "prerelease" {
+        return Err(GeneratorError::usage(
+            "package-release preview channel requires github_release_type = `prerelease`",
+        ));
+    }
+    if channel == "stable" && github_release_type != "release" {
+        return Err(GeneratorError::usage(
+            "package-release stable channel requires github_release_type = `release`",
         ));
     }
     let publish_environment = required_string(args, "publish_environment")?;
@@ -356,7 +443,7 @@ fn parse_spec(args: &Args<'_>) -> Result<PackageReleaseSpec, GeneratorError> {
     let release_title_prefix = args
         .string("release_title_prefix")?
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "Preview".to_owned());
+        .unwrap_or_else(|| default_release_title_prefix(&channel));
     validate_one_line("release_title_prefix", &release_title_prefix)?;
     let consumer_repository = required_string(args, "consumer_repository")?;
     validate_repository("consumer_repository", &consumer_repository)?;
@@ -378,11 +465,21 @@ fn parse_spec(args: &Args<'_>) -> Result<PackageReleaseSpec, GeneratorError> {
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "chore: update verified package metadata".to_owned());
     validate_one_line("update_commit_message", &update_commit_message)?;
-    let concurrency_group = args
+    let concurrency_group = format!("package-release-{release_tag}");
+    if args
         .string("concurrency_group")?
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "package-release-preview".to_owned());
-    validate_one_line("concurrency_group", &concurrency_group)?;
+        .is_some_and(|configured| configured != concurrency_group)
+    {
+        return Err(GeneratorError::usage(
+            "package-release concurrency_group is derived from release_tag and cannot be overridden",
+        ));
+    }
+    if concurrency_group.eq_ignore_ascii_case(GLOBAL_PUBLISH_CONCURRENCY_GROUP) {
+        return Err(GeneratorError::usage(
+            "package-release release_tag maps to the reserved global publish concurrency group",
+        ));
+    }
 
     Ok(PackageReleaseSpec {
         build_tasks,
@@ -393,6 +490,8 @@ fn parse_spec(args: &Args<'_>) -> Result<PackageReleaseSpec, GeneratorError> {
         payloads,
         supporting_assets,
         channel,
+        manifest_format,
+        version_format,
         release_tag,
         github_release_type,
         publish_environment,
@@ -424,6 +523,32 @@ fn release_runner(config: &ProjectConfig) -> (ProviderId, String) {
     (provider, runner)
 }
 
+fn validate_release_runner(config: &ProjectConfig) -> Result<(), GeneratorError> {
+    let Some(selector) = config.selectors.get(&ProviderId::GithubHosted) else {
+        return Ok(());
+    };
+    let is_supported_ubuntu = matches!(
+        selector.runs_on.as_slice(),
+        [label]
+            if matches!(
+                label.as_str(),
+                "ubuntu-latest"
+                    | "ubuntu-22.04"
+                    | "ubuntu-24.04"
+                    | "ubuntu-26.04"
+                    | "ubuntu-22.04-arm"
+                    | "ubuntu-24.04-arm"
+                    | "ubuntu-26.04-arm"
+            )
+    );
+    if !is_supported_ubuntu {
+        return Err(GeneratorError::usage(
+            "package-release requires one standard GitHub-hosted Ubuntu runner label for Bash and GNU package verification tools",
+        ));
+    }
+    Ok(())
+}
+
 fn indent_script(script: &str, spaces: usize) -> String {
     let prefix = " ".repeat(spaces);
     let mut indented = String::new();
@@ -450,13 +575,14 @@ manifest="$dir/release-manifest.json"
 identity="$dir/identity.json"
 test -s "$manifest"
 test -s "$identity"
-expected_files="$(mktemp)"
-actual_files="$(mktemp)"
-expected_names="$(mktemp)"
-actual_names="$(mktemp)"
-checksum_names="$(mktemp)"
-expected_supporting_names="$(mktemp)"
-actual_supporting_names="$(mktemp)"
+verification_temp_dir="${VELNOR_VERIFICATION_TEMP_DIR:-${TMPDIR:-/tmp}}"
+expected_files="$(mktemp "$verification_temp_dir/expected-files.XXXXXX")"
+actual_files="$(mktemp "$verification_temp_dir/actual-files.XXXXXX")"
+expected_names="$(mktemp "$verification_temp_dir/expected-names.XXXXXX")"
+actual_names="$(mktemp "$verification_temp_dir/actual-names.XXXXXX")"
+checksum_names="$(mktemp "$verification_temp_dir/checksum-names.XXXXXX")"
+expected_supporting_names="$(mktemp "$verification_temp_dir/expected-supporting-names.XXXXXX")"
+actual_supporting_names="$(mktemp "$verification_temp_dir/actual-supporting-names.XXXXXX")"
 trap 'rm -f -- "$expected_files" "$actual_files" "$expected_names" "$actual_names" "$checksum_names" "$expected_supporting_names" "$actual_supporting_names"' EXIT
 {
   printf '%s\n' "release-manifest.json" "identity.json"
@@ -494,31 +620,20 @@ esac
 actual_source_repository="${actual_source_repository%.git}"
 [ "$actual_source_repository" = "$EXPECTED_SOURCE_REPOSITORY" ] || { echo "::error::source checkout repository does not match the declared repository" >&2; exit 1; }
 source_commit="$(jq -er '.source_commit | strings' "$manifest")"
+__MANIFEST_VERSION_GUARD__
 version="$(jq -er '.version | strings' "$manifest")"
 [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::manifest source_commit is not 40 lowercase hex" >&2; exit 1; }
 [ "$source_commit" = "$actual_source_commit" ] || { echo "::error::manifest source_commit is not the checked-out commit" >&2; exit 1; }
-[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-([A-Za-z0-9_-]+)\.[0-9]+\+[0-9a-f]{7}$ ]] || { echo "::error::manifest version is not a source-bound channel version" >&2; exit 1; }
-[ "${BASH_REMATCH[1]}" = "$VELNOR_PACKAGE_CHANNEL" ] || { echo "::error::manifest version channel does not match the configured channel" >&2; exit 1; }
-short_commit="$(printf '%s' "$source_commit" | cut -c1-7)"
-version_suffix="$(printf '%s' "$version" | awk -F+ '{print $2}')"
-[ "$version_suffix" = "$short_commit" ] || { echo "::error::version does not bind its source commit" >&2; exit 1; }
+__VERSION_VALIDATION__
 jq -e \
   --arg schema "$EXPECTED_MANIFEST_SCHEMA" \
   --arg repository "$EXPECTED_SOURCE_REPOSITORY" \
   --arg source_ref "$EXPECTED_SOURCE_REF" \
   --arg commit "$source_commit" \
   --slurpfile package_manifest "$manifest" \
-  'keys == ["assets","schema","source_commit","source_ref","source_repository","supporting_assets","version"] and
+  '__MANIFEST_SHAPE_VALIDATION__ and
    .schema == $schema and .source_repository == $repository and
-   .source_ref == $source_ref and .source_commit == $commit and
-   (.assets | type == "array" and
-    all(.[]; type == "object" and (keys == ["name","sha256"]) and
-      (.name | strings | length > 0) and
-      (.sha256 | strings | test("^[0-9a-f]{64}$")))) and
-   (.supporting_assets | type == "array" and
-    all(.[]; type == "object" and (keys == ["name","sha256"]) and
-      (.name | strings | length > 0) and
-      (.sha256 | strings | test("^[0-9a-f]{64}$"))))' "$manifest" >/dev/null
+   .source_ref == $source_ref and .source_commit == $commit' "$manifest" >/dev/null
 jq -e \
   --arg repository "$EXPECTED_SOURCE_REPOSITORY" \
   --arg source_ref "$EXPECTED_SOURCE_REF" \
@@ -556,17 +671,18 @@ for name in \
         r#"; do
   test -s "$dir/$name"
   expected="$(jq -er --arg name "$name" '[.assets[] | select(.name == $name)] | select(length == 1) | .[0].sha256 | select(test("^[0-9a-f]{64}$"))' "$manifest")"
-  actual="$(sha256sum "$dir/$name" | awk '{print $1}')"
+ actual="$(sha256sum "$dir/$name" | awk '{print $1}')"
   [ "$actual" = "$expected" ] || { echo "::error::payload checksum mismatch: $name" >&2; exit 1; }
  done
-{
 "#,
     );
-    for name in &spec.supporting_assets {
-        let _ = writeln!(script, "  printf '%s\\n' {}", shell_quote(name));
-    }
-    script.push_str(
-        r#"} | LC_ALL=C sort > "$expected_supporting_names"
+    if !spec.supporting_assets.is_empty() {
+        script.push_str("{\n");
+        for name in &spec.supporting_assets {
+            let _ = writeln!(script, "  printf '%s\\n' {}", shell_quote(name));
+        }
+        script.push_str(
+            r#"} | LC_ALL=C sort > "$expected_supporting_names"
 jq -r '.supporting_assets[].name' "$manifest" | LC_ALL=C sort > "$actual_supporting_names"
 if ! cmp -s "$expected_supporting_names" "$actual_supporting_names"; then
   echo "::error::manifest supporting assets do not equal the declared supporting assets" >&2
@@ -574,16 +690,16 @@ if ! cmp -s "$expected_supporting_names" "$actual_supporting_names"; then
 fi
 for name in \
 "#,
-    );
-    for (index, name) in spec.supporting_assets.iter().enumerate() {
-        let suffix = if index + 1 == spec.supporting_assets.len() {
-            ""
-        } else {
-            " \\\n"
-        };
-        let _ = write!(script, "  {}{}", shell_quote(name), suffix);
-    }
-    script.push_str(
+        );
+        for (index, name) in spec.supporting_assets.iter().enumerate() {
+            let suffix = if index + 1 == spec.supporting_assets.len() {
+                ""
+            } else {
+                " \\\n"
+            };
+            let _ = write!(script, "  {}{}", shell_quote(name), suffix);
+        }
+        script.push_str(
         r#"; do
   test -s "$dir/$name"
   expected="$(jq -er --arg name "$name" '[.supporting_assets[] | select(.name == $name)] | select(length == 1) | .[0].sha256 | select(test("^[0-9a-f]{64}$"))' "$manifest")"
@@ -593,20 +709,21 @@ done
 for name in \
 "#,
     );
-    for (index, name) in spec.supporting_assets.iter().enumerate() {
-        let suffix = if index + 1 == spec.supporting_assets.len() {
-            ""
-        } else {
-            " \\\n"
-        };
-        let _ = write!(script, "  {}{}", shell_quote(name), suffix);
-    }
-    script.push_str(
-        r#"; do
+        for (index, name) in spec.supporting_assets.iter().enumerate() {
+            let suffix = if index + 1 == spec.supporting_assets.len() {
+                ""
+            } else {
+                " \\\n"
+            };
+            let _ = write!(script, "  {}{}", shell_quote(name), suffix);
+        }
+        script.push_str(
+            r#"; do
   test -s "$dir/$name"
 done
 "#,
-    );
+        );
+    }
     if spec
         .supporting_assets
         .iter()
@@ -696,6 +813,14 @@ fi
 printf 'source_commit=%s\n' "$source_commit" >> "$GITHUB_OUTPUT"
 "#,
     );
+    let version_checks =
+        version_validation_script(spec.version_format, "version", "source_commit", "manifest");
+    script = script.replace("__VERSION_VALIDATION__", &version_checks);
+    script = script.replace(
+        "__MANIFEST_SHAPE_VALIDATION__",
+        &manifest_shape_validation(spec),
+    );
+    script = script.replace("__MANIFEST_VERSION_GUARD__", manifest_version_line_guard());
     script
 }
 
@@ -707,6 +832,123 @@ fn release_asset_names(spec: &PackageReleaseSpec) -> Vec<String> {
     names.extend(spec.payloads.iter().cloned());
     names.extend(spec.supporting_assets.iter().cloned());
     names
+}
+
+fn manifest_shape_validation(spec: &PackageReleaseSpec) -> String {
+    let mut query = format!("{} and\n", manifest_key_validation(spec));
+    query.push_str(
+        r#"   (.assets | type == "array" and
+    all(.[]; type == "object" and (keys == ["name","sha256"]) and
+      (.name | strings | length > 0) and
+      (.sha256 | strings | test("^[0-9a-f]{64}$"))))
+"#,
+    );
+    if spec.manifest_format == ManifestFormat::CoreV1 {
+        query.push_str(
+            r"   and ((.assets | map(.name)) as $names |
+    ($names | unique | length) == ($names | length))",
+        );
+    } else {
+        query.push_str(
+            r#"   and (.supporting_assets | type == "array" and
+    all(.[]; type == "object" and (keys == ["name","sha256"]) and
+      (.name | strings | length > 0) and
+      (.sha256 | strings | test("^[0-9a-f]{64}$"))))
+   and ((.assets + .supporting_assets | map(.name)) as $names |
+    ($names | unique | length) == ($names | length))"#,
+        );
+    }
+    query
+}
+
+fn manifest_key_validation(spec: &PackageReleaseSpec) -> &'static str {
+    match spec.manifest_format {
+        ManifestFormat::CoreV1 => {
+            r#"keys == ["assets","schema","source_commit","source_ref","source_repository","version"]"#
+        }
+        ManifestFormat::SupportingAssetsV1 => {
+            r#"keys == ["assets","schema","source_commit","source_ref","source_repository","supporting_assets","version"]"#
+        }
+    }
+}
+
+fn latest_manifest_identity_validation() -> &'static str {
+    r".schema == $schema and .source_repository == $repository and
+   .source_ref == $source_ref and .source_commit == $commit"
+}
+
+fn latest_identity_envelope_validation() -> &'static str {
+    r#"keys == ["manifest","source_digest","source_ref","source_repository"] and
+   .source_repository == $repository and .source_ref == $source_ref and
+   .source_digest == $commit and .manifest == $latest_manifest[0]"#
+}
+
+/// Reject line breaks on the raw JSON string before command substitution can
+/// strip trailing newlines and turn an invalid version into a valid one.
+fn manifest_version_line_guard() -> &'static str {
+    r#"jq -e '.version | type == "string" and ((contains("\n") or contains("\r") or contains("\u0000")) | not)' "$manifest" >/dev/null || { echo "::error::manifest version must be a single-line JSON string without NUL bytes" >&2; exit 1; }"#
+}
+
+fn known_manifest_shape_validation() -> &'static str {
+    r#"((keys == ["assets","schema","source_commit","source_ref","source_repository","version"]) or
+    (keys == ["assets","schema","source_commit","source_ref","source_repository","supporting_assets","version"])) and
+   (.assets | type == "array" and
+    all(.[]; type == "object" and (keys == ["name","sha256"]) and
+      (.name | strings | length > 0) and
+      (.sha256 | strings | test("^[0-9a-f]{64}$")))) and
+   (if has("supporting_assets") then
+      (.supporting_assets | type == "array" and
+        all(.[]; type == "object" and (keys == ["name","sha256"]) and
+          (.name | strings | length > 0) and
+          (.sha256 | strings | test("^[0-9a-f]{64}$")))) and
+      ((.assets + .supporting_assets | map(.name)) as $names |
+        ($names | unique | length) == ($names | length))
+    else
+      ((.assets | map(.name)) as $names |
+        ($names | unique | length) == ($names | length))
+    end)"#
+}
+
+fn version_validation_script(
+    format: VersionFormat,
+    version_variable: &str,
+    commit_variable: &str,
+    error_context: &str,
+) -> String {
+    let mut script = String::new();
+    match format {
+        VersionFormat::Channel => {
+            let _ = writeln!(
+                script,
+                r#"[[ "${version_variable}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-([A-Za-z0-9_-]+)\.(0|[1-9][0-9]*)\+([0-9a-f]{{7}})$ ]] || {{ echo "::error::{error_context} version is not a source-bound channel version" >&2; exit 1; }}"#
+            );
+            let _ = writeln!(
+                script,
+                r#"[ "${{BASH_REMATCH[4]}}" = "$VELNOR_PACKAGE_CHANNEL" ] || {{ echo "::error::{error_context} version channel does not match the configured channel" >&2; exit 1; }}"#
+            );
+            let _ = writeln!(
+                script,
+                r#"[ "${{{version_variable}##*+}}" = "${{{commit_variable}:0:7}}" ] || {{ echo "::error::{error_context} version does not bind its source commit" >&2; exit 1; }}"#
+            );
+        }
+        VersionFormat::Semver => {
+            let _ = writeln!(
+                script,
+                r#"[[ "${version_variable}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {{ echo "::error::{error_context} version is not strict semantic versioning" >&2; exit 1; }}"#
+            );
+        }
+    }
+    script
+}
+
+fn version_validation_return_script(
+    format: VersionFormat,
+    version_variable: &str,
+    commit_variable: &str,
+    error_context: &str,
+) -> String {
+    version_validation_script(format, version_variable, commit_variable, error_context)
+        .replace("exit 1", "return 1")
 }
 
 #[allow(clippy::too_many_lines)]
@@ -745,7 +987,6 @@ fn render_workflow(
     ));
     let package_dir_yaml = crate::s2::yaml_scalar(&spec.package_dir);
     let package_dir = spec.package_dir.as_str();
-    let package_path_yaml = crate::s2::yaml_scalar(&format!("{workspace_expr}/{package_dir}"));
     let channel_yaml = crate::s2::yaml_scalar(&spec.channel);
     let source_repository_yaml = crate::s2::yaml_scalar(&spec.source_repository);
     let source_ref_yaml = crate::s2::yaml_scalar(&spec.source_ref);
@@ -775,6 +1016,13 @@ fn render_workflow(
     for name in &attested_assets {
         let _ = writeln!(
             attestation_subjects,
+            "            {workspace_expr}/{package_dir}/{name}"
+        );
+    }
+    let mut artifact_upload_paths = String::new();
+    for name in release_asset_names(spec) {
+        let _ = writeln!(
+            artifact_upload_paths,
             "            {workspace_expr}/{package_dir}/{name}"
         );
     }
@@ -814,7 +1062,7 @@ fn render_workflow(
     );
     let _ = writeln!(
         output,
-        "jobs:\n  build:\n    name: Verify package release\n    if: {build_if}\n    runs-on: {runner}\n    timeout-minutes: 90\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    outputs:\n      version: {}\n      source_commit: {}\n    env:\n      PACKAGE_DIR: {package_dir_yaml}\n      VELNOR_VERIFIED_PACKAGE_DIR: {workspace_expr}/{package_dir}\n      VELNOR_PACKAGE_CHANNEL: {channel_yaml}\n      EXPECTED_SOURCE_REPOSITORY: {source_repository_yaml}\n      EXPECTED_SOURCE_REF: {source_ref_yaml}\n      EXPECTED_MANIFEST_SCHEMA: {schema_yaml}\n      EXPECTED_SOURCE_COMMIT: {source_commit_expr}\n",
+        "jobs:\n  build:\n    name: Verify package release\n    if: {build_if}\n    runs-on: {runner}\n    defaults:\n      run:\n        shell: bash\n    timeout-minutes: 90\n    permissions:\n      contents: read\n      id-token: write\n      attestations: write\n    outputs:\n      version: {}\n      source_commit: {}\n    env:\n      PACKAGE_DIR: {package_dir_yaml}\n      VELNOR_VERIFIED_PACKAGE_DIR: {workspace_expr}/{package_dir}\n      VELNOR_PACKAGE_CHANNEL: {channel_yaml}\n      EXPECTED_SOURCE_REPOSITORY: {source_repository_yaml}\n      EXPECTED_SOURCE_REF: {source_ref_yaml}\n      EXPECTED_MANIFEST_SCHEMA: {schema_yaml}\n      EXPECTED_SOURCE_COMMIT: {source_commit_expr}\n",
         github_expression("steps.verify.outputs.version"),
         github_expression("steps.verify.outputs.source_commit"),
     );
@@ -826,16 +1074,12 @@ fn render_workflow(
     );
     let _ = writeln!(
         output,
-        "    steps:\n      - name: Checkout source\n        uses: {checkout}\n        with:\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false\n      - name: Enforce workflow policy\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Build verified package directory\n        env:\n          VELNOR_SOURCE_COMMIT: {source_commit_expr}\n          VELNOR_SOURCE_REF: {source_shell}\n        run: |\n          set -euo pipefail\n          mkdir -p \"$VELNOR_VERIFIED_PACKAGE_DIR\"\n{tasks}      - name: Verify manifest, identity, checksums, and exact file set\n        id: verify\n        run: |\n{build_verify}      - name: Attest declared payloads\n        uses: {attest}\n        with:\n          subject-path: |\n{attestation_subjects}      - name: Upload verified package handoff\n        uses: {upload}\n        with:\n          name: package-release\n          path: {workspace_expr}/{package_dir}\n          if-no-files-found: error\n          retention-days: 2\n",
+        "    steps:\n      - name: Checkout source\n        uses: {checkout}\n        with:\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false\n      - name: Enforce workflow policy\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Build verified package directory\n        env:\n          VELNOR_SOURCE_COMMIT: {source_commit_expr}\n          VELNOR_SOURCE_REF: {source_shell}\n        run: |\n          set -euo pipefail\n          mkdir -p \"$VELNOR_VERIFIED_PACKAGE_DIR\"\n{tasks}      - name: Verify manifest, identity, checksums, and exact file set\n        id: verify\n        run: |\n{build_verify}      - name: Attest declared payloads\n        uses: {attest}\n        with:\n          subject-path: |\n{attestation_subjects}      - name: Upload verified package handoff\n        uses: {upload}\n        with:\n          name: package-release\n          path: |\n{artifact_upload_paths}          include-hidden-files: true\n          if-no-files-found: error\n          retention-days: 2\n",
     );
     output = output.replace("Attest declared payloads", "Attest declared package assets");
     output = output.replace(
         "          install: false\n      - name: Enforce workflow policy",
         "          install: false\n      - name: Install locked build tools\n        run: mise --yes install --locked --include-task-tools\n      - name: Enforce workflow policy",
-    );
-    output = output.replace(
-        &format!("          path: {workspace_expr}/{package_dir}\n"),
-        &format!("          path: {package_path_yaml}\n"),
     );
     output.push('\n');
     output.push_str(&render_publish_job(
@@ -860,7 +1104,6 @@ fn render_workflow(
         &consumer_branch_yaml,
         &updater_yaml,
         &message_yaml,
-        &concurrency_yaml,
     ));
     output = output.replace(
         "git -C source ls-remote origin",
@@ -888,23 +1131,38 @@ struct PublishVerification<'a> {
 
 #[allow(clippy::too_many_lines)]
 fn render_rolling_refresh_script(
+    spec: &PackageReleaseSpec,
     published_assets: &str,
     expected_asset_names: &str,
-    payload_names: &str,
+    attested_asset_names: &str,
     verification: &PublishVerification<'_>,
 ) -> String {
+    let inline_verification = verification.script.replace(
+        r#"trap 'rm -f -- "$expected_files" "$actual_files" "$expected_names" "$actual_names" "$checksum_names" "$expected_supporting_names" "$actual_supporting_names"' EXIT"#,
+        "# temporary files are inside transaction_dir; on_exit removes them",
+    );
     let mut script = String::from(
         r#"set -Eeuo pipefail
 case "$RELEASE_PRERELEASE" in
   true|false) ;;
   *) echo "::error::invalid configured GitHub release type" >&2; exit 1 ;;
 esac
+ROLLING_PREFLIGHT_ONLY="${ROLLING_PREFLIGHT_ONLY:-false}"
+case "$ROLLING_PREFLIGHT_ONLY" in
+  true|false) ;;
+  *) echo "::error::invalid rolling release preflight mode" >&2; exit 1 ;;
+esac
 rolling_tag="$RELEASE_TAG"
 staged_tag="$RELEASE_TAG-$EXPECTED_SOURCE_COMMIT"
-published_dir="$GITHUB_WORKSPACE/published-package"
+if [ "$ROLLING_PREFLIGHT_ONLY" = true ]; then
+  published_dir="$GITHUB_WORKSPACE/$PACKAGE_DIR"
+else
+  published_dir="$GITHUB_WORKSPACE/published-package"
+fi
 transaction_dir="$(mktemp -d)"
 rolling_response="$transaction_dir/rolling-response"
 rolling_body="$transaction_dir/rolling.json"
+latest_response="$transaction_dir/latest-response"
 expected_assets="$transaction_dir/expected-assets"
 old_assets="$transaction_dir/old-assets"
 staged_assets="$transaction_dir/staged-assets"
@@ -913,24 +1171,119 @@ rolling_published_assets="$transaction_dir/rolling-published-assets"
 rollback_dir="$transaction_dir/old-package"
 rolling_release_id=""
 old_tag_sha=""
+old_tag_ref_sha=""
 old_name=""
-old_body=""
+old_body_file="$transaction_dir/old-release-body"
 old_draft=""
 old_prerelease=""
+old_make_latest=false
 old_source_commit=""
 old_version=""
-candidate_version="$(jq -er '.version | strings' "$published_dir/release-manifest.json")"
+manifest="$published_dir/release-manifest.json"
+__MANIFEST_VERSION_GUARD__
+candidate_version="$(jq -er '.version | strings' "$manifest")"
 had_release=0
 mutated=0
 
 remote_tag_sha() {
   local tag_name="$1"
-  local sha
-  sha="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name^{}" | awk 'NR == 1 {print $1}')"
+  local result sha
+  if ! result="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name^{}")"; then
+    echo "::error::failed to query remote tag: $tag_name" >&2
+    return 1
+  fi
+  sha="$(awk 'NR == 1 {print $1}' <<<"$result")"
   if [ -z "$sha" ]; then
-    sha="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name" | awk 'NR == 1 {print $1}')"
+    if ! result="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name")"; then
+      echo "::error::failed to query remote tag: $tag_name" >&2
+      return 1
+    fi
+    sha="$(awk 'NR == 1 {print $1}' <<<"$result")"
+  fi
+  if [ -n "$sha" ] && ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "::error::remote tag returned an invalid object id: $tag_name" >&2
+    return 1
   fi
   printf '%s\n' "$sha"
+}
+
+remote_tag_ref_sha() {
+  local tag_name="$1"
+  local ref="refs/tags/$tag_name"
+  local result sha
+  if ! result="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "$ref")"; then
+    echo "::error::failed to query remote tag ref: $tag_name" >&2
+    return 1
+  fi
+  sha="$(awk -v ref="$ref" '$2 == ref {print $1}' <<<"$result")"
+  if [ -n "$sha" ] && ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "::error::remote tag ref returned an invalid object id: $tag_name" >&2
+    return 1
+  fi
+  printf '%s\n' "$sha"
+}
+
+verify_latest_floor() {
+  if [ "$RELEASE_LATEST" != true ]; then
+    return 0
+  fi
+  local latest_dir="$transaction_dir/latest-floor"
+  local manifest identity latest_tag_sha latest_attested_asset
+  mkdir -p "$latest_dir"
+  if ! gh release download "$latest_tag" --repo "$GITHUB_REPOSITORY" --dir "$latest_dir" \
+      --pattern release-manifest.json --pattern identity.json; then
+    echo "::error::current GitHub Latest release has no readable package identity; refusing to publish stable release" >&2
+    return 1
+  fi
+  manifest="$latest_dir/release-manifest.json"
+  identity="$latest_dir/identity.json"
+  test -s "$manifest"
+  test -s "$identity"
+  jq -e '__KNOWN_MANIFEST_SHAPE_VALIDATION__' "$manifest" >/dev/null
+  __MANIFEST_VERSION_GUARD__
+  latest_version="$(jq -er '.version | strings' "$manifest")"
+  latest_source_commit="$(jq -er '.source_commit | strings' "$manifest")"
+  [[ "$latest_source_commit" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "::error::current GitHub Latest manifest source_commit is not 40 lowercase hex" >&2
+    return 1
+  }
+  jq -e --arg schema "$EXPECTED_MANIFEST_SCHEMA" \
+    --arg repository "$EXPECTED_SOURCE_REPOSITORY" \
+    --arg source_ref "$EXPECTED_SOURCE_REF" \
+    --arg commit "$latest_source_commit" \
+    '__LATEST_MANIFEST_IDENTITY_VALIDATION__' "$manifest" >/dev/null || {
+    echo "::error::current GitHub Latest manifest does not match the configured schema and source identity" >&2
+    return 1
+  }
+  jq -e --arg repository "$EXPECTED_SOURCE_REPOSITORY" \
+    --arg source_ref "$EXPECTED_SOURCE_REF" \
+    --arg commit "$latest_source_commit" \
+    --slurpfile latest_manifest "$manifest" \
+    '__LATEST_IDENTITY_ENVELOPE_VALIDATION__' "$identity" >/dev/null || {
+    echo "::error::current GitHub Latest identity envelope does not bind its manifest and source" >&2
+    return 1
+  }
+  if ! latest_tag_sha="$(remote_tag_sha "$latest_tag")"; then
+    echo "::error::could not verify the current GitHub Latest tag; refusing stable publication" >&2
+    return 1
+  fi
+  [ "$latest_tag_sha" = "$latest_source_commit" ] || {
+    echo "::error::current GitHub Latest tag does not match its package manifest" >&2
+    return 1
+  }
+  for latest_attested_asset in "$manifest" "$identity"; do
+    gh attestation verify "$latest_attested_asset" __LATEST_ATTESTATION_FLAGS__
+  done
+  __LATEST_VERSION_VALIDATION__
+  if [ "$latest_version" = "$candidate_version" ]; then
+    [ "$latest_source_commit" = "$EXPECTED_SOURCE_COMMIT" ] || {
+      echo "::error::candidate version already belongs to a different GitHub Latest source commit" >&2
+      return 1
+    }
+  elif [ "$(printf '%s\n' "$latest_version" "$candidate_version" | LC_ALL=C sort -V | tail -n 1)" != "$candidate_version" ]; then
+    echo "::error::candidate stable version is older than current GitHub Latest" >&2
+    return 1
+  fi
 }
 
 validate_existing_rolling_release() {
@@ -939,10 +1292,12 @@ validate_existing_rolling_release() {
   local manifest="$source_dir/release-manifest.json"
   local identity="$source_dir/identity.json"
   local manifest_assets="$transaction_dir/live-manifest-assets"
+  local manifest_digests="$transaction_dir/live-manifest-digests"
   local downloaded_assets="$transaction_dir/live-downloaded-assets"
+  local github_digests="$transaction_dir/live-github-digests"
   local name expected_digest actual_digest api_digest
 
-  jq -e --arg tag "$rolling_tag" --argjson prerelease "$RELEASE_PRERELEASE" '
+  if ! jq -e --arg tag "$rolling_tag" --argjson prerelease "$RELEASE_PRERELEASE" '
     (.draft | type == "boolean") and .prerelease == $prerelease and .tag_name == $tag and
     (.id | type == "number") and
     (.assets | type == "array" and length > 0) and
@@ -952,30 +1307,32 @@ validate_existing_rolling_release() {
         type == "object" and
         (.name | type == "string") and
         (.digest | type == "string" and test("^sha256:[0-9a-f]{64}$"))))
-  ' <<<"$body" >/dev/null
-  test -s "$manifest"
-  test -s "$identity"
+  ' <<<"$body" >/dev/null; then
+    echo "::error::existing rolling release metadata is invalid" >&2
+    return 1
+  fi
+  if ! test -s "$manifest" || ! test -s "$identity"; then
+    echo "::error::existing rolling release is missing its manifest or identity envelope" >&2
+    return 1
+  fi
 
-  jq -e '
-    keys == ["assets","schema","source_commit","source_ref","source_repository","supporting_assets","version"] and
-    (.assets | type == "array" and
-      all(.[];
-        type == "object" and
-        (.name | type == "string") and
-        (.name | length > 0 and . != "." and . != ".." and test("^[-A-Za-z0-9._+~]+$")) and
-        (.sha256 | type == "string" and test("^[0-9a-f]{64}$")))) and
-    (.supporting_assets | type == "array" and
-      all(.[];
-        type == "object" and
-        (.name | type == "string") and
-        (.name | length > 0 and . != "." and . != ".." and test("^[-A-Za-z0-9._+~]+$")) and
-        (.sha256 | type == "string" and test("^[0-9a-f]{64}$")))) and
-    ((.assets + .supporting_assets | map(.name)) as $names |
-      ($names | unique | length) == ($names | length))
-  ' "$manifest" >/dev/null
+  if ! jq -e '__MANIFEST_SHAPE_VALIDATION__' "$manifest" >/dev/null; then
+    echo "::error::existing rolling release manifest does not match the configured schema" >&2
+    return 1
+  fi
 
-  old_source_commit="$(jq -er '.source_commit | strings' "$manifest")"
-  old_version="$(jq -er '.version | strings' "$manifest")"
+  if ! old_source_commit="$(jq -er '.source_commit | strings' "$manifest")"; then
+    echo "::error::existing rolling release manifest has no source commit" >&2
+    return 1
+  fi
+  if ! jq -e '.version | type == "string" and ((contains("\n") or contains("\r") or contains("\u0000")) | not)' "$manifest" >/dev/null; then
+    echo "::error::existing rolling manifest version must be a single-line JSON string without NUL bytes" >&2
+    return 1
+  fi
+  if ! old_version="$(jq -er '.version | strings' "$manifest")"; then
+    echo "::error::existing rolling release manifest has no version" >&2
+    return 1
+  fi
   [[ "$old_source_commit" =~ ^[0-9a-f]{40}$ ]] || {
     echo "::error::existing rolling manifest source_commit is not 40 lowercase hex" >&2
     return 1
@@ -984,42 +1341,49 @@ validate_existing_rolling_release() {
     echo "::error::existing rolling manifest source_commit does not match its tag" >&2
     return 1
   }
-  [[ "$old_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-([A-Za-z0-9_-]+)\.[0-9]+\+[0-9a-f]{7}$ ]] || {
-    echo "::error::existing rolling manifest version is not a source-bound channel version" >&2
-    return 1
-  }
-  [ "${BASH_REMATCH[1]}" = "$VELNOR_PACKAGE_CHANNEL" ] || {
-    echo "::error::existing rolling manifest channel does not match the configured channel" >&2
-    return 1
-  }
-  [ "${old_version##*+}" = "${old_source_commit:0:7}" ] || {
-    echo "::error::existing rolling manifest version does not bind to its source" >&2
-    return 1
-  }
-  jq -e \
+  __EXISTING_VERSION_VALIDATION__
+  if ! jq -e \
     --arg schema "$EXPECTED_MANIFEST_SCHEMA" \
     --arg repository "$EXPECTED_SOURCE_REPOSITORY" \
     --arg source_ref "$EXPECTED_SOURCE_REF" \
     --arg commit "$old_source_commit" \
     --slurpfile rolling_manifest "$manifest" \
     '.schema == $schema and .source_repository == $repository and
-     .source_ref == $source_ref and .source_commit == $commit' "$manifest" >/dev/null
-  jq -e \
+     .source_ref == $source_ref and .source_commit == $commit' "$manifest" >/dev/null; then
+    echo "::error::existing rolling manifest does not match the configured source identity" >&2
+    return 1
+  fi
+  if ! jq -e \
     --arg repository "$EXPECTED_SOURCE_REPOSITORY" \
     --arg source_ref "$EXPECTED_SOURCE_REF" \
     --arg commit "$old_source_commit" \
     --slurpfile rolling_manifest "$manifest" \
     'keys == ["manifest","source_digest","source_ref","source_repository"] and
      .source_repository == $repository and .source_ref == $source_ref and
-     .source_digest == $commit and .manifest == $rolling_manifest[0]' "$identity" >/dev/null
-  jq -e --arg name "$RELEASE_TITLE_PREFIX $old_version" '.name == $name' <<<"$body" >/dev/null
+     .source_digest == $commit and .manifest == $rolling_manifest[0]' "$identity" >/dev/null; then
+    echo "::error::existing rolling release identity envelope does not bind its manifest and source" >&2
+    return 1
+  fi
+  if ! jq -e --arg name "$RELEASE_TITLE_PREFIX $old_version" '.name == $name' <<<"$body" >/dev/null; then
+    echo "::error::existing rolling release title does not match its manifest version" >&2
+    return 1
+  fi
 
-  {
+  if ! {
     printf '%s\n' "release-manifest.json" "identity.json"
-    jq -r '(.assets[] | .name), (.supporting_assets[] | .name)' "$manifest"
-  } | LC_ALL=C sort > "$manifest_assets"
-  jq -r '.assets[].name' <<<"$body" | LC_ALL=C sort > "$old_assets"
-  find "$source_dir" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort > "$downloaded_assets"
+    jq -r '(.assets[] | .name), ((.supporting_assets // [])[] | .name)' "$manifest"
+  } | LC_ALL=C sort > "$manifest_assets"; then
+    echo "::error::existing rolling manifest asset list could not be read" >&2
+    return 1
+  fi
+  if ! jq -r '.assets[].name' <<<"$body" | LC_ALL=C sort > "$old_assets"; then
+    echo "::error::existing rolling release asset list could not be read" >&2
+    return 1
+  fi
+  if ! find "$source_dir" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort > "$downloaded_assets"; then
+    echo "::error::existing rolling release download inventory could not be read" >&2
+    return 1
+  fi
   cmp -s "$manifest_assets" "$old_assets" || {
     echo "::error::existing rolling release assets are not exactly covered by its manifest" >&2
     return 1
@@ -1029,21 +1393,38 @@ validate_existing_rolling_release() {
     return 1
   }
 
+  if ! jq -r '(.assets[] | [.name, .sha256] | @tsv), ((.supporting_assets // [])[] | [.name, .sha256] | @tsv)' "$manifest" > "$manifest_digests"; then
+    echo "::error::existing rolling manifest digests could not be read" >&2
+    return 1
+  fi
   while IFS=$'\t' read -r name expected_digest; do
-    test -s "$source_dir/$name"
-    actual_digest="$(sha256sum -- "$source_dir/$name" | awk '{print $1}')"
+    if ! test -s "$source_dir/$name"; then
+      echo "::error::existing rolling release is missing asset: $name" >&2
+      return 1
+    fi
+    if ! actual_digest="$(sha256sum -- "$source_dir/$name" | awk '{print $1}')"; then
+      echo "::error::existing rolling release asset could not be hashed: $name" >&2
+      return 1
+    fi
     [ "$actual_digest" = "$expected_digest" ] || {
       echo "::error::existing rolling manifest digest mismatch: $name" >&2
       return 1
     }
-  done < <(jq -r '(.assets[] | [.name, .sha256] | @tsv), (.supporting_assets[] | [.name, .sha256] | @tsv)' "$manifest")
+  done < "$manifest_digests"
+  if ! jq -r '.assets[] | [.name, .digest] | @tsv' <<<"$body" > "$github_digests"; then
+    echo "::error::existing rolling GitHub asset digests could not be read" >&2
+    return 1
+  fi
   while IFS=$'\t' read -r name api_digest; do
-    actual_digest="$(sha256sum -- "$source_dir/$name" | awk '{print $1}')"
+    if ! actual_digest="$(sha256sum -- "$source_dir/$name" | awk '{print $1}')"; then
+      echo "::error::existing rolling release asset could not be hashed: $name" >&2
+      return 1
+    fi
     [ "$api_digest" = "sha256:$actual_digest" ] || {
       echo "::error::existing rolling GitHub asset digest mismatch: $name" >&2
       return 1
     }
-  done < <(jq -r '.assets[] | [.name, .digest] | @tsv' <<<"$body")
+  done < "$github_digests"
 
   if ! git -C source cat-file -e "${old_source_commit}^{commit}"; then
     echo "::error::existing rolling source commit is not present in the checked-out history" >&2
@@ -1053,27 +1434,12 @@ validate_existing_rolling_release() {
     echo "::error::candidate source commit is not a descendant of the live rolling source" >&2
     return 1
   fi
+  return 0
 }
 
-discard_stale_rolling_draft() {
-  local stale_tag_sha
-  echo "::warning::discarding incomplete rolling draft and retrying publication" >&2
-  gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" >/dev/null
-  stale_tag_sha="$(remote_tag_sha "$rolling_tag")"
-  if [ -n "$stale_tag_sha" ]; then
-    gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" >/dev/null
-  fi
-  had_release=0
-  rolling_release_id=""
-  old_tag_sha=""
-  old_name=""
-  old_body=""
-  old_draft=""
-  old_prerelease=""
-  old_source_commit=""
-  old_version=""
-  : > "$old_assets"
-  rm -rf -- "$rollback_dir"
+reject_stale_rolling_draft() {
+  echo "::error::existing rolling draft is incomplete or incompatible; repair or remove it before retrying" >&2
+  exit 1
 }
 
 verify_restored_assets() {
@@ -1137,63 +1503,174 @@ verify_restored_assets() {
 
 rollback() {
   local status="$1"
-  trap - ERR
+  trap - ERR EXIT
   if [ "$mutated" = 1 ]; then
     set +e
     rollback_status=0
     if [ "$had_release" = 1 ]; then
-      # Keep the rollback release hidden while restoring its complete old set.
-      if gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" -F draft=true >/dev/null; then
-        while IFS=$'\t' read -r asset_id asset_name; do
-          if ! grep -Fqx -- "$asset_name" "$old_assets"; then
-            gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" >/dev/null || rollback_status=1
-          fi
-        done < <(gh api --paginate --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id/assets" --jq '.[] | [.id, .name] | @tsv')
+      # Hide the release before replacing any public assets. A lost PATCH
+      # response is resolved by reading server state, not by assuming failure.
+      asset_restore_status=0
+      assets_restored=0
+      if ! gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" -F draft=true >/dev/null; then
+        echo "::warning::draft transition response was uncertain; checking remote release state" >&2
+      fi
+      if ! current_release_body="$(gh api --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id")"; then
+        asset_restore_status=1
+      elif ! jq -e --arg tag "$rolling_tag" '.tag_name == $tag and .draft == true' <<<"$current_release_body" >/dev/null; then
+        asset_restore_status=1
+      fi
+      if [ "$asset_restore_status" -eq 0 ]; then
+        if ! current_assets="$(gh api --paginate --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id/assets" --jq '.[] | [.id, .name] | @tsv')"; then
+          asset_restore_status=1
+        else
+          while IFS=$'\t' read -r asset_id asset_name; do
+            if ! grep -Fqx -- "$asset_name" "$old_assets"; then
+              gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" >/dev/null || asset_restore_status=1
+            fi
+          done <<<"$current_assets"
+        fi
         while IFS= read -r asset_name; do
           if ! gh release upload "$rolling_tag" --repo "$GITHUB_REPOSITORY" --clobber "$rollback_dir/$asset_name"; then
-            rollback_status=1
+            asset_restore_status=1
           fi
         done < "$old_assets"
-        restore_dir="$rollback_dir"
-        restore_assets="$old_assets"
-        if ! verify_restored_assets "$restore_dir" "$restore_assets"; then
-          rollback_status=1
-        fi
-        rollback_ready=1
-        if [ "$rollback_status" -ne 0 ]; then
-          rollback_ready=0
-        fi
-        if [ -n "$old_tag_sha" ] && ! gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" -f "sha=$old_tag_sha" -F force=true >/dev/null; then
-          rollback_ready=0
-        fi
-        if [ "$rollback_ready" = 1 ]; then
-          gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" \
-            -f "name=$old_name" -f "body=$old_body" -F "draft=$old_draft" -F "prerelease=$old_prerelease" -F make_latest=false >/dev/null || rollback_status=1
+        if verify_restored_assets "$rollback_dir" "$old_assets"; then
+          assets_restored=1
         else
+          asset_restore_status=1
+        fi
+      fi
+
+      # Restore the ref independently of release API state; a tag restore must
+      # still be attempted when the release PATCH or asset download failed.
+      if [ -z "$old_tag_sha" ] || [ -z "$old_tag_ref_sha" ]; then
+        rollback_status=1
+      else
+        if ! gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" -f "sha=$old_tag_ref_sha" -F force=true >/dev/null; then
+          echo "::warning::tag restore response was uncertain; checking remote ref state" >&2
+        fi
+        if ! restored_tag_ref_sha="$(remote_tag_ref_sha "$rolling_tag")"; then
+          rollback_status=1
+        elif [ "$restored_tag_ref_sha" != "$old_tag_ref_sha" ]; then
           rollback_status=1
         fi
-      else
+        if ! restored_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
+          rollback_status=1
+        elif [ "$restored_tag_sha" != "$old_tag_sha" ]; then
+          rollback_status=1
+        fi
+      fi
+
+      restore_draft="$old_draft"
+      restore_latest="$old_make_latest"
+      restore_metadata="$transaction_dir/restore-release-metadata.json"
+      if [ "$assets_restored" != 1 ]; then
+        # Keep a release with unverified bytes private, while restoring fields
+        # that do not expose those bytes.
+        restore_draft=true
+        restore_latest=false
         rollback_status=1
       fi
+      if ! jq -n --rawfile body "$old_body_file" --arg name "$old_name" \
+          --argjson draft "$restore_draft" --argjson prerelease "$old_prerelease" \
+          --argjson make_latest "$restore_latest" \
+          '{name:$name, body:$body, draft:$draft, prerelease:$prerelease, make_latest:$make_latest}' \
+          > "$restore_metadata"; then
+        echo "::warning::could not encode the original release metadata" >&2
+        rollback_status=1
+      elif ! gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" \
+          --input "$restore_metadata" >/dev/null; then
+        echo "::warning::release metadata restore response was uncertain; checking remote release state" >&2
+      fi
+      if ! restored_body="$(gh api --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id")"; then
+        rollback_status=1
+      elif ! jq -e --rawfile expected_body "$old_body_file" --arg tag "$rolling_tag" --arg name "$old_name" \
+          --argjson draft "$restore_draft" --argjson prerelease "$old_prerelease" \
+          '.tag_name == $tag and .name == $name and (.body // "") == $expected_body and .draft == $draft and .prerelease == $prerelease' \
+          <<<"$restored_body" >/dev/null; then
+        rollback_status=1
+      elif ! jq -j '.body // ""' <<<"$restored_body" > "$transaction_dir/restored-release-body" || \
+           ! cmp -s "$old_body_file" "$transaction_dir/restored-release-body"; then
+        rollback_status=1
+      fi
+      if [ "$assets_restored" = 1 ]; then
+        if ! verify_restored_assets "$rollback_dir" "$old_assets"; then
+          rollback_status=1
+        fi
+        if gh api --repo "$GITHUB_REPOSITORY" -i "repos/$GITHUB_REPOSITORY/releases/latest" > "$latest_response" 2>/dev/null; then
+          :
+        fi
+        restored_latest_http="$(awk 'NR == 1 {print $2; exit}' "$latest_response")"
+        case "$restored_latest_http" in
+          200)
+            restored_latest_body="$(awk 'body {print; next} /^\r?$/ {body = 1}' "$latest_response")"
+            restored_latest_tag="$(jq -er '.tag_name | strings' <<<"$restored_latest_body")"
+            [ "$restored_latest_tag" = "$latest_tag" ] || rollback_status=1
+            ;;
+          404)
+            [ -z "$latest_tag" ] || rollback_status=1
+            ;;
+          *) rollback_status=1 ;;
+        esac
+      fi
     else
+      if [ -z "$rolling_release_id" ]; then
+        if gh api --repo "$GITHUB_REPOSITORY" -i "repos/$GITHUB_REPOSITORY/releases/tags/$rolling_tag" > "$rolling_response" 2>/dev/null; then
+          :
+        fi
+        discovered_http="$(awk 'NR == 1 {print $2; exit}' "$rolling_response")"
+        case "$discovered_http" in
+          200)
+            discovered_body="$(awk 'body {print; next} /^\r?$/ {body = 1}' "$rolling_response")"
+            if ! rolling_release_id="$(jq -er '.id | select(type == "number")' <<<"$discovered_body")"; then
+              rollback_status=1
+            fi
+            ;;
+          404) ;;
+          *) rollback_status=1 ;;
+        esac
+      fi
       if [ -n "$rolling_release_id" ]; then
         gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" >/dev/null || rollback_status=1
       fi
-      if [ -n "$(remote_tag_sha "$rolling_tag")" ]; then
+      if gh api --repo "$GITHUB_REPOSITORY" -i "repos/$GITHUB_REPOSITORY/releases/tags/$rolling_tag" > "$rolling_response" 2>/dev/null; then
+        :
+      fi
+      absent_release_http="$(awk 'NR == 1 {print $2; exit}' "$rolling_response")"
+      [ "$absent_release_http" = 404 ] || rollback_status=1
+
+      if ! current_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
+        rollback_status=1
+      elif [ -n "$current_tag_sha" ]; then
         gh api --method DELETE --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" >/dev/null || rollback_status=1
+      fi
+      if ! absent_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
+        rollback_status=1
+      elif [ -n "$absent_tag_sha" ]; then
+        rollback_status=1
       fi
     fi
     if [ "$rollback_status" -ne 0 ]; then
-      echo "::error::rolling preview publication failed and rollback was incomplete" >&2
+      echo "::error::rolling package release publication failed and rollback was incomplete" >&2
       status=1
     else
-      echo "::warning::rolling preview publication failed; previous release restored" >&2
+      echo "::warning::rolling package release publication failed; previous state restored" >&2
     fi
   fi
+  rm -rf -- "$transaction_dir"
   exit "$status"
 }
-trap 'rollback "$?"' ERR
-trap 'rm -rf -- "$transaction_dir"' EXIT
+on_exit() {
+  local status="$1"
+  trap - EXIT
+  if [ "$status" -ne 0 ] && [ "$mutated" = 1 ]; then
+    rollback "$status"
+  fi
+  rm -rf -- "$transaction_dir"
+  exit "$status"
+}
+trap 'on_exit "$?"' EXIT
 
 {
 "#,
@@ -1203,15 +1680,51 @@ trap 'rm -rf -- "$transaction_dir"' EXIT
         r#"
 } | LC_ALL=C sort > "$expected_assets"
 
-if ! staged_body="$(gh api --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/tags/$staged_tag")"; then
-  echo "::error::verified immutable staging release is missing" >&2
-  exit 1
+if [ "$ROLLING_PREFLIGHT_ONLY" = true ]; then
+  if ! find "$published_dir" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort > "$staged_assets"; then
+    echo "::error::candidate package inventory could not be read during release preflight" >&2
+    exit 1
+  fi
+  cmp -s "$expected_assets" "$staged_assets" || {
+    echo "::error::candidate package asset set is not exact during release preflight" >&2
+    exit 1
+  }
+else
+  if ! staged_body="$(gh api --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/tags/$staged_tag")"; then
+    echo "::error::verified immutable staging release is missing" >&2
+    exit 1
+  fi
+  jq -e --arg tag "$staged_tag" --argjson prerelease "$RELEASE_PRERELEASE" '(.draft | not) and .prerelease == $prerelease and .tag_name == $tag' <<<"$staged_body" >/dev/null
+  jq -r '.assets[].name' <<<"$staged_body" | LC_ALL=C sort > "$staged_assets"
+  cmp -s "$expected_assets" "$staged_assets" || { echo "::error::immutable staging release asset set is not exact" >&2; exit 1; }
+  staged_tag_sha="$(remote_tag_sha "$staged_tag")"
+  [ "$staged_tag_sha" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::immutable staging tag does not resolve to the verified source commit" >&2; exit 1; }
 fi
-jq -e --arg tag "$staged_tag" --argjson prerelease "$RELEASE_PRERELEASE" '(.draft | not) and .prerelease == $prerelease and .tag_name == $tag' <<<"$staged_body" >/dev/null
-jq -r '.assets[].name' <<<"$staged_body" | LC_ALL=C sort > "$staged_assets"
-cmp -s "$expected_assets" "$staged_assets" || { echo "::error::immutable staging release asset set is not exact" >&2; exit 1; }
-staged_tag_sha="$(remote_tag_sha "$staged_tag")"
-[ "$staged_tag_sha" = "$EXPECTED_SOURCE_COMMIT" ] || { echo "::error::immutable staging tag does not resolve to the verified source commit" >&2; exit 1; }
+
+latest_tag=""
+latest_id=""
+latest_version=""
+latest_source_commit=""
+if gh api --repo "$GITHUB_REPOSITORY" -i "repos/$GITHUB_REPOSITORY/releases/latest" > "$latest_response" 2>/dev/null; then
+  :
+fi
+latest_http="$(awk 'NR == 1 {print $2; exit}' "$latest_response")"
+case "$latest_http" in
+  200)
+    latest_body="$(awk 'body {print; next} /^\r?$/ {body = 1}' "$latest_response")"
+    jq -e '(.id | type == "number") and (.tag_name | type == "string" and length > 0)' <<<"$latest_body" >/dev/null
+    latest_tag="$(jq -er '.tag_name | strings' <<<"$latest_body")"
+    latest_id="$(jq -er '.id' <<<"$latest_body")"
+    [ "$latest_tag" != "$rolling_tag" ] || old_make_latest=true
+    verify_latest_floor
+    ;;
+  404) ;;
+  *)
+    echo "::error::current GitHub Latest release could not be determined; refusing package publication" >&2
+    exit 1
+    ;;
+esac
+manifest="$published_dir/release-manifest.json"
 
 if gh api --repo "$GITHUB_REPOSITORY" -i "repos/$GITHUB_REPOSITORY/releases/tags/$rolling_tag" > "$rolling_response" 2>/dev/null; then
   :
@@ -1224,35 +1737,55 @@ case "$rolling_http" in
     jq -e --arg tag "$rolling_tag" '(.draft | type == "boolean") and .tag_name == $tag and (.id | type == "number")' "$rolling_body" >/dev/null
     rolling_release_id="$(jq -er '.id' "$rolling_body")"
     old_name="$(jq -er '.name | strings' "$rolling_body")"
-    old_body="$(jq -r '.body // ""' "$rolling_body")"
+    if ! jq -e '(.body == null) or (.body | type == "string")' "$rolling_body" >/dev/null || \
+       ! jq -j '.body // ""' "$rolling_body" > "$old_body_file"; then
+      echo "::error::existing rolling release body is not a readable string" >&2
+      exit 1
+    fi
     old_draft="$(jq -er '.draft | tostring' "$rolling_body")"
     old_prerelease="$(jq -er '.prerelease | tostring' "$rolling_body")"
     old_tag_sha="$(remote_tag_sha "$rolling_tag")"
+    old_tag_ref_sha="$(remote_tag_ref_sha "$rolling_tag")"
     if ! [[ "$old_tag_sha" =~ ^[0-9a-f]{40}$ ]]; then
       if [ "$old_draft" = true ]; then
-        discard_stale_rolling_draft
+        reject_stale_rolling_draft
       else
         echo "::error::rolling release tag is not a commit ref" >&2
         exit 1
       fi
+    elif ! [[ "$old_tag_ref_sha" =~ ^[0-9a-f]{40}$ ]]; then
+      if [ "$old_draft" = true ]; then
+        reject_stale_rolling_draft
+      else
+        echo "::error::rolling release tag ref object could not be verified" >&2
+        exit 1
+      fi
     elif [ "$old_draft" = true ] && [ "$old_prerelease" != "$RELEASE_PRERELEASE" ]; then
-      discard_stale_rolling_draft
+      reject_stale_rolling_draft
     elif ! mkdir -p "$rollback_dir" || ! gh release download "$rolling_tag" --repo "$GITHUB_REPOSITORY" --dir "$rollback_dir" --clobber; then
       if [ "$old_draft" = true ]; then
-        discard_stale_rolling_draft
+        reject_stale_rolling_draft
       else
         echo "::error::existing rolling release could not be downloaded" >&2
         exit 1
       fi
+    elif jq -e '__KNOWN_MANIFEST_SHAPE_VALIDATION__' "$rollback_dir/release-manifest.json" >/dev/null &&
+         ! jq -e '__MANIFEST_KEY_VALIDATION__' "$rollback_dir/release-manifest.json" >/dev/null; then
+      echo "::error::existing rolling release manifest shape differs from the configured package contract; explicit manifest migration is required before publication" >&2
+      exit 1
     elif ! validate_existing_rolling_release "$rolling_body" "$rollback_dir"; then
       if [ "$old_draft" = true ]; then
-        discard_stale_rolling_draft
+        reject_stale_rolling_draft
       else
         echo "::error::existing rolling release failed immutable validation" >&2
         exit 1
       fi
     fi
     if [ "$had_release" = 1 ]; then
+      if ! cmp -s "$expected_assets" "$old_assets"; then
+        echo "::error::existing rolling release asset set differs from the configured package contract; explicit asset migration is required before publication" >&2
+        exit 1
+      fi
       old_version_order="${old_version%%+*}"
       candidate_version_order="${candidate_version%%+*}"
       if [ "$old_version" = "$candidate_version" ] && [ "$old_source_commit" = "$EXPECTED_SOURCE_COMMIT" ]; then
@@ -1268,13 +1801,21 @@ case "$rolling_http" in
         r#"
     ;;
   404)
-    test -z "$(remote_tag_sha "$rolling_tag")" || { echo "::error::rolling tag exists without a release; refusing to overwrite it" >&2; exit 1; }
+    if ! rolling_tag_sha="$(remote_tag_sha "$rolling_tag")"; then
+      echo "::error::could not verify that the rolling tag is absent" >&2
+      exit 1
+    fi
+    [ -z "$rolling_tag_sha" ] || { echo "::error::rolling tag exists without a release; refusing to overwrite it" >&2; exit 1; }
     ;;
   *)
     echo "::error::rolling release preflight failed with HTTP $rolling_http" >&2
     exit 1
     ;;
 esac
+
+if [ "$ROLLING_PREFLIGHT_ONLY" = true ]; then
+  exit 0
+fi
 
 if [ "$had_release" = 0 ]; then
   mutated=1
@@ -1322,14 +1863,57 @@ rm -rf -- "$transaction_dir/rolling-published"
 mkdir -p "$transaction_dir/rolling-published"
 gh release download "$rolling_tag" --repo "$GITHUB_REPOSITORY" --dir "$transaction_dir/rolling-published" --clobber
 export VELNOR_VERIFIED_PACKAGE_DIR="$transaction_dir/rolling-published"
+export VELNOR_VERIFICATION_TEMP_DIR="$transaction_dir"
 "#,
     );
-    script.push_str(verification.script);
+    script.push_str(&inline_verification);
     script.push_str("\nfor payload in \\\n");
-    script.push_str(payload_names);
+    script.push_str(attested_asset_names);
     script.push_str("do\n  gh attestation verify \"$transaction_dir/rolling-published/$payload\" ");
     script.push_str(verification.attestation_flags);
-    script.push_str("\ndone\ntrap 'rm -rf -- \"$transaction_dir\"' EXIT\n");
+    script.push_str("\ndone\n");
+    script = script.replace(
+        "__MANIFEST_SHAPE_VALIDATION__",
+        &manifest_shape_validation(spec),
+    );
+    script = script.replace("__MANIFEST_VERSION_GUARD__", manifest_version_line_guard());
+    script = script.replace("__MANIFEST_KEY_VALIDATION__", manifest_key_validation(spec));
+    script = script.replace(
+        "__KNOWN_MANIFEST_SHAPE_VALIDATION__",
+        known_manifest_shape_validation(),
+    );
+    script = script.replace(
+        "__EXISTING_VERSION_VALIDATION__",
+        &version_validation_return_script(
+            spec.version_format,
+            "old_version",
+            "old_source_commit",
+            "existing rolling manifest",
+        ),
+    );
+    script = script.replace(
+        "__LATEST_VERSION_VALIDATION__",
+        &version_validation_script(
+            VersionFormat::Semver,
+            "latest_version",
+            "latest_source_commit",
+            "current GitHub Latest manifest",
+        ),
+    );
+    script = script.replace(
+        "__LATEST_MANIFEST_IDENTITY_VALIDATION__",
+        latest_manifest_identity_validation(),
+    );
+    script = script.replace(
+        "__LATEST_IDENTITY_ENVELOPE_VALIDATION__",
+        latest_identity_envelope_validation(),
+    );
+    script = script.replace(
+        "__LATEST_ATTESTATION_FLAGS__",
+        &verification
+            .attestation_flags
+            .replace("\"$EXPECTED_SOURCE_COMMIT\"", "\"$latest_source_commit\""),
+    );
     script
 }
 
@@ -1340,12 +1924,22 @@ case "$RELEASE_PRERELEASE" in
   true|false) ;;
   *) echo "::error::invalid configured GitHub release type" >&2; exit 1 ;;
 esac
+case "$RELEASE_LATEST" in
+  true|false) ;;
+  *) echo "::error::invalid configured latest-release policy" >&2; exit 1 ;;
+esac
+if [ "$RELEASE_PRERELEASE" = true ] && [ "$RELEASE_LATEST" = true ]; then
+  echo "::error::prerelease lanes cannot mark an immutable release latest" >&2
+  exit 1
+fi
 release_flags=(--latest=false)
 if [ "$RELEASE_PRERELEASE" = true ]; then
   release_flags+=(--prerelease)
 fi
 tag="$RELEASE_TAG-$EXPECTED_SOURCE_COMMIT"
-version="$(jq -er '.version | strings' "$PACKAGE_DIR/release-manifest.json")"
+manifest="$PACKAGE_DIR/release-manifest.json"
+__MANIFEST_VERSION_GUARD__
+version="$(jq -er '.version | strings' "$manifest")"
 title="$RELEASE_TITLE_PREFIX $version"
 transaction_dir="$(mktemp -d)"
 release_json="$transaction_dir/release-response"
@@ -1357,10 +1951,22 @@ trap 'rm -rf -- "$transaction_dir"' EXIT
 
 remote_tag_sha() {
   local tag_name="$1"
-  local sha
-  sha="$(git -C source ls-remote origin "refs/tags/$tag_name^{}" | awk 'NR == 1 {print $1}')"
+  local result sha
+  if ! result="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name^{}")"; then
+    echo "::error::failed to query remote tag: $tag_name" >&2
+    return 1
+  fi
+  sha="$(awk 'NR == 1 {print $1}' <<<"$result")"
   if [ -z "$sha" ]; then
-    sha="$(git -C source ls-remote origin "refs/tags/$tag_name" | awk 'NR == 1 {print $1}')"
+    if ! result="$(git -C source -c "http.extraheader=AUTHORIZATION: bearer $GH_TOKEN" ls-remote origin "refs/tags/$tag_name")"; then
+      echo "::error::failed to query remote tag: $tag_name" >&2
+      return 1
+    fi
+    sha="$(awk 'NR == 1 {print $1}' <<<"$result")"
+  fi
+  if [ -n "$sha" ] && ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "::error::remote tag returned an invalid object id: $tag_name" >&2
+    return 1
   fi
   printf '%s\n' "$sha"
 }
@@ -1374,8 +1980,8 @@ verify_asset_bytes() {
   rm -rf -- "$target_dir"
   mkdir -p "$target_dir"
   gh release download "$release_tag" --repo "$GITHUB_REPOSITORY" --dir "$target_dir"
-  downloaded_assets="$target_dir/.asset-names"
-  find "$target_dir" -maxdepth 1 -type f ! -name '.asset-names' -printf '%f\n' | LC_ALL=C sort > "$downloaded_assets"
+  downloaded_assets="$transaction_dir/downloaded-assets"
+  find "$target_dir" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort > "$downloaded_assets"
   cmp -s "$names_file" "$downloaded_assets" || {
     echo "::error::immutable release downloaded asset set differs from its API asset set" >&2
     return 1
@@ -1495,7 +2101,7 @@ final_tag_sha="$(remote_tag_sha "$tag")"
 printf 'immutable_tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
 "#
     );
-    script
+    script.replace("__MANIFEST_VERSION_GUARD__", manifest_version_line_guard())
 }
 
 /// Render the publication half separately from the build half.  The release
@@ -1525,7 +2131,6 @@ fn render_publish_job(
     consumer_branch_yaml: &str,
     updater_yaml: &str,
     message_yaml: &str,
-    concurrency_yaml: &str,
 ) -> String {
     let publish_environment_yaml = crate::s2::yaml_scalar(&spec.publish_environment);
     let release_prerelease_yaml =
@@ -1534,14 +2139,23 @@ fn render_publish_job(
         } else {
             "false"
         });
-    let mut payload_names = String::new();
-    for (index, name) in spec.payloads.iter().enumerate() {
-        let suffix = if index + 1 == spec.payloads.len() {
+    let release_latest_yaml = crate::s2::yaml_scalar(if spec.github_release_type == "release" {
+        "true"
+    } else {
+        "false"
+    });
+    let mut attested_asset_names = String::new();
+    let mut attested_names = spec.payloads.clone();
+    attested_names.extend(spec.supporting_assets.iter().cloned());
+    attested_names.push("release-manifest.json".to_owned());
+    attested_names.push("identity.json".to_owned());
+    for (index, name) in attested_names.iter().enumerate() {
+        let suffix = if index + 1 == attested_names.len() {
             ""
         } else {
             " \\"
         };
-        let _ = writeln!(payload_names, "  {}{}", shell_quote(name), suffix);
+        let _ = writeln!(attested_asset_names, "  {}{}", shell_quote(name), suffix);
     }
     let mut expected_asset_names = String::new();
     for name in release_asset_names(spec) {
@@ -1566,9 +2180,10 @@ fn render_publish_job(
     };
     let rolling_refresh = indent_script(
         &render_rolling_refresh_script(
+            spec,
             &published_assets,
             &expected_asset_names,
-            &payload_names,
+            &attested_asset_names,
             &verification,
         ),
         10,
@@ -1577,6 +2192,9 @@ fn render_publish_job(
     let _ = writeln!(output, "  publish:");
     output.push_str("    name: Publish immutable package and update consumer\n");
     output.push_str("    needs: build\n");
+    output.push_str("    concurrency:\n      group: ");
+    output.push_str(GLOBAL_PUBLISH_CONCURRENCY_GROUP);
+    output.push_str("\n      queue: max\n      cancel-in-progress: false\n");
     output.push_str("    if: ");
     output.push_str(&github_expression(&format!(
         "github.event_name == 'push' && github.ref == '{}'",
@@ -1585,7 +2203,7 @@ fn render_publish_job(
     output.push('\n');
     output.push_str("    runs-on: ");
     output.push_str(runner);
-    output.push_str("\n    timeout-minutes: 30\n    environment: ");
+    output.push_str("\n    defaults:\n      run:\n        shell: bash\n    timeout-minutes: 30\n    environment: ");
     output.push_str(&publish_environment_yaml);
     output.push('\n');
     output.push_str(
@@ -1614,6 +2232,8 @@ fn render_publish_job(
     output.push_str(tag_yaml);
     output.push_str("\n      RELEASE_PRERELEASE: ");
     output.push_str(&release_prerelease_yaml);
+    output.push_str("\n      RELEASE_LATEST: ");
+    output.push_str(&release_latest_yaml);
     output.push_str("\n      RELEASE_TITLE_PREFIX: ");
     output.push_str(title_yaml);
     output.push_str("\n      CONSUMER_REPOSITORY: ");
@@ -1626,9 +2246,7 @@ fn render_publish_job(
     output.push_str(updater_token_expr);
     output.push_str("\n      UPDATE_COMMIT_MESSAGE: ");
     output.push_str(message_yaml);
-    output.push_str("\n    concurrency:\n      group: ");
-    output.push_str(concurrency_yaml);
-    output.push_str("\n      cancel-in-progress: false\n    steps:\n");
+    output.push_str("\n    steps:\n");
 
     output.push_str("      - name: Checkout verified source for publication\n        uses: ");
     output.push_str(checkout);
@@ -1653,6 +2271,13 @@ fn render_publish_job(
     output.push_str("          do\n            gh attestation verify \"$payload\" ");
     output.push_str(attestation_flags);
     output.push_str("\n          done\n");
+
+    output.push_str(
+        "      - name: Preflight rolling package release\n        env:\n          GH_TOKEN: ",
+    );
+    output.push_str(github_token_expr);
+    output.push_str("\n          ROLLING_PREFLIGHT_ONLY: \"true\"\n        run: |\n");
+    output.push_str(&rolling_refresh);
 
     output.push_str("      - name: Publish immutable source-bound release\n        id: publish\n        env:\n          GH_TOKEN: ");
     output.push_str(github_token_expr);
@@ -1682,11 +2307,20 @@ fn render_publish_job(
     output.push_str("\n          done\n");
 
     output.push_str(
-        "      - name: Refresh rolling preview release\n        env:\n          GH_TOKEN: ",
+        "      - name: Refresh rolling package release\n        env:\n          GH_TOKEN: ",
     );
     output.push_str(github_token_expr);
     output.push_str("\n        run: |\n");
     output.push_str(&rolling_refresh);
+    if spec.github_release_type == "release" {
+        output.push_str(
+            "      - name: Promote immutable release to GitHub Latest after rolling refresh\n        env:\n          GH_TOKEN: ",
+        );
+        output.push_str(github_token_expr);
+        output.push_str(
+            "\n        run: |\n          set -euo pipefail\n          immutable_tag=\"$RELEASE_TAG-$EXPECTED_SOURCE_COMMIT\"\n          release_body=\"$(gh api --repo \"$GITHUB_REPOSITORY\" \"repos/$GITHUB_REPOSITORY/releases/tags/$immutable_tag\")\"\n          jq -e --arg tag \"$immutable_tag\" '.tag_name == $tag and .draft == false and .prerelease == false and (.id | type == \"number\")' <<<\"$release_body\" >/dev/null\n          release_id=\"$(jq -er '.id' <<<\"$release_body\")\"\n          gh api --method PATCH --repo \"$GITHUB_REPOSITORY\" \"repos/$GITHUB_REPOSITORY/releases/$release_id\" -F make_latest=true >/dev/null\n          latest_body=\"$(gh api --repo \"$GITHUB_REPOSITORY\" \"repos/$GITHUB_REPOSITORY/releases/latest\")\"\n          jq -e --arg tag \"$immutable_tag\" '.tag_name == $tag' <<<\"$latest_body\" >/dev/null\n",
+        );
+    }
     output.push_str("      - name: Checkout consumer repository\n        uses: ");
     output.push_str(checkout);
     output.push_str("\n        with:\n          repository: ");
@@ -1731,6 +2365,7 @@ fn render_publish_job(
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
     use std::collections::{BTreeMap, BTreeSet};
 
     fn args() -> BTreeMap<String, toml::Value> {
@@ -1744,19 +2379,315 @@ source_ref = "refs/heads/main"
 payloads = ["a.tar.gz", "b.tar.gz", "c.tar.gz", "d.tar.gz", "e.tar.gz", "f.tar.gz"]
 supporting_assets = ["SHA256SUMS", "a.tar.gz.bundle", "capsule-manifest.json"]
 channel = "preview"
+version_format = "channel"
+manifest_format = "supporting-assets-v1"
 release_tag = "preview"
 github_release_type = "prerelease"
 publish_environment = "github-preview"
 consumer_repository = "example/tap"
 consumer_branch = "main"
-release_title_prefix = "Preview"
 updater = "./scripts/package-update.sh"
 updater_token_secret = "TAP_TOKEN"
 update_commit_message = "chore: update verified preview"
-concurrency_group = "package-release-preview"
 "#,
         )
         .expect("fixture args")
+    }
+
+    fn stable_args() -> BTreeMap<String, toml::Value> {
+        let mut values = args();
+        values.insert(
+            "channel".to_owned(),
+            toml::Value::String("stable".to_owned()),
+        );
+        values.insert(
+            "version_format".to_owned(),
+            toml::Value::String("semver".to_owned()),
+        );
+        values.insert(
+            "release_tag".to_owned(),
+            toml::Value::String("stable".to_owned()),
+        );
+        values.insert(
+            "github_release_type".to_owned(),
+            toml::Value::String("release".to_owned()),
+        );
+        values.remove("supporting_assets");
+        values.insert(
+            "manifest_format".to_owned(),
+            toml::Value::String("core-v1".to_owned()),
+        );
+        values
+    }
+
+    fn consumer_fixture_path(lane: &str, file: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/package-release")
+            .join(lane)
+            .join(file)
+    }
+
+    fn rolling_refresh_script_for_test(spec: &PackageReleaseSpec, workflow_file: &str) -> String {
+        let attestation_flags = format!(
+            "--repo \"$GITHUB_REPOSITORY\" --signer-workflow \"$GITHUB_REPOSITORY/.github/workflows/{workflow_file}\" --source-ref \"$EXPECTED_SOURCE_REF\" --source-digest \"$EXPECTED_SOURCE_COMMIT\""
+        );
+        let assets = release_asset_names(spec);
+        let mut expected_assets = String::new();
+        let mut published_assets = String::new();
+        for (index, name) in assets.iter().enumerate() {
+            let _ = writeln!(expected_assets, "  printf '%s\\n' {}", shell_quote(name));
+            let suffix = if index + 1 == assets.len() { "" } else { " \\" };
+            let _ = writeln!(published_assets, "  \"$published_dir/{name}\"{suffix}");
+        }
+        let mut attested_names = spec.payloads.clone();
+        attested_names.extend(spec.supporting_assets.iter().cloned());
+        attested_names.push("release-manifest.json".to_owned());
+        attested_names.push("identity.json".to_owned());
+        let mut attested_assets = String::new();
+        for (index, name) in attested_names.iter().enumerate() {
+            let suffix = if index + 1 == attested_names.len() {
+                ""
+            } else {
+                " \\"
+            };
+            let _ = writeln!(attested_assets, "  {}{suffix}", shell_quote(name));
+        }
+        let verification = PublishVerification {
+            script: "",
+            attestation_flags: &attestation_flags,
+        };
+        render_rolling_refresh_script(
+            spec,
+            &published_assets,
+            &expected_assets,
+            &attested_assets,
+            &verification,
+        )
+    }
+
+    fn script_region<'a>(script: &'a str, start: &str, end: &str) -> &'a str {
+        let start = script.find(start).expect("script region start");
+        let end = script[start..].find(end).expect("script region end") + start;
+        &script[start..end]
+    }
+
+    fn run_latest_floor_case(
+        expected_schema: &str,
+        expected_repository: &str,
+        expected_ref: &str,
+        fail_attestation: bool,
+        candidate_version: &str,
+    ) -> (bool, String, String) {
+        use std::process::Command;
+
+        let spec = parse_spec(&Args(&stable_args())).expect("stable fixture config");
+        let script = rolling_refresh_script_for_test(&spec, "stable.yml");
+        let verify_latest = script_region(
+            &script,
+            "verify_latest_floor() {",
+            "\nvalidate_existing_rolling_release() {",
+        );
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-latest-floor-{}",
+            crate::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create latest-floor fixture");
+        let log = root.join("gh.log");
+        let mut harness = format!(
+            "set -Eeuo pipefail\ntransaction_dir={}\nGITHUB_REPOSITORY=example/project\nEXPECTED_MANIFEST_SCHEMA={}\nEXPECTED_SOURCE_REPOSITORY={}\nEXPECTED_SOURCE_REF={}\nEXPECTED_SOURCE_COMMIT=fedcba9876543210fedcba9876543210fedcba98\nRELEASE_LATEST=true\nlatest_tag=stable-0123456789abcdef0123456789abcdef01234567\ncandidate_version={}\nlatest_version=\"\"\nlatest_source_commit=\"\"\nremote_tag_sha() {{ printf '%s\\n' \"$LATEST_SOURCE_COMMIT\"; }}\n",
+            shell_quote(root.to_str().expect("latest-floor path")),
+            shell_quote(expected_schema),
+            shell_quote(expected_repository),
+            shell_quote(expected_ref),
+            shell_quote(candidate_version),
+        );
+        harness.push_str(
+            r#"gh() {
+  if [ "$1" = release ] && [ "$2" = download ]; then
+    shift 2
+    local destination=""
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = --dir ]; then
+        destination="$2"
+        shift 2
+      else
+        shift
+      fi
+    done
+    cp "$LATEST_MANIFEST" "$destination/release-manifest.json"
+    cp "$LATEST_IDENTITY" "$destination/identity.json"
+    return 0
+  fi
+  if [ "$1" = attestation ] && [ "$2" = verify ]; then
+    printf '%s\n' "$*" >> "$GH_LOG"
+    [ "$ATTESTATION_FAIL" != true ] || return 1
+    local valid_repo=false valid_workflow=false valid_ref=false valid_digest=false
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --repo) [ "$2" = "$GITHUB_REPOSITORY" ] && valid_repo=true; shift 2 ;;
+        --signer-workflow) [ "$2" = "$GITHUB_REPOSITORY/.github/workflows/stable.yml" ] && valid_workflow=true; shift 2 ;;
+        --source-ref) [ "$2" = "$EXPECTED_SOURCE_REF" ] && valid_ref=true; shift 2 ;;
+        --source-digest) [ "$2" = "$LATEST_SOURCE_COMMIT" ] && valid_digest=true; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    [ "$valid_repo" = true ] && [ "$valid_workflow" = true ] && [ "$valid_ref" = true ] && [ "$valid_digest" = true ]
+    return
+  fi
+  echo "unexpected gh invocation: $*" >&2
+  return 97
+}
+"#,
+        );
+        harness.push_str(verify_latest);
+        harness.push_str(
+            "\nverify_latest_floor\nprintf 'rolling-tag-404-recreate-branch\\n' >> \"$GH_LOG\"\n",
+        );
+        let manifest = consumer_fixture_path("stable", "release-manifest.json");
+        let source_commit = "0123456789abcdef0123456789abcdef01234567";
+        let output = Command::new("bash")
+            .args(["-c", &harness])
+            .env("LATEST_MANIFEST", &manifest)
+            .env(
+                "LATEST_IDENTITY",
+                consumer_fixture_path("stable", "identity.json"),
+            )
+            .env("LATEST_SOURCE_COMMIT", source_commit)
+            .env("GH_LOG", &log)
+            .env("ATTESTATION_FAIL", fail_attestation.to_string())
+            .env("GH_TOKEN", "fixture-token")
+            .output()
+            .expect("run generated latest-floor validation");
+        let log_contents = std::fs::read_to_string(&log).unwrap_or_default();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        let _ = std::fs::remove_dir_all(root);
+        (output.status.success(), stderr, log_contents)
+    }
+
+    fn jq_fixture_validation(spec: &PackageReleaseSpec, lane: &str) -> (bool, bool, bool) {
+        use std::process::Command;
+
+        let manifest = consumer_fixture_path(lane, "release-manifest.json");
+        let identity = consumer_fixture_path(lane, "identity.json");
+        let manifest_query = format!(
+            "{} and .schema == $schema and .source_repository == $repository and .source_ref == $source_ref and .source_commit == $commit",
+            manifest_shape_validation(spec)
+        );
+        let manifest_result = Command::new("jq")
+            .args([
+                "-e",
+                "--arg",
+                "schema",
+                "example.consumer-manifest-v1",
+                "--arg",
+                "repository",
+                "example/project",
+                "--arg",
+                "source_ref",
+                "refs/heads/main",
+                "--arg",
+                "commit",
+                "0123456789abcdef0123456789abcdef01234567",
+                "--slurpfile",
+                "package_manifest",
+            ])
+            .arg(&manifest)
+            .arg(&manifest_query)
+            .arg(&manifest)
+            .output()
+            .expect("run fixture manifest jq validation");
+        let identity_result = Command::new("jq")
+            .args([
+                "-e",
+                "--arg",
+                "repository",
+                "example/project",
+                "--arg",
+                "source_ref",
+                "refs/heads/main",
+                "--arg",
+                "commit",
+                "0123456789abcdef0123456789abcdef01234567",
+                "--slurpfile",
+                "package_manifest",
+            ])
+            .arg(&manifest)
+            .arg(
+                r#"keys == ["manifest","source_digest","source_ref","source_repository"] and
+   .source_repository == $repository and .source_ref == $source_ref and
+   .source_digest == $commit and .manifest == $package_manifest[0]"#,
+            )
+            .arg(&identity)
+            .output()
+            .expect("run fixture identity jq validation");
+        let known_shape_result = Command::new("jq")
+            .args([
+                "-e",
+                known_manifest_shape_validation(),
+                manifest.to_str().expect("fixture manifest path"),
+            ])
+            .output()
+            .expect("run known manifest shape jq validation");
+        (
+            manifest_result.status.success(),
+            identity_result.status.success(),
+            known_shape_result.status.success(),
+        )
+    }
+
+    fn version_script_accepts(
+        version_format: VersionFormat,
+        version: &str,
+        channel: &str,
+        source_commit: &str,
+    ) -> bool {
+        use std::process::Command;
+
+        let script = format!(
+            "version={}\nsource_commit={}\n{}",
+            shell_quote(version),
+            shell_quote(source_commit),
+            version_validation_script(version_format, "version", "source_commit", "fixture")
+        );
+        Command::new("bash")
+            .args(["-c", &script])
+            .env("VELNOR_PACKAGE_CHANNEL", channel)
+            .status()
+            .expect("run generated version validation")
+            .success()
+    }
+
+    fn manifest_shell_version_accepts(
+        manifest: &serde_json::Value,
+        version_format: VersionFormat,
+        channel: &str,
+    ) -> bool {
+        use std::process::Command;
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-version-json-{}",
+            crate::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create manifest version fixture");
+        let manifest_path = root.join("release-manifest.json");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(manifest).expect("serialize manifest version fixture"),
+        )
+        .expect("write manifest version fixture");
+        let script = format!(
+            "manifest={}\n{}\nsource_commit=\"$(jq -er '.source_commit | strings' \"$manifest\")\"\nversion=\"$(jq -er '.version | strings' \"$manifest\")\"\n{}",
+            shell_quote(manifest_path.to_str().expect("manifest fixture path")),
+            manifest_version_line_guard(),
+            version_validation_script(version_format, "version", "source_commit", "manifest")
+        );
+        let output = Command::new("bash")
+            .args(["-c", &script])
+            .env("VELNOR_PACKAGE_CHANNEL", channel)
+            .output()
+            .expect("run generated manifest-to-shell version validation");
+        let _ = std::fs::remove_dir_all(root);
+        output.status.success()
     }
 
     #[test]
@@ -1791,16 +2722,16 @@ source_ref = "refs/heads/main"
 payloads = ["a.tar.gz", "b.tar.gz", "c.tar.gz", "d.tar.gz", "e.tar.gz", "f.tar.gz"]
 supporting_assets = ["SHA256SUMS", "a.tar.gz.bundle", "capsule-manifest.json"]
 channel = "preview"
+version_format = "channel"
+manifest_format = "supporting-assets-v1"
 release_tag = "preview"
 github_release_type = "prerelease"
 publish_environment = "github-preview"
-release_title_prefix = "Preview"
 consumer_repository = "example/tap"
 consumer_branch = "main"
 updater = "./scripts/package-update.sh"
 updater_token_secret = "TAP_TOKEN"
 update_commit_message = "chore: update verified preview"
-concurrency_group = "package-release-preview"
 "#,
         )
         .expect("schema 2 package declaration must parse");
@@ -1829,11 +2760,744 @@ concurrency_group = "package-release-preview"
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
+    fn consumer_fixtures_match_manifest_identity_and_version_contracts() {
+        let stable_spec = parse_spec(&Args(&stable_args())).expect("stable fixture config");
+        let mut preview_values = args();
+        preview_values.insert(
+            "supporting_assets".to_owned(),
+            toml::Value::Array(vec![toml::Value::String("provenance.json".to_owned())]),
+        );
+        let preview_spec = parse_spec(&Args(&preview_values)).expect("preview fixture config");
+
+        for (lane, spec, format, channel, version) in [
+            (
+                "stable",
+                &stable_spec,
+                VersionFormat::Semver,
+                "stable",
+                "1.2.3",
+            ),
+            (
+                "preview",
+                &preview_spec,
+                VersionFormat::Channel,
+                "preview",
+                "1.2.3-preview.7+0123456",
+            ),
+        ] {
+            let manifest_path = consumer_fixture_path(lane, "release-manifest.json");
+            let identity_path = consumer_fixture_path(lane, "identity.json");
+            let manifest: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(&manifest_path).expect("read consumer manifest fixture"),
+            )
+            .expect("parse consumer manifest fixture");
+            let identity: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(&identity_path).expect("read consumer identity fixture"),
+            )
+            .expect("parse consumer identity fixture");
+            assert_eq!(
+                manifest
+                    .as_object()
+                    .expect("manifest object")
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                match spec.manifest_format {
+                    ManifestFormat::CoreV1 => vec![
+                        "assets",
+                        "schema",
+                        "source_commit",
+                        "source_ref",
+                        "source_repository",
+                        "version",
+                    ],
+                    ManifestFormat::SupportingAssetsV1 => vec![
+                        "assets",
+                        "schema",
+                        "source_commit",
+                        "source_ref",
+                        "source_repository",
+                        "supporting_assets",
+                        "version",
+                    ],
+                }
+            );
+            assert_eq!(
+                identity
+                    .as_object()
+                    .expect("identity object")
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                [
+                    "manifest",
+                    "source_digest",
+                    "source_ref",
+                    "source_repository"
+                ]
+            );
+            assert_eq!(identity["manifest"], manifest);
+            assert_eq!(identity["source_digest"], manifest["source_commit"]);
+            let asset_bytes = std::fs::read(consumer_fixture_path(lane, "package.tar.gz"))
+                .expect("read consumer package fixture");
+            let mut asset_digest = String::with_capacity(64);
+            for byte in Sha256::digest(asset_bytes) {
+                let _ = write!(asset_digest, "{byte:02x}");
+            }
+            assert_eq!(manifest["assets"][0]["sha256"], asset_digest);
+            if let Some(supporting_assets) = manifest["supporting_assets"].as_array() {
+                assert_eq!(supporting_assets.len(), spec.supporting_assets.len());
+                for supporting_asset in supporting_assets {
+                    let name = supporting_asset["name"]
+                        .as_str()
+                        .expect("supporting asset name");
+                    let asset_bytes = std::fs::read(consumer_fixture_path(lane, name))
+                        .expect("read consumer supporting asset fixture");
+                    let mut asset_digest = String::with_capacity(64);
+                    for byte in Sha256::digest(asset_bytes) {
+                        let _ = write!(asset_digest, "{byte:02x}");
+                    }
+                    assert_eq!(supporting_asset["sha256"], asset_digest);
+                }
+            } else {
+                assert!(spec.supporting_assets.is_empty());
+            }
+            assert_eq!(manifest["version"], version);
+            assert!(manifest_shell_version_accepts(&manifest, format, channel));
+            let mut trailing_newline = manifest.clone();
+            trailing_newline["version"] = serde_json::Value::String(format!("{version}\n"));
+            assert!(
+                !manifest_shell_version_accepts(&trailing_newline, format, channel),
+                "raw JSON version with trailing LF must not be normalized by command substitution"
+            );
+            let mut nul_byte = manifest.clone();
+            nul_byte["version"] = serde_json::Value::String(format!("{version}\0"));
+            assert!(
+                !manifest_shell_version_accepts(&nul_byte, format, channel),
+                "raw JSON version with NUL must not be normalized by command substitution"
+            );
+            assert_eq!(
+                manifest_key_validation(spec),
+                match spec.manifest_format {
+                    ManifestFormat::CoreV1 => {
+                        r#"keys == ["assets","schema","source_commit","source_ref","source_repository","version"]"#
+                    }
+                    ManifestFormat::SupportingAssetsV1 => {
+                        r#"keys == ["assets","schema","source_commit","source_ref","source_repository","supporting_assets","version"]"#
+                    }
+                }
+            );
+            assert_eq!(jq_fixture_validation(spec, lane), (true, true, true));
+            assert!(version_script_accepts(
+                format,
+                version,
+                channel,
+                manifest["source_commit"]
+                    .as_str()
+                    .expect("fixture source commit")
+            ));
+        }
+
+        assert!(!version_script_accepts(
+            VersionFormat::Semver,
+            "01.2.3",
+            "stable",
+            "0123456789abcdef0123456789abcdef01234567"
+        ));
+        assert!(!version_script_accepts(
+            VersionFormat::Channel,
+            "1.2.3-preview.07+0123456",
+            "preview",
+            "0123456789abcdef0123456789abcdef01234567"
+        ));
+        assert!(!version_script_accepts(
+            VersionFormat::Channel,
+            "1.2.3-preview.7+0123457",
+            "preview",
+            "0123456789abcdef0123456789abcdef01234567"
+        ));
+    }
+
+    #[test]
+    fn latest_floor_requires_expected_identity_and_verified_attestation() {
+        let (valid, stderr, log) = run_latest_floor_case(
+            "example.consumer-manifest-v1",
+            "example/project",
+            "refs/heads/main",
+            false,
+            "1.2.4",
+        );
+        assert!(valid, "valid current Latest failed: {stderr}");
+        assert_eq!(log.matches("attestation verify").count(), 2, "{log}");
+        assert!(log.contains("--source-digest 0123456789abcdef0123456789abcdef01234567"));
+        assert!(log.contains("--signer-workflow example/project/.github/workflows/stable.yml"));
+        assert!(log.contains("rolling-tag-404-recreate-branch"));
+
+        for (schema, repository, source_ref) in [
+            ("different.schema", "example/project", "refs/heads/main"),
+            (
+                "example.consumer-manifest-v1",
+                "other/project",
+                "refs/heads/main",
+            ),
+            (
+                "example.consumer-manifest-v1",
+                "example/project",
+                "refs/heads/release",
+            ),
+        ] {
+            let (valid, stderr, log) =
+                run_latest_floor_case(schema, repository, source_ref, false, "1.2.4");
+            assert!(
+                !valid,
+                "mismatched Latest identity passed: {schema} {repository} {source_ref}"
+            );
+            assert!(
+                stderr.contains("current GitHub Latest manifest does not match"),
+                "{stderr}"
+            );
+            assert!(
+                !log.contains("attestation verify"),
+                "attestation ran on invalid identity: {log}"
+            );
+        }
+
+        let (valid, stderr, log) = run_latest_floor_case(
+            "example.consumer-manifest-v1",
+            "example/project",
+            "refs/heads/main",
+            true,
+            "1.2.4",
+        );
+        assert!(!valid, "failed attestation allowed Latest version floor");
+        assert_eq!(log.matches("attestation verify").count(), 1, "{log}");
+        assert!(
+            !log.contains("rolling-tag-404-recreate-branch"),
+            "validation continued after attestation failure"
+        );
+        assert!(
+            stderr.is_empty(),
+            "attestation failure should fail closed: {stderr}"
+        );
+
+        let (valid, stderr, log) = run_latest_floor_case(
+            "example.consumer-manifest-v1",
+            "example/project",
+            "refs/heads/main",
+            false,
+            "1.2.2",
+        );
+        assert!(!valid, "stale release candidate passed the Latest floor");
+        assert!(
+            stderr.contains("candidate stable version is older than current GitHub Latest"),
+            "{stderr}"
+        );
+        assert_eq!(log.matches("attestation verify").count(), 2, "{log}");
+        assert!(
+            !log.contains("rolling-tag-404-recreate-branch"),
+            "stale candidate reached the rolling-tag 404 recreation branch: {log}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn lane_defaults_and_latest_policy_follow_target_configuration() {
+        let preview_spec = parse_spec(&Args(&args())).expect("preview fixture config");
+        let preview = render_workflow(&render_config(), &preview_spec, "preview.yml");
+        assert_eq!(preview_spec.release_title_prefix, "Preview");
+        assert_eq!(preview_spec.concurrency_group, "package-release-preview");
+        assert!(preview.contains("RELEASE_LATEST: \"false\""));
+        assert!(preview
+            .contains("-F draft=false -F \"prerelease=$RELEASE_PRERELEASE\" -F make_latest=false"));
+        assert!(preview.contains("release_flags=(--latest=false)"));
+        assert!(
+            !preview.contains("Promote immutable release to GitHub Latest after rolling refresh")
+        );
+        assert!(!preview.contains("-F make_latest=true"));
+        assert!(preview.contains("RELEASE_TITLE_PREFIX: Preview"));
+        assert!(preview.contains("concurrency:\n  group: package-release-preview"));
+        assert_eq!(preview.matches("\nconcurrency:\n").count(), 1);
+        let preview_yaml: serde_yaml::Value =
+            serde_yaml::from_str(&preview).expect("preview workflow yaml");
+        let jobs = preview_yaml
+            .get("jobs")
+            .and_then(serde_yaml::Value::as_mapping)
+            .expect("workflow jobs mapping");
+        let publish = jobs
+            .get("publish")
+            .and_then(serde_yaml::Value::as_mapping)
+            .expect("publish job mapping");
+        let publish_concurrency = publish
+            .get("concurrency")
+            .and_then(serde_yaml::Value::as_mapping)
+            .expect("global publish concurrency lock");
+        assert_eq!(
+            publish_concurrency
+                .get("group")
+                .and_then(serde_yaml::Value::as_str),
+            Some(GLOBAL_PUBLISH_CONCURRENCY_GROUP)
+        );
+        assert_eq!(
+            publish_concurrency
+                .get("cancel-in-progress")
+                .and_then(serde_yaml::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            publish_concurrency
+                .get("queue")
+                .and_then(serde_yaml::Value::as_str),
+            Some("max")
+        );
+        assert_ne!(
+            preview_spec.concurrency_group,
+            GLOBAL_PUBLISH_CONCURRENCY_GROUP
+        );
+        assert_eq!(
+            publish
+                .get("defaults")
+                .and_then(serde_yaml::Value::as_mapping)
+                .and_then(|defaults| defaults.get("run"))
+                .and_then(serde_yaml::Value::as_mapping)
+                .and_then(|run| run.get("shell"))
+                .and_then(serde_yaml::Value::as_str),
+            Some("bash")
+        );
+
+        let mut beta_values = args();
+        beta_values.insert("channel".to_owned(), toml::Value::String("beta".to_owned()));
+        let beta_shared_tag = parse_spec(&Args(&beta_values)).expect("beta sharing preview tag");
+        assert_eq!(beta_shared_tag.release_title_prefix, "Beta");
+        assert_eq!(beta_shared_tag.concurrency_group, "package-release-preview");
+        beta_values.insert(
+            "release_tag".to_owned(),
+            toml::Value::String("beta".to_owned()),
+        );
+        let beta_spec = parse_spec(&Args(&beta_values)).expect("beta fixture config");
+        let beta = render_workflow(&render_config(), &beta_spec, "beta.yml");
+        assert_eq!(beta_spec.release_title_prefix, "Beta");
+        assert_eq!(beta_spec.concurrency_group, "package-release-beta");
+        assert!(beta.contains("RELEASE_TITLE_PREFIX: Beta"));
+        assert!(beta.contains("concurrency:\n  group: package-release-beta"));
+        assert!(beta.contains("RELEASE_LATEST: \"false\""));
+
+        let stable_spec = parse_spec(&Args(&stable_args())).expect("stable fixture config");
+        let stable = render_workflow(&render_config(), &stable_spec, "stable.yml");
+        assert_eq!(stable_spec.release_title_prefix, "Stable");
+        assert_eq!(stable_spec.concurrency_group, "package-release-stable");
+        assert!(stable.contains("RELEASE_TITLE_PREFIX: Stable"));
+        assert!(stable.contains("concurrency:\n  group: package-release-stable"));
+        assert!(stable.contains("RELEASE_LATEST: \"true\""));
+        assert!(stable.contains("release_flags=(--latest=false)"));
+        assert!(stable
+            .contains("-F draft=false -F \"prerelease=$RELEASE_PRERELEASE\" -F make_latest=false"));
+        let refresh = stable
+            .find("Refresh rolling package release")
+            .expect("rolling release refresh step");
+        let promote = stable
+            .find("Promote immutable release to GitHub Latest after rolling refresh")
+            .expect("deferred stable latest promotion step");
+        let promote_flag = stable
+            .find("-F make_latest=true")
+            .expect("explicit stable latest promotion");
+        let stale_guard = stable
+            .find("candidate version is not newer than the live rolling version")
+            .expect("rolling monotonicity preflight");
+        let latest_floor = stable
+            .find("candidate stable version is older than current GitHub Latest")
+            .expect("repository-wide stable version floor");
+        let first_mutation = stable.find("mutated=1").expect("mutation boundary");
+        assert!(
+            stale_guard < first_mutation
+                && latest_floor < first_mutation
+                && refresh < promote
+                && promote < promote_flag
+        );
+    }
+
+    #[test]
+    fn release_lanes_reject_unsupported_channel_type_and_version_pairs() {
+        let mut invalid = stable_args();
+        invalid.insert(
+            "version_format".to_owned(),
+            toml::Value::String("channel".to_owned()),
+        );
+        assert!(parse_spec(&Args(&invalid))
+            .expect_err("stable releases require semver")
+            .to_string()
+            .contains("release lanes require version_format"));
+
+        let mut invalid = args();
+        invalid.insert(
+            "version_format".to_owned(),
+            toml::Value::String("semver".to_owned()),
+        );
+        assert!(parse_spec(&Args(&invalid))
+            .expect_err("prereleases require a channel version")
+            .to_string()
+            .contains("prerelease lanes require version_format"));
+
+        let mut invalid = stable_args();
+        invalid.insert(
+            "channel".to_owned(),
+            toml::Value::String("preview".to_owned()),
+        );
+        assert!(parse_spec(&Args(&invalid))
+            .expect_err("preview is a prerelease lane")
+            .to_string()
+            .contains("preview channel requires github_release_type"));
+
+        let mut missing_preview_sidecars = args();
+        missing_preview_sidecars.remove("supporting_assets");
+        assert!(parse_spec(&Args(&missing_preview_sidecars))
+            .expect_err("prereleases require consumer provenance sidecars")
+            .to_string()
+            .contains("requires supporting_assets"));
+
+        let mut preview_core_manifest = args();
+        preview_core_manifest.remove("supporting_assets");
+        preview_core_manifest.insert(
+            "manifest_format".to_owned(),
+            toml::Value::String("core-v1".to_owned()),
+        );
+        assert!(parse_spec(&Args(&preview_core_manifest))
+            .expect_err("prereleases must use the sidecar manifest schema")
+            .to_string()
+            .contains("prerelease lanes require manifest_format"));
+
+        let mut unsafe_group_override = args();
+        unsafe_group_override.insert(
+            "concurrency_group".to_owned(),
+            toml::Value::String("unlocked-preview-tag".to_owned()),
+        );
+        assert!(parse_spec(&Args(&unsafe_group_override))
+            .expect_err("concurrency must be derived from mutable release_tag")
+            .to_string()
+            .contains("concurrency_group is derived from release_tag"));
+
+        let mut reserved_tag = args();
+        reserved_tag.insert(
+            "release_tag".to_owned(),
+            toml::Value::String("global-publish".to_owned()),
+        );
+        assert!(parse_spec(&Args(&reserved_tag))
+            .expect_err("release tags cannot collide with the global publication lock")
+            .to_string()
+            .contains("reserved global publish concurrency group"));
+
+        let mut uppercase_reserved_tag = args();
+        uppercase_reserved_tag.insert(
+            "release_tag".to_owned(),
+            toml::Value::String("GLOBAL-PUBLISH".to_owned()),
+        );
+        assert!(parse_spec(&Args(&uppercase_reserved_tag))
+            .expect_err("GitHub treats uppercase and lowercase groups as equal")
+            .to_string()
+            .contains("reserved global publish concurrency group"));
+    }
+
+    #[test]
+    fn release_runner_and_generated_shell_are_constrained_to_supported_hosts() {
+        for labels in [
+            vec!["macos-15"],
+            vec!["windows-2025"],
+            vec!["ubuntu-24.04", "self-hosted"],
+            vec!["ubuntu-slim"],
+            vec!["ubuntu-custom"],
+        ] {
+            let mut config = render_config();
+            config
+                .selectors
+                .get_mut(&ProviderId::GithubHosted)
+                .expect("hosted selector")
+                .runs_on = labels.into_iter().map(str::to_owned).collect();
+            assert!(validate_release_runner(&config).is_err());
+        }
+
+        for label in [
+            "ubuntu-latest",
+            "ubuntu-22.04",
+            "ubuntu-24.04",
+            "ubuntu-26.04",
+            "ubuntu-22.04-arm",
+            "ubuntu-24.04-arm",
+            "ubuntu-26.04-arm",
+        ] {
+            let mut config = render_config();
+            config
+                .selectors
+                .get_mut(&ProviderId::GithubHosted)
+                .expect("hosted selector")
+                .runs_on = vec![label.to_owned()];
+            assert!(validate_release_runner(&config).is_ok(), "{label}");
+        }
+
+        let spec = parse_spec(&Args(&args())).expect("preview fixture config");
+        let workflow = render_workflow(&render_config(), &spec, "preview.yml");
+        assert_eq!(
+            workflow
+                .matches("defaults:\n      run:\n        shell: bash")
+                .count(),
+            2
+        );
+        assert!(workflow
+            .contains("    defaults:\n      run:\n        shell: bash\n    timeout-minutes: 30"));
+    }
+
+    #[test]
+    fn configured_hidden_asset_and_inventory_name_survive_exact_verification() {
+        let mut values = stable_args();
+        values.insert(
+            "payloads".to_owned(),
+            toml::Value::Array(vec![toml::Value::String(".asset-names".to_owned())]),
+        );
+        let spec = parse_spec(&Args(&values)).expect("hidden bare payload is valid");
+        assert!(release_asset_names(&spec).contains(&".asset-names".to_owned()));
+        let workflow = render_workflow(&render_config(), &spec, "stable.yml");
+        assert!(workflow.contains("include-hidden-files: true"));
+        let upload_step = workflow
+            .find("Upload verified package handoff")
+            .expect("artifact upload step");
+        let upload_paths = workflow[upload_step..]
+            .split("          include-hidden-files: true")
+            .next()
+            .expect("upload path block");
+        assert!(upload_paths.contains(
+            "path: |\n            ${{ github.workspace }}/dist/release-manifest.json\n            ${{ github.workspace }}/dist/identity.json\n            ${{ github.workspace }}/dist/.asset-names"
+        ));
+        assert!(!upload_paths.contains("dist/unconfigured"));
+        let immutable = render_immutable_publish_script(&spec);
+        let authenticated_tag_query =
+            "git -C source -c \"http.extraheader=AUTHORIZATION: bearer $GH_TOKEN\" ls-remote origin";
+        assert_eq!(
+            immutable.matches(authenticated_tag_query).count(),
+            2,
+            "both immutable tag lookup paths must authenticate private source access"
+        );
+        assert!(immutable.contains("downloaded_assets=\"$transaction_dir/downloaded-assets\""));
+        assert!(immutable.contains("find \"$target_dir\" -maxdepth 1 -type f -printf '%f\\n'"));
+        assert!(!immutable.contains("$target_dir/.asset-names"));
+    }
+
+    #[test]
+    fn rolling_asset_contract_migration_fails_before_any_release_mutation() {
+        let old_spec = parse_spec(&Args(&stable_args())).expect("old stable contract");
+        let mut new_values = stable_args();
+        new_values.insert(
+            "supporting_assets".to_owned(),
+            toml::Value::Array(vec![toml::Value::String("provenance.json".to_owned())]),
+        );
+        new_values.insert(
+            "manifest_format".to_owned(),
+            toml::Value::String("supporting-assets-v1".to_owned()),
+        );
+        let new_spec = parse_spec(&Args(&new_values)).expect("new stable contract");
+        let old_names = release_asset_names(&old_spec);
+        let new_names = release_asset_names(&new_spec);
+        assert_ne!(old_names, new_names);
+        assert_eq!(
+            manifest_key_validation(&old_spec),
+            r#"keys == ["assets","schema","source_commit","source_ref","source_repository","version"]"#
+        );
+        assert_eq!(
+            manifest_key_validation(&new_spec),
+            r#"keys == ["assets","schema","source_commit","source_ref","source_repository","supporting_assets","version"]"#
+        );
+
+        let workflow = render_workflow(&render_config(), &new_spec, "stable.yml");
+        let manifest_migration = workflow
+            .find("existing rolling release manifest shape differs from the configured package contract")
+            .expect("manifest-shape migration error");
+        let asset_migration = workflow
+            .find("existing rolling release asset set differs from the configured package contract")
+            .expect("asset-set migration error");
+        let mutation = workflow
+            .find("mutated=1")
+            .expect("publication mutation marker");
+        assert!(manifest_migration < mutation);
+        assert!(asset_migration < mutation);
+        assert!(workflow.contains("explicit manifest migration is required before publication"));
+        assert!(workflow.contains("explicit asset migration is required before publication"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preflight_rejects_manifest_migration_before_immutable_publication() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        let mut values = stable_args();
+        values.insert(
+            "payloads".to_owned(),
+            toml::Value::Array(vec![toml::Value::String("package.tar.gz".to_owned())]),
+        );
+        values.insert(
+            "supporting_assets".to_owned(),
+            toml::Value::Array(vec![toml::Value::String("provenance.json".to_owned())]),
+        );
+        values.insert(
+            "manifest_format".to_owned(),
+            toml::Value::String("supporting-assets-v1".to_owned()),
+        );
+        let spec = parse_spec(&Args(&values)).expect("new stable package contract");
+        let script = rolling_refresh_script_for_test(&spec, "stable.yml");
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-publish-preflight-{}",
+            crate::unique_suffix()
+        ));
+        let candidate = root.join("package");
+        let fake_bin = root.join("bin");
+        let old_package = consumer_fixture_path("stable", "release-manifest.json");
+        let old_package_dir = old_package.parent().expect("fixture package directory");
+        let log = root.join("gh.log");
+        std::fs::create_dir_all(&candidate).expect("create candidate package directory");
+        std::fs::create_dir_all(&fake_bin).expect("create mock binary directory");
+        for name in ["package.tar.gz", "provenance.json"] {
+            std::fs::write(candidate.join(name), b"candidate asset")
+                .expect("write candidate package asset");
+        }
+        let candidate_manifest = serde_json::json!({
+            "assets": [{"name": "package.tar.gz", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],
+            "schema": "example.consumer-manifest-v1",
+            "source_commit": "0123456789abcdef0123456789abcdef01234567",
+            "source_ref": "refs/heads/main",
+            "source_repository": "example/project",
+            "supporting_assets": [{"name": "provenance.json", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}],
+            "version": "1.2.4"
+        });
+        std::fs::write(
+            candidate.join("release-manifest.json"),
+            serde_json::to_vec(&candidate_manifest).expect("serialize candidate manifest"),
+        )
+        .expect("write candidate manifest");
+        std::fs::write(candidate.join("identity.json"), b"candidate identity")
+            .expect("write candidate identity");
+
+        let git_mock = fake_bin.join("git");
+        std::fs::write(
+            &git_mock,
+            r#"#!/usr/bin/env bash
+last="${@: -1}"
+case "$last" in
+  refs/tags/stable^{}|refs/tags/stable)
+    printf '%s\t%s\n' 0123456789abcdef0123456789abcdef01234567 "$last"
+    ;;
+  *) echo "unexpected git query: $*" >&2; exit 97 ;;
+esac
+"#,
+        )
+        .expect("write authenticated tag query mock");
+        std::fs::set_permissions(&git_mock, std::fs::Permissions::from_mode(0o755))
+            .expect("make git mock executable");
+        let find_mock = fake_bin.join("find");
+        std::fs::write(
+            &find_mock,
+            r#"#!/usr/bin/env bash
+directory="$1"
+for path in "$directory"/* "$directory"/.[!.]* "$directory"/..?*; do
+  if [ -f "$path" ]; then printf '%s\n' "${path##*/}"; fi
+done
+"#,
+        )
+        .expect("write GNU find behavior mock");
+        std::fs::set_permissions(&find_mock, std::fs::Permissions::from_mode(0o755))
+            .expect("make find mock executable");
+
+        let mut harness = String::from(
+            r#"gh() {
+  printf 'gh %s\n' "$*" >> "$GH_LOG"
+  if [ "$1" = api ] && [ "$2" = --repo ] && [ "$4" = -i ]; then
+    case "$5" in
+      */releases/latest)
+        printf 'HTTP/2 404 Not Found\r\n\r\n'
+        return 0
+        ;;
+      */releases/tags/stable)
+        printf 'HTTP/2 200 OK\r\n\r\n'
+        printf '%s\n' '{"id":42,"tag_name":"stable","name":"Stable 1.2.3","body":"old body","draft":false,"prerelease":false,"assets":[{"id":1,"name":"release-manifest.json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},{"id":2,"name":"identity.json","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},{"id":3,"name":"package.tar.gz","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}'
+        return 0
+        ;;
+    esac
+  fi
+  if [ "$1" = release ] && [ "$2" = download ]; then
+    local destination=""
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = --dir ]; then destination="$2"; shift 2; else shift; fi
+    done
+    cp "$OLD_PACKAGE_DIR"/* "$destination/"
+    return 0
+  fi
+  if [[ "$*" == *"--method"* ]] || { [ "$1" = release ] && [ "$2" = upload ]; }; then
+    printf 'unexpected public mutation: %s\n' "$*" >&2
+    return 98
+  fi
+  echo "unexpected gh invocation: $*" >&2
+  return 97
+}
+"#,
+        );
+        harness.push_str(&script);
+        let path = std::env::var_os("PATH").expect("PATH is present");
+        let joined_path = std::env::join_paths(
+            std::iter::once(fake_bin.clone()).chain(std::env::split_paths(&path)),
+        )
+        .expect("join mock PATH");
+        let output = Command::new("bash")
+            .args(["-c", &harness])
+            .env("PATH", joined_path)
+            .env("GITHUB_WORKSPACE", &root)
+            .env("GITHUB_REPOSITORY", "example/project")
+            .env("PACKAGE_DIR", "package")
+            .env(
+                "EXPECTED_SOURCE_COMMIT",
+                "0123456789abcdef0123456789abcdef01234567",
+            )
+            .env("EXPECTED_SOURCE_REPOSITORY", "example/project")
+            .env("EXPECTED_SOURCE_REF", "refs/heads/main")
+            .env("EXPECTED_MANIFEST_SCHEMA", "example.consumer-manifest-v1")
+            .env("VELNOR_PACKAGE_CHANNEL", "stable")
+            .env("RELEASE_TAG", "stable")
+            .env("RELEASE_PRERELEASE", "false")
+            .env("RELEASE_LATEST", "true")
+            .env("RELEASE_TITLE_PREFIX", "Stable")
+            .env("ROLLING_PREFLIGHT_ONLY", "true")
+            .env("GH_TOKEN", "fixture-token")
+            .env("OLD_PACKAGE_DIR", old_package_dir)
+            .env("GH_LOG", &log)
+            .output()
+            .expect("run generated preflight with migration fault injection");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let gh_log = std::fs::read_to_string(&log).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(output.status.code(), Some(1), "{stderr}\n{gh_log}");
+        assert!(
+            stderr.contains("explicit manifest migration is required before publication"),
+            "{stderr}"
+        );
+        assert!(gh_log.contains("releases/tags/stable"), "{gh_log}");
+        assert!(!gh_log.contains("--method"), "{gh_log}");
+        assert!(!gh_log.contains("release upload"), "{gh_log}");
+    }
+
+    #[test]
     fn release_type_and_publish_environment_come_from_target_config() {
         let mut values = args();
         values.insert(
             "github_release_type".to_owned(),
             toml::Value::String("release".to_owned()),
+        );
+        values.insert(
+            "channel".to_owned(),
+            toml::Value::String("stable".to_owned()),
+        );
+        values.insert(
+            "version_format".to_owned(),
+            toml::Value::String("semver".to_owned()),
+        );
+        values.insert(
+            "release_tag".to_owned(),
+            toml::Value::String("stable".to_owned()),
         );
         values.insert(
             "publish_environment".to_owned(),
@@ -1843,6 +3507,14 @@ concurrency_group = "package-release-preview"
         let workflow = render_workflow(&render_config(), &spec, "package-release.yml");
         assert!(workflow.contains("environment: package-production"));
         assert!(workflow.contains("RELEASE_PRERELEASE: \"false\""));
+        assert!(workflow.contains("RELEASE_LATEST: \"true\""));
+        assert!(workflow.contains("RELEASE_TITLE_PREFIX: Stable"));
+        assert!(workflow.contains("concurrency:\n  group: package-release-stable"));
+        assert!(workflow
+            .contains("-F draft=false -F \"prerelease=$RELEASE_PRERELEASE\" -F make_latest=false"));
+        assert!(
+            workflow.contains("Promote immutable release to GitHub Latest after rolling refresh")
+        );
         assert!(workflow.contains(r#"-F "prerelease=$RELEASE_PRERELEASE""#));
         assert!(workflow.contains(r#"--argjson prerelease "$RELEASE_PRERELEASE""#));
         assert!(!workflow.contains("environment: github-preview"));
@@ -1898,7 +3570,88 @@ concurrency_group = "package-release-preview"
             "merge-base --is-ancestor \"$old_source_commit\" \"$EXPECTED_SOURCE_COMMIT\""
         ));
         assert!(workflow.contains("existing rolling manifest source_commit does not match its tag"));
-        assert!(workflow.contains("existing rolling manifest version does not bind to its source"));
+        assert!(
+            workflow.contains("existing rolling manifest version does not bind its source commit")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_rolling_identity_failure_survives_negated_function_call() {
+        use std::process::Command;
+
+        let spec = parse_spec(&Args(&stable_args())).expect("stable fixture config");
+        let script = rolling_refresh_script_for_test(&spec, "stable.yml");
+        let validation = script_region(
+            &script,
+            "validate_existing_rolling_release() {",
+            "\nreject_stale_rolling_draft() {",
+        );
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-rolling-identity-{}",
+            crate::unique_suffix()
+        ));
+        let transaction = root.join("transaction");
+        let source_dir = root.join("live-package");
+        std::fs::create_dir_all(&transaction).expect("create transaction directory");
+        std::fs::create_dir_all(&source_dir).expect("create live package directory");
+        for file in ["release-manifest.json", "package.tar.gz"] {
+            std::fs::copy(consumer_fixture_path("stable", file), source_dir.join(file))
+                .expect("copy valid stable package fixture");
+        }
+        let mut identity = serde_json::from_slice::<serde_json::Value>(
+            &std::fs::read(consumer_fixture_path("stable", "identity.json"))
+                .expect("read stable identity fixture"),
+        )
+        .expect("parse stable identity fixture");
+        identity["source_repository"] = serde_json::json!("untrusted/other");
+        std::fs::write(
+            source_dir.join("identity.json"),
+            serde_json::to_vec(&identity).expect("serialize invalid identity fixture"),
+        )
+        .expect("write mismatched identity envelope");
+
+        let assets = ["release-manifest.json", "identity.json", "package.tar.gz"].map(|name| {
+            use std::fmt::Write as _;
+
+            let contents = std::fs::read(source_dir.join(name)).expect("read package asset");
+            let mut digest = String::with_capacity(64);
+            for byte in Sha256::digest(contents) {
+                write!(&mut digest, "{byte:02x}").expect("write SHA-256 digest");
+            }
+            serde_json::json!({"name": name, "digest": format!("sha256:{digest}")})
+        });
+        let body = serde_json::json!({
+            "assets": assets,
+            "draft": false,
+            "id": 42,
+            "name": "Stable 1.2.3",
+            "prerelease": false,
+            "tag_name": "stable"
+        });
+        let body = serde_json::to_string(&body).expect("serialize existing release body");
+        let harness = format!(
+            "set -Eeuo pipefail\ntransaction_dir={}\nrolling_tag=stable\nRELEASE_PRERELEASE=false\nRELEASE_TITLE_PREFIX=Stable\nEXPECTED_MANIFEST_SCHEMA=example.consumer-manifest-v1\nEXPECTED_SOURCE_REPOSITORY=example/project\nEXPECTED_SOURCE_REF=refs/heads/main\nEXPECTED_SOURCE_COMMIT=fedcba9876543210fedcba9876543210fedcba98\nVELNOR_PACKAGE_CHANNEL=stable\nold_tag_sha=0123456789abcdef0123456789abcdef01234567\nold_assets=\"$transaction_dir/old-assets\"\ngit() {{ return 0; }}\n{}\nbody={}\nif ! validate_existing_rolling_release \"$body\" {}; then\n  result=rejected\nelse\n  result=accepted\nfi\ntest \"$result\" = rejected\n",
+            shell_quote(transaction.to_str().expect("transaction path")),
+            validation,
+            shell_quote(&body),
+            shell_quote(source_dir.to_str().expect("source directory path")),
+        );
+        let output = Command::new("bash")
+            .args(["-c", &harness])
+            .output()
+            .expect("run generated rolling identity validation");
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            output.status.success(),
+            "generated validation accepted an invalid identity: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("identity envelope does not bind"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -1912,14 +3665,11 @@ concurrency_group = "package-release-preview"
             r#"if [ "$old_draft" = true ] && [ "$old_prerelease" != "$RELEASE_PRERELEASE" ]; then"#
         ));
         assert!(workflow.contains("elif ! validate_existing_rolling_release"));
-        assert!(workflow.contains("discard_stale_rolling_draft"));
-        assert!(workflow.contains("discarding incomplete rolling draft and retrying publication"));
-        assert!(workflow.contains(
-            "gh api --method DELETE --repo \"$GITHUB_REPOSITORY\" \"repos/$GITHUB_REPOSITORY/releases/$rolling_release_id\""
-        ));
-        assert!(workflow.contains("stale_tag_sha=\"$(remote_tag_sha \"$rolling_tag\")\""));
+        assert!(workflow.contains("reject_stale_rolling_draft"));
+        assert!(workflow.contains("existing rolling draft is incomplete or incompatible"));
+        assert!(!workflow.contains("discard_stale_rolling_draft"));
+        assert!(!workflow.contains("stale_tag_sha=\"$(remote_tag_sha \"$rolling_tag\")\""));
         assert!(workflow.contains("git/refs/tags/$rolling_tag\""));
-        assert!(workflow.contains("had_release=0"));
     }
 
     fn render_config() -> ProjectConfig {
@@ -2153,7 +3903,10 @@ concurrency_group = "package-release-preview"
         assert!(workflow.contains("--source-ref \"$EXPECTED_SOURCE_REF\""));
         assert!(workflow.contains("--source-digest \"$EXPECTED_SOURCE_COMMIT\""));
         assert!(workflow.contains("PACKAGE_DIR: published-package"));
-        assert!(workflow.contains("Refresh rolling preview release"));
+        assert!(workflow.contains("Refresh rolling package release"));
+        assert!(
+            !workflow.contains("Promote immutable release to GitHub Latest after rolling refresh")
+        );
         assert!(workflow.contains(
             "gh release upload \"$rolling_tag\" --repo \"$GITHUB_REPOSITORY\" --clobber"
         ));
@@ -2240,7 +3993,7 @@ concurrency_group = "package-release-preview"
             .find("Checkout verified source for publication")
             .expect("source checkout");
         let rolling_refresh = workflow
-            .find("Refresh rolling preview release")
+            .find("Refresh rolling package release")
             .expect("rolling refresh");
         assert!(source_checkout < rolling_refresh);
         assert!(workflow.contains("fetch-depth: 0\n          path: source"));
@@ -2262,15 +4015,22 @@ concurrency_group = "package-release-preview"
         let spec = parse_spec(&Args(&args())).expect("valid fixture");
         let workflow = render_workflow(&render_config(), &spec, "preview.yml");
         assert!(workflow.contains("repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag"));
-        assert!(workflow.contains("previous release restored"));
+        assert!(workflow.contains("previous state restored"));
         assert!(workflow.contains("validate_existing_rolling_release"));
         assert!(workflow
             .contains("existing rolling release assets are not exactly covered by its manifest"));
-        assert!(
-            workflow.contains("if ! verify_restored_assets \"$restore_dir\" \"$restore_assets\"")
-        );
+        assert!(workflow.contains("if verify_restored_assets \"$rollback_dir\" \"$old_assets\""));
+        assert!(workflow.contains("remote_tag_ref_sha()"));
+        assert!(workflow.contains("sha=$old_tag_ref_sha"));
+        assert!(workflow.contains("remote_tag_ref_sha \"$rolling_tag\""));
         assert!(workflow.contains("rollback restored bytes differ"));
         assert!(workflow.contains("rollback GitHub digest differs"));
+        assert!(workflow.contains("current GitHub Latest manifest does not match the configured schema and source identity"));
+        assert!(workflow.contains(
+            "current GitHub Latest identity envelope does not bind its manifest and source"
+        ));
+        assert!(workflow.contains("gh attestation verify \"$latest_attested_asset\""));
+        assert!(workflow.contains("--source-digest \"$latest_source_commit\""));
         assert!(workflow.contains(
             "if ! gh release upload \"$rolling_tag\" --repo \"$GITHUB_REPOSITORY\" --clobber"
         ));
@@ -2279,9 +4039,195 @@ concurrency_group = "package-release-preview"
         );
         assert!(workflow
             .contains("gh attestation verify \"$transaction_dir/rolling-published/$payload\""));
+        let refresh_start = workflow
+            .find("Refresh rolling package release")
+            .expect("rolling refresh step");
+        let refresh_script = &workflow[refresh_start..];
+        let rolling_attestations = refresh_script
+            .find("for payload in \\\n")
+            .map(|index| &refresh_script[index..])
+            .expect("post-upload rolling attestation loop");
+        for name in [
+            "a.tar.gz",
+            "SHA256SUMS",
+            "a.tar.gz.bundle",
+            "capsule-manifest.json",
+            "release-manifest.json",
+            "identity.json",
+        ] {
+            assert!(rolling_attestations.contains(name), "missing {name}");
+        }
         assert!(workflow.contains("VELNOR_PACKAGE_RELEASE_TAG=\"$RELEASE_TAG\""));
+        let build_attestations = workflow
+            .find("Verify build attestations")
+            .expect("build attestation check");
+        let preflight = workflow
+            .find("Preflight rolling package release")
+            .expect("read-only rolling preflight");
+        let immutable_publish = workflow
+            .find("Publish immutable source-bound release")
+            .expect("immutable release publication");
+        assert!(build_attestations < preflight && preflight < immutable_publish);
+        assert!(workflow.contains("ROLLING_PREFLIGHT_ONLY: \"true\""));
+        assert!(workflow.contains("candidate stable version is older than current GitHub Latest"));
         assert!(!workflow.contains("gh release delete"));
         assert!(!workflow.contains("HEAD:$CONSUMER_BRANCH"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn rollback_retries_independent_ref_and_safe_metadata_after_uncertain_asset_restore() {
+        use std::process::Command;
+
+        let spec = parse_spec(&Args(&stable_args())).expect("stable fixture config");
+        let script = rolling_refresh_script_for_test(&spec, "stable.yml");
+        let rollback = script_region(&script, "rollback() {", "\non_exit() {");
+        let on_exit = script_region(&script, "on_exit() {", "\ntrap 'on_exit");
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-rollback-fault-{}",
+            crate::unique_suffix()
+        ));
+        let rollback_dir = root.join("old-package");
+        std::fs::create_dir_all(&rollback_dir).expect("create rollback package");
+        std::fs::write(rollback_dir.join("package.tar.gz"), b"old package")
+            .expect("write old package asset");
+        let old_assets = root.join("old-assets");
+        std::fs::write(&old_assets, "package.tar.gz\n").expect("write old asset inventory");
+        let log = root.join("rollback.log");
+        let transaction = root.join("transaction");
+        std::fs::create_dir_all(&transaction).expect("create rollback transaction");
+        let old_body_file = transaction.join("old-release-body");
+        std::fs::write(&old_body_file, b"Old release body\n")
+            .expect("write exact old release body including trailing LF");
+        let mock_body_file = root.join("mock-release-body");
+        std::fs::write(&mock_body_file, b"Candidate body").expect("write candidate release body");
+
+        let mut harness = format!(
+            "set -Eeuo pipefail\ntransaction_dir={}\nrollback_dir={}\nold_assets={}\nold_body_file={}\nlatest_response={}\nrolling_response={}\nrolling_tag=preview\nrolling_release_id=42\nGITHUB_REPOSITORY=example/project\nold_tag_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\nold_tag_ref_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nold_name='Old Name'\nold_draft=false\nold_prerelease=false\nold_make_latest=true\nlatest_tag=stable-previous\nhad_release=1\nmutated=1\nMOCK_NAME='New Name'\nMOCK_DRAFT=false\nMOCK_PRERELEASE=false\nMOCK_REF_SHA=cccccccccccccccccccccccccccccccccccccccc\nremote_tag_sha() {{ printf '%s\\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; }}\nremote_tag_ref_sha() {{ printf 'remote-ref=%s\\n' \"$MOCK_REF_SHA\" >> \"$MOCK_LOG\"; printf '%s\\n' \"$MOCK_REF_SHA\"; }}\nverify_restored_assets() {{ printf 'verify-assets\\n' >> \"$MOCK_LOG\"; return 1; }}\n",
+            shell_quote(transaction.to_str().expect("transaction path")),
+            shell_quote(rollback_dir.to_str().expect("rollback path")),
+            shell_quote(old_assets.to_str().expect("asset inventory path")),
+            shell_quote(old_body_file.to_str().expect("old release body path")),
+            shell_quote(root.join("latest-response").to_str().expect("latest response path")),
+            shell_quote(root.join("rolling-response").to_str().expect("rolling response path")),
+        );
+        harness.push_str(
+            r#"gh() {
+  printf 'gh %s\n' "$*" >> "$MOCK_LOG"
+  if [ "$1" = injected-failure ]; then
+    return 23
+  fi
+  if [ "$1" = api ] && [ "$2" = --method ] && [ "$3" = PATCH ]; then
+    case "$*" in
+      *"git/refs/tags/preview"*)
+        for argument in "$@"; do
+          case "$argument" in sha=*) MOCK_REF_SHA="${argument#sha=}" ;; esac
+        done
+        return 0
+        ;;
+      *"releases/42"*)
+        if [[ "$*" == *"--input"* ]]; then
+          local input_file=""
+          while [ "$#" -gt 0 ]; do
+            if [ "$1" = --input ]; then input_file="$2"; shift 2; else shift; fi
+          done
+          MOCK_NAME="$(jq -er '.name' "$input_file")"
+          jq -j '.body' "$input_file" > "$MOCK_BODY_FILE"
+          MOCK_DRAFT="$(jq -er '.draft | tostring' "$input_file")"
+          MOCK_PRERELEASE="$(jq -er '.prerelease | tostring' "$input_file")"
+          printf 'restore-body-base64=%s\n' "$(jq -r '.body | @base64' "$input_file")" >> "$MOCK_LOG"
+          printf 'restore-metadata=%s\n' "$(jq -c '{name,draft,prerelease,make_latest}' "$input_file")" >> "$MOCK_LOG"
+          return 0
+        fi
+        case "$*" in
+          *"draft=true"*)
+            MOCK_DRAFT=true
+            return 1
+            ;;
+        esac
+        ;;
+    esac
+  fi
+  if [ "$1" = api ] && [ "$2" = --paginate ]; then
+    printf '7\tpackage.tar.gz\n'
+    return 0
+  fi
+  if [ "$1" = api ] && [ "$2" = --repo ] && [ "$4" = repos/example/project/releases/42 ]; then
+    jq -cn --arg name "$MOCK_NAME" --rawfile body "$MOCK_BODY_FILE" \
+      --argjson draft "$MOCK_DRAFT" --argjson prerelease "$MOCK_PRERELEASE" \
+      '{id:42,tag_name:"preview",name:$name,body:$body,draft:$draft,prerelease:$prerelease,assets:[{id:7,name:"package.tar.gz",digest:"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}'
+    return 0
+  fi
+  if [ "$1" = release ] && [ "$2" = upload ]; then
+    return 0
+  fi
+  echo "unexpected gh invocation: $*" >&2
+  return 97
+}
+"#,
+        );
+        harness.push_str(rollback);
+        harness.push('\n');
+        harness.push_str(on_exit);
+        harness.push_str("\ntrap 'on_exit \"$?\"' EXIT\nfailure=\"$(gh injected-failure)\"\n");
+        let output = Command::new("bash")
+            .args(["-c", &harness])
+            .env("MOCK_LOG", &log)
+            .env("MOCK_BODY_FILE", &mock_body_file)
+            .output()
+            .expect("run generated rollback fault injection");
+        let log_contents = std::fs::read_to_string(&log).expect("read rollback action log");
+        let restored_body = std::fs::read(&mock_body_file).expect("read restored release body");
+        assert_eq!(restored_body, b"Old release body\n");
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("draft transition response was uncertain"),
+            "{stderr}"
+        );
+        assert!(stderr.contains("rollback was incomplete"), "{stderr}");
+        assert!(log_contents.contains("verify-assets"), "{log_contents}");
+        assert!(
+            log_contents.contains("gh release upload preview --repo example/project --clobber"),
+            "{log_contents}"
+        );
+        assert!(
+            log_contents.contains("sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            "{log_contents}"
+        );
+        assert_eq!(
+            log_contents.matches("git/refs/tags/preview").count(),
+            1,
+            "rollback ran more than once after a command-substitution failure: {log_contents}"
+        );
+        assert!(
+            !log_contents.contains("sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            "peeled commit used for ref restore: {log_contents}"
+        );
+        assert!(
+            log_contents.contains("remote-ref=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            "{log_contents}"
+        );
+        assert!(
+            log_contents.contains("restore-body-base64=T2xkIHJlbGVhc2UgYm9keQo="),
+            "{log_contents}"
+        );
+        assert!(
+            log_contents.contains(r#""name":"Old Name""#),
+            "{log_contents}"
+        );
+        assert!(
+            log_contents.contains(r#""make_latest":false"#),
+            "{log_contents}"
+        );
+        assert!(log_contents.contains(r#""draft":true"#), "{log_contents}");
+        assert!(
+            log_contents.contains(r#""prerelease":false"#),
+            "{log_contents}"
+        );
+        assert!(log_contents.contains("-F draft=true"), "{log_contents}");
     }
 
     #[cfg(unix)]
