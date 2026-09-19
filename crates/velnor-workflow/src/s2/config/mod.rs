@@ -2233,6 +2233,10 @@ pub(crate) const RELEASE_JOB_PERMISSIONS: &[&str] = &[
 /// Permission levels accepted by a typed release job.
 pub(crate) const RELEASE_JOB_PERMISSION_LEVELS: &[&str] = &["read", "write", "none"];
 
+// Keep this in lockstep with the Velnor runner's
+// `actions/attest-build-provenance` capability contract.
+const VELNOR_ATTESTATION_SUBJECTS: &[&str] = &["dist/*.tar.gz", "dist/l2-subject.json"];
+
 /// The OCI platforms the `docker` publisher builds. Native builders exist
 /// for exactly these; anything else fails closed instead of silently
 /// emulating an architecture under QEMU.
@@ -3583,6 +3587,16 @@ fn validate_release_jobs(
                     )));
                 }
             }
+            if runner == "velnor"
+                && (subjects.len() != 1
+                    || !VELNOR_ATTESTATION_SUBJECTS.contains(&subjects[0].as_str()))
+            {
+                return Err(GeneratorError::usage(format!(
+                    "[[release.job]] {id} runner `velnor` supports exactly one attest_subjects value from {}; found [{}]",
+                    VELNOR_ATTESTATION_SUBJECTS.join(", "),
+                    subjects.join(", "),
+                )));
+            }
         }
         for (scope, level) in &row.permissions {
             if !RELEASE_JOB_PERMISSIONS.contains(&scope.as_str()) {
@@ -3595,6 +3609,21 @@ fn validate_release_jobs(
                     "[[release.job]] {id} permissions {scope} must be one of {}, found {level}",
                     RELEASE_JOB_PERMISSION_LEVELS.join(", ")
                 )));
+            }
+        }
+        if row
+            .attest_subjects
+            .as_deref()
+            .is_some_and(|subjects| !subjects.is_empty())
+        {
+            for (scope, required) in [("id-token", "write"), ("attestations", "write")] {
+                if let Some(level) = row.permissions.get(scope)
+                    && level != required
+                {
+                    return Err(GeneratorError::usage(format!(
+                        "[[release.job]] {id} attest_subjects requires permissions.{scope} = {required}, found {level}"
+                    )));
+                }
             }
         }
         if row
@@ -3906,6 +3935,29 @@ mod tests {
             error.contains("checkout requires contents: read"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn release_job_rejects_attestation_permission_downgrade() {
+        let error = tasks_release_validation_error(
+            "",
+            "[[release.job]]\nid = \"sign\"\ntasks = [\"sign\"]\nattest_subjects = [\"dist/*.tar.gz\"]\n\n[release.job.permissions]\nid-token = \"read\"\n",
+        );
+        assert!(
+            error.contains("attest_subjects requires permissions.id-token = write"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn release_job_rejects_velnor_attestation_subject_outside_capability() {
+        let error = tasks_release_validation_error(
+            "[workflow]\nproviders = [\"velnor\"]\n",
+            "[[release.job]]\nid = \"sign\"\ntasks = [\"sign\"]\nrunner = \"velnor\"\nattest_subjects = [\"dist/app.zip\"]\n",
+        );
+        assert!(error.contains("runner `velnor`"), "{error}");
+        assert!(error.contains("dist/*.tar.gz"), "{error}");
+        assert!(error.contains("dist/l2-subject.json"), "{error}");
     }
 
     #[test]

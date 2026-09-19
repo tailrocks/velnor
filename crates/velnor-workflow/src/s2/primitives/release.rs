@@ -2993,15 +2993,24 @@ fn render_tasks_release_job(config: &ProjectConfig, job: &ReleaseJobSpec) -> Str
     if !job.environment.is_empty() {
         let _ = writeln!(output, "    environment: {}", yaml_scalar(&job.environment));
     }
-    if !job.permissions.is_empty() {
+    if !job.permissions.is_empty() || !job.attest_subjects.is_empty() {
         // A job-level permissions map replaces the workflow-level map in
         // GitHub Actions. Preserve checkout access when a release author
         // asks for an additional scope, while config validation rejects an
-        // explicit `contents: none` override.
+        // explicit `contents: none` override. Attestation subjects also
+        // require the OIDC and attestations scopes at this job boundary.
         let mut permissions = job.permissions.clone();
         permissions
             .entry("contents".to_owned())
             .or_insert_with(|| "read".to_owned());
+        if !job.attest_subjects.is_empty() {
+            permissions
+                .entry("id-token".to_owned())
+                .or_insert_with(|| "write".to_owned());
+            permissions
+                .entry("attestations".to_owned())
+                .or_insert_with(|| "write".to_owned());
+        }
         output.push_str("    permissions:\n");
         for (scope, level) in &permissions {
             let _ = writeln!(output, "      {scope}: {level}");
@@ -5914,7 +5923,7 @@ mod tests {
         must(
             fs::write(
                 root.join(crate::s2::config::GENERATION_CONFIG_PATH),
-                "schema = 2\n\n[generator]\nrepository = \"example/declared\"\n\n[workflow]\nfiles = [\"release.yml\"]\n\n[release]\nenabled = true\nkind = \"tasks\"\nmodes = [\"validate\"]\ntag_pattern = \"v[0-9]*\"\n\n[[release.job]]\nid = \"build\"\ntasks = [\"desktop-build\"]\nrunner = \"github\"\n\n[[release.job]]\nid = \"sign\"\nname = \"Sign release\"\ntasks = [\"desktop-sign\"]\nneeds = [\"build\"]\nrunner = \"macos\"\nmodes = [\"publish\"]\nenvironment = \"release-macos\"\nattest_subjects = [\"dist/app.zip\"]\n\n[release.job.permissions]\nid-token = \"write\"\n",
+                "schema = 2\n\n[generator]\nrepository = \"example/declared\"\n\n[workflow]\nfiles = [\"release.yml\"]\n\n[release]\nenabled = true\nkind = \"tasks\"\nmodes = [\"validate\"]\ntag_pattern = \"v[0-9]*\"\n\n[[release.job]]\nid = \"build\"\ntasks = [\"desktop-build\"]\nrunner = \"github\"\n\n[[release.job]]\nid = \"sign\"\nname = \"Sign release\"\ntasks = [\"desktop-sign\"]\nneeds = [\"build\"]\nrunner = \"macos\"\nmodes = [\"publish\"]\nenvironment = \"release-macos\"\nattest_subjects = [\"dist/app.zip\"]\n\n[release.job.permissions]\nid-token = \"write\"\n\n[[release.job]]\nid = \"attest-defaults\"\ntasks = [\"desktop-sign\"]\nrunner = \"github\"\nattest_subjects = [\"dist/*.tar.gz\"]\n",
             ),
             "write tasks release config",
         );
@@ -5948,11 +5957,16 @@ mod tests {
             "custom permissions must retain checkout access: {sign}"
         );
         assert!(sign.contains("id-token: write"), "{sign}");
+        assert!(sign.contains("attestations: write"), "{sign}");
         assert!(sign.contains("run: mise run desktop-sign"), "{sign}");
         assert!(
             sign.contains("subject-path: |\n            dist/app.zip"),
             "{sign}"
         );
+        let defaults = yaml_job(release, "attest-defaults");
+        assert!(defaults.contains("contents: read"), "{defaults}");
+        assert!(defaults.contains("id-token: write"), "{defaults}");
+        assert!(defaults.contains("attestations: write"), "{defaults}");
         let _ = fs::remove_dir_all(root);
     }
 
