@@ -1,0 +1,64 @@
+{
+  "$schema": "velnor.external-evidence-update.v1",
+  "update_id": "20260919T192157Z",
+  "captured_at_utc": "2026-09-19T19:24:28Z",
+  "repository": "tailrocks/velnor",
+  "ref": "refs/heads/evidence/github-first-dual-lane-20260919T181508Z",
+  "parent_checkpoint_commit": "a1f9f1187a6cc6cb2197836ca03e79f1c5261a09",
+  "remote_before_copy": "a1f9f1187a6cc6cb2197836ca03e79f1c5261a09",
+  "source_base_revision": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+  "attestation": "none",
+  "gate_status": "not-evaluated",
+  "gate_statement": "This append-only evidence snapshot does not establish G0, G1, G2, G3, G4, G5, G6, or G7 success.",
+  "original_evidence_root": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence",
+  "included_file_count_before_manifests": 71,
+  "included_groups": {
+    "G0/checker-adversarial-fixtures": {
+      "files": 58,
+      "fixture_files": 54,
+      "logs_excluded": "out/*.stdout and out/*.stderr"
+    },
+    "G0/checker-identity": 2,
+    "G0/checker-host-release-adversarial.md": 1,
+    "G0/checker-v2-review": 2,
+    "G0/estate-scope-review": 2,
+    "G0/fleet": 5,
+    "G1/reviews/hosted-provider-3aecc6ed.md": 1
+  },
+  "stable_records": {
+    "checker_owner_sha": "2ba66b116dd5511f0b4f2a6856cfbed6bd290152",
+    "records_commit": "92f6ff62d80bcd8e1edb51135277d6d434982cd5",
+    "estate_scope_commit": "6387532f03c230f26795975ba5ff3034f2862eb7",
+    "hosted_review_commit": "3aecc6ed0bf83b1f6dd1d99a1a8a29884f3d710a",
+    "push_census_captured_at": "2026-09-19T18:35:57Z",
+    "push_census_sha256": "8faaa8af6224e45e4ebf7f908be731680bb37061b31d83b6ce8817ac9aad410f",
+    "current_push_checkpoint_captured_at": "2026-09-19T19:23:22Z",
+    "current_push_checkpoint_sha256": "a02ad7c04d268ac69fe0d974395bf12c13bdf05f77e029a10dfe11d75c875e78",
+    "current_push_checkpoint_worktrees": 21,
+    "attribution_commits": {
+      "checker": "d9a277938d54d93f06b85ce6e8d406ebb67468c3",
+      "apt_schema": "24438704e22b9a82b3240cd06e2aae0eb2fe1d95"
+    }
+  },
+  "validation": {
+    "json_and_manifest_files_parsed": 61,
+    "ndjson_lines_parsed": 34,
+    "secret_pattern_hits": 0,
+    "source_changed": false,
+    "prior_snapshot_preserved": true
+  },
+  "excluded": [
+    "generated checker out/*.stdout and out/*.stderr logs",
+    "research/cloned repositories",
+    "build targets, binaries, and caches",
+    "raw mass logs",
+    "credentials and mutable session state",
+    "ongoing writes not stable at capture",
+    "G0/lane-compare-review/review-3ad452acd.md (observed 2026-09-19T19:27:17Z after cutoff)"
+  ],
+  "integrity": {
+    "inventory": "INVENTORY.tsv",
+    "sha256_manifest": "SHA256SUMS",
+    "manifest_scope": "All files in this update directory except SHA256SUMS itself"
+  }
+}

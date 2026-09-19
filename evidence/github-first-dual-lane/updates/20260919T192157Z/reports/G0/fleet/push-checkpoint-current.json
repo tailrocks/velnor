@@ -1,0 +1,460 @@
+{
+  "schema_version": 2,
+  "captured_at_utc": "2026-09-19T19:23:22Z",
+  "purpose": "read-only current push/checkpoint census",
+  "runtime": {
+    "model": "gpt-5.6-luna",
+    "effort": "max",
+    "verified_from": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/session.json agent_settings (each agent latest turn_context)",
+    "orchestrator_model": "gpt-6-astra",
+    "orchestrator_effort": "low"
+  },
+  "policy": {
+    "read_only_source_census": true,
+    "normal_push_only": true,
+    "force_pushes": false,
+    "merges_or_releases": false,
+    "source_edits_by_coordinator": false,
+    "source_tests_run_by_coordinator": false,
+    "owner_attribution_corrections": "normal forward commits only; no history rewrite"
+  },
+  "prior_snapshot": {
+    "path": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/fleet/pushes.json",
+    "captured_at_utc": "2026-09-19T18:35:57Z",
+    "current_worktrees": 18,
+    "current_worktrees_clean": 18,
+    "current_worktrees_remote_equal": 18
+  },
+  "timing": {
+    "full_21_tree_refresh_started_utc": "2026-09-19T19:18:27Z",
+    "checker_and_distribution_recheck_utc": "2026-09-19T19:22:41Z",
+    "checkpoint_written_utc": "2026-09-19T19:23:22Z"
+  },
+  "census": {
+    "selected_task_owned_worktrees": 21,
+    "clean": 21,
+    "remote_equal": 21,
+    "owners_requiring_commit_or_push": [],
+    "new_since_prior_18": [
+      "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-lane-compare",
+      "/private/tmp/g0-estate-scope",
+      "/private/tmp/velnor-g1-scan-integrity-fix"
+    ],
+    "native_product_v2_included": {
+      "worktree": "/private/tmp/dual-lane-native-product",
+      "branch": "codex/github-first-native-product-v2",
+      "head": "934451bb3b1a087b67f2e356e3c958bf976a22eb",
+      "remote_sha": "934451bb3b1a087b67f2e356e3c958bf976a22eb",
+      "old_bb0_branch_preserved": "codex/github-first-native-product"
+    }
+  },
+  "worktrees": [
+    {
+      "worktree": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-action-scanner",
+      "owner": "/root/g3_action_roles",
+      "repository": "tailrocks/velnor",
+      "branch": "codex/github-first-action-scanner",
+      "HEAD": "d22a0c7009ea0db690879747bf7095198828ce01",
+      "local_sha": "d22a0c7009ea0db690879747bf7095198828ce01",
+      "dirty_files": [],
+      "origin": "git@github.com:tailrocks/velnor.git",
+      "correct_origin": true,
+      "live_remote_sha": "d22a0c7009ea0db690879747bf7095198828ce01",
+      "remote_relation": "equal",
+      "trailers": {
+        "valid_signed_off": true,
+        "valid_codex_coauthor": true,
+        "observed": ["Co-authored-by: Codex <codex@openai.com>", "Signed-off-by: Alexey Zhokhov <alexey@zhokhov.com>"]
+      }
+    },
+    {
+      "worktree": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-apt",
+      "owner": "/root/g0_distribution",
+      "repository": "tailrocks/velnor-apt",
+      "branch": "codex/github-first-apt-discovery",
+      "HEAD": "f679a1ce94627281a99e4b887fe26fc1cad33409",
+      "local_sha": "f679a1ce94627281a99e4b887fe26fc1cad33409",
+      "dirty_files": [],
+      "origin": "https://github.com/tailrocks/velnor-apt.git",
+      "correct_origin": true,
+      "live_remote_sha": "f679a1ce94627281a99e4b887fe26fc1cad33409",
+      "remote_relation": "equal",
+      "trailers": {
+        "valid_signed_off": true,
+        "valid_codex_coauthor": true,
+        "observed": ["Signed-off-by: Alexey Zhokhov <alexey@zhokhov.com>", "Co-authored-by: Codex <codex@openai.com>"]
+      }
+    },
+    {
+      "worktree": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-checker",
+      "owner": "/root/g0_checker",
+      "repository": "tailrocks/velnor",
+      "branch": "codex/github-first-checker",
+      "HEAD": "d9a277938d54d93f06b85ce6e8d406ebb67468c3",
+      "local_sha": "d9a277938d54d93f06b85ce6e8d406ebb67468c3",
+      "dirty_files": [],
+      "origin": "git@github.com:tailrocks/velnor.git",
+      "correct_origin": true,
+      "live_remote_sha": "d9a277938d54d93f06b85ce6e8d406ebb67468c3",
+      "remote_relation": "equal",
+      "trailers": {
+        "valid_signed_off": true,
+        "valid_codex_coauthor": true,
+        "observed": ["Co-authored-by: Codex <codex@openai.com>", "Signed-off-by: Alexey Zhokhov <alexey@zhokhov.com>"]
+      },
+      "attribution_correction": {
+        "prior_head": "2ba66b116dd5511f0b4f2a6856cfbed6bd290152",
+        "correction": "normal forward attribution commit; source tree identical to prior 2ba content",
+        "historical_prior_trailer_defect": "2ba embedded Co-authored-by after literal backslash-n text; Git trailer parser saw only Signed-off-by"
+      }
+    },
+    {
+      "worktree": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-generator",
+      "owner": "/root/g0_bootstrap",
+      "repository": "tailrocks/velnor",
+      "branch": "codex/github-first-generator",
+      "HEAD": "122fd50a60f55c66f34bed1ab035233a0d4b5744",
+      "local_sha": "122fd50a60f55c66f34bed1ab035233a0d4b5744",
+      "dirty_files": [],
+      "origin": "git@github.com:tailrocks/velnor.git",
+      "correct_origin": true,
+      "live_remote_sha": "122fd50a60f55c66f34bed1ab035233a0d4b5744",
+      "remote_relation": "equal",
+      "trailers": {
+        "valid_signed_off": true,
+        "valid_codex_coauthor": true,
+        "observed": ["Co-authored-by: Codex <codex@openai.com>", "Signed-off-by: Alexey Zhokhov <alexey@zhokhov.com>"]
+      }
+    },
+    {
+      "worktree": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-goal-commit",
+      "owner": "/root/execution_health",
+      "repository": "tailrocks/velnor",
+      "branch": "codex/github-first-goal-artifact",
+      "HEAD": "626f4e741df0946edb860376b5a1896e2b9dfe10",
+      "local_sha": "626f4e741df0946edb860376b5a1896e2b9dfe10",
+      "dirty_files": [],
+      "origin": "git@github.com:tailrocks/velnor.git",
+      "correct_origin": true,
+      "live_remote_sha": "626f4e741df0946edb860376b5a1896e2b9dfe10",
+      "remote_relation": "equal",
+      "trailers": {
+        "valid_signed_off": true,
+        "valid_codex_coauthor": true,
+        "observed": ["Co-authored-by: Codex <codex@openai.com>", "Signed-off-by: Alexey Zhokhov <alexey@zhokhov.com>"]
+      }
+    },
+    {
+      "worktree": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-homebrew",
+      "owner": "/root/g2_homebrew_contract",
+      "repository": "tailrocks/homebrew-velnor",
+      "branch": "codex/github-first-homebrew",
+      "HEAD": "8feb46c19b6aca1a7079e45acad7cdc99cde23e8",
+      "local_sha": "8feb46c19b6aca1a7079e45acad7cdc99cde23e8",
+      "dirty_files": [],
+      "origin": "https://github.com/tailrocks/homebrew-velnor.git",
+      "correct_origin": true,
+      "live_remote_sha": "8feb46c19b6aca1a7079e45acad7cdc99cde23e8",
+      "remote_relation": "equal",
+      "trailers": {
+        "valid_signed_off": true,
+        "valid_codex_coauthor": true,
+        "observed": ["Co-authored-by: Codex <codex@openai.com>", "Signed-off-by: Alexey Zhokhov <alexey@zhokhov.com>"]
+      }
+    },
+    {
+      "worktree": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-hosted",
+      "owner": "/root/g1_hosted_config",
+      "repository": "tailrocks/velnor",
+      "branch": "codex/github-first-hosted",
+      "HEAD": "3aecc6ed0bf83b1f6dd1d99a1a8a29884f3d710a",
+      "local_sha": "3aecc6ed0bf83b1f6dd1d99a1a8a29884f3d710a",
+      "dirty_files": [],
+      "origin": "git@github.com:tailrocks/velnor.git",
+      "correct_origin": true,
+      "live_remote_sha": "3aecc6ed0bf83b1f6dd1d99a1a8a29884f3d710a",
+      "remote_relation": "equal",
+      "trailers": {
+        "valid_signed_off": true,
+        "valid_codex_coauthor": true,
+        "observed": ["Co-authored-by: Codex <codex@openai.com>", "Signed-off-by: Alexey Zhokhov <alexey@zhokhov.com>"]
+      }
+    },
+    {
+      "worktree": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-integration",
+      "owner": "/root/g1_review_952",
+      "repository": "tailrocks/velnor",
+      "branch": "codex/github-first-recovery",
+      "HEAD": "12cc87b629802c294da9840325cb21087c020df6",
+      "local_sha": "12cc87b629802c294da9840325cb21087c020df6",
+      "dirty_files": [],
+      "origin": "git@github.com:tailrocks/velnor.git",
+      "correct_origin": true,
+      "live_remote_sha": "12cc87b629802c294da9840325cb21087c020df6",
+      "remote_relation": "equal",
+      "trailers": {
+        "valid_signed_off": true,
+        "valid_codex_coauthor": true,
+        "observed": ["Co-authored-by: Codex <codex@openai.com>", "Signed-off-by: Alexey Zhokhov <alexey@zhokhov.com>"]
+      }
+    },
+    {
+      "worktree": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-native-policy",
+      "owner": "/root/g3_native_routing",
+      "repository": "tailrocks/velnor",
+      "branch": "codex/github-first-native-policy",
+      "HEAD": "38f71725df9998f125a0e3cffeff3105a5644061",
+      "local_sha": "38f71725df9998f125a0e3cffeff3105a5644061",
+      "dirty_files": [],
+      "origin": "git@github.com:tailrocks/velnor.git",
+      "correct_origin": true,
+      "live_remote_sha": "38f71725df9998f125a0e3cffeff3105a5644061",
+      "remote_relation": "equal",
+      "trailers": {
+        "valid_signed_off": true,
+        "valid_codex_coauthor": true,
+        "observed": ["Signed-off-by: Alexey Zhokhov <alexey@zhokhov.com>", "Co-authored-by: Codex <codex@openai.com>"]
+      }
+    },
+    {
+      "worktree": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-native-routing",
+      "owner": "/root/g3_native_routing",
+      "repository": "tailrocks/velnor",
+      "branch": "codex/github-first-native-routing",
+      "HEAD": "746745c56a6798a13d176341b4996f66cdee2958",
+      "local_sha": "746745c56a6798a13d176341b4996f66cdee2958",
+      "dirty_files": [],
+      "origin": "git@github.com:tailrocks/velnor.git",
+      "correct_origin": true,
+      "live_remote_sha": "746745c56a6798a13d176341b4996f66cdee2958",
+      "remote_relation": "equal",
+      "trailers": {
+        "valid_signed_off": true,
+        "valid_codex_coauthor": true,
+        "observed": ["Co-authored-by: Codex <codex@openai.com>", "Signed-off-by: Alexey Zhokhov <alexey@zhokhov.com>"]
+      }
+    },
+    {
+      "worktree": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-preview-publication",
+      "owner": "/root/g1_run_operations",
+      "repository": "tailrocks/velnor",
+      "branch": "codex/github-first-preview-publication",
+      "HEAD": "5f2b0d384f8833ac6407087c12f6b00d59e2f9cc",
+      "local_sha": "5f2b0d384f8833ac6407087c12f6b00d59e2f9cc",
+      "dirty_files": [],
+      "origin": "git@github.com:tailrocks/velnor.git",
+      "correct_origin": true,
+      "live_remote_sha": "5f2b0d384f8833ac6407087c12f6b00d59e2f9cc",
+      "remote_relation": "equal",
+      "trailers": {
+        "valid_signed_off": true,
+        "valid_codex_coauthor": true,
+        "observed": ["Co-authored-by: Codex <codex@openai.com>", "Signed-off-by: Alexey Zhokhov <alexey@zhokhov.com>"]
+      }
+    },
+    {
+      "worktree": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-records",
+      "owner": "/root/g0_records",
+      "repository": "tailrocks/velnor",
+      "branch": "codex/github-first-records",
+      "HEAD": "4a9435e7cbeb220f1d2e985ab4d3fac97290dcef",
+      "local_sha": "4a9435e7cbeb220f1d2e985ab4d3fac97290dcef",
+      "dirty_files": [],
+      "origin": "git@github.com:tailrocks/velnor.git",
+      "correct_origin": true,
+      "live_remote_sha": "4a9435e7cbeb220f1d2e985ab4d3fac97290dcef",
+      "remote_relation": "equal",
+      "trailers": {
+        "valid_signed_off": true,
+        "valid_codex_coauthor": true,
+        "observed": ["Co-authored-by: Codex <codex@openai.com>", "Signed-off-by: Alexey Zhokhov <alexey@zhokhov.com>"]
+      }
+    },
+    {
+      "worktree": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-scan-integrity",
+      "owner": "/root/g0_inventory",
+      "repository": "tailrocks/velnor",
+      "branch": "codex/github-first-scan-integrity-corrected",
+      "HEAD": "3c46b9e83c9a0ca57be88743e49ecae27f731685",
+      "local_sha": "3c46b9e83c9a0ca57be88743e49ecae27f731685",
+      "dirty_files": [],
+      "origin": "git@github.com:tailrocks/velnor.git",
+      "correct_origin": true,
+      "live_remote_sha": "3c46b9e83c9a0ca57be88743e49ecae27f731685",
+      "remote_relation": "equal",
+      "trailers": {
+        "valid_signed_off": true,
+        "valid_codex_coauthor": true,
+        "observed": ["Co-authored-by: Codex <codex@openai.com>", "Signed-off-by: Alexey Zhokhov <alexey@zhokhov.com>"]
+      }
+    },
+    {
+      "worktree": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-skills-adapter",
+      "owner": "/root/g3_skills_adapter",
+      "repository": "tailrocks/velnor",
+      "branch": "codex/github-first-skills-adapter",
+      "HEAD": "2ec3502026a2461aa520f6da6ac0a3cef3f1a93d",
+      "local_sha": "2ec3502026a2461aa520f6da6ac0a3cef3f1a93d",
+      "dirty_files": [],
+      "origin": "git@github.com:tailrocks/velnor.git",
+      "correct_origin": true,
+      "live_remote_sha": "2ec3502026a2461aa520f6da6ac0a3cef3f1a93d",
+      "remote_relation": "equal",
+      "trailers": {
+        "valid_signed_off": true,
+        "valid_codex_coauthor": true,
+        "observed": ["Co-authored-by: Codex <codex@openai.com>", "Signed-off-by: Alexey Zhokhov <alexey@zhokhov.com>"]
+      }
+    },
+    {
+      "worktree": "/private/tmp/dual-lane-apt-schema2",
+      "owner": "/root/g0_bootstrap",
+      "repository": "tailrocks/velnor",
+      "branch": "dual-lane-apt-schema2",
+      "HEAD": "24438704e22b9a82b3240cd06e2aae0eb2fe1d95",
+      "local_sha": "24438704e22b9a82b3240cd06e2aae0eb2fe1d95",
+      "dirty_files": [],
+      "origin": "git@github.com:tailrocks/velnor.git",
+      "correct_origin": true,
+      "live_remote_sha": "24438704e22b9a82b3240cd06e2aae0eb2fe1d95",
+      "remote_relation": "equal",
+      "trailers": {
+        "valid_signed_off": true,
+        "valid_codex_coauthor": true,
+        "observed": ["Co-authored-by: Codex <codex@openai.com>", "Signed-off-by: Alexey Zhokhov <alexey@zhokhov.com>"]
+      },
+      "attribution_correction": {
+        "prior_head": "c63c1c5d89888b9c93f53d9d11f1f8003804db9b",
+        "correction": "normal forward attribution commit; source tree identical to prior c63 content",
+        "historical_prior_trailer_defect": "c63 embedded Co-authored-by after literal backslash-n text; Git trailer parser saw only Signed-off-by",
+        "status": "mixed WIP; compile errors remain; no gate approval"
+      }
+    },
+    {
+      "worktree": "/private/tmp/dual-lane-native-product",
+      "owner": "/root/g2_native_packages",
+      "repository": "tailrocks/velnor",
+      "branch": "codex/github-first-native-product-v2",
+      "HEAD": "934451bb3b1a087b67f2e356e3c958bf976a22eb",
+      "local_sha": "934451bb3b1a087b67f2e356e3c958bf976a22eb",
+      "dirty_files": [],
+      "origin": "git@github.com:tailrocks/velnor.git",
+      "correct_origin": true,
+      "live_remote_sha": "934451bb3b1a087b67f2e356e3c958bf976a22eb",
+      "remote_relation": "equal",
+      "trailers": {
+        "valid_signed_off": true,
+        "valid_codex_coauthor": true,
+        "observed": ["Co-authored-by: Codex <codex@openai.com>", "Signed-off-by: Alexey Zhokhov <alexey@zhokhov.com>"]
+      }
+    },
+    {
+      "worktree": "/private/tmp/dual-lane-rust-scan",
+      "owner": "/root/g3_rust_consumers",
+      "repository": "tailrocks/velnor",
+      "branch": "codex/github-first-rust-scan",
+      "HEAD": "d2395fc70a32864796a6cec271966d6cb002bcb5",
+      "local_sha": "d2395fc70a32864796a6cec271966d6cb002bcb5",
+      "dirty_files": [],
+      "origin": "git@github.com:tailrocks/velnor.git",
+      "correct_origin": true,
+      "live_remote_sha": "d2395fc70a32864796a6cec271966d6cb002bcb5",
+      "remote_relation": "equal",
+      "trailers": {
+        "valid_signed_off": true,
+        "valid_codex_coauthor": true,
+        "observed": ["Co-authored-by: Codex <codex@openai.com>", "Signed-off-by: Alexey Zhokhov <alexey@zhokhov.com>"]
+      }
+    },
+    {
+      "worktree": "/Users/donbeave/Projects/tailrocks/velnor-evidence-checkpoint",
+      "owner": "/root/g0_reviewer",
+      "repository": "tailrocks/velnor",
+      "branch": "evidence/github-first-dual-lane-20260919T181508Z",
+      "HEAD": "a1f9f1187a6cc6cb2197836ca03e79f1c5261a09",
+      "local_sha": "a1f9f1187a6cc6cb2197836ca03e79f1c5261a09",
+      "dirty_files": [],
+      "origin": "git@github.com:tailrocks/velnor.git",
+      "correct_origin": true,
+      "live_remote_sha": "a1f9f1187a6cc6cb2197836ca03e79f1c5261a09",
+      "remote_relation": "equal",
+      "trailers": {
+        "valid_signed_off": true,
+        "valid_codex_coauthor": true,
+        "observed": ["Co-authored-by: Codex <codex@openai.com>", "Signed-off-by: Alexey Zhokhov <alexey@zhokhov.com>"]
+      }
+    },
+    {
+      "worktree": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-lane-compare",
+      "owner": "/root/g1_run_operations",
+      "repository": "tailrocks/velnor",
+      "branch": "codex/github-first-lane-compare-failclosed",
+      "HEAD": "3ad452acd8004c06cb866f75392bb5749adfe818",
+      "local_sha": "3ad452acd8004c06cb866f75392bb5749adfe818",
+      "dirty_files": [],
+      "origin": "git@github.com:tailrocks/velnor.git",
+      "correct_origin": true,
+      "live_remote_sha": "3ad452acd8004c06cb866f75392bb5749adfe818",
+      "remote_relation": "equal",
+      "trailers": {
+        "valid_signed_off": true,
+        "valid_codex_coauthor": true,
+        "observed": ["Co-authored-by: Codex <codex@openai.com>", "Signed-off-by: Alexey Zhokhov <alexey@zhokhov.com>"]
+      }
+    },
+    {
+      "worktree": "/private/tmp/g0-estate-scope",
+      "owner": "/root/g0_fleet",
+      "repository": "tailrocks/velnor",
+      "branch": "codex/g0-estate-scope",
+      "HEAD": "58bd26f905624820042ff944997ea21476fc0127",
+      "local_sha": "58bd26f905624820042ff944997ea21476fc0127",
+      "dirty_files": [],
+      "origin": "git@github.com:tailrocks/velnor.git",
+      "correct_origin": true,
+      "live_remote_sha": "58bd26f905624820042ff944997ea21476fc0127",
+      "remote_relation": "equal",
+      "trailers": {
+        "valid_signed_off": true,
+        "valid_codex_coauthor": true,
+        "observed": ["Co-authored-by: Codex <codex@openai.com>", "Signed-off-by: Alexey Zhokhov <alexey@zhokhov.com>"]
+      }
+    },
+    {
+      "worktree": "/private/tmp/velnor-g1-scan-integrity-fix",
+      "owner": "/root/g0_inventory",
+      "repository": "tailrocks/velnor",
+      "branch": "codex/github-first-scan-integrity-fix",
+      "HEAD": "2c328e1d471546a2c9b4b1f7e790d1e3562c66d3",
+      "local_sha": "2c328e1d471546a2c9b4b1f7e790d1e3562c66d3",
+      "dirty_files": [],
+      "origin": "git@github.com:tailrocks/velnor.git",
+      "correct_origin": true,
+      "live_remote_sha": "2c328e1d471546a2c9b4b1f7e790d1e3562c66d3",
+      "remote_relation": "equal",
+      "trailers": {
+        "valid_signed_off": true,
+        "valid_codex_coauthor": true,
+        "observed": ["Co-authored-by: Codex <codex@openai.com>", "Signed-off-by: Alexey Zhokhov <alexey@zhokhov.com>"]
+      }
+    }
+  ],
+  "remaining_blockers": [
+    "No owner synchronization debt remains; all 21 selected trees are clean and remote-equal.",
+    "Checker and schema2 attribution defects were corrected by normal forward commits; historical 2ba/c63 objects remain documented and were not rewritten.",
+    "dual-lane-apt-schema2 remains mixed WIP with compile errors; no gate approval is implied.",
+    "This checkpoint proves ref synchronization/trailers only, not review, tests, gate completion, releases, or merges."
+  ],
+  "excluded": {
+    "review_and_historical_trees": "All unrelated /private/tmp review fixtures, detached review worktrees, .muse/worktrees, historical user trees, and PR953/PR954 trees were excluded and untouched.",
+    "explicit_scope_exclusions": [
+      "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence",
+      "/Users/donbeave/Projects/tailrocks/velnor-project/native-routing-sources",
+      "/Users/donbeave/Projects/tailrocks/velnor-project/velnor",
+      "/Users/donbeave/Projects/tailrocks/velnor-project/velnor2",
+      "/private/tmp/velnor-pr953-954-merged",
+      "/private/tmp/velnor-pr953-current-review",
+      "/private/tmp/velnor-pr954-review"
+    ]
+  }
+}

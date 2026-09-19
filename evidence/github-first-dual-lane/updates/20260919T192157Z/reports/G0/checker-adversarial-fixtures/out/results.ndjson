@@ -1,0 +1,34 @@
+{"case":"positive-g0","exit_code":0,"status":"pass","findings":0,"codes":[]}
+{"case":"g0-blocker-next-action","exit_code":0,"status":"pass","findings":0,"codes":[]}
+{"case":"g0-third-provider-manifest","exit_code":0,"status":"pass","findings":0,"codes":[]}
+{"case":"g0-third-provider-record","exit_code":1,"status":"fail","findings":1,"codes":["g0-record-role"]}
+{"case":"g0-substituted-name","exit_code":1,"status":"fail","findings":6,"codes":["manifest-scope","missing-repository","missing-snapshot-repository","snapshot-out-of-scope","unknown-repository"]}
+{"case":"positive-g1","exit_code":0,"status":"pass","findings":0,"codes":[]}
+{"case":"g1-empty-logs","exit_code":1,"status":"fail","findings":1,"codes":["missing-log"]}
+{"case":"g1-malformed-logs","exit_code":1,"status":"fail","findings":1,"codes":["missing-log"]}
+{"case":"g1-expected-job-binding","exit_code":1,"status":"fail","findings":2,"codes":["job-inventory-mismatch","missing-job"]}
+{"case":"g1-extra-job-id","exit_code":1,"status":"fail","findings":1,"codes":["job-inventory-mismatch"]}
+{"case":"g1-duplicate-job-id","exit_code":1,"status":"fail","findings":1,"codes":["duplicate-job"]}
+{"case":"g1-required-child-omitted","exit_code":1,"status":"fail","findings":1,"codes":["child-run-inventory"]}
+{"case":"g1-manual-dispatch","exit_code":1,"status":"fail","findings":64,"codes":["event-source","missing-main-evidence"]}
+{"case":"g1-github-fake-velnor-host","exit_code":1,"status":"fail","findings":64,"codes":["host-trust"]}
+{"case":"g1-evil-runurl","exit_code":0,"status":"pass","findings":0,"codes":[]}
+{"case":"g1-evil-log","exit_code":0,"status":"pass","findings":0,"codes":[]}
+{"case":"g1-evil-check","exit_code":0,"status":"pass","findings":0,"codes":[]}
+{"case":"g1-third-provider-map","exit_code":0,"status":"pass","findings":0,"codes":[]}
+{"case":"g1-child-evil-provider","exit_code":0,"status":"pass","findings":0,"codes":[]}
+{"case":"g4-fake-host","exit_code":0,"status":"pass","findings":0,"codes":[]}
+{"case":"g5-fake-host","exit_code":0,"status":"pass","findings":0,"codes":[]}
+{"case":"alias-check-evidence","exit_code":0,"status":"pass","findings":0,"codes":[]}
+{"case":"alias-evidence-verify","exit_code":0,"status":"pass","findings":0,"codes":[]}
+{"case":"alias-verify-evidence","exit_code":0,"status":"pass","findings":0,"codes":[]}
+{"case":"g0-unknown-manifest-field","exit_code":1,"status":"parse-error","error":"Error: parse strict manifest JSON /Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-adversarial-fixtures/fixtures/g0-unknown-manifest-field.json"}
+{"case":"g0-unknown-snapshot-field","exit_code":1,"status":"parse-error","error":"Error: parse strict snapshot JSON /Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-adversarial-fixtures/fixtures/g0-unknown-snapshot-field.json"}
+{"case":"g0-unknown-evidence-field","exit_code":1,"status":"parse-error","error":"Error: parse strict evidence JSON /Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-adversarial-fixtures/fixtures/g0-unknown-evidence-field.json"}
+{"case":"g0-old-flat-fleet","exit_code":1,"status":"parse-error","error":"Error: parse strict manifest JSON /Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-adversarial-fixtures/fixtures/g0-old-flat-fleet.json"}
+{"case":"g0-uppercase-applicability","exit_code":1,"status":"parse-error","error":"Error: parse strict manifest JSON /Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-adversarial-fixtures/fixtures/g0-uppercase-applicability.json"}
+{"case":"g0-uppercase-eligibility","exit_code":1,"status":"parse-error","error":"Error: parse strict manifest JSON /Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-adversarial-fixtures/fixtures/g0-uppercase-eligibility.json"}
+{"case":"g1-flat-release-alias","exit_code":1,"status":"parse-error","error":"Error: parse strict evidence JSON /Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-adversarial-fixtures/fixtures/g1-flat-release-alias.json"}
+{"case":"g1-flat-release-alias-different","exit_code":1,"status":"parse-error","error":"Error: parse strict evidence JSON /Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-adversarial-fixtures/fixtures/g1-flat-release-alias-different.json"}
+{"case":"g1-flat-install-alias","exit_code":1,"status":"parse-error","error":"Error: parse strict evidence JSON /Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-adversarial-fixtures/fixtures/g1-flat-install-alias.json"}
+{"case":"g1-flat-install-alias-different","exit_code":1,"status":"parse-error","error":"Error: parse strict evidence JSON /Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/checker-adversarial-fixtures/fixtures/g1-flat-install-alias-different.json"}

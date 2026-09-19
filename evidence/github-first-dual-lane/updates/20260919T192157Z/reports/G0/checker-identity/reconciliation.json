@@ -1,0 +1,110 @@
+{
+  "$schema": "velnor.g0.checker-identity/v1",
+  "captured_at_utc": "2026-09-19T19:08:39Z",
+  "reviewer": {
+    "agent": "/root/g0_inventory",
+    "model": "gpt-5.6-luna",
+    "reasoning_effort": "max",
+    "settings_verified": true
+  },
+  "repository": "tailrocks/velnor",
+  "remote_ref": "refs/heads/codex/github-first-checker",
+  "remote_sha": "2ba66b116dd5511f0b4f2a6856cfbed6bd290152",
+  "owner": {
+    "path": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-checker",
+    "branch": "codex/github-first-checker",
+    "head": "2ba66b116dd5511f0b4f2a6856cfbed6bd290152",
+    "tree": "b642339db0db0b286c7122e3ab02124b9172b18c",
+    "status": "clean",
+    "head_matches_remote": true,
+    "role": "owner/pushed candidate"
+  },
+  "worktrees": [
+    {
+      "path": "/private/tmp/g1-checker-adversarial-final",
+      "ref": "HEAD (detached)",
+      "head": "2ba66b116dd5511f0b4f2a6856cfbed6bd290152",
+      "tree": "b642339db0db0b286c7122e3ab02124b9172b18c",
+      "status": "clean",
+      "classification": "same commit/tree as pushed owner; detached review copy"
+    },
+    {
+      "path": "/private/tmp/g2-checker-x8njgs",
+      "ref": "HEAD (detached)",
+      "head": "2ba66b116dd5511f0b4f2a6856cfbed6bd290152",
+      "tree": "b642339db0db0b286c7122e3ab02124b9172b18c",
+      "status": "dirty: untracked fixtures/ and review_fixture_generator.py",
+      "classification": "same commit/tree as pushed owner plus uncommitted review artifacts; not authoritative"
+    },
+    {
+      "path": "/private/tmp/g1-checker-adversarial-review",
+      "ref": "HEAD (detached)",
+      "head": "8f976b52e6250deea662cdb23ccd19e7d9ca446c",
+      "tree": "24d20cdf72dbc81e88d5e7e529f6419afe58c9d4",
+      "status": "clean",
+      "classification": "parent of pushed owner; prior review/checkpoint tree"
+    },
+    {
+      "path": "/private/tmp/g3-checker-host-release-design-8f976b52",
+      "ref": "HEAD (detached)",
+      "head": "8f976b52e6250deea662cdb23ccd19e7d9ca446c",
+      "tree": "24d20cdf72dbc81e88d5e7e529f6419afe58c9d4",
+      "status": "clean",
+      "classification": "same prior review/checkpoint tree; not current owner"
+    },
+    {
+      "path": "/private/tmp/g1-checker-review",
+      "ref": "HEAD (detached)",
+      "head": "b3b6b2ef5239ff3354f504b8aeb638129fd0504b",
+      "tree": "786f3d449159969a418e314ad9aa0bce12e9e21a",
+      "status": "clean",
+      "classification": "original checker implementation tree; stale"
+    },
+    {
+      "path": "/private/tmp/g2-checker-review.5FXqui",
+      "ref": "HEAD (detached)",
+      "head": "b3b6b2ef5239ff3354f504b8aeb638129fd0504b",
+      "tree": "786f3d449159969a418e314ad9aa0bce12e9e21a",
+      "status": "clean",
+      "classification": "same original implementation tree; stale review copy"
+    },
+    {
+      "path": "/private/tmp/g1-checker-v2-review",
+      "ref": "HEAD (detached)",
+      "head": "017c92e0bf608d42675a0b8e495f0486c7296041",
+      "tree": "6f6378206879a26038dde25751ed9f2fd60013d1",
+      "status": "clean",
+      "classification": "intermediate v2 child-run binding tree; stale review copy"
+    }
+  ],
+  "commit_chain": [
+    {
+      "commit": "b3b6b2ef5239ff3354f504b8aeb638129fd0504b",
+      "parent": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+      "subject": "feat(tools): add deterministic dual-lane evidence checker"
+    },
+    {
+      "commit": "017c92e0bf608d42675a0b8e495f0486c7296041",
+      "parent": "91b2800197f12fa4e1cdec092eeaf56f3ceb5053",
+      "subject": "fix(tools): bind child runs to parent executions"
+    },
+    {
+      "commit": "8f976b52e6250deea662cdb23ccd19e7d9ca446c",
+      "parent": "790a0805c0a0a97244e92c328a6b154067c1ab4f",
+      "subject": "WIP(checker): bind reviewed scope and G0 inventory"
+    },
+    {
+      "commit": "2ba66b116dd5511f0b4f2a6856cfbed6bd290152",
+      "parent": "8f976b52e6250deea662cdb23ccd19e7d9ca446c",
+      "subject": "WIP(checker): wire typed PR inventory fields"
+    }
+  ],
+  "verdict": "IDENTITY_RECONCILED",
+  "gate_status": "not_a_gate_pass",
+  "notes": [
+    "The pushed branch and project sibling are the same exact current commit and tree.",
+    "Detached copies at 8f976b52, b3b6b2ef, and 017c92e0 are prior review/checkpoint trees and must not be mistaken for the current candidate.",
+    "The g2-checker-x8njgs copy has untracked review files; its commit object matches the owner, but its working tree is not clean.",
+    "Remote truth was checked with git ls-remote; refs/heads/codex/github-first-checker resolves to the owner SHA."
+  ]
+}

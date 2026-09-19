@@ -1,0 +1,194 @@
+{
+  "schema": "velnor.g0.estate-scope-review.v1",
+  "source_base": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+  "authority": {
+    "source": "velnor-github-first-dual-lane-goal.md:21-58",
+    "count": 32,
+    "identities": [
+      "tailrocks/velnor",
+      "tailrocks/velnor-apt",
+      "tailrocks/parallax",
+      "tailrocks/tracing-request-level",
+      "tailrocks/termrock",
+      "tailrocks/termpane",
+      "tailrocks/tablerock",
+      "tailrocks/schemalane",
+      "tailrocks/ruxel",
+      "tailrocks/pg-bigdecimal",
+      "tailrocks/parallax-telemetry-playground",
+      "tailrocks/homebrew-tablerock",
+      "tailrocks/homebrew-ruxel",
+      "tailrocks/homebrew-parallax",
+      "tailrocks/homebrew-holla",
+      "tailrocks/holla-apt",
+      "tailrocks/holla",
+      "tailrocks/homebrew-velnor",
+      "tailrocks/tailrocks-typescript-skills",
+      "tailrocks/tailrocks-skill-authoring-skills",
+      "tailrocks/tailrocks-rust-skills",
+      "tailrocks/tailrocks-roadmap-skills",
+      "tailrocks/tailrocks-pull-request-skills",
+      "tailrocks/tailrocks-open-source-skills",
+      "tailrocks/tailrocks-macos-skills",
+      "tailrocks/tailrocks-code-quality-skills",
+      "jackin-project/jackin",
+      "jackin-project/jackin-agent-smith",
+      "jackin-project/homebrew-tap",
+      "jackin-project/jackin-the-architect",
+      "jackin-project/jackin-sentinel",
+      "jackin-project/jackin-role-action"
+    ]
+  },
+  "auxiliary": {
+    "source": "config/estate-repositories.json:19",
+    "count": 28,
+    "role": "metadata-only; never canonical scope authority",
+    "identities": [
+      "ChainArgos/java-monorepo",
+      "ChainArgos/blockchain-nodes",
+      "jackin-project/jackin",
+      "tailrocks/parallax",
+      "tailrocks/parallax-telemetry-playground",
+      "tailrocks/tablerock",
+      "tailrocks/holla",
+      "tailrocks/velnor",
+      "tailrocks/ruxel",
+      "tailrocks/termrock",
+      "tailrocks/schemalane",
+      "tailrocks/pg-bigdecimal",
+      "tailrocks/tracing-request-level",
+      "ChainArgos/jackin-agent-brown",
+      "tailrocks/velnor-actions-fixture",
+      "tailrocks/velnor-apt",
+      "tailrocks/holla-apt",
+      "tailrocks/homebrew-tablerock",
+      "tailrocks/homebrew-parallax",
+      "tailrocks/homebrew-holla",
+      "jackin-project/jackin-the-architect",
+      "jackin-project/jackin-role-action",
+      "jackin-project/jackin-agent-smith",
+      "jackin-project/homebrew-tap",
+      "jackin-project/jackin-sentinel",
+      "jackin-project/jackin-dev",
+      "tailrocks/homebrew-ruxel",
+      "tailrocks/tailrocks-skills"
+    ],
+    "overlap_with_authority": 22,
+    "authority_missing_from_auxiliary": [
+      "tailrocks/termpane",
+      "tailrocks/homebrew-velnor",
+      "tailrocks/tailrocks-typescript-skills",
+      "tailrocks/tailrocks-skill-authoring-skills",
+      "tailrocks/tailrocks-rust-skills",
+      "tailrocks/tailrocks-roadmap-skills",
+      "tailrocks/tailrocks-pull-request-skills",
+      "tailrocks/tailrocks-open-source-skills",
+      "tailrocks/tailrocks-macos-skills",
+      "tailrocks/tailrocks-code-quality-skills"
+    ],
+    "auxiliary_outside_authority": [
+      "ChainArgos/java-monorepo",
+      "ChainArgos/blockchain-nodes",
+      "ChainArgos/jackin-agent-brown",
+      "tailrocks/velnor-actions-fixture",
+      "jackin-project/jackin-dev",
+      "tailrocks/tailrocks-skills"
+    ]
+  },
+  "fixtures": [
+    {
+      "id": "exact32",
+      "rows": "authority.identities",
+      "expected_scope": "accept",
+      "required_diagnostics": []
+    },
+    {
+      "id": "duplicate-missing",
+      "rows": "authority.identities",
+      "mutations": [
+        {"op": "duplicate", "value": "tailrocks/velnor"},
+        {"op": "drop", "value": "tailrocks/termpane"}
+      ],
+      "expected_scope": "reject",
+      "required_diagnostics": ["duplicate", "missing"]
+    },
+    {
+      "id": "missing-one",
+      "rows": "authority.identities",
+      "mutations": [{"op": "drop", "value": "jackin-project/jackin-role-action"}],
+      "expected_scope": "reject",
+      "required_diagnostics": ["missing"]
+    },
+    {
+      "id": "extra-substitution",
+      "rows": "authority.identities",
+      "mutations": [{"op": "replace", "from": "tailrocks/termpane", "to": "tailrocks/not-in-scope"}],
+      "expected_scope": "reject",
+      "required_diagnostics": ["missing", "unexpected"]
+    },
+    {
+      "id": "case-alias",
+      "rows": "authority.identities",
+      "mutations": [{"op": "replace", "from": "tailrocks/velnor", "to": "Tailrocks/velnor"}],
+      "expected_scope": "reject",
+      "required_diagnostics": ["missing", "unexpected", "alias-not-normalized"]
+    },
+    {
+      "id": "trailing-slash-alias",
+      "rows": "authority.identities",
+      "mutations": [{"op": "replace", "from": "tailrocks/velnor", "to": "tailrocks/velnor/"}],
+      "expected_scope": "reject",
+      "required_diagnostics": ["missing", "unexpected", "alias-not-normalized"]
+    },
+    {
+      "id": "owner-repo-swap",
+      "rows": "authority.identities",
+      "mutations": [{"op": "replace", "from": "tailrocks/velnor", "to": "velnor/tailrocks"}],
+      "expected_scope": "reject",
+      "required_diagnostics": ["missing", "unexpected", "malformed-identity"]
+    },
+    {
+      "id": "auxiliary-28-only",
+      "rows": "auxiliary.identities",
+      "expected_scope": "reject",
+      "required_diagnostics": ["missing", "unexpected"],
+      "boundary": "auxiliary rows cannot become canonical scope"
+    },
+    {
+      "id": "auxiliary-extra",
+      "rows": "auxiliary.identities",
+      "mutations": [{"op": "append", "value": "tailrocks/not-in-scope"}],
+      "expected_scope": "auxiliary-parse-accept-but-report",
+      "required_diagnostics": ["auxiliary-out-of-scope"],
+      "boundary": "do not add extra metadata to canonical scope"
+    },
+    {
+      "id": "auxiliary-duplicate",
+      "rows": "auxiliary.identities",
+      "mutations": [{"op": "duplicate", "value": "tailrocks/velnor"}],
+      "expected_scope": "auxiliary-parse-reject",
+      "required_diagnostics": ["duplicate-auxiliary"]
+    },
+    {
+      "id": "caller-substitution",
+      "rows": "auxiliary.identities",
+      "expected_scope": "reject",
+      "required_diagnostics": ["caller-input-not-authority", "missing", "unexpected"]
+    },
+    {
+      "id": "caller-concern-substitution",
+      "rows": "authority.identities",
+      "mutations": [{"op": "rewrite_required_classifications", "value": "non-applicable"}],
+      "expected_scope": "reject-or-plan-mismatch",
+      "required_diagnostics": ["caller-plan-not-authority", "concern-plan-mismatch"],
+      "boundary": "scope names may match while caller metadata must not weaken the accepted concern plan"
+    },
+    {
+      "id": "canonical-digest-mismatch",
+      "rows": "authority.identities",
+      "mutations": [{"op": "replace", "from": "tailrocks/velnor", "to": "tailrocks/velnor-renamed"}],
+      "expected_scope": "authority-reject",
+      "required_diagnostics": ["authority-digest-mismatch", "missing", "unexpected"]
+    }
+  ]
+}

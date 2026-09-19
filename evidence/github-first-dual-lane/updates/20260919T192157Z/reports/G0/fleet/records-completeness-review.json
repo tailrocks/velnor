@@ -1,0 +1,240 @@
+{
+  "$schema": "velnor.g0.records-completeness-review/v1",
+  "captured_at_utc": "2026-09-19T19:17:40Z",
+  "reviewer": {
+    "agent": "/root/g0_inventory",
+    "model": "gpt-5.6-luna",
+    "reasoning_effort": "max",
+    "settings_verified": true
+  },
+  "subject": {
+    "records_repository": "tailrocks/velnor",
+    "records_branch": "codex/github-first-records",
+    "records_commit": "92f6ff62d80bcd8e1edb51135277d6d434982cd5",
+    "records_parent": "41998262c81d146a4b6b34f882a097f7c3ad169f",
+    "worktree": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-records",
+    "working_tree": "clean",
+    "fleet_json_git_blob": "e9605e6fc1018d1bf46af6a826aa4f7c9ea55ccd",
+    "spec_git_blob": "4cfddbf23638837879a132eb9e2fc29ba7c140c9",
+    "status_git_blob": "d1fecc4e6616dcde3ed0942c93a0551132e956a6",
+    "fleet_json_sha256": "b39b3bcb5d149db66a03483bd7a19482af2657df6f962872030d820a39f13514",
+    "spec_sha256": "0da3bf79b128f51cee7d6127a7990991159a2a0be3a34ce989affde6bdebf050",
+    "status_sha256": "413d6f4402e982ac8fe9a41ff32880581d2fb9ed05dbd6dec7ded8f8f9c03283"
+  },
+  "claim_vs_fact": {
+    "fixed_scope_claim": {
+      "expected_rows": 32,
+      "observed_rows": 32,
+      "unique_rows": 32,
+      "result": "confirmed"
+    },
+    "historical_pr_claim": {
+      "source": "G0/fleet/inventory.md",
+      "observed_at_utc": "2026-09-19T16:34:19Z",
+      "open_pr_rows": 78,
+      "ready": 75,
+      "draft": 3,
+      "result": "historical_only"
+    },
+    "current_pr_check_snapshot": {
+      "source": "G0/fleet/pr-checks.tsv",
+      "observed_at_utc": "2026-09-19T16:52:43Z",
+      "rows": 77,
+      "unique_pr_rows": 77,
+      "ready": 74,
+      "draft": 3,
+      "result": "later_snapshot; not a current-now refresh"
+    },
+    "freshness_now": {
+      "audit_time_utc": "2026-09-19T19:17:40Z",
+      "latest_external_snapshot_utc": "2026-09-19T17:05:57Z",
+      "status": "stale_unless_refreshed",
+      "live_github_refresh_performed": false,
+      "interpretation": "No current-now live claim is accepted from the external snapshots."
+    }
+  },
+  "row_completeness": {
+    "scope": {
+      "rows": 32,
+      "unique_repositories": 32,
+      "duplicate_repositories": 0
+    },
+    "branch_identity": {
+      "default_branch_nonnull": 32,
+      "default_branch_main": 32,
+      "default_branch_sha_nonnull": 32,
+      "default_branch_sha_valid_lower_hex40": 32,
+      "observed_at_nonnull": 32,
+      "observed_at_valid_utc_seconds": 32,
+      "current_snapshot_rows": 32,
+      "current_snapshot_sha_match": 31,
+      "current_snapshot_sha_mismatch": 1,
+      "mismatches": [
+        {
+          "repository": "jackin-project/homebrew-tap",
+          "records_sha": "f1669391582f92c95da1aa5958de4397dfedca09",
+          "current_snapshot_sha": "2281ae9c95dfcb5bf82dfd025fdf58a50658b1d1",
+          "branch": "main",
+          "records_observed_at_utc": "2026-09-19T16:34:19Z",
+          "current_snapshot_observed_at_utc": "2026-09-19T17:05:57Z"
+        }
+      ],
+      "sourcebound_definition": "A row is source-bound for this audit only when its repository identity exists in the independent main-revisions.tsv snapshot and branch/SHA match that snapshot.",
+      "sourcebound_rows": 31,
+      "sourcebound_total": 32
+    },
+    "fleet_row_fields": {
+      "pr": {
+        "fields": ["PR_number", "PR_head_sha", "PR_base_sha", "tested_merge_sha", "merge_group_sha"],
+        "nonempty_rows_by_field": {
+          "PR_number": 0,
+          "PR_head_sha": 0,
+          "PR_base_sha": 0,
+          "tested_merge_sha": 0,
+          "merge_group_sha": 0
+        },
+        "complete_rows": 0,
+        "row_count": 32
+      },
+      "checks": {
+        "fields": ["required_check_contexts_and_apps", "expected_jobs", "actual_job_ids", "actual_job_conclusions", "logs", "child_run_links"],
+        "nonempty_rows_by_field": {
+          "required_check_contexts_and_apps": 0,
+          "expected_jobs": 0,
+          "actual_job_ids": 0,
+          "actual_job_conclusions": 0,
+          "logs": 0,
+          "child_run_links": 0
+        },
+        "complete_rows": 0,
+        "row_count": 32
+      },
+      "workflow": {
+        "fields": ["workflow_path", "workflow_revision", "event", "run_id", "run_attempt", "run_url", "trigger_source_sha", "actual_checkout_sha", "provider", "runner_name", "host_id"],
+        "nonempty_rows_by_field": {
+          "workflow_path": 0,
+          "workflow_revision": 0,
+          "event": 0,
+          "run_id": 0,
+          "run_attempt": 0,
+          "run_url": 0,
+          "trigger_source_sha": 0,
+          "actual_checkout_sha": 0,
+          "provider": 0,
+          "runner_name": 0,
+          "host_id": 0
+        },
+        "complete_rows": 0,
+        "row_count": 32
+      },
+      "workload": {
+        "fields": ["expected_workload_ids", "workload_platform_architecture", "provider_eligibility", "justified_exclusions"],
+        "nonempty_rows_by_field": {
+          "expected_workload_ids": 0,
+          "workload_platform_architecture": 0,
+          "provider_eligibility": 0,
+          "justified_exclusions": 0
+        },
+        "complete_rows": 0,
+        "row_count": 32,
+        "external_enrichment": "workloads-full.json"
+      },
+      "access": {
+        "row_field_present": false,
+        "rows_with_structured_access": 0,
+        "external_historical_inventory_access": "32 readable at 2026-09-19T16:34:19Z; current access unknown"
+      },
+      "dependency": {
+        "row_fields_present": {
+          "dependency_graph_edges": false,
+          "dependent_workload_graph": false
+        },
+        "rows_with_typed_dependency_edges": 0,
+        "required_edge_kinds": ["workload_to_child", "workload_to_release", "workload_to_package", "workload_to_required_check"],
+        "external_enrichment": "workloads-full.json records explicit unknown empty graph per row"
+      },
+      "control_fields": {
+        "owner": 32,
+        "reviewer": 32,
+        "gate_status": 32,
+        "blocker": 32,
+        "next_action": 32,
+        "evidence_status": 32,
+        "interpretation": "control metadata is populated but does not replace acceptance evidence"
+      }
+    }
+  },
+  "external_snapshot_completeness": {
+    "inventory": {
+      "path": "G0/fleet/inventory.md",
+      "sha256": "42fac3779bc41b48b6850cdab5cc6deccd5d8ba693a68f16f91791ad4623b16b",
+      "rows": 32,
+      "default_branch_main": 32,
+      "timestamp": "2026-09-19T16:34:19Z",
+      "open_pr_claim": 78,
+      "scope_access_claim": "all 32 readable"
+    },
+    "main_revisions": {
+      "path": "G0/fleet/main-revisions.tsv",
+      "sha256": "2e79bd50201c488376c6d25fe5c781927a3752d5801d9fc3c9351c9da981d915",
+      "rows": 32,
+      "unique_repositories": 32,
+      "default_branch_main": 32,
+      "valid_sha": 32,
+      "valid_timestamp": 32,
+      "observed_at_utc": "2026-09-19T17:05:57Z"
+    },
+    "pr_checks": {
+      "path": "G0/fleet/pr-checks.tsv",
+      "sha256": "54729bba3e6b6b1c33c03251e50e7026226c0eb26375f60c3f1780b4e9bec370",
+      "rows": 77,
+      "unique_repositories": 12,
+      "unique_pr_rows": 77,
+      "ready": 74,
+      "draft": 3,
+      "valid_timestamp": 77,
+      "valid_head_sha": 77,
+      "valid_base_sha": 77,
+      "valid_default_sha": 77,
+      "valid_rollup_sha": 77,
+      "numeric_check_counts": 77,
+      "required_like_nonempty": 77,
+      "app_ids_nonempty": 77,
+      "contexts_with_pagination": 2,
+      "failed_checks_nonempty": 24,
+      "pending_checks_nonempty": 2,
+      "skipped_checks_nonempty": 64,
+      "incomplete_flags_nonempty": 65,
+      "interpretation": "PR/check snapshot is populated but not a full 32-row workflow/run/workload ledger; two rows require pagination completion."
+    }
+  },
+  "workload_enrichment": {
+    "path": "G0/fleet/workloads-full.json",
+    "sha256": "32aa854684af045b6b03798110990b75fda9369c67b7c742b31a2e318d318c52",
+    "source_matrix": "G0/workload-matrix.json",
+    "source_matrix_sha256": "f6d91897469474a28dc754d6f50521af2667ad4ef3c2694553e2afb01cd98820",
+    "source_matrix_rows": 32,
+    "expected_workload_id_count": 115,
+    "expected_workload_id_unique_count": 86,
+    "observed_scan_unit_id_count": 43,
+    "observed_scan_unit_id_unique_count": 41,
+    "platform_row_count": 50,
+    "native_row_count": 17,
+    "rows_with_expected_workloads": 32,
+    "rows_with_platform_architecture": 32,
+    "rows_with_provider_eligibility": 32,
+    "rows_with_explicit_unsupported_blocks": 32,
+    "rows_with_current_main_sha_match": 32,
+    "rows_with_current_main_sha_mismatch": 0,
+    "interpretation": "This is a source-observed workload projection. It preserves configured, excluded, misrouted, unexecuted, and unsupported statuses; it is not generated coverage or execution success."
+  },
+  "verdict": "INCOMPLETE_BLOCKED",
+  "gate_status": "no_g0_pass",
+  "blockers": [
+    "The committed fleet rows contain only static scope/default-branch identity plus null PR/check/workflow/workload/release/install fields.",
+    "One static default-branch SHA is stale against the independent current main snapshot: jackin-project/homebrew-tap.",
+    "External PR/check evidence has 77 later rows versus the historical 78 claim and two paginated context rows; it is not a complete current-now 32-row run/workload ledger.",
+    "Structured access and typed dependency graphs are absent from fleet rows; workloads-full records them as unknown rather than passing them.",
+    "External snapshots are stale relative to audit time and no live GitHub refresh was performed."
+  ]
+}
