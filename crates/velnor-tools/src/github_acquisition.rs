@@ -6,6 +6,11 @@
 //! every request, every page, the safe auth identity, and a verified reference
 //! to the exact response bytes.
 
+#![allow(
+    dead_code,
+    reason = "collector wiring is a follow-up integration scope"
+)]
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -14,6 +19,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+use url::Url;
 
 pub type AcquisitionFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -33,6 +39,134 @@ pub enum HttpMethod {
     Post,
 }
 
+/// Normalized, fixed GitHub API origin.  The acquisition seam deliberately
+/// does not accept arbitrary hosts: auth-bearing requests stay on the public
+/// GitHub API origin until a separately designed enterprise policy exists.
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct GithubApiOrigin(String);
+
+impl fmt::Debug for GithubApiOrigin {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("GithubApiOrigin")
+            .field(&self.0)
+            .finish()
+    }
+}
+
+impl GithubApiOrigin {
+    pub fn github() -> Self {
+        Self("https://api.github.com".to_owned())
+    }
+
+    fn bind(&self, endpoint: &str) -> Result<String, AcquisitionError> {
+        self.validate_origin()?;
+        let origin = Url::parse(&self.0).map_err(|_| AcquisitionError::EndpointViolation)?;
+        let candidate = match Url::parse(endpoint) {
+            Ok(candidate) => candidate,
+            Err(_) => origin
+                .join(endpoint)
+                .map_err(|_| AcquisitionError::EndpointViolation)?,
+        };
+        self.validate_candidate(&candidate)?;
+        Ok(candidate.to_string())
+    }
+
+    fn validate_candidate(&self, candidate: &Url) -> Result<(), AcquisitionError> {
+        self.validate_origin()?;
+        let origin = Url::parse(&self.0).map_err(|_| AcquisitionError::EndpointViolation)?;
+        if candidate.scheme() != "https"
+            || candidate.host_str() != origin.host_str()
+            || candidate.port() != origin.port()
+            || !candidate.username().is_empty()
+            || candidate.password().is_some()
+            || candidate.fragment().is_some()
+        {
+            return Err(AcquisitionError::EndpointViolation);
+        }
+        for (key, value) in candidate.query_pairs() {
+            if key_is_sensitive(&key) || looks_like_secret(&value) {
+                return Err(AcquisitionError::EndpointViolation);
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_origin(&self) -> Result<(), AcquisitionError> {
+        let origin = Url::parse(&self.0).map_err(|_| AcquisitionError::EndpointViolation)?;
+        if origin.scheme() != "https"
+            || origin.host_str() != Some("api.github.com")
+            || origin.port().is_some()
+            || !origin.username().is_empty()
+            || origin.password().is_some()
+            || origin.path() != "/"
+            || origin.query().is_some()
+            || origin.fragment().is_some()
+        {
+            return Err(AcquisitionError::EndpointViolation);
+        }
+        Ok(())
+    }
+}
+
+/// Credential handle carried only as a safe reference.  The actual token is
+/// owned by the transport and cannot be represented by this type.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AuthHandle(String);
+
+impl fmt::Debug for AuthHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AuthHandle([opaque])")
+    }
+}
+
+impl AuthHandle {
+    fn validate(&self) -> Result<(), AcquisitionError> {
+        if self.0.is_empty()
+            || self.0.len() > 128
+            || !self
+                .0
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            || looks_like_secret(&self.0)
+        {
+            return Err(AcquisitionError::SecretMetadata);
+        }
+        Ok(())
+    }
+}
+
+/// Registered credential values are held in memory only and are masked before
+/// response bytes cross the raw-object storage boundary.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct CredentialRegistry {
+    secrets: Vec<Vec<u8>>,
+}
+
+impl fmt::Debug for CredentialRegistry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CredentialRegistry")
+            .field("registered_count", &self.secrets.len())
+            .finish()
+    }
+}
+
+impl CredentialRegistry {
+    pub fn register(&mut self, secret: impl AsRef<str>) -> Result<(), AcquisitionError> {
+        let secret = secret.as_ref();
+        if secret.len() < 8 || secret.as_bytes().contains(&0) {
+            return Err(AcquisitionError::SecretMetadata);
+        }
+        if !self.secrets.iter().any(|value| value == secret.as_bytes()) {
+            self.secrets.push(secret.as_bytes().to_vec());
+        }
+        Ok(())
+    }
+}
+
 /// Safe identity for the credential used by a request.
 ///
 /// Token values and auth headers are deliberately not represented.  The
@@ -40,12 +174,15 @@ pub enum HttpMethod {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthIdentity {
-    pub reference: String,
+    #[serde(rename = "reference")]
+    auth_handle: AuthHandle,
     pub provider: String,
     pub viewer_id: Option<String>,
     pub viewer_login: Option<String>,
     pub safe_scopes: BTreeSet<String>,
     pub secret_excluded: bool,
+    #[serde(skip)]
+    credentials: CredentialRegistry,
 }
 
 impl AuthIdentity {
@@ -57,22 +194,31 @@ impl AuthIdentity {
         safe_scopes: BTreeSet<String>,
     ) -> Self {
         Self {
-            reference: reference.into(),
+            auth_handle: AuthHandle(reference.into()),
             provider: provider.into(),
             viewer_id,
             viewer_login,
             safe_scopes,
             secret_excluded: true,
+            credentials: CredentialRegistry::default(),
         }
     }
 
+    pub fn reference(&self) -> &str {
+        &self.auth_handle.0
+    }
+
+    pub fn register_credential(&mut self, secret: impl AsRef<str>) -> Result<(), AcquisitionError> {
+        self.credentials.register(secret)
+    }
+
     fn validate(&self) -> Result<(), AcquisitionError> {
-        if self.reference.trim().is_empty() || self.provider.trim().is_empty() {
+        self.auth_handle.validate()?;
+        if self.provider.trim().is_empty() {
             return Err(AcquisitionError::InvalidRequest);
         }
         if !self.secret_excluded
             || [
-                Some(self.reference.as_str()),
                 Some(self.provider.as_str()),
                 self.viewer_id.as_deref(),
                 self.viewer_login.as_deref(),
@@ -97,6 +243,7 @@ impl AuthIdentity {
 pub struct AcquisitionRequest {
     pub api: ApiKind,
     pub method: HttpMethod,
+    pub api_origin: GithubApiOrigin,
     pub endpoint_or_operation: String,
     pub query: BTreeMap<String, String>,
     pub body: Option<Vec<u8>>,
@@ -108,6 +255,7 @@ impl fmt::Debug for AcquisitionRequest {
             .debug_struct("AcquisitionRequest")
             .field("api", &self.api)
             .field("method", &self.method)
+            .field("api_origin", &self.api_origin)
             .field("endpoint_or_operation", &self.endpoint_or_operation)
             .field("query", &redacted_query(&self.query))
             .field("body", &self.body.as_ref().map(|_| "[REDACTED]"))
@@ -121,6 +269,9 @@ pub struct TransportResponse {
     pub status: u16,
     pub headers: BTreeMap<String, String>,
     pub body: Vec<u8>,
+    /// Final URL reported by a no-redirect transport.  The collector rejects
+    /// a response whose effective origin is outside `request.api_origin`.
+    pub effective_endpoint: String,
 }
 
 impl fmt::Debug for TransportResponse {
@@ -130,6 +281,7 @@ impl fmt::Debug for TransportResponse {
             .field("status", &self.status)
             .field("headers", &redacted_headers(&self.headers))
             .field("body", &format_args!("<{} bytes>", self.body.len()))
+            .field("effective_endpoint", &self.effective_endpoint)
             .finish()
     }
 }
@@ -155,7 +307,7 @@ pub trait AcquisitionTransport {
 }
 
 /// Stored response bytes and their immutable provenance reference.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RawObject {
     pub raw_id: String,
     pub request_id: String,
@@ -163,6 +315,20 @@ pub struct RawObject {
     pub canonicalization: String,
     pub media_type: String,
     pub bytes: Vec<u8>,
+}
+
+impl fmt::Debug for RawObject {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RawObject")
+            .field("raw_id", &self.raw_id)
+            .field("request_id", &self.request_id)
+            .field("object_kind", &self.object_kind)
+            .field("canonicalization", &self.canonicalization)
+            .field("media_type", &self.media_type)
+            .field("bytes", &format_args!("<{} bytes>", self.bytes.len()))
+            .finish()
+    }
 }
 
 /// Reference emitted into the collector snapshot.  The store must return a
@@ -184,12 +350,18 @@ pub struct RawObjectRef {
 pub enum RawStorageError {
     Unavailable,
     Refused,
+    Unbound,
 }
 
 /// Caller-owned raw-byte store.  A production implementation may place bytes
 /// in an evidence object store; tests use an in-memory fixture store.
 pub trait RawObjectStore {
     fn store(&mut self, object: RawObject) -> Result<RawObjectRef, RawStorageError>;
+
+    /// Verify that the returned reference denotes an immutable object that is
+    /// actually present in the external store.  A caller-asserted URI is not
+    /// sufficient evidence.
+    fn verify(&self, reference: &RawObjectRef) -> Result<(), RawStorageError>;
 }
 
 /// Pagination state recorded on each request.
@@ -274,10 +446,13 @@ pub struct CollectionResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcquisitionError {
     InvalidRequest,
+    EndpointViolation,
     SecretMetadata,
+    CredentialMaterialDetected,
     Serialization,
     StorageUnavailable,
     StorageRefused,
+    StorageUnbound,
     RawReferenceMismatch,
     RawDigestMismatch,
 }
@@ -286,10 +461,13 @@ impl fmt::Display for AcquisitionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::InvalidRequest => "invalid acquisition request",
+            Self::EndpointViolation => "endpoint is outside the fixed GitHub API origin",
             Self::SecretMetadata => "secret-bearing metadata is not allowed",
+            Self::CredentialMaterialDetected => "credential material detected in response bytes",
             Self::Serialization => "request serialization failed",
             Self::StorageUnavailable => "raw object storage unavailable",
             Self::StorageRefused => "raw object storage refused object",
+            Self::StorageUnbound => "raw object storage reference is not externally bound",
             Self::RawReferenceMismatch => "raw object reference metadata mismatch",
             Self::RawDigestMismatch => "raw object digest mismatch",
         };
@@ -304,6 +482,7 @@ impl std::error::Error for AcquisitionError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestCollectionRequest {
     pub collection_id: String,
+    pub api_origin: GithubApiOrigin,
     pub endpoint: String,
     pub query: BTreeMap<String, String>,
     pub item_field: Option<String>,
@@ -321,6 +500,7 @@ impl RestCollectionRequest {
     ) -> Self {
         Self {
             collection_id: collection_id.into(),
+            api_origin: GithubApiOrigin::github(),
             endpoint: endpoint.into(),
             query: BTreeMap::new(),
             item_field: item_field.map(Into::into),
@@ -351,6 +531,7 @@ impl RestCollectionRequest {
 #[derive(Debug, Clone, PartialEq)]
 pub struct GraphQlCollectionRequest {
     pub collection_id: String,
+    pub api_origin: GithubApiOrigin,
     pub endpoint: String,
     pub operation_name: String,
     pub query: String,
@@ -375,6 +556,7 @@ impl GraphQlCollectionRequest {
     ) -> Self {
         Self {
             collection_id: collection_id.into(),
+            api_origin: GithubApiOrigin::github(),
             endpoint: endpoint.into(),
             operation_name: operation_name.into(),
             query: query.into(),
@@ -517,28 +699,28 @@ where
         state: AcquisitionState::Unknown,
         complete: false,
     };
-    let mut endpoint = request.endpoint.clone();
+    let mut endpoint = request.api_origin.bind(&request.endpoint)?;
     let mut query = request.query.clone();
     let mut seen_pages = BTreeSet::new();
 
     for page_number in 1..=request.max_pages {
         let page_number_u32 = page_number as u32;
-        let page_key = format!("{}?{}", endpoint, canonical_query(&query));
-        if !seen_pages.insert(page_key) {
-            result.state = AcquisitionState::DuplicateCursor;
-            result.complete = false;
-            break;
-        }
-
         let mut page_query = query.clone();
         if page_number == 1 {
             page_query
                 .entry("per_page".to_owned())
                 .or_insert_with(|| request.per_page.to_string());
         }
+        let page_key = canonical_page_key(&endpoint, &page_query)?;
+        if !seen_pages.insert(page_key) {
+            result.state = AcquisitionState::DuplicateCursor;
+            result.complete = false;
+            break;
+        }
         let acquisition_request = AcquisitionRequest {
             api: ApiKind::Rest,
             method: HttpMethod::Get,
+            api_origin: request.api_origin.clone(),
             endpoint_or_operation: endpoint.clone(),
             query: page_query.clone(),
             body: None,
@@ -581,6 +763,10 @@ where
                 break;
             }
         };
+        request.api_origin.validate_candidate(
+            &Url::parse(&response.effective_endpoint)
+                .map_err(|_| AcquisitionError::EndpointViolation)?,
+        )?;
 
         let rate_limit = rate_limit_from_headers(&response.headers);
         let media_type = header_value(&response.headers, "content-type")
@@ -588,6 +774,7 @@ where
         let raw_id = format!("{request_id}-response");
         let raw = retain_raw(
             store,
+            &auth.credentials,
             RawObject {
                 raw_id,
                 request_id: request_id.clone(),
@@ -772,6 +959,7 @@ where
         result.items.extend(page_items);
 
         if let Some(next_link) = next_link {
+            let next_endpoint = request.api_origin.bind(&next_link)?;
             let page = PageState {
                 number: page_number_u32,
                 per_page: Some(request.per_page as u32),
@@ -803,11 +991,8 @@ where
                 result.complete = false;
                 break;
             }
-            if seen_pages.contains(&format!("{next_link}?"))
-                || seen_pages
-                    .iter()
-                    .any(|entry| entry.starts_with(&format!("{next_link}?")))
-            {
+            let next_page_key = canonical_page_key(&next_endpoint, &BTreeMap::new())?;
+            if seen_pages.contains(&next_page_key) {
                 result.requests.push(make_record(
                     &request_id,
                     &acquisition_request,
@@ -846,7 +1031,7 @@ where
                 None,
                 rate_limit,
             ));
-            endpoint = next_link;
+            endpoint = next_endpoint;
             query = BTreeMap::new();
             continue;
         }
@@ -947,10 +1132,12 @@ where
         let page_number_u32 = page_number as u32;
         let variables = graphql_variables(&request, cursor.as_deref())?;
         let body = graphql_body(&request.operation_name, &request.query, &variables)?;
+        let endpoint = request.api_origin.bind(&request.endpoint)?;
         let acquisition_request = AcquisitionRequest {
             api: ApiKind::GraphQl,
             method: HttpMethod::Post,
-            endpoint_or_operation: request.endpoint.clone(),
+            api_origin: request.api_origin.clone(),
+            endpoint_or_operation: endpoint,
             query: BTreeMap::new(),
             body: Some(body),
         };
@@ -992,12 +1179,17 @@ where
                 break;
             }
         };
+        request.api_origin.validate_candidate(
+            &Url::parse(&response.effective_endpoint)
+                .map_err(|_| AcquisitionError::EndpointViolation)?,
+        )?;
         let rate_limit = rate_limit_from_headers(&response.headers);
         let media_type = header_value(&response.headers, "content-type")
             .unwrap_or_else(|| "application/octet-stream".to_owned());
         let raw_id = format!("{request_id}-response");
         let raw = retain_raw(
             store,
+            &auth.credentials,
             RawObject {
                 raw_id,
                 request_id: request_id.clone(),
@@ -1531,6 +1723,13 @@ fn validate_rest_request(request: &RestCollectionRequest) -> Result<(), Acquisit
     {
         return Err(AcquisitionError::InvalidRequest);
     }
+    if request
+        .query
+        .iter()
+        .any(|(key, value)| key_is_sensitive(key) || looks_like_secret(value))
+    {
+        return Err(AcquisitionError::EndpointViolation);
+    }
     Ok(())
 }
 
@@ -1548,8 +1747,16 @@ fn validate_graphql_request(request: &GraphQlCollectionRequest) -> Result<(), Ac
         || request.cursor_variable.trim().is_empty()
         || request.page_size_variable.trim().is_empty()
         || !request.variables.is_object()
+        || looks_like_secret(&request.query)
+        || contains_sensitive_value(&request.variables)
     {
-        return Err(AcquisitionError::InvalidRequest);
+        return Err(
+            if looks_like_secret(&request.query) || contains_sensitive_value(&request.variables) {
+                AcquisitionError::SecretMetadata
+            } else {
+                AcquisitionError::InvalidRequest
+            },
+        );
     }
     Ok(())
 }
@@ -1602,10 +1809,153 @@ fn value_at_path<'a>(value: &'a Value, path: &[String]) -> Option<&'a Value> {
     path.iter().try_fold(value, |current, key| current.get(key))
 }
 
+struct MaskedBytes {
+    bytes: Vec<u8>,
+    changed: bool,
+}
+
+fn mask_response_bytes(
+    credentials: &CredentialRegistry,
+    bytes: &[u8],
+) -> Result<MaskedBytes, AcquisitionError> {
+    let mut masked = bytes.to_vec();
+    let mut changed = false;
+    for secret in &credentials.secrets {
+        let (next, replaced) = replace_bytes(&masked, secret, b"[REDACTED]");
+        masked = next;
+        changed |= replaced;
+    }
+    let (next, known_replaced) = mask_known_credential_markers(&masked);
+    masked = next;
+    changed |= known_replaced;
+
+    if let Ok(value) = serde_json::from_slice::<Value>(&masked) {
+        let redacted = redact_value(&value);
+        if redacted != value {
+            masked = serde_json::to_vec(&redacted).map_err(|_| AcquisitionError::Serialization)?;
+            changed = true;
+        }
+    }
+    if contains_unmasked_credential(&masked) {
+        return Err(AcquisitionError::CredentialMaterialDetected);
+    }
+    Ok(MaskedBytes {
+        bytes: masked,
+        changed,
+    })
+}
+
+fn replace_bytes(input: &[u8], needle: &[u8], replacement: &[u8]) -> (Vec<u8>, bool) {
+    if needle.is_empty() || needle.len() > input.len() {
+        return (input.to_vec(), false);
+    }
+    let mut output = Vec::with_capacity(input.len());
+    let mut cursor = 0;
+    let mut changed = false;
+    while cursor < input.len() {
+        let remaining = &input[cursor..];
+        if remaining.starts_with(needle) {
+            output.extend_from_slice(replacement);
+            cursor += needle.len();
+            changed = true;
+        } else {
+            output.push(input[cursor]);
+            cursor += 1;
+        }
+    }
+    (output, changed)
+}
+
+fn mask_known_credential_markers(input: &[u8]) -> (Vec<u8>, bool) {
+    const AUTHORIZATION: &[u8] = b"authorization:";
+    const GH_TOKEN_PREFIXES: [&[u8]; 2] = [b"ghp_", b"github_pat_"];
+    let mut output = Vec::with_capacity(input.len());
+    let mut cursor = 0;
+    let mut changed = false;
+    while cursor < input.len() {
+        if starts_case_insensitive(input, cursor, AUTHORIZATION) {
+            output.extend_from_slice(&input[cursor..cursor + AUTHORIZATION.len()]);
+            output.extend_from_slice(b" [REDACTED]");
+            cursor += AUTHORIZATION.len();
+            while cursor < input.len() && !matches!(input[cursor], b'\r' | b'\n') {
+                cursor += 1;
+            }
+            changed = true;
+            continue;
+        }
+        if let Some(prefix) = GH_TOKEN_PREFIXES
+            .iter()
+            .find(|prefix| input[cursor..].starts_with(prefix))
+        {
+            output.extend_from_slice(b"[REDACTED]");
+            cursor += prefix.len();
+            while cursor < input.len()
+                && (input[cursor].is_ascii_alphanumeric() || matches!(input[cursor], b'_' | b'-'))
+            {
+                cursor += 1;
+            }
+            changed = true;
+            continue;
+        }
+        output.push(input[cursor]);
+        cursor += 1;
+    }
+    (output, changed)
+}
+
+fn starts_case_insensitive(input: &[u8], offset: usize, needle: &[u8]) -> bool {
+    input
+        .get(offset..offset.saturating_add(needle.len()))
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(needle))
+}
+
+fn contains_unmasked_credential(input: &[u8]) -> bool {
+    if input
+        .windows(4)
+        .any(|window| window == b"ghp_" || window == b"GHP_")
+        || input
+            .windows(11)
+            .any(|window| window.eq_ignore_ascii_case(b"github_pat_"))
+    {
+        return true;
+    }
+    let marker = b"authorization:";
+    let mut offset = 0;
+    while let Some(relative) = input[offset..]
+        .windows(marker.len())
+        .position(|window| window.eq_ignore_ascii_case(marker))
+    {
+        let start = offset + relative + marker.len();
+        let end = input[start..]
+            .iter()
+            .position(|byte| matches!(byte, b'\r' | b'\n'))
+            .map_or(input.len(), |length| start + length);
+        let value = input[start..end]
+            .iter()
+            .copied()
+            .filter(|byte| !byte.is_ascii_whitespace())
+            .collect::<Vec<_>>();
+        if !value.is_empty() && value != b"[REDACTED]" {
+            return true;
+        }
+        if end >= input.len() {
+            break;
+        }
+        offset = end;
+    }
+    false
+}
+
 fn retain_raw<S: RawObjectStore>(
     store: &mut S,
-    object: RawObject,
+    credentials: &CredentialRegistry,
+    mut object: RawObject,
 ) -> Result<RawObjectRef, AcquisitionError> {
+    let masked = mask_response_bytes(credentials, &object.bytes)?;
+    object.bytes = masked.bytes;
+    if masked.changed {
+        object.canonicalization = "redacted-raw-bytes-v1".to_owned();
+    }
     let expected_sha256 = sha256_digest(&object.bytes);
     let expected_length = object.bytes.len() as u64;
     let expected_id = object.raw_id.clone();
@@ -1616,6 +1966,7 @@ fn retain_raw<S: RawObjectStore>(
     let reference = store.store(object).map_err(|error| match error {
         RawStorageError::Unavailable => AcquisitionError::StorageUnavailable,
         RawStorageError::Refused => AcquisitionError::StorageRefused,
+        RawStorageError::Unbound => AcquisitionError::StorageUnbound,
     })?;
     if reference.raw_id != expected_id
         || reference.request_id != expected_request
@@ -1629,6 +1980,14 @@ fn retain_raw<S: RawObjectStore>(
     if reference.sha256 != expected_sha256 {
         return Err(AcquisitionError::RawDigestMismatch);
     }
+    if reference.storage_ref != content_addressed_storage_ref(&expected_sha256) {
+        return Err(AcquisitionError::StorageUnbound);
+    }
+    store.verify(&reference).map_err(|error| match error {
+        RawStorageError::Unavailable => AcquisitionError::StorageUnavailable,
+        RawStorageError::Refused => AcquisitionError::StorageRefused,
+        RawStorageError::Unbound => AcquisitionError::StorageUnbound,
+    })?;
     Ok(reference)
 }
 
@@ -1652,7 +2011,7 @@ fn make_record(
 ) -> RequestRecord {
     let (query_sha256, variables_sha256, redacted_variables) = match graphql_inputs {
         Some((variables, query)) => (
-            Some(sha256_digest(query.as_bytes())),
+            Some(request_digest(&request.endpoint_or_operation, query)),
             Some(canonical_json_bytes(variables).map_or_else(
                 |_| "sha256:serialization-error".to_owned(),
                 |bytes| sha256_digest(&bytes),
@@ -1660,7 +2019,10 @@ fn make_record(
             Some(redact_value(variables)),
         ),
         None => (
-            Some(sha256_digest(canonical_query(&request.query).as_bytes())),
+            Some(request_digest(
+                &request.endpoint_or_operation,
+                &canonical_query(&request.query),
+            )),
             None,
             None,
         ),
@@ -1673,7 +2035,7 @@ fn make_record(
         query_sha256,
         variables_sha256,
         redacted_variables,
-        auth_identity_ref: auth.reference.clone(),
+        auth_identity_ref: auth.reference().to_owned(),
         started_at_utc,
         completed_at_utc,
         http_status,
@@ -1699,6 +2061,53 @@ fn canonical_query(query: &BTreeMap<String, String>) -> String {
         canonical.push('\0');
     }
     canonical
+}
+
+fn canonical_page_key(
+    endpoint: &str,
+    query: &BTreeMap<String, String>,
+) -> Result<String, AcquisitionError> {
+    let parsed = Url::parse(endpoint).map_err(|_| AcquisitionError::EndpointViolation)?;
+    let mut pairs = parsed
+        .query_pairs()
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect::<Vec<_>>();
+    pairs.extend(
+        query
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
+    pairs.sort();
+    let host = parsed
+        .host_str()
+        .ok_or(AcquisitionError::EndpointViolation)?;
+    let mut canonical = format!("{}://{}{}", parsed.scheme(), host, parsed.path());
+    if let Some(port) = parsed.port() {
+        canonical.push(':');
+        canonical.push_str(&port.to_string());
+    }
+    canonical.push('?');
+    for (key, value) in pairs {
+        canonical.push_str(&key);
+        canonical.push('\0');
+        canonical.push_str(&value);
+        canonical.push('\0');
+    }
+    Ok(canonical)
+}
+
+fn request_digest(endpoint_or_operation: &str, query_or_document: &str) -> String {
+    let mut canonical =
+        String::with_capacity(endpoint_or_operation.len() + query_or_document.len() + 1);
+    canonical.push_str(endpoint_or_operation);
+    canonical.push('\0');
+    canonical.push_str(query_or_document);
+    sha256_digest(canonical.as_bytes())
+}
+
+fn content_addressed_storage_ref(digest: &str) -> String {
+    let digest = digest.strip_prefix("sha256:").unwrap_or(digest);
+    format!("sha256://{digest}")
 }
 
 fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, AcquisitionError> {
@@ -1838,6 +2247,17 @@ fn redact_value(value: &Value) -> Value {
     }
 }
 
+fn contains_sensitive_value(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => object
+            .iter()
+            .any(|(key, value)| key_is_sensitive(key) || contains_sensitive_value(value)),
+        Value::Array(array) => array.iter().any(contains_sensitive_value),
+        Value::String(value) => looks_like_secret(value),
+        _ => false,
+    }
+}
+
 fn redacted_query(query: &BTreeMap<String, String>) -> BTreeMap<String, String> {
     query
         .iter()
@@ -1951,22 +2371,33 @@ mod tests {
     #[derive(Default)]
     struct MemoryStore {
         refs: Vec<RawObjectRef>,
+        bytes: Vec<Vec<u8>>,
     }
 
     impl RawObjectStore for MemoryStore {
         fn store(&mut self, object: RawObject) -> Result<RawObjectRef, RawStorageError> {
+            let bytes = object.bytes.clone();
             let reference = RawObjectRef {
                 raw_id: object.raw_id,
                 request_id: object.request_id,
                 object_kind: object.object_kind,
                 canonicalization: object.canonicalization,
-                sha256: sha256_digest(&object.bytes),
-                byte_length: object.bytes.len() as u64,
+                sha256: sha256_digest(&bytes),
+                byte_length: bytes.len() as u64,
                 media_type: object.media_type,
-                storage_ref: format!("memory://{}", self.refs.len() + 1),
+                storage_ref: content_addressed_storage_ref(&sha256_digest(&bytes)),
             };
+            self.bytes.push(bytes);
             self.refs.push(reference.clone());
             Ok(reference)
+        }
+
+        fn verify(&self, reference: &RawObjectRef) -> Result<(), RawStorageError> {
+            if self.refs.contains(reference) {
+                Ok(())
+            } else {
+                Err(RawStorageError::Unbound)
+            }
         }
     }
 
@@ -1982,8 +2413,34 @@ mod tests {
                 sha256: "sha256:tampered".to_owned(),
                 byte_length: object.bytes.len() as u64,
                 media_type: object.media_type,
-                storage_ref: "memory://tampered".to_owned(),
+                storage_ref: "sha256://tampered".to_owned(),
             })
+        }
+
+        fn verify(&self, _reference: &RawObjectRef) -> Result<(), RawStorageError> {
+            Ok(())
+        }
+    }
+
+    struct UnboundStore;
+
+    impl RawObjectStore for UnboundStore {
+        fn store(&mut self, object: RawObject) -> Result<RawObjectRef, RawStorageError> {
+            let digest = sha256_digest(&object.bytes);
+            Ok(RawObjectRef {
+                raw_id: object.raw_id,
+                request_id: object.request_id,
+                object_kind: object.object_kind,
+                canonicalization: object.canonicalization,
+                sha256: digest,
+                byte_length: object.bytes.len() as u64,
+                media_type: object.media_type,
+                storage_ref: "store://unbound/caller-asserted".to_owned(),
+            })
+        }
+
+        fn verify(&self, _reference: &RawObjectRef) -> Result<(), RawStorageError> {
+            Ok(())
         }
     }
 
@@ -2000,13 +2457,28 @@ mod tests {
     }
 
     fn response(status: u16, headers: &[(&str, &str)], body: Value) -> TransportResponse {
+        raw_response(
+            status,
+            headers,
+            serde_json::to_vec(&body).unwrap(),
+            "https://api.github.com",
+        )
+    }
+
+    fn raw_response(
+        status: u16,
+        headers: &[(&str, &str)],
+        body: Vec<u8>,
+        effective_endpoint: &str,
+    ) -> TransportResponse {
         TransportResponse {
             status,
             headers: headers
                 .iter()
                 .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
                 .collect(),
-            body: serde_json::to_vec(&body).unwrap(),
+            body,
+            effective_endpoint: effective_endpoint.to_owned(),
         }
     }
 
@@ -2071,7 +2543,10 @@ mod tests {
                 &[
                     ("content-type", "application/json"),
                     ("x-github-request-id", "r1"),
-                    ("link", "<https://api.test/items?page=2>; rel=\"next\""),
+                    (
+                        "link",
+                        "<https://api.github.com/items?page=2>; rel=\"next\"",
+                    ),
                 ],
                 rest_items(100, 0),
             )),
@@ -2095,7 +2570,7 @@ mod tests {
         assert_eq!(result.requests[0].page.items_returned, 100);
         assert_eq!(
             result.requests[0].page.link_next.as_deref(),
-            Some("https://api.test/items?page=2")
+            Some("https://api.github.com/items?page=2")
         );
         assert_eq!(transport.requests().len(), 2);
     }
@@ -2164,6 +2639,152 @@ mod tests {
             Some(0)
         );
         assert_eq!(result.raw_objects.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn evil_rest_next_link_is_rejected_before_following() {
+        let transport = FixtureTransport::new(vec![Ok(response(
+            200,
+            &[(
+                "link",
+                "<https://evil.example/items?page=2&token=ghp_secret>; rel=\"next\"",
+            )],
+            rest_items(1, 0),
+        ))]);
+        let mut store = MemoryStore::default();
+        let request = RestCollectionRequest::new("items", "/items", Some("items"), "items");
+        let error = collect_rest(&transport, &mut store, &auth(), request)
+            .await
+            .unwrap_err();
+        assert_eq!(error, AcquisitionError::EndpointViolation);
+        assert_eq!(transport.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn duplicate_rest_link_with_query_reordering_is_rejected() {
+        let transport = FixtureTransport::new(vec![
+            Ok(response(
+                200,
+                &[(
+                    "link",
+                    "<https://api.github.com/items?page=2&a=1&b=2>; rel=\"next\"",
+                )],
+                rest_items(1, 0),
+            )),
+            Ok(response(
+                200,
+                &[(
+                    "link",
+                    "<https://api.github.com/items?b=2&a=1&page=2>; rel=\"next\"",
+                )],
+                rest_items(1, 1),
+            )),
+        ]);
+        let mut store = MemoryStore::default();
+        let request = RestCollectionRequest::new("items", "/items", Some("items"), "items");
+        let result = collect_rest(&transport, &mut store, &auth(), request)
+            .await
+            .unwrap();
+        assert_eq!(result.state, AcquisitionState::DuplicateCursor);
+        assert!(!result.complete);
+        assert_eq!(transport.requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn evil_initial_graphql_endpoint_is_rejected_before_transport() {
+        let transport = FixtureTransport::new(Vec::new());
+        let mut store = MemoryStore::default();
+        let mut request = graphql_request();
+        request.endpoint = "https://evil.example/graphql".to_owned();
+        let error = collect_graphql(&transport, &mut store, &auth(), request)
+            .await
+            .unwrap_err();
+        assert_eq!(error, AcquisitionError::EndpointViolation);
+        assert!(transport.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn credential_query_and_handle_are_rejected_before_transport() {
+        let transport = FixtureTransport::new(Vec::new());
+        let mut store = MemoryStore::default();
+        let query_request = RestCollectionRequest::new("items", "/items", Some("items"), "items")
+            .with_query("token", "ghp_secret");
+        let query_error = collect_rest(&transport, &mut store, &auth(), query_request)
+            .await
+            .unwrap_err();
+        assert_eq!(query_error, AcquisitionError::EndpointViolation);
+
+        let mut store = MemoryStore::default();
+        let secret_auth = AuthIdentity::new(
+            "ghp_secret",
+            "github",
+            Some("viewer-1".to_owned()),
+            Some("fixture".to_owned()),
+            BTreeSet::new(),
+        );
+        let request = RestCollectionRequest::new("items", "/items", Some("items"), "items");
+        let handle_error = collect_rest(&transport, &mut store, &secret_auth, request)
+            .await
+            .unwrap_err();
+        assert_eq!(handle_error, AcquisitionError::SecretMetadata);
+        assert!(transport.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn effective_redirect_origin_is_rejected() {
+        let transport = FixtureTransport::new(vec![Ok(raw_response(
+            200,
+            &[],
+            serde_json::to_vec(&rest_items(1, 0)).unwrap(),
+            "https://evil.example/items",
+        ))]);
+        let mut store = MemoryStore::default();
+        let request = RestCollectionRequest::new("items", "/items", Some("items"), "items");
+        let error = collect_rest(&transport, &mut store, &auth(), request)
+            .await
+            .unwrap_err();
+        assert_eq!(error, AcquisitionError::EndpointViolation);
+        assert!(store.refs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn credential_bytes_are_masked_before_raw_storage() {
+        let body = serde_json::json!({
+            "authorization": "ghp_secret",
+            "token": "registered-secret-value",
+            "items": [1]
+        });
+        let transport = FixtureTransport::new(vec![Ok(response(200, &[], body))]);
+        let mut store = MemoryStore::default();
+        let mut credentials = auth();
+        credentials
+            .register_credential("registered-secret-value")
+            .unwrap();
+        let request = RestCollectionRequest::new("items", "/items", None::<String>, "items");
+        let result = collect_rest(&transport, &mut store, &credentials, request)
+            .await
+            .unwrap();
+        assert!(!result.complete);
+        assert_eq!(result.state, AcquisitionState::Malformed);
+        assert_eq!(store.bytes.len(), 1);
+        let stored = String::from_utf8(store.bytes[0].clone()).unwrap();
+        assert!(!stored.contains("ghp_secret"));
+        assert!(!stored.contains("registered-secret-value"));
+        assert_eq!(
+            result.raw_objects[0].canonicalization,
+            "redacted-raw-bytes-v1"
+        );
+    }
+
+    #[tokio::test]
+    async fn unbound_storage_reference_is_rejected() {
+        let transport = FixtureTransport::new(vec![Ok(response(200, &[], rest_items(1, 0)))]);
+        let mut store = UnboundStore;
+        let request = RestCollectionRequest::new("items", "/items", Some("items"), "items");
+        let error = collect_rest(&transport, &mut store, &auth(), request)
+            .await
+            .unwrap_err();
+        assert_eq!(error, AcquisitionError::StorageUnbound);
     }
 
     #[tokio::test]
@@ -2293,6 +2914,7 @@ mod tests {
         let request = AcquisitionRequest {
             api: ApiKind::GraphQl,
             method: HttpMethod::Post,
+            api_origin: GithubApiOrigin::github(),
             endpoint_or_operation: "query".to_owned(),
             query: [("token".to_owned(), "ghp_secret".to_owned())]
                 .into_iter()
