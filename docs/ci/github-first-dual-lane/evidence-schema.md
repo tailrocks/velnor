@@ -188,8 +188,11 @@ scalar inventory fields, aliases, and opaque success booleans are rejected.
 `collector_snapshot_bytes_base64` must decode to the canonical JSON bytes of
 `collector_snapshot` (sorted object keys), and
 `collector_snapshot_sha256` is recomputed from those supplied bytes. The
-digest stays outside the object to avoid a hash cycle; a digest over a parsed
-caller object, without the supplied bytes, is not accepted.
+`collector_snapshot_storage_ref` must be an immutable content-addressed
+`artifact://sha256/<hex>` or `cas://sha256/<hex>` reference to those exact
+bytes. The digest stays outside the object to avoid a hash cycle; a digest or
+storage path over a parsed caller object, without the supplied bytes, is not
+accepted.
 
 The snapshot carries collector revision, read-only GitHub API identity, safe
 viewer scopes, rate-limit observation, complete request/page state, and
@@ -208,11 +211,14 @@ method, repository-bound endpoint or GraphQL operation, base64-encoded
 canonical query/variables, recomputable query/variables digests, API request
 identity, the canonical `collector.auth` and `collector.rate_limit`
 references, page metadata, and a raw response object. Raw object bytes are
-supplied in base64 and their byte length and digest are recomputed; a storage
-URI or self-attested digest is insufficient. `has_next_page` requires the
-next captured page; forbidden, rate-limited, malformed, truncated, unknown,
-or missing pages fail closed. Every nested reference must resolve to a raw
-object from the same snapshot.
+supplied in base64 and their byte length and digest are recomputed; every raw
+object storage reference is digest-addressed (`artifact://sha256/<hex>` or
+`cas://sha256/<hex>`) and must match the measured bytes. `has_next_page`
+requires the next captured page in the same canonical stream, with contiguous
+page number/cursor and an exact `https://api.github.com` URL/path/query link;
+forbidden, rate-limited, malformed, truncated, unknown, or missing pages fail
+closed. Every nested reference must resolve to a raw object from the same
+snapshot.
 PR check producers bind positive check-suite/check-run/workflow-run/job IDs,
 attempt, source SHA, actual checkout SHA, exact `pull_request` event,
 completed-success status/conclusion, required check app identity, and a
@@ -241,6 +247,9 @@ workloads must have required check edges; reviewed child/release/package
 obligations require their corresponding edges. Graph source rows must match
 the reviewed workload revisions or the observed default-branch SHA. Missing
 edges, illegal cycles, or a source/relation mismatch fail closed.
+Edges carry separate `source_sha/source_ref` and
+`target_source_sha/target_source_ref` bindings. An edge source digest alone
+cannot authorize an unrelated target revision.
 
 The live API collector is not yet wired to this contract. The checker retains
 `g0-authoritative-proof-missing` for structurally valid typed fixtures;

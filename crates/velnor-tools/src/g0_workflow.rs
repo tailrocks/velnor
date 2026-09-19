@@ -132,7 +132,7 @@ fn derive_source(
             .ok_or_else(|| anyhow!("workflow job {job_id} must be a mapping"))?;
         let reusable = mapping_value(job, "uses").and_then(Value::as_str);
         let (provider, platform, architecture) = if let Some(uses) = reusable {
-            let target = resolve_source_target(uses, source)?;
+            let (target, pinned_ref) = resolve_source_target(uses, source)?;
             let dependency = sources.get(&target).ok_or_else(|| {
                 anyhow!(
                     "workflow job {job_id} references uncaptured immutable source {}/{}",
@@ -140,6 +140,15 @@ fn derive_source(
                     target.path
                 )
             })?;
+            if dependency.revision != pinned_ref && dependency.source_sha != pinned_ref {
+                bail!(
+                    "workflow job {job_id} pins {pinned_ref}, but captured source {}/{} has revision {} and commit {}",
+                    target.repository,
+                    target.path,
+                    dependency.revision,
+                    dependency.source_sha
+                );
+            }
             let child_plan = derive_source(dependency, sources, &target, stack, depth + 1)?;
             let child_job = child_plan.jobs.first().ok_or_else(|| {
                 anyhow!(
@@ -220,34 +229,55 @@ fn action_sources(
         let Some(uses) = mapping_value(step, "uses").and_then(Value::as_str) else {
             continue;
         };
-        let target = resolve_source_target(uses, source)
+        let (target, pinned_ref) = resolve_source_target(uses, source)
             .with_context(|| format!("resolve immutable action source in workflow step {index}"))?;
-        if !sources.contains_key(&target) {
+        let Some(dependency) = sources.get(&target) else {
             bail!(
                 "workflow step {index} references uncaptured immutable action source {}/{}",
                 target.repository,
                 target.path
+            );
+        };
+        if dependency.revision != pinned_ref && dependency.source_sha != pinned_ref {
+            bail!(
+                "workflow step {index} pins {pinned_ref}, but captured action source {}/{} has revision {} and commit {}",
+                target.repository,
+                target.path,
+                dependency.revision,
+                dependency.source_sha
             );
         }
     }
     Ok(())
 }
 
-fn resolve_source_target(reference: &str, current: &G0WorkflowSource) -> Result<SourceKey> {
+fn resolve_source_target(
+    reference: &str,
+    current: &G0WorkflowSource,
+) -> Result<(SourceKey, String)> {
     let (target, pinned_ref) = reference
         .split_once('@')
         .ok_or_else(|| anyhow!("workflow source reference {reference} lacks immutable @ref"))?;
-    if target.trim().is_empty() || pinned_ref.trim().is_empty() {
+    if target.trim().is_empty()
+        || pinned_ref.trim().is_empty()
+        || pinned_ref.len() != 40
+        || !pinned_ref
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
         bail!("workflow source reference {reference} has empty target/ref");
     }
     if target.starts_with("docker://") || target.starts_with("http://") {
         bail!("workflow source reference {reference} is not an immutable repository source");
     }
     if target.starts_with("./") {
-        return Ok(SourceKey {
-            repository: current.repository.clone(),
-            path: normalize_path(target)?,
-        });
+        return Ok((
+            SourceKey {
+                repository: current.repository.clone(),
+                path: normalize_path(target)?,
+            },
+            pinned_ref.to_owned(),
+        ));
     }
     let mut parts = target.splitn(3, '/');
     let owner = parts.next().unwrap_or_default();
@@ -256,10 +286,13 @@ fn resolve_source_target(reference: &str, current: &G0WorkflowSource) -> Result<
     if owner.is_empty() || repository.is_empty() || path.is_empty() {
         bail!("workflow source reference {reference} lacks owner/repository/path");
     }
-    Ok(SourceKey {
-        repository: format!("{owner}/{repository}"),
-        path: normalize_path(path)?,
-    })
+    Ok((
+        SourceKey {
+            repository: format!("{owner}/{repository}"),
+            path: normalize_path(path)?,
+        },
+        pinned_ref.to_owned(),
+    ))
 }
 
 fn normalize_path(path: &str) -> Result<String> {
@@ -447,6 +480,10 @@ jobs:
             .child_edges
             .iter()
             .any(|edge| edge.relation == "dispatch"));
+
+        let mut stale_capture = dependencies;
+        stale_capture[0].source.revision = "cccccccccccccccccccccccccccccccccccccccc".to_owned();
+        assert!(derive_workflow_plan(&root, &stale_capture).is_err());
     }
 
     #[test]

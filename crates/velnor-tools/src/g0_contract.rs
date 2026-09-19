@@ -19,6 +19,10 @@ pub(crate) struct G0InventoryEvidence {
     /// External digest of canonical `collector_snapshot` bytes.  It is kept
     /// outside the object to avoid a self-referential hash cycle.
     pub collector_snapshot_sha256: String,
+    /// Content-addressed immutable storage location for the exact snapshot
+    /// bytes.  The collector owns this object; a path or mutable memory key is
+    /// not an authoritative provenance binding.
+    pub collector_snapshot_storage_ref: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -355,6 +359,8 @@ pub(crate) struct G0GraphEdge {
     pub required: bool,
     pub source_sha: String,
     pub source_ref: String,
+    pub target_source_sha: String,
+    pub target_source_ref: String,
     pub raw_object_refs: Vec<String>,
 }
 
