@@ -316,7 +316,7 @@ fn render_renovate(config: &ProjectConfig, spec: &RenovateSpec) -> String {
           key: velnor-renovate-${{{{ github.repository }}}}-{hash_files}-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}
           restore-keys: |
             velnor-renovate-${{{{ github.repository }}}}-{hash_files}-
-            velnor-renovate-${{{{ github.repository }}}}- 
+            velnor-renovate-${{{{ github.repository }}}}-
       - name: Fix Renovate cache ownership
         if: steps.renovate-cache.outputs.cache-matched-key != ''
         run: sudo chown -R 12021:0 /tmp/renovate/
@@ -569,6 +569,25 @@ mod tests {
             workflow.contains("/tmp/renovate/cache/${{ github.repository }}/renovate/repository")
         );
         assert!(workflow.contains("velnor-renovate-${{ github.repository }}-"));
+    }
+
+    #[test]
+    fn renovate_writer_has_no_trailing_whitespace() {
+        let config = renovate_config();
+        let spec = must_some(
+            config.renovate.as_ref(),
+            "renovate_config must include a renovate spec",
+        );
+        let workflow = render_renovate(&config, spec);
+        let offenders = workflow
+            .lines()
+            .enumerate()
+            .filter_map(|(line, content)| (content.trim_end() != content).then_some(line + 1))
+            .collect::<Vec<_>>();
+        assert!(
+            offenders.is_empty(),
+            "trailing whitespace at lines {offenders:?}"
+        );
     }
 
     #[test]
