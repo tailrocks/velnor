@@ -522,18 +522,27 @@ mod tests {
         let allocator = ScaleSetAllocator::open(&path);
 
         // Set 7 spends the whole N; set 9 is refused (no per-set reserve).
-        let _a = allocator
+        let a = allocator
             .acquire(&permit_holder(7, 1))
             .unwrap()
             .expect("grants");
-        let _b = allocator
+        let b = allocator
             .acquire(&permit_holder(7, 2))
             .unwrap()
             .expect("grants");
         assert!(allocator.acquire(&permit_holder(9, 3)).unwrap().is_none());
-        drop(_a);
-        // One freed permit is spendable by the other set.
-        assert!(allocator.acquire(&permit_holder(9, 3)).unwrap().is_some());
+        // Confirm terminal cleanup for set 7/request 1. Drop would return
+        // that older demand to Eligible, so it would correctly win again.
+        a.release();
+        // The terminal demand no longer blocks set 9 from the freed slot.
+        let c = allocator
+            .acquire(&permit_holder(9, 3))
+            .unwrap()
+            .expect("freed permit is spendable by the other set");
+        assert_eq!(allocator.occupied().unwrap(), 2);
+        c.release();
+        b.release();
+        assert_eq!(allocator.occupied().unwrap(), 0);
     }
 
     #[test]
