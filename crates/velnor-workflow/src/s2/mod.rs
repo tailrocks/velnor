@@ -224,6 +224,12 @@ pub enum ActionPin {
     Renovate,
 }
 
+/// The central Bun baseline for Skills/plugin helper verification. It matches
+/// this generator's pinned `mise.toml` tool and the repository template that
+/// declares `packageManager = "bun@1.4.0"`; Skills repos do not supply a
+/// repository-wide runtime pin of their own.
+pub(crate) const SKILLS_BUN_VERSION: &str = "1.4.0";
+
 impl ActionPin {
     fn reference(self) -> &'static str {
         match self {
