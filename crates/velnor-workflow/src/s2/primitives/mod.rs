@@ -18,6 +18,7 @@ mod ir;
 mod pipeline;
 mod plan;
 pub(crate) mod prepared_tools;
+pub(crate) mod preview_publication;
 mod providers;
 mod regen;
 pub(crate) mod release;

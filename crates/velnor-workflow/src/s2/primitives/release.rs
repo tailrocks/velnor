@@ -10,6 +10,9 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
+use super::preview_publication::{
+    preview_channel_asset_name, preview_release_tag, PREVIEW_CHANNEL_SCHEMA, PREVIEW_CHANNEL_TAG,
+};
 use super::{
     checks_env, docker_build_token_env_for_members, render_cargo_source_preparation,
     render_pinned_toolchain_steps, render_retained_output_cache_note, Args, CacheBackend,
@@ -1985,6 +1988,7 @@ fn render_native_publish_job(
         assets = assets,
         consumer = release.consumer_repository,
     );
+    let create_verify = rewrite_stable_reconciliation(create_verify, &published);
     // Publication — including its no-clobber reconciliation — is
     // publish-only: drilled modes stop after the local assembly.
     let mode_gate = if has_release_modes(release) {
@@ -2002,6 +2006,54 @@ fn render_native_publish_job(
         package = release.package,
         tag_check = TAG_IMMUTABILITY_STEP,
     )
+}
+
+/// Make an existing stable release recoverable after a partial publication.
+/// Existing assets are downloaded and verified; absent assets are uploaded
+/// from the staged local bytes without clobbering. A failed upload is retried
+/// by re-listing first, because GitHub can commit an asset before returning an
+/// API error to the caller.
+fn rewrite_stable_reconciliation(mut output: String, published: &str) -> String {
+    let start_marker = "            tmp=\"$(mktemp -d)\"\n            for name in ";
+    let end_marker = "            # Sidecar checksums must match their payloads.\n";
+    let Some(start) = output.find(start_marker) else {
+        return output;
+    };
+    let Some(end_offset) = output[start..].find(end_marker) else {
+        return output;
+    };
+    let end = start + end_offset;
+    let replacement = r#"            tmp="$(mktemp -d)"
+            remote_assets="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag/assets?per_page=100")" \
+              || { echo "::error::could not list assets for existing release $tag" >&2; exit 1; }
+            local_asset() {
+              case "$1" in
+                release-record.json|release-record.json.sha256|release-manifest.json|manifest.json|manifest.json.sha256|SHA256SUMS)
+                  printf '%s\n' "$1" ;;
+                *) printf 'artifacts/%s\n' "$1" ;;
+              esac
+            }
+            for name in __PUBLISHED__; do
+              local_path="$(local_asset "$name")"
+              if jq -e --arg name "$name" '.[] | select(.name == $name)' <<<"$remote_assets" >/dev/null 2>&1; then
+                gh release download "$tag" --pattern "$name" --dir "$tmp" --clobber >/dev/null 2>&1 \
+                  || { echo "::error::existing release $tag asset $name could not be downloaded" >&2; exit 1; }
+              else
+                [ -f "$local_path" ] \
+                  || { echo "::error::existing release $tag is missing $name and local subject $local_path is absent" >&2; exit 1; }
+                if ! gh release upload "$tag" "$local_path" >/dev/null 2>&1; then
+                  remote_assets="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag/assets?per_page=100")" \
+                    || { echo "::error::upload of missing stable asset $name failed and re-list failed" >&2; exit 1; }
+                  jq -e --arg name "$name" '.[] | select(.name == $name)' <<<"$remote_assets" >/dev/null 2>&1 \
+                    || { echo "::error::upload of missing stable asset $name failed" >&2; exit 1; }
+                fi
+                gh release download "$tag" --pattern "$name" --dir "$tmp" --clobber >/dev/null 2>&1 \
+                  || { echo "::error::uploaded stable asset $name could not be verified" >&2; exit 1; }
+              fi
+            done
+"#;
+    output.replace_range(start..end, &replacement.replace("__PUBLISHED__", published));
+    output
 }
 
 /// The preview identity job: one resolved `~preview.N+sha7` version, bound
@@ -2044,11 +2096,11 @@ fn policy_enforcement_step() -> &'static str {
     "      - name: Enforce workflow policy\n        env:\n          EVENT_NAME: ${{ github.event_name }}\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n"
 }
 
-/// The rolling preview publish job: the per-arch preview debs are
-/// re-verified from their own bytes (each deb's packaged record must name
-/// exactly this identity), then the rolling `preview` release is replaced
-/// atomically under its `Preview <version>` title. A monotonicity guard
-/// refuses to move the lane backward when a superseded run re-publishes.
+/// The preview publish job: the per-arch preview debs are re-verified from
+/// their own bytes, then uploaded to a uniquely named immutable prerelease.
+/// The `preview` channel is an append-only index release; consumers select
+/// the greatest valid channel asset, so a slower run can never overwrite a
+/// newer one and a cancelled upload leaves recoverable bytes behind.
 fn render_preview_publish_job(config: &ProjectConfig, release: &ReleaseSpec, sign: bool) -> String {
     let download = ActionPin::DownloadArtifact.reference();
     let needs = if sign {
@@ -2075,6 +2127,8 @@ fn render_preview_publish_job(config: &ProjectConfig, release: &ReleaseSpec, sig
         ));
     }
     let create_assets = assets.join(" \\\n            ");
+    let candidate_tag = preview_release_tag("${VERSION}");
+    let channel_asset = preview_channel_asset_name("${ASSET_VERSION}");
     let mut expected_assets = vec![
         "\"SHA256SUMS\"".to_owned(),
         "\"release-manifest.json\"".to_owned(),
@@ -2101,13 +2155,232 @@ fn render_preview_publish_job(config: &ProjectConfig, release: &ReleaseSpec, sig
             count = arches.len(),
         )
     };
-    format!(
-        "  publish:\n    needs: [{needs}]\n    name: Replace the rolling preview release\n    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{branch}' }}}}\n    timeout-minutes: 20\n    runs-on: {runner}\n    permissions:\n      contents: write\n    env:\n      VERSION: ${{{{ needs.identity.outputs.version }}}}\n      NAME: ${{{{ needs.identity.outputs.name }}}}\n      COMMIT: ${{{{ needs.identity.outputs.commit }}}}\n      GH_REPO: ${{{{ github.repository }}}}\n    steps:\n      - name: Download preview debs\n        uses: {download}\n        with:\n          name: debian-packages\n          path: artifacts\n      - name: Download preview metadata\n        uses: {download}\n        with:\n          name: preview-metadata\n          path: preview-metadata\n      - name: Assemble independent checksums\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          subjects=(artifacts/*-preview-*.deb)\n          test \"${{#subjects[@]}}\" -eq {count}\n          : > SHA256SUMS\n          : > assets.jsonl\n          for subject in \"${{subjects[@]}}\"; do\n            name=$(basename \"$subject\")\n            digest=$(sha256sum \"$subject\" | awk '{{print $1}}')\n            sidecar=\"$(awk 'NF {{print $1; exit}}' \"${{subject}}.sha256\")\"\n            [[ \"$digest\" =~ ^[0-9a-f]{{64}}$ && \"$sidecar\" = \"$digest\" ]] \\\n              || {{ echo \"::error::$name sidecar does not match its payload\" >&2; exit 1; }}\n            printf '%s  %s\\n' \"$digest\" \"$name\" >> SHA256SUMS\n            jq -cn --arg name \"$name\" --arg sha256 \"$digest\" '{{name:$name,sha256:$sha256}}' >> assets.jsonl\n          done\n          test \"$(wc -l < SHA256SUMS | tr -d ' ')\" -eq {count}\n          (cd artifacts && sha256sum --check --strict ../SHA256SUMS)\n          chmod +x preview-metadata/{binary}-release-tool\n          tmpdir=\"$(mktemp -d)\"\n          trap 'rm -rf -- \"$tmpdir\"' EXIT\n          for arch in {arch_list}; do\n            deb=\"artifacts/{package}-preview-${{VERSION}}-${{arch}}.deb\"\n            [ -f \"$deb\" ] || {{ echo \"::error::missing preview deb for $arch\" >&2; exit 1; }}\n            [ \"$(dpkg-deb -f \"$deb\" Version)\" = \"$VERSION\" ] \\\n              || {{ echo \"::error::published deb version != preview identity ($arch)\" >&2; exit 1; }}\n            [ \"$(dpkg-deb -f \"$deb\" Architecture)\" = \"$arch\" ] \\\n              || {{ echo \"::error::published deb arch mismatch ($arch)\" >&2; exit 1; }}\n            record=\"$tmpdir/package-record-$arch.json\"\n            record_path=\"$(dpkg-deb -c \"$deb\" | awk '$NF ~ /(^|\\/)package-record\\.json$/ {{ print $NF }}')\"\n            [ -n \"$record_path\" ] || {{ echo \"::error::deb missing its package record ($arch)\" >&2; exit 1; }}\n            dpkg-deb --fsys-tarfile \"$deb\" | tar -xOf - \"$record_path\" > \"$record\"\n            record_digest=\"$(sha256sum \"$record\" | awk '{{print $1}}')\"\n            preview-metadata/{binary}-release-tool release verify-record \\\n              --record \"$record\" --sha256 \"$record_digest\" >/dev/null \\\n              || {{ echo \"::error::packaged package record is incoherent ($arch)\" >&2; exit 1; }}\n            packaged_binary=\"$(dpkg-deb --fsys-tarfile \"$deb\" | tar -xOf - ./usr/bin/{binary} | sha256sum | awk '{{print $1}}')\"\n            jq -e --arg commit \"$COMMIT\" --arg version \"$VERSION\" --arg arch \"$arch\" --arg binary \"$packaged_binary\" \\\n              '.build.kind == \"preview\" and .build.commit == $commit and\n               .build.debian_version == $version and\n               .architecture.arch == $arch and .architecture.binary_sha256 == $binary' \\\n              \"$record\" >/dev/null \\\n              || {{ echo \"::error::packaged package record does not name this preview identity ($arch)\" >&2; exit 1; }}\n          done\n{manifest_step}      - name: Replace the rolling preview release atomically\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          live_response=\"$(mktemp)\"\n          trap 'rm -f -- \"$live_response\"' EXIT\n          live_status=0\n          gh api -i \"repos/$GITHUB_REPOSITORY/releases/tags/preview\" > \"$live_response\" 2>/dev/null || live_status=$?\n          live_http=\"$(awk 'NR == 1 {{print $2; exit}}' \"$live_response\")\"\n          if [ \"$live_status\" -ne 0 ]; then\n            [ \"$live_http\" = \"404\" ] \\\n              || {{ echo \"::error::could not read the live preview release (gh api exit $live_status, HTTP ${{live_http:-unknown}}); refusing to replace it\" >&2; exit 1; }}\n          else\n            live_body=\"$(awk 'body {{print; next}} /^\\r?$/ {{body = 1}}' \"$live_response\")\"\n            if ! live_name=\"$(jq -er '.name | strings' <<<\"$live_body\" 2>/dev/null)\"; then\n              echo \"::error::live preview release response carries no name; refusing to replace it\" >&2\n              exit 1\n            fi\n            [ -n \"$live_name\" ] || {{ echo \"::error::live preview release has an empty name; refusing to replace it\" >&2; exit 1; }}\n            live_version=\"${{live_name#Preview }}\"\n            [[ \"$live_name\" = \"Preview $live_version\" && \"$live_version\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+~preview\\.[0-9]+\\+[0-9a-f]{{7}}$ ]] \\\n              || {{ echo \"::error::live preview release names '$live_name', which is not 'Preview <version>' under the preview contract; refusing to delete it\" >&2; exit 1; }}\n            if dpkg --compare-versions \"$live_version\" eq \"$VERSION\"; then\n              :\n            elif dpkg --compare-versions \"$live_version\" gt \"$VERSION\"; then\n              echo \"::error::live preview $live_version is newer than candidate $VERSION; refusing to move the rolling preview backward — re-run the LATEST preview run instead\" >&2\n              exit 1\n            fi\n          fi\n          gh release delete preview --cleanup-tag --yes || true\n          gh release create preview --target \"$COMMIT\" --prerelease --title \"$NAME\" \\\n            {create_assets}\n      - name: Verify the published rolling preview\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          gh api \"repos/$GITHUB_REPOSITORY/releases/tags/preview\" > published.json\n          asset_version=\"${{VERSION//'~'/'.'}}\"\n          jq -e \\\n            --arg name \"$NAME\" --arg commit \"$COMMIT\" --arg asset_version \"$asset_version\" '\n              (.draft | not) and .prerelease == true and\n              .tag_name == \"preview\" and .name == $name and\n              .target_commitish == $commit and\n              ([.assets[].name] | sort) ==\n              ([\n                {expected_assets}\n              ] | sort)\n            ' published.json >/dev/null\n          jq -e --arg version \"$VERSION\" \\\n            '.version == $version and .source_ref == \"refs/heads/{branch}\" and\n             (.assets | length) == {count}' release-manifest.json >/dev/null\n",
+    let mut output = format!(
+        "  publish:\n    needs: [{needs}]\n    name: Replace the rolling preview release\n    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{branch}' }}}}\n    timeout-minutes: 20\n    runs-on: {runner}\n    permissions:\n      contents: write\n    env:\n      VERSION: ${{{{ needs.identity.outputs.version }}}}\n      NAME: ${{{{ needs.identity.outputs.name }}}}\n      COMMIT: ${{{{ needs.identity.outputs.commit }}}}\n      GH_REPO: ${{{{ github.repository }}}}\n    steps:\n      - name: Download preview debs\n        uses: {download}\n        with:\n          name: debian-packages\n          path: artifacts\n      - name: Download preview metadata\n        uses: {download}\n        with:\n          name: preview-metadata\n          path: preview-metadata\n      - name: Assemble independent checksums\n        run: |\n          set -euo pipefail\n          shopt -s nullglob\n          subjects=(artifacts/*-preview-*.deb)\n          test \"${{#subjects[@]}}\" -eq {count}\n          : > SHA256SUMS\n          : > assets.jsonl\n          for subject in \"${{subjects[@]}}\"; do\n            name=$(basename \"$subject\")\n            digest=$(sha256sum \"$subject\" | awk '{{print $1}}')\n            sidecar=\"$(awk 'NF {{print $1; exit}}' \"${{subject}}.sha256\")\"\n            [[ \"$digest\" =~ ^[0-9a-f]{{64}}$ && \"$sidecar\" = \"$digest\" ]] \\\n              || {{ echo \"::error::$name sidecar does not match its payload\" >&2; exit 1; }}\n            printf '%s  %s\\n' \"$digest\" \"$name\" >> SHA256SUMS\n            jq -cn --arg name \"$name\" --arg sha256 \"$digest\" '{{name:$name,sha256:$sha256}}' >> assets.jsonl\n          done\n          test \"$(wc -l < SHA256SUMS | tr -d ' ')\" -eq {count}\n          (cd artifacts && sha256sum --check --strict ../SHA256SUMS)\n          chmod +x preview-metadata/{binary}-release-tool\n          tmpdir=\"$(mktemp -d)\"\n          trap 'rm -rf -- \"$tmpdir\"' EXIT\n          for arch in {arch_list}; do\n            deb=\"artifacts/{package}-preview-${{VERSION}}-${{arch}}.deb\"\n            [ -f \"$deb\" ] || {{ echo \"::error::missing preview deb for $arch\" >&2; exit 1; }}\n            [ \"$(dpkg-deb -f \"$deb\" Version)\" = \"$VERSION\" ] \\\n              || {{ echo \"::error::published deb version != preview identity ($arch)\" >&2; exit 1; }}\n            [ \"$(dpkg-deb -f \"$deb\" Architecture)\" = \"$arch\" ] \\\n              || {{ echo \"::error::published deb arch mismatch ($arch)\" >&2; exit 1; }}\n            record=\"$tmpdir/package-record-$arch.json\"\n            record_path=\"$(dpkg-deb -c \"$deb\" | awk '$NF ~ /(^|\\/)package-record\\.json$/ {{ print $NF }}')\"\n            [ -n \"$record_path\" ] || {{ echo \"::error::deb missing its package record ($arch)\" >&2; exit 1; }}\n            dpkg-deb --fsys-tarfile \"$deb\" | tar -xOf - \"$record_path\" > \"$record\"\n            record_digest=\"$(sha256sum \"$record\" | awk '{{print $1}}')\"\n            preview-metadata/{binary}-release-tool release verify-record \\\n              --record \"$record\" --sha256 \"$record_digest\" >/dev/null \\\n              || {{ echo \"::error::packaged package record is incoherent ($arch)\" >&2; exit 1; }}\n            packaged_binary=\"$(dpkg-deb --fsys-tarfile \"$deb\" | tar -xOf - ./usr/bin/{binary} | sha256sum | awk '{{print $1}}')\"\n            jq -e --arg commit \"$COMMIT\" --arg version \"$VERSION\" --arg arch \"$arch\" --arg binary \"$packaged_binary\" \\\n              '.build.kind == \"preview\" and .build.commit == $commit and\n               .build.debian_version == $version and\n               .architecture.arch == $arch and .architecture.binary_sha256 == $binary' \\\n              \"$record\" >/dev/null \\\n              || {{ echo \"::error::packaged package record does not name this preview identity ($arch)\" >&2; exit 1; }}\n          done\n{manifest_step}      - name: Replace the rolling preview release atomically\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          live_response=\"$(mktemp)\"\n          trap 'rm -f -- \"$live_response\"' EXIT\n          live_status=0\n          gh api -i \"repos/$GITHUB_REPOSITORY/releases/tags/preview\" > \"$live_response\" 2>/dev/null || live_status=$?\n          live_http=\"$(awk 'NR == 1 {{print $2; exit}}' \"$live_response\")\"\n          if [ \"$live_status\" -ne 0 ]; then\n            [ \"$live_http\" = \"404\" ] \\\n              || {{ echo \"::error::could not read the live preview release (gh api exit $live_status, HTTP ${{live_http:-unknown}}); refusing to replace it\" >&2; exit 1; }}\n          else\n            live_body=\"$(awk 'body {{print; next}} /^\\r?$/ {{body = 1}}' \"$live_response\")\"\n            if ! live_name=\"$(jq -er '.name | strings' <<<\"$live_body\" 2>/dev/null)\"; then\n              echo \"::error::live preview release response carries no name; refusing to replace it\" >&2\n              exit 1\n            fi\n            [ -n \"$live_name\" ] || {{ echo \"::error::live preview release has an empty name; refusing to replace it\" >&2; exit 1; }}\n            live_version=\"${{live_name#Preview }}\"\n            [[ \"$live_name\" = \"Preview $live_version\" && \"$live_version\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+~preview\\.[0-9]+\\+[0-9a-f]{{7}}$ ]] \\\n              || {{ echo \"::error::live preview release names '$live_name', which is not 'Preview <version>' under the preview contract; refusing to use an invalid legacy channel identity\" >&2; exit 1; }}\n            if dpkg --compare-versions \"$live_version\" eq \"$VERSION\"; then\n              :\n            elif dpkg --compare-versions \"$live_version\" gt \"$VERSION\"; then\n              echo \"::error::live preview $live_version is newer than candidate $VERSION; refusing to move the rolling preview backward — re-run the LATEST preview run instead\" >&2\n              exit 1\n            fi\n          fi\n          # immutable publisher installed after rendering\n          gh release create preview --target \"$COMMIT\" --prerelease --title \"$NAME\" \\\n            {create_assets}\n      - name: Verify the published rolling preview\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          gh api \"repos/$GITHUB_REPOSITORY/releases/tags/preview\" > published.json\n          asset_version=\"${{VERSION//'~'/'.'}}\"\n          jq -e \\\n            --arg name \"$NAME\" --arg commit \"$COMMIT\" --arg asset_version \"$asset_version\" '\n              (.draft | not) and .prerelease == true and\n              .tag_name == \"preview\" and .name == $name and\n              .target_commitish == $commit and\n              ([.assets[].name] | sort) ==\n              ([\n                {expected_assets}\n              ] | sort)\n            ' published.json >/dev/null\n          jq -e --arg version \"$VERSION\" \\\n            '.version == $version and .source_ref == \"refs/heads/{branch}\" and\n             (.assets | length) == {count}' release-manifest.json >/dev/null\n",
         branch = config.default_branch,
         runner = selected_runner(config),
         count = arches.len(),
         package = release.package,
-    )
+    );
+    output = output.replace(
+        r#"jq -cn --arg name "$name" --arg sha256 "$digest" '{name:$name,sha256:$sha256}'"#,
+        r#"size=$(wc -c < "$subject" | tr -d ' ')
+            target=$(dpkg-deb -f "$subject" Architecture)
+            jq -cn --arg name "$name" --arg target "$target" --arg kind "debian-package" --arg sha256 "$digest" --argjson size "$size" '{name:$name,target:$target,kind:$kind,sha256:$sha256,size:$size}'"#,
+    );
+    let immutable_block = render_immutable_preview_publish_block(
+        config,
+        release,
+        &arches,
+        &expected_assets,
+        &candidate_tag,
+        &channel_asset,
+    );
+    let start = output
+        .find("      - name: Replace the rolling preview release atomically\n")
+        .expect("preview publisher marker");
+    let end = output[start..]
+        .find("      - name: Verify the published rolling preview\n")
+        .map(|offset| start + offset)
+        .expect("preview verification marker");
+    output.replace_range(start..end, &immutable_block);
+    output = output.replace(
+        "name: Replace the rolling preview release",
+        "name: Publish immutable preview + advance channel",
+    );
+    output = output.replace(
+        r#"gh api "repos/$GITHUB_REPOSITORY/releases/tags/preview" > published.json"#,
+        &format!(
+            "tag=\"{candidate_tag}\"\n          gh api \"repos/$GITHUB_REPOSITORY/releases/tags/$tag\" > published.json"
+        ),
+    );
+    output = output.replace(
+        r#".tag_name == "preview" and .name == $name"#,
+        r#".tag_name == $tag and .name == $name"#,
+    );
+    output = output.replace(
+        r#"--arg name "$NAME" --arg commit "$COMMIT" --arg asset_version "$asset_version""#,
+        r#"--arg name "$NAME" --arg tag "$tag" --arg commit "$COMMIT" --arg asset_version "$asset_version""#,
+    );
+    output
+}
+
+/// Replace the old rolling-release step with an append-only publisher.  The
+/// template is intentionally transport-shaped rather than repository-shaped:
+/// package, binary, branch, and target values come from the typed release
+/// contract, while GitHub only supplies the release transport.
+fn render_immutable_preview_publish_block(
+    config: &ProjectConfig,
+    release: &ReleaseSpec,
+    arches: &[(&str, &str)],
+    expected_assets: &str,
+    candidate_tag: &str,
+    channel_asset: &str,
+) -> String {
+    let arch_list = arches
+        .iter()
+        .map(|(arch, _)| *arch)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let targets = arches
+        .iter()
+        .map(|(_, target)| format!("\"{target}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    let block = r#"      - name: Publish immutable preview release and advance channel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="__CANDIDATE_TAG__"
+          ASSET_VERSION="${VERSION//'~'/'.'}"
+          channel_tag="__CHANNEL__"
+          release_path="repos/$GITHUB_REPOSITORY/releases/tags/$tag"
+          release_json=""
+          if ! release_json="$(gh api "$release_path" 2>/dev/null)"; then
+            # Creation may race with another run; re-read the immutable tag if
+            # the create request reports an error after the provider committed.
+            if ! gh release create "$tag" --draft --prerelease --target "$COMMIT" --title "$NAME"; then
+              release_json="$(gh api "$release_path")" \
+                || { echo "::error::could not establish immutable preview release $tag" >&2; exit 1; }
+            else
+              release_json="$(gh api "$release_path")"
+            fi
+          fi
+          jq -e --arg tag "$tag" --arg name "$NAME" --arg commit "$COMMIT" \
+            '.tag_name == $tag and .name == $name and .prerelease == true and
+             .target_commitish == $commit' <<<"$release_json" >/dev/null \
+            || { echo "::error::immutable preview release identity does not match this run" >&2; exit 1; }
+          release_id="$(jq -er '.id | tostring' <<<"$release_json")"
+
+          # Add publication identity after the release id exists.  The
+          # manifest itself is excluded from artifacts to avoid self-hash
+          # recursion; assets remains for existing consumer contracts.
+          product_id="${GITHUB_REPOSITORY##*/}"
+          jq -S \
+            --arg product_id "$product_id" --arg channel "$channel_tag" \
+            --arg release_tag "$tag" --arg release_id "$release_id" \
+            --arg package "__PACKAGE__" --arg crate "__BINARY__" --arg binary "__BINARY__" \
+            --arg version "$VERSION" --argjson targets '[__TARGETS__]' \
+            '. + {product_id:$product_id,channel:$channel,release_tag:$release_tag,release_id:$release_id,
+                  artifacts:[.assets[] | {name:.name,target:.target,kind:.kind,sha256:.sha256,size:.size}],
+                  components:[{name:$package,crate:$crate,version:$version,binary:$binary,targets:$targets}]}' \
+            release-manifest.json > release-manifest.json.tmp
+          mv release-manifest.json.tmp release-manifest.json
+
+          # Reconcile only absent immutable subjects.  An API error after the
+          # provider stored bytes is safe: the retry re-lists and confirms the
+          # digest. Existing mismatches fail closed; no remote clobber exists.
+          reconcile_asset() {
+            local target_tag="$1" path="$2" name remote tmp actual expected
+            name="$(basename "$path")"
+            expected="$(sha256sum "$path" | awk '{print $1}')"
+            remote="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$target_tag/assets?per_page=100")" \
+              || { echo "::error::could not list assets for $target_tag" >&2; return 1; }
+            if jq -e --arg name "$name" '.[] | select(.name == $name)' <<<"$remote" >/dev/null 2>&1; then
+              tmp="$(mktemp -d)"
+              gh release download "$target_tag" --pattern "$name" --dir "$tmp" --clobber >/dev/null \
+                || { rm -rf "$tmp"; echo "::error::could not download immutable asset $target_tag/$name" >&2; return 1; }
+              actual="$(sha256sum "$tmp/$name" | awk '{print $1}')"
+              rm -rf "$tmp"
+              [ "$actual" = "$expected" ] \
+                || { echo "::error::immutable asset $target_tag/$name has different bytes" >&2; return 1; }
+              return 0
+            fi
+            if gh release upload "$target_tag" "$path" >/dev/null 2>&1; then
+              return 0
+            fi
+            # Upload may have succeeded before the client saw the API error.
+            remote="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$target_tag/assets?per_page=100")" \
+              || { echo "::error::upload of immutable asset $target_tag/$name failed and re-list failed" >&2; return 1; }
+            jq -e --arg name "$name" '.[] | select(.name == $name)' <<<"$remote" >/dev/null 2>&1 \
+              || { echo "::error::upload of immutable asset $target_tag/$name failed" >&2; return 1; }
+            reconcile_asset "$target_tag" "$path"
+          }
+
+          reconcile_asset "$tag" SHA256SUMS
+          reconcile_asset "$tag" release-manifest.json
+          for arch in __ARCH_LIST__; do
+            reconcile_asset "$tag" "artifacts/__PACKAGE__-preview-${VERSION}-${arch}.deb"
+            reconcile_asset "$tag" "artifacts/__PACKAGE__-preview-${VERSION}-${arch}.deb.sha256"
+          done
+
+          release_json="$(gh api "$release_path")"
+          jq -e --arg tag "$tag" --arg commit "$COMMIT" --arg asset_version "$ASSET_VERSION" \
+            '.tag_name == $tag and .target_commitish == $commit and
+             ([.assets[].name] | sort) ==
+             ([__EXPECTED_ASSETS__] | sort)' <<<"$release_json" >/dev/null \
+            || { echo "::error::immutable preview release is incomplete" >&2; exit 1; }
+          if [ "$(jq -r '.draft' <<<"$release_json")" = true ]; then
+            gh api -X PATCH "$release_path" -F draft=false >/dev/null
+          fi
+          release_json="$(gh api "$release_path")"
+          jq -e '.draft == false and .prerelease == true' <<<"$release_json" >/dev/null \
+            || { echo "::error::immutable preview release did not become published" >&2; exit 1; }
+
+          # Keep the channel release and append one uniquely named index asset
+          # per candidate. Consumers choose the greatest valid version; this
+          # is the monotonic reference, so old/new runs cannot overwrite one.
+          channel_path="repos/$GITHUB_REPOSITORY/releases/tags/$channel_tag"
+          channel_json=""
+          if ! channel_json="$(gh api "$channel_path" 2>/dev/null)"; then
+            if ! gh release create "$channel_tag" --prerelease --target "$COMMIT" --title "Preview channel index"; then
+              channel_json="$(gh api "$channel_path")" \
+                || { echo "::error::could not establish preview channel release" >&2; exit 1; }
+            else
+              channel_json="$(gh api "$channel_path")"
+            fi
+          fi
+          jq -e --arg channel "$channel_tag" '.tag_name == $channel and .prerelease == true' <<<"$channel_json" >/dev/null \
+            || { echo "::error::preview channel release identity is invalid" >&2; exit 1; }
+          manifest_sha256="$(sha256sum release-manifest.json | awk '{print $1}')"
+          jq -S -n \
+            --arg schema "__CHANNEL_SCHEMA__" --arg product_id "$product_id" --arg channel "$channel_tag" \
+            --arg version "$VERSION" --arg source_repository "$GITHUB_REPOSITORY" \
+            --arg source_ref "refs/heads/__BRANCH__" --arg source_commit "$COMMIT" \
+            --arg release_tag "$tag" --arg release_id "$release_id" \
+            --arg manifest_sha256 "$manifest_sha256" \
+            '{schema:$schema,product_id:$product_id,channel:$channel,version:$version,source_repository:$source_repository,
+              source_ref:$source_ref,source_commit:$source_commit,release_tag:$release_tag,
+              release_id:$release_id,manifest_sha256:$manifest_sha256}' > "__CHANNEL_ASSET__"
+
+          channel_assets="$(gh api --paginate --slurp "$channel_path/assets?per_page=100" | jq 'add')" \
+            || { echo "::error::could not list preview channel assets" >&2; exit 1; }
+          current_version=""
+          channel_tmp="$(mktemp -d)"
+          trap 'rm -rf -- "$channel_tmp"' EXIT
+          while IFS= read -r channel_name; do
+            [ -n "$channel_name" ] || continue
+            gh release download "$channel_tag" --pattern "$channel_name" --dir "$channel_tmp" --clobber >/dev/null \
+              || { echo "::error::could not read preview channel asset $channel_name" >&2; exit 1; }
+            observed="$(jq -er '.version | strings' "$channel_tmp/$channel_name")" \
+              || { echo "::error::preview channel asset $channel_name has no version" >&2; exit 1; }
+            if [ -z "$current_version" ] || dpkg --compare-versions "$observed" gt "$current_version"; then
+              current_version="$observed"
+            fi
+          done < <(jq -r '.[].name | select(startswith("preview-channel-") and endswith(".json"))' <<<"$channel_assets")
+
+          if [ -z "$current_version" ] || dpkg --compare-versions "$VERSION" gt "$current_version"; then
+            reconcile_asset "$channel_tag" "__CHANNEL_ASSET__"
+            echo "Preview channel advanced append-only to $VERSION"
+          elif dpkg --compare-versions "$VERSION" eq "$current_version"; then
+            reconcile_asset "$channel_tag" "__CHANNEL_ASSET__"
+            echo "Preview channel already names $VERSION; immutable bytes confirmed"
+          else
+            echo "Preview candidate $VERSION is superseded by channel head $current_version; channel unchanged"
+          fi
+"#;
+    block
+        .replace("__CANDIDATE_TAG__", candidate_tag)
+        .replace("__CHANNEL__", PREVIEW_CHANNEL_TAG)
+        .replace("__CHANNEL_SCHEMA__", PREVIEW_CHANNEL_SCHEMA)
+        .replace("__CHANNEL_ASSET__", channel_asset)
+        .replace("__PACKAGE__", &release.package)
+        .replace("__BINARY__", &release.binary)
+        .replace("__ARCH_LIST__", &arch_list)
+        .replace("__TARGETS__", &targets)
+        .replace("__EXPECTED_ASSETS__", expected_assets)
+        .replace("__BRANCH__", &config.default_branch)
 }
 
 /// The rolling-lane trigger bindings: a `workflow_run` block for the bound
@@ -2638,7 +2911,7 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
     }
     let matrix_runner = release_matrix_runner(config, &release.targets);
     let mut output = format!(
-        r#"{GENERATED_HEADER}name: Preview\nrun-name: Preview · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    branches: [{}]\n    paths:\n{paths}  workflow_dispatch:\n\nconcurrency:\n  group: preview-${{{{ github.repository }}}}\n  cancel-in-progress: true\n\npermissions:\n  contents: read\n\njobs:\n  build:\n    name: Preview / ${{{{ matrix.target }}}}\n    runs-on: {matrix_runner}\n    timeout-minutes: 75\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Build preview binary\n        env:\n          CARGO_INCREMENTAL: "0"\n          RUSTC_WRAPPER: sccache\n        run: cargo build --locked --release --package {} --bin {} --target "${{{{ matrix.target }}}}"\n      - name: Package preview binary\n        run: velnor-workflow release package-binary --target "${{{{ matrix.target }}}}" --version preview --package {} --binary {}\n      - name: Attest preview artifact\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload preview artifact\n        uses: {}\n        with:\n          name: ${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 1\n\n  publish:\n    name: Publish rolling preview\n    needs: build\n    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{}' }}}}\n    runs-on: ubuntu-24.04\n    timeout-minutes: 15\n    permissions:\n      contents: write\n    steps:\n      - name: Download preview artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Replace rolling preview\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          gh release view preview >/dev/null 2>&1 || gh release create preview --prerelease --title "Rolling preview"\n          gh release edit preview --target "${{{{ github.sha }}}}" --prerelease\n          gh release upload preview dist/* --clobber\n"#,
+        r#"{GENERATED_HEADER}name: Preview\nrun-name: Preview · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    branches: [{}]\n    paths:\n{paths}  workflow_dispatch:\n\nconcurrency:\n  group: preview-${{{{ github.repository }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n  build:\n    name: Preview / ${{{{ matrix.target }}}}\n    runs-on: {matrix_runner}\n    timeout-minutes: 75\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    steps:\n      - name: Checkout\n        uses: {}\n        with:\n          persist-credentials: false\n      - name: Set up sccache\n        uses: {}\n        with:\n          version: v0.16.0\n      - name: Build preview binary\n        env:\n          CARGO_INCREMENTAL: "0"\n          RUSTC_WRAPPER: sccache\n        run: cargo build --locked --release --package {} --bin {} --target "${{{{ matrix.target }}}}"\n      - name: Package preview binary\n        run: velnor-workflow release package-binary --target "${{{{ matrix.target }}}}" --version preview --package {} --binary {}\n      - name: Attest preview artifact\n        uses: {}\n        with:\n          subject-path: dist/*.tar.gz\n      - name: Upload preview artifact\n        uses: {}\n        with:\n          name: ${{{{ matrix.target }}}}\n          path: dist/*\n          if-no-files-found: error\n          retention-days: 1\n\n  publish:\n    name: Publish rolling preview\n    needs: build\n    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{}' }}}}\n    runs-on: ubuntu-24.04\n    timeout-minutes: 15\n    permissions:\n      contents: write\n    steps:\n      - name: Download preview artifacts\n        uses: {}\n        with:\n          path: dist\n          merge-multiple: true\n      - name: Replace rolling preview\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n        run: |\n          set -euo pipefail\n          gh release view preview >/dev/null 2>&1 || gh release create preview --prerelease --title "Rolling preview"\n          gh release edit preview --target "${{{{ github.sha }}}}" --prerelease\n          # immutable publisher installed after rendering\n"#,
         yaml_scalar(&config.default_branch),
         ActionPin::Checkout.reference(),
         ActionPin::Sccache.reference(),
@@ -2719,12 +2992,108 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
         ),
     )
     .replace("run: cargo build ", "run: mbx build ");
+    output = rewrite_tarball_preview_publication(output, config);
     // The tarball lane has no identity job, so its guest payload keeps the
     // unbound shape; the native preview lane renders its own guest below.
     if let Some(guest) = render_guest_payload_job(config, release, false) {
         output = output.replace("jobs:\n  build:", &format!("jobs:\n{guest}\n  build:"));
     }
     inject_tarball_preview_bindings(&output, config, release)
+}
+
+/// The non-Debian preview lane has no identity job. Give it the same
+/// run-number/commit orderable identity and append-only channel semantics as
+/// the native lane instead of mutating one rolling release in place.
+fn rewrite_tarball_preview_publication(mut output: String, config: &ProjectConfig) -> String {
+    let marker = "      - name: Replace rolling preview\n";
+    let Some(start) = output.find(marker) else {
+        return output;
+    };
+    let block = r#"      - name: Publish immutable preview release and advance channel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="0.0.0~preview.${{ github.run_number }}+${GITHUB_SHA:0:7}"
+          tag="preview-v$version"
+          release_path="repos/$GITHUB_REPOSITORY/releases/tags/$tag"
+          if ! release_json="$(gh api "$release_path" 2>/dev/null)"; then
+            if ! gh release create "$tag" --draft --prerelease --target "$GITHUB_SHA" --title "Preview $version"; then
+              release_json="$(gh api "$release_path")" \
+                || { echo "::error::could not establish immutable preview release $tag" >&2; exit 1; }
+            else
+              release_json="$(gh api "$release_path")"
+            fi
+          fi
+          jq -e --arg tag "$tag" --arg commit "$GITHUB_SHA" \
+            '.tag_name == $tag and .prerelease == true and .target_commitish == $commit' <<<"$release_json" >/dev/null
+          release_id="$(jq -er '.id | tostring' <<<"$release_json")"
+          confirm_asset() {
+            local target_tag="$1" path="$2" name="$3" tmp
+            tmp="$(mktemp -d)"
+            gh release download "$target_tag" --pattern "$name" --dir "$tmp" --clobber >/dev/null \
+              || { rm -rf "$tmp"; echo "::error::could not download immutable asset $target_tag/$name" >&2; return 1; }
+            cmp "$path" "$tmp/$name" \
+              || { rm -rf "$tmp"; echo "::error::immutable asset $target_tag/$name has different bytes" >&2; return 1; }
+            rm -rf "$tmp"
+          }
+          reconcile_asset() {
+            local target_tag="$1" path="$2" name remote
+            name="$(basename "$path")"
+            remote="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$target_tag/assets?per_page=100")" \
+              || { echo "::error::could not list assets for $target_tag" >&2; return 1; }
+            if jq -e --arg name "$name" '.[] | select(.name == $name)' <<<"$remote" >/dev/null 2>&1; then
+              confirm_asset "$target_tag" "$path" "$name"
+              return
+            fi
+            if ! gh release upload "$target_tag" "$path" >/dev/null 2>&1; then
+              remote="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$target_tag/assets?per_page=100")" \
+                || { echo "::error::upload of immutable asset $target_tag/$name failed and re-list failed" >&2; return 1; }
+              jq -e --arg name "$name" '.[] | select(.name == $name)' <<<"$remote" >/dev/null 2>&1 \
+                || { echo "::error::upload of immutable asset $target_tag/$name failed" >&2; return 1; }
+            fi
+            confirm_asset "$target_tag" "$path" "$name"
+          }
+          for path in dist/*; do
+            reconcile_asset "$tag" "$path"
+          done
+          release_json="$(gh api "$release_path")"
+          expected="$(printf '%s\n' dist/* | sed 's#^dist/##' | jq -R . | jq -s .)"
+          jq -e --argjson expected "$expected" \
+            '([.assets[].name] | sort) == ($expected | sort)' <<<"$release_json" >/dev/null
+          if [ "$(jq -r '.draft' <<<"$release_json")" = true ]; then
+            gh api -X PATCH "$release_path" -F draft=false >/dev/null
+          fi
+          channel_path="repos/$GITHUB_REPOSITORY/releases/tags/preview"
+          if ! channel_json="$(gh api "$channel_path" 2>/dev/null)"; then
+            gh release create preview --prerelease --target "$GITHUB_SHA" --title "Preview channel index"
+            channel_json="$(gh api "$channel_path")"
+          fi
+          jq -e '.tag_name == "preview" and .prerelease == true' <<<"$channel_json" >/dev/null
+          channel_asset="preview-channel-${version//~/.}.json"
+          jq -S -n --arg version "$version" --arg source_repository "$GITHUB_REPOSITORY" \
+            --arg source_commit "$GITHUB_SHA" --arg release_tag "$tag" --arg release_id "$release_id" \
+            '{schema:"velnor.preview-channel/v1",channel:"preview",version:$version,
+              source_repository:$source_repository,source_ref:"refs/heads/__BRANCH__",
+              source_commit:$source_commit,release_tag:$release_tag,release_id:$release_id}' > "$channel_asset"
+          channel_assets="$(gh api --paginate --slurp "$channel_path/assets?per_page=100" | jq 'add')" \
+            || { echo "::error::could not list preview channel assets" >&2; exit 1; }
+          current_version=""
+          channel_tmp="$(mktemp -d)"
+          while IFS= read -r name; do
+            gh release download preview --pattern "$name" --dir "$channel_tmp" --clobber >/dev/null
+            observed="$(jq -er '.version | strings' "$channel_tmp/$name")"
+            if [ -z "$current_version" ] || dpkg --compare-versions "$observed" gt "$current_version"; then current_version="$observed"; fi
+          done < <(jq -r '.[].name | select(startswith("preview-channel-") and endswith(".json"))' <<<"$channel_assets")
+          if [ -z "$current_version" ] || dpkg --compare-versions "$version" ge "$current_version"; then
+            reconcile_asset preview "$channel_asset"
+          fi
+"#;
+    output.replace_range(
+        start..,
+        &block.replace("__BRANCH__", &config.default_branch),
+    );
+    output
 }
 
 /// The tarball preview bindings: trigger bindings with the source and gate
@@ -2803,9 +3172,9 @@ fn inject_tarball_preview_bindings(
                 "${{ github.sha }}"
             };
             output = output.replacen(
-                "      - name: Replace rolling preview\n",
+                "      - name: Publish immutable preview release and advance channel\n",
                 &format!(
-                    "{}      - name: Assemble release manifest\n        run: |\n          set -euo pipefail\n          velnor-workflow release assemble-manifest --dir dist --subjects \"{subjects}\" --schema {} --repository \"${{{{ github.repository }}}}\" --ref \"${{{{ github.ref }}}}\" --commit \"{commit}\" --version preview\n      - name: Replace rolling preview\n",
+                    "{}      - name: Assemble release manifest\n        run: |\n          set -euo pipefail\n          velnor-workflow release assemble-manifest --dir dist --subjects \"{subjects}\" --schema {} --repository \"${{{{ github.repository }}}}\" --ref \"${{{{ github.ref }}}}\" --commit \"{commit}\" --version preview\n      - name: Publish immutable preview release and advance channel\n",
                     workflow_runtime_setup_for_config(config),
                     shell_quote(&release.manifest_schema),
                 ),
@@ -5222,7 +5591,7 @@ mod tests {
             ),
             (
                 "preview.yml",
-                "4c47335678cafe07eeb3dfd7f2aacdc8e57535f80fec2a1a9f8fcea7a1336afc",
+                "a8dd050ab0850c4136ff96f17d0be21e8e2f2098cb3c6e2ba8d0be7a0f054c51",
             ),
             (
                 "maintenance.yml",
@@ -5339,11 +5708,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "ae561323482f1a0ec3b45a2553b5dda311a69ca655576b484fea8170b3a08401",
+                "d107ab6ace90bf316ac1e0ababb113485f179e4ec43c0b8d0d94004fe43897dd",
             ),
             (
                 "preview.yml",
-                "4922e8b7aded3ec357e776fec51fad0ef4d408db8117801c87ec7dfeefb36368",
+                "abc96beb0357461b20df083a9031c1147206beab47f4a508572c9953abe3712e",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -6737,10 +7106,13 @@ mod tests {
             ),
             "{publish}"
         );
-        assert_eq!(
-            publish.matches("--clobber").count(),
-            1,
-            "only the idempotency re-download into a fresh directory may clobber: {publish}"
+        assert!(
+            publish.matches("gh release upload \"$tag\"").count() >= 1,
+            "partial stable releases must upload missing subjects: {publish}"
+        );
+        assert!(
+            !publish.contains("gh release upload \"$tag\" \"$local_path\" --clobber"),
+            "stable reconciliation must never clobber remote assets: {publish}"
         );
         assert!(
             publish.contains("Stage package subjects for hosted signer"),
@@ -7121,8 +7493,8 @@ mod tests {
             debian.contains("--asset-name \"example-preview-${{ needs.identity.outputs.version }}-${{ matrix.arch }}.deb\""),
             "{debian}"
         );
-        // The rolling release is replaced under its Preview title, never
-        // moved backward, and its published shape is verified.
+        // The candidate release is immutable, and the retained channel index
+        // advances only to a greater valid version.
         let publish = yaml_job(&preview, "publish");
         assert!(
             publish.contains("needs: [identity, debian, sign-deb]"),
@@ -7130,14 +7502,12 @@ mod tests {
         );
         assert!(
             publish.contains(
-                "gh release create preview --target \"$COMMIT\" --prerelease --title \"$NAME\""
+                "gh release create \"$tag\" --draft --prerelease --target \"$COMMIT\" --title \"$NAME\""
             ),
             "{publish}"
         );
-        assert!(
-            publish.contains("refusing to move the rolling preview backward"),
-            "{publish}"
-        );
+        assert!(publish.contains("superseded by channel head"), "{publish}");
+        assert!(!publish.contains("gh release delete preview"), "{publish}");
         assert!(
             publish.contains("Verify the published rolling preview"),
             "{publish}"
@@ -7530,7 +7900,7 @@ mod tests {
             );
             assert!(
                 preview.contains(
-                    "gh release create preview --target \"$COMMIT\" --prerelease --title \"$NAME\""
+                    "gh release create \"$tag\" --draft --prerelease --target \"$COMMIT\" --title \"$NAME\""
                 ),
                 "{preview}"
             );
