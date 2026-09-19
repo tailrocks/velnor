@@ -37,6 +37,9 @@ The fixture deliberately probes nine hostile surfaces:
   Docker preflight, bounded execution, structured result, output rejection, and
   cleanup. Its success is diagnostic containment evidence only; it is not policy
   approval or provenance.
+* `trusted-harness-negative-tests.sh` exercises schema duplicate/float/extra-key
+  rejection, unreadable output-subtree rejection, unexpected regular-file
+  rejection, and the non-Linux host gate. It never invokes Docker or the probe.
 
 The approved sandbox base identity is recorded as the raw digest-pinned
 `ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b`.
@@ -107,12 +110,16 @@ The wrapper receives every path and expected hash below from base-owned workflow
 metadata, never from `fixture-contract.json`, candidate JSON, artifact names, or
 probe output:
 
-* handoff JSON and SHA-256;
+* handoff JSON and SHA-256; the strict schema validator rejects duplicate keys,
+  wrong integer types, missing fields, and additional properties;
 * clean source archive and SHA-256, producer artifact archive SHA-256,
   probe/build/fixture/schema/checker/harness SHA-256 values, and the measured
   Linux ELF binary SHA-256;
-* exact source head/tree/closure, repository, producer run/job/artifact IDs and
-  name, artifact service digest, archive digest, profile/features/platform;
+* exact source head/tree/closure, target/head repository names and numeric IDs,
+  producer workflow/event/run/job/artifact IDs and exact names, artifact service
+  digest, re-hashed producer archive and exact binary member, archive digest,
+  profile/features/platform. These API observations are supplied by the trusted
+  acquire job; the fixture cannot mint or select them;
 * final sandbox image name, raw multi-platform index digest, exact `linux/amd64`
   platform-manifest digest, config digest, base digest, and image-build revision.
 
@@ -120,12 +127,26 @@ probe output:
 image `Config.Env`, nonempty image entrypoint/cmd/workdir/volume/port/healthcheck,
 unmeasured layer size, wrong labels, stale local RepoDigests, or any Docker
 preflight mismatch. It uses only read-only `/input` and `/candidate` binds plus
-64 MiB/4096-inode disposable `/tmp` and `/output` tmpfs mounts. The source
-archive is extracted only after the trusted archive checker accepts it. Resource
-limits are 128 PIDs, 512 MiB memory with equal swap, one CPU, 64 MiB file size,
-1024 file descriptors, 16 MiB `/dev/shm`, a 300-second timeout, and a 1 MiB
-container log cap. Any image, quota, timeout, copy, result, or cleanup failure
-is red; no host-shell fallback exists.
+64 MiB/4096-inode disposable `/tmp` and `/output` tmpfs mounts. The only other
+mounts permitted are Docker's per-container generated `/etc/hosts`,
+`/etc/hostname`, and `/etc/resolv.conf` files; arbitrary host paths, volumes,
+devices, and extra tmpfs mounts fail preflight. The source archive is extracted
+only after the trusted archive checker accepts it. Resource limits are 128 PIDs,
+512 MiB memory with equal swap, one CPU, 64 MiB file size, 1024 file
+descriptors, 16 MiB `/dev/shm`, a 300-second timeout, and a 1 MiB container log
+cap. Any image, quota, timeout, copy, result, or cleanup failure is red; no
+host-shell fallback exists.
+
+The hostile result parser asserts every H1-H9 field, not just field presence:
+zero forbidden names/tokens, absent command files/endpoints/proxies/sockets,
+read-only source/workspace/cache writes (only `missing` or `denied` is safe),
+bounded process pressure, no connected network path, expected hostile output
+attempts, exact base-owned cache presence and readability masks, and
+PID/capability/seccomp/no-new-privileges values. The
+post-copy census has an empty allow-list for this hostile fixture: any regular
+file/directory, symlink, hardlink, special file, missing required entry, unreadable
+subtree, quota breach, or traversal error is rejected and counted in structured
+evidence. No output is transport authority.
 
 Local checks may run `bash -n`, JSON parsing, Python syntax/help, Rust static
 compilation, and formatting. They must not invoke Docker/OrbStack/Velnor or run

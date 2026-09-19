@@ -34,6 +34,7 @@ fn status_for_error(error: &io::Error) -> Status {
     match error.kind() {
         io::ErrorKind::NotFound => "missing",
         io::ErrorKind::PermissionDenied => "denied",
+        io::ErrorKind::ReadOnlyFilesystem => "denied",
         io::ErrorKind::AlreadyExists => "exists",
         io::ErrorKind::InvalidData | io::ErrorKind::InvalidInput => "invalid",
         io::ErrorKind::TimedOut => "timeout",
@@ -361,16 +362,24 @@ fn unix_socket_status(path: &Path) -> Status {
     }
 }
 
-fn cache_statuses(active: bool) -> (u64, u64) {
+fn cache_statuses(active: bool) -> (u64, u64, u64, u64) {
     let paths = ["/cache", "/root/.cache", "/opt/mise", "/mbx", "/var/cache"];
     let mut present = 0;
+    let mut present_mask = 0;
+    let mut readable_mask = 0;
     let mut wrote = 0;
-    for path in paths {
+    for (index, path) in paths.into_iter().enumerate() {
         if !matches!(
             inspect_outside_root(Path::new(path), None),
             "absent" | "missing"
         ) {
             present += 1;
+            present_mask |= 1_u64 << index;
+        }
+        if let Ok(mut entries) = fs::read_dir(path) {
+            if entries.next().is_some_and(|entry| entry.is_ok()) {
+                readable_mask |= 1_u64 << index;
+            }
         }
         if active
             && mount_write_status(&PathBuf::from(path).join(".velnor-hostile-cache"), active)
@@ -379,7 +388,7 @@ fn cache_statuses(active: bool) -> (u64, u64) {
             wrote += 1;
         }
     }
-    (present, wrote)
+    (present, present_mask, readable_mask, wrote)
 }
 
 fn mount_write_status(path: &Path, active: bool) -> Status {
@@ -698,7 +707,12 @@ fn main() {
     let h5_unix_socket = unix_socket_status(Path::new("/tmp/velnor-hostile-network.sock"));
     let h4_docker_socket = unix_socket_status(Path::new("/var/run/docker.sock"));
     let h4_docker_socket_run = unix_socket_status(Path::new("/run/docker.sock"));
-    let (h9_cache_paths_present, h9_cache_paths_wrote) = cache_statuses(true);
+    let (
+        h9_cache_paths_present,
+        h9_cache_paths_present_mask,
+        h9_cache_paths_readable_mask,
+        h9_cache_paths_wrote,
+    ) = cache_statuses(true);
     let h6_symlink = symlink_status(&output);
     let h6_hardlink = hardlink_status(&output, &root);
     let h7_traversal = traversal_status(&output, true);
@@ -817,6 +831,14 @@ fn main() {
         (
             "h9_cache_paths_present",
             JsonValue::Number(h9_cache_paths_present),
+        ),
+        (
+            "h9_cache_paths_present_mask",
+            JsonValue::Number(h9_cache_paths_present_mask),
+        ),
+        (
+            "h9_cache_paths_readable_mask",
+            JsonValue::Number(h9_cache_paths_readable_mask),
         ),
         (
             "h9_cache_paths_wrote",
