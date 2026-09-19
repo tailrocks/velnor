@@ -433,6 +433,7 @@ pub(crate) struct CheckObservation {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ChildRunObservation {
+    pub parent_run_id: u64,
     pub run_id: u64,
     pub run_attempt: u32,
     pub repository: String,
@@ -530,6 +531,7 @@ pub(crate) struct EvidenceRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ChildRunLink {
+    pub parent_run_id: u64,
     pub run_id: u64,
     pub run_attempt: u32,
     pub repository: String,
@@ -1671,7 +1673,8 @@ fn check_execution_observation(
         }
     }
     for child in &execution.child_runs {
-        if child.run_id == 0
+        if child.parent_run_id != execution.run_id
+            || child.run_id == 0
             || child.run_attempt == 0
             || child.status != "completed"
             || child.conclusion != "success"
@@ -2724,6 +2727,7 @@ fn check_authoritative_children(
             continue;
         };
         if link.run_attempt != actual.run_attempt
+            || link.parent_run_id != actual.parent_run_id
             || link.repository != actual.repository
             || link.workflow_path != actual.workflow_path
             || link.event != actual.event
@@ -4111,6 +4115,7 @@ mod tests {
     fn failed_child_fixture_is_rejected() {
         let mut execution = minimal_execution();
         execution.child_runs.push(ChildRunObservation {
+            parent_run_id: 1,
             run_id: 9,
             run_attempt: 1,
             repository: "owner/repo".to_owned(),

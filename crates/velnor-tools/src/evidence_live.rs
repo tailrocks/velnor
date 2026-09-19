@@ -322,6 +322,7 @@ async fn collect_executions<H: FleetHttp>(
             http, manifest, source_sha, run_id, &event, ruleset, page_count,
         )
         .await?;
+        let child_runs = collect_child_runs(http, manifest, source_sha, run_id, page_count).await?;
         executions.push(ExecutionObservation {
             run_id,
             run_attempt,
@@ -340,10 +341,96 @@ async fn collect_executions<H: FleetHttp>(
             runner_labels,
             jobs,
             required_checks,
-            child_runs: Vec::<ChildRunObservation>::new(),
+            child_runs,
         });
     }
     Ok(executions)
+}
+
+async fn collect_child_runs<H: FleetHttp>(
+    http: &H,
+    manifest: &ManifestRepository,
+    source_sha: &str,
+    parent_run_id: u64,
+    page_count: &mut u32,
+) -> Result<Vec<ChildRunObservation>> {
+    let child_specs = manifest
+        .expected_jobs
+        .iter()
+        .filter_map(|job| job.child_workflow.as_ref())
+        .collect::<Vec<_>>();
+    if child_specs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let values = paginate(
+        http,
+        &format!("/repos/{}/actions/runs", manifest.repository),
+        &[("head_sha", source_sha), ("event", "workflow_run")],
+        "workflow_runs",
+        page_count,
+    )
+    .await?;
+    let mut children = Vec::new();
+    for value in values {
+        let workflow_path = value
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        let Some(spec) = child_specs
+            .iter()
+            .find(|spec| spec.workflow_path == workflow_path)
+        else {
+            continue;
+        };
+        let Some(observed_parent_run_id) = value.get("parent_run_id").and_then(Value::as_u64)
+        else {
+            // GitHub does not expose a parent relation for this response. Do
+            // not infer one from a matching SHA; missing association is a
+            // failed child graph, not successful evidence.
+            continue;
+        };
+        if observed_parent_run_id != parent_run_id {
+            continue;
+        }
+        let run_id = positive_u64(&value, "id")?;
+        let child_source_sha = value
+            .get("head_sha")
+            .and_then(Value::as_str)
+            .unwrap_or(source_sha)
+            .to_owned();
+        let provider = manifest
+            .expected_jobs
+            .iter()
+            .find(|job| {
+                job.child_workflow
+                    .as_ref()
+                    .is_some_and(|child| child.workflow_path == spec.workflow_path)
+            })
+            .map(|job| job.provider.clone())
+            .unwrap_or_else(|| "github".to_owned());
+        children.push(ChildRunObservation {
+            parent_run_id,
+            run_id,
+            run_attempt: value
+                .get("run_attempt")
+                .and_then(Value::as_u64)
+                .unwrap_or(1) as u32,
+            repository: spec.repository.clone(),
+            workflow_path,
+            event: "workflow_run".to_owned(),
+            source_sha: child_source_sha,
+            provider,
+            status: string_field(&value, "status")?,
+            conclusion: value
+                .get("conclusion")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+            source_url: string_field(&value, "html_url")?,
+        });
+    }
+    Ok(children)
 }
 
 async fn collect_jobs<H: FleetHttp>(
