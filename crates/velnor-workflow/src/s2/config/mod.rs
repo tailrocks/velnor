@@ -2628,6 +2628,81 @@ fn valid_check_profile_env_key(key: &str) -> bool {
         && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
+/// The release events on which one named-task job can run. An omitted mode
+/// means both dispatch validation and tag publication.
+fn release_job_events(row: &ReleaseJobSection) -> (bool, bool) {
+    let modes = row.modes.as_deref().unwrap_or_default();
+    if modes.is_empty() {
+        (true, true)
+    } else {
+        (
+            modes.iter().any(|mode| mode == "validate"),
+            modes.iter().any(|mode| mode == "publish"),
+        )
+    }
+}
+
+/// Reject cycles before a release job graph reaches GitHub Actions. GitHub
+/// does not report a useful configuration error for a cycle; it leaves every
+/// member waiting forever, so generation must fail with the actual cycle.
+fn validate_release_job_cycles(rows: &[ReleaseJobSection]) -> Result<(), GeneratorError> {
+    fn visit(
+        node: &str,
+        graph: &BTreeMap<String, Vec<String>>,
+        visiting: &mut BTreeSet<String>,
+        visited: &mut BTreeSet<String>,
+        stack: &mut Vec<String>,
+    ) -> Result<(), GeneratorError> {
+        if visited.contains(node) {
+            return Ok(());
+        }
+        if visiting.contains(node) {
+            let start = stack.iter().position(|entry| entry == node).unwrap_or(0);
+            let mut cycle = stack[start..].to_vec();
+            cycle.push(node.to_owned());
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] dependency cycle: {}",
+                cycle.join(" -> ")
+            )));
+        }
+
+        visiting.insert(node.to_owned());
+        stack.push(node.to_owned());
+        if let Some(needs) = graph.get(node) {
+            for dependency in needs {
+                // Unknown dependencies are reported by validate_release_jobs
+                // before this graph check. Keeping this guard makes the
+                // helper total when unit-tested directly.
+                if graph.contains_key(dependency) {
+                    visit(dependency, graph, visiting, visited, stack)?;
+                }
+            }
+        }
+        stack.pop();
+        visiting.remove(node);
+        visited.insert(node.to_owned());
+        Ok(())
+    }
+
+    let graph = rows
+        .iter()
+        .map(|row| {
+            (
+                row.id.as_deref().unwrap_or_default().to_owned(),
+                row.needs.clone().unwrap_or_default(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let mut visiting = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    let mut stack = Vec::new();
+    for node in graph.keys() {
+        visit(node, &graph, &mut visiting, &mut visited, &mut stack)?;
+    }
+    Ok(())
+}
+
 fn validate_check_profile_cron(id: &str, schedule: &str) -> Result<(), GeneratorError> {
     if schedule.contains(['\n', '\r']) {
         return Err(GeneratorError::usage(format!(
@@ -3407,7 +3482,12 @@ fn validate_release_jobs(
         .map(|values| parse_provider_set(values, "[workflow] providers"))
         .transpose()?
         .unwrap_or_else(|| ProviderId::ALL.into_iter().collect());
-    let selectors = parse_selectors(&workflow.selectors)?;
+    // The repository config may override scan defaults, but omitted selectors
+    // still resolve to those defaults before rendering. Validate release
+    // runner choices against the same effective map so a valid config can
+    // never render `runs-on:` empty.
+    let mut selectors = crate::s2::scan::default_selectors();
+    selectors.extend(parse_selectors(&workflow.selectors)?);
     for row in &release.job {
         let id = row.id.as_deref().unwrap_or_default();
         if let Some(name) = row.name.as_deref()
@@ -3448,25 +3528,28 @@ fn validate_release_jobs(
                 }
             }
         }
-        match row.runner.as_deref() {
-            None | Some("github" | "macos" | "velnor") => {}
-            Some(runner) => {
+        let runner = row.runner.as_deref().unwrap_or("github");
+        let (provider, needs_selector) = match runner {
+            "github" => (ProviderId::GithubHosted, true),
+            // macOS is a fixed GitHub-hosted label, so it needs the hosted
+            // provider but not its Linux selector.
+            "macos" => (ProviderId::GithubHosted, false),
+            "velnor" => (ProviderId::Velnor, true),
+            _ => {
                 return Err(GeneratorError::usage(format!(
                     "[[release.job]] {id} runner must be one of github, macos, velnor; found {runner}"
                 )));
             }
+        };
+        if !providers.contains(&provider) {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} runner `{runner}` selects {provider}, but [workflow] providers does not include that lane"
+            )));
         }
-        if row.runner.as_deref().unwrap_or("github") == "velnor" {
-            if !providers.contains(&ProviderId::Velnor) {
-                return Err(GeneratorError::usage(format!(
-                    "[[release.job]] {id} runs on velnor, but [workflow] providers has no Velnor lane"
-                )));
-            }
-            if !selectors.contains_key(&ProviderId::Velnor) {
-                return Err(GeneratorError::usage(format!(
-                    "[[release.job]] {id} runs on velnor, but [workflow.selectors.velnor] names no selector for the job"
-                )));
-            }
+        if needs_selector && !selectors.contains_key(&provider) {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} runner `{runner}` selects {provider}, but no selector supplies its runs-on labels"
+            )));
         }
         if let Some(modes) = row.modes.as_deref() {
             for mode in modes {
@@ -3514,6 +3597,36 @@ fn validate_release_jobs(
                 )));
             }
         }
+        if row
+            .permissions
+            .get("contents")
+            .is_some_and(|level| level == "none")
+        {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} permissions cannot set contents = none; checkout requires contents: read"
+            )));
+        }
+        if let Some(needs) = row.needs.as_deref() {
+            let (runs_validate, runs_publish) = release_job_events(row);
+            for dependency in needs {
+                let Some(dependency_row) = release
+                    .job
+                    .iter()
+                    .find(|candidate| candidate.id.as_deref() == Some(dependency.as_str()))
+                else {
+                    // The earlier reference check returns this same config
+                    // error before this mode check in normal validation.
+                    continue;
+                };
+                let (dependency_validate, dependency_publish) = release_job_events(dependency_row);
+                if (runs_validate && !dependency_validate) || (runs_publish && !dependency_publish)
+                {
+                    return Err(GeneratorError::usage(format!(
+                        "[[release.job]] {id} needs {dependency}, but their release modes do not overlap for every event; a gated dependency would silently skip this job"
+                    )));
+                }
+            }
+        }
         for (key, value) in &row.env {
             if !valid_check_profile_env_key(key) {
                 return Err(GeneratorError::usage(format!(
@@ -3527,6 +3640,7 @@ fn validate_release_jobs(
             }
         }
     }
+    validate_release_job_cycles(&release.job)?;
     Ok(())
 }
 
@@ -3765,6 +3879,66 @@ mod tests {
             toml::from_str::<RepoGenerationConfig>(text),
             "parse config under test",
         )
+    }
+
+    fn tasks_release_config(workflow: &str, jobs: &str) -> RepoGenerationConfig {
+        config_for(&format!(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n{workflow}\n\n[release]\nenabled = true\nkind = \"tasks\"\n\n{jobs}\n"
+        ))
+    }
+
+    fn tasks_release_validation_error(workflow: &str, jobs: &str) -> String {
+        must_fail(
+            tasks_release_config(workflow, jobs).validate(&[], &[], &BTreeSet::new()),
+            "tasks release config must fail",
+        )
+        .to_string()
+    }
+
+    #[test]
+    fn release_job_rejects_explicit_contents_none() {
+        let error = tasks_release_validation_error(
+            "",
+            "[[release.job]]\nid = \"build\"\ntasks = [\"build\"]\n\n[release.job.permissions]\ncontents = \"none\"\n",
+        );
+        assert!(error.contains("contents = none"), "{error}");
+        assert!(
+            error.contains("checkout requires contents: read"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn release_job_rejects_runner_outside_provider_universe() {
+        let error = tasks_release_validation_error(
+            "[workflow]\nproviders = [\"velnor\"]\n",
+            "[[release.job]]\nid = \"build\"\ntasks = [\"build\"]\nrunner = \"github\"\n",
+        );
+        assert!(
+            error.contains("runner `github` selects github-hosted"),
+            "{error}"
+        );
+        assert!(error.contains("does not include that lane"), "{error}");
+    }
+
+    #[test]
+    fn release_job_rejects_dependency_cycles() {
+        let error = tasks_release_validation_error(
+            "",
+            "[[release.job]]\nid = \"build\"\ntasks = [\"build\"]\nneeds = [\"publish\"]\n\n[[release.job]]\nid = \"publish\"\ntasks = [\"publish\"]\nneeds = [\"build\"]\n",
+        );
+        assert!(error.contains("dependency cycle"), "{error}");
+        assert!(error.contains("build -> publish -> build"), "{error}");
+    }
+
+    #[test]
+    fn release_job_rejects_mode_incompatible_dependency() {
+        let error = tasks_release_validation_error(
+            "",
+            "[[release.job]]\nid = \"validate\"\ntasks = [\"validate\"]\nmodes = [\"validate\"]\n\n[[release.job]]\nid = \"publish\"\ntasks = [\"publish\"]\nmodes = [\"publish\"]\nneeds = [\"validate\"]\n",
+        );
+        assert!(error.contains("modes do not overlap"), "{error}");
+        assert!(error.contains("silently skip"), "{error}");
     }
 
     /// A test-owned `package-update.yml` body: the grant rules are validated

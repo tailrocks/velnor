@@ -2971,9 +2971,19 @@ fn tasks_job_gate(job: &ReleaseJobSpec) -> Option<&'static str> {
 /// stays in named mise tasks; Velnor owns only the job graph, event gates,
 /// runner routing, and protected execution metadata.
 fn render_tasks_release_job(config: &ProjectConfig, job: &ReleaseJobSpec) -> String {
-    let mut output = format!("  {}:\n    name: {}\n", job.id, yaml_scalar(&job.name));
+    let mut output = format!(
+        "  {}:\n    name: {}\n",
+        yaml_scalar(&job.id),
+        yaml_scalar(&job.name)
+    );
     if !job.needs.is_empty() {
-        let _ = writeln!(output, "    needs: [{}]", job.needs.join(", "));
+        let needs = job
+            .needs
+            .iter()
+            .map(|dependency| yaml_scalar(dependency))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(output, "    needs: [{needs}]");
     }
     if let Some(gate) = tasks_job_gate(job) {
         let _ = writeln!(output, "    if: {gate}");
@@ -2984,8 +2994,16 @@ fn render_tasks_release_job(config: &ProjectConfig, job: &ReleaseJobSpec) -> Str
         let _ = writeln!(output, "    environment: {}", yaml_scalar(&job.environment));
     }
     if !job.permissions.is_empty() {
+        // A job-level permissions map replaces the workflow-level map in
+        // GitHub Actions. Preserve checkout access when a release author
+        // asks for an additional scope, while config validation rejects an
+        // explicit `contents: none` override.
+        let mut permissions = job.permissions.clone();
+        permissions
+            .entry("contents".to_owned())
+            .or_insert_with(|| "read".to_owned());
         output.push_str("    permissions:\n");
-        for (scope, level) in &job.permissions {
+        for (scope, level) in &permissions {
             let _ = writeln!(output, "      {scope}: {level}");
         }
     }
@@ -5321,7 +5339,7 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "5d7699eb1fe59c1ff441adbd6ce225a847bf0c2ea20a3bc7cbc31c190bbcb62d",
+                "9bac3040c77b0dc9fb9acf31cabb426f20a8da419f86f976d34819b0c1bc5e75",
             ),
             (
                 "preview.yml",
@@ -5442,7 +5460,7 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "dda4fe0ecf3711890a1daa84b48b2f9517e57b07dad6c06783cb34bfcaa08559",
+                "be72b8ec1252d670495df4d184c26b50c08ae0e2847d1191688851d3e5eb9c2c",
             ),
             (
                 "preview.yml",
@@ -5925,11 +5943,56 @@ mod tests {
         );
         assert!(sign.contains("runs-on: macos-15"), "{sign}");
         assert!(sign.contains("environment: release-macos"), "{sign}");
+        assert!(
+            sign.contains("contents: read"),
+            "custom permissions must retain checkout access: {sign}"
+        );
         assert!(sign.contains("id-token: write"), "{sign}");
         assert!(sign.contains("run: mise run desktop-sign"), "{sign}");
         assert!(
             sign.contains("subject-path: |\n            dist/app.zip"),
             "{sign}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn schema2_tasks_release_quotes_yaml_reserved_job_ids_and_needs() {
+        let root = scanned_root("tasks-release-reserved-id");
+        must(
+            fs::write(
+                root.join("mise.toml"),
+                "[tasks.desktop-build]\nrun = \"true\"\n\n[tasks.desktop-publish]\nrun = \"true\"\n",
+            ),
+            "write reserved-id task fixture",
+        );
+        must(
+            fs::create_dir_all(root.join(".github-gen")),
+            "create generation config directory",
+        );
+        must(
+            fs::write(
+                root.join(crate::s2::config::GENERATION_CONFIG_PATH),
+                "schema = 2\n\n[generator]\nrepository = \"example/declared\"\n\n[workflow]\nfiles = [\"release.yml\"]\n\n[release]\nenabled = true\nkind = \"tasks\"\n\n[[release.job]]\nid = \"on\"\ntasks = [\"desktop-build\"]\n\n[[release.job]]\nid = \"publish\"\ntasks = [\"desktop-publish\"]\nneeds = [\"on\"]\n",
+            ),
+            "write reserved-id release config",
+        );
+        let tree = must(
+            crate::s2::render_tree(&root, None, "main"),
+            "render reserved-id tasks release tree",
+        );
+        let release = must_some(
+            tree.files
+                .get(&PathBuf::from(".github/workflows/release.yml")),
+            "reserved-id tasks release workflow",
+        );
+        assert!(
+            release.contains("  \"on\":\n"),
+            "job ids must be YAML-safe: {release}"
+        );
+        assert!(
+            release.contains("needs: [\"on\"]"),
+            "needs entries must be YAML-safe: {release}"
         );
         let _ = fs::remove_dir_all(root);
     }
