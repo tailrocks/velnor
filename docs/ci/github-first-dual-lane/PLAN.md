@@ -25,6 +25,14 @@ G6 may reopen G4/G5 when a fleet workload exposes a runtime defect.
 The graph is a dependency graph, not a success claim. Read-only discovery can
 start early; operational actions obey the arrows.
 
+This source graph is the durable contract. Mutable task ownership, revisions,
+invalidations, and amendments live at the stable external session path
+`/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/session.json`.
+The current read-only G0 workload/platform projection is
+`/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/workload-matrix.json`;
+it covers all 32 manifest rows and does not claim generated G3 coverage or
+execution success.
+
 ## Gate exit contracts
 
 | Gate | Depends on | Exit condition | Required evidence owner |
@@ -48,10 +56,10 @@ reviewer. Unknown thread/worktree metadata stays `unknown` until observed.
 | `G0-inventory` | Fixed 32-repository fleet | `/root/g0_inventory` | none | External ledger inventory only; worktree `unknown` | `[pending]` live GitHub inventory with pagination; `git rev-parse HEAD` | `G0/inventory.json`, access and dependency records | `/root/g0-reviewer` |
 | `G0-bootstrap` | Velnor generator/runtime bootstrap | `/root/g0_bootstrap` | `G0-inventory` findings as needed | Generator worktree `unknown`; no records in source | `[pending]` clean/shallow checkout bootstrap and pin/artifact checks | `G0/bootstrap.json` with source/artifact/output identities | `/root/g0-reviewer` |
 | `G0-distribution` | Velnor, `velnor-apt`, `homebrew-velnor` | `/root/g0_distribution` | `G0-inventory` | Distribution investigation worktree `unknown`; external evidence only | `[pending]` release discovery/feed/formula inventory | `G0/distribution.json` and access gaps | `/root/g0-reviewer` |
-| `G0-fleet` | Fleet categories/workload matrix | `/root/g0_fleet` | `G0-inventory` | Fleet worktree `unknown`; source edits prohibited in this wave | `[pending]` scanner/config/workflow inventory for all 32 | `G0/fleet-matrix.json` | `/root/g0-reviewer` |
+| `G0-fleet` | Fleet categories/workload matrix | `/root/g0_fleet` | `G0-inventory` | Fleet worktree `unknown`; source edits prohibited in this wave | `[observed]` read-only 32-row workload/platform projection; exact emitted scanner IDs remain partial | External `G0/workload-matrix.json` plus fleet refresh files | `/root/g0-reviewer` |
 | `G0-runtime` | macOS/OrbStack capability analysis | `/root/g0_runtime` | `G0-inventory` | Runtime investigation worktree `unknown`; no live host mutation | `[pending]` source capability and host-access checks | `G0/runtime-capabilities.json` | `/root/g0-reviewer` |
 | `G0-records` | Canonical execution records | `/root/g0_records` | none | `/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-records`; this directory's five docs only | `[verified]` RTK/version/git/model metadata; `[pending]` checker schema validation | These five source docs; external session ownership amendments | `/root/g0-reviewer` |
-| `G0-checker` | Deterministic evidence checker | `/root/g0_checker` | `G0-records` schema | `/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-checker`; checker-owned code/tests | `[pending]` checker unit/fixture tests for stale SHA, skip, missing repo, wrong provider, child failure, artifact mismatch | Checker commit and test report | `/root/g0-reviewer` |
+| `G0-checker` | Deterministic evidence checker | `/root/g0_checker` | `G0-records` schema | `/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-checker`; checker-owned code/tests | `[rejected]` initial b3b6 unit hygiene passed but semantic review found false-green paths; v2 architecture/implementation/review remain pending | External checker review and hostile fixtures | `/root/g0-reviewer` |
 | `G0-reviewer` | Independent G0 records/evidence review | `/root/g0_reviewer` | all initial outputs | Review-only worktree `unknown`; no author approval | `[pending]` fresh read of source docs and external raw evidence | Independent findings and disposition | `/root` |
 | `G1-cache-semantics` | Hosted cache compatibility | `/root/g1_cache_semantics` (Luna/max) | `G0-inventory`, `G0-bootstrap` | Thread `01a0ba76-f725-7022-9cfa-f28456ab67b2`; external findings | `[observed]` stale fixture and PR953 cache-contract diagnosis; refresh pending | `G0/cache-semantics/findings.md` | `/root/g0-reviewer` |
 | `G1-hosted-config` | Hosted-first generator policy | `/root/g1_hosted_config` (Luna/max) | `G0-inventory`, `G0-bootstrap` | Thread `01a0ba77-5222-7e63-97fa-553849b96d7b`; worktree `hosted→g1_hosted_config` | `[in progress]` typed config/regeneration/policy checks | G1 candidate/source/output identity | `/root/g0-reviewer` |
@@ -59,7 +67,7 @@ reviewer. Unknown thread/worktree metadata stays `unknown` until observed.
 | `G1-run-operations` | Existing failed run/child graph | `/root/g1_run_operations` (Luna/max) | `G0-inventory` | Thread `01a0ba7a-9d5d-7291-a2f5-357ff78dba5e`; owns external `G0/stale-runs.json` | `[observed]` failed-run/child reconciliation in progress | `G1/run-operations.json`, `G0/stale-runs.json` | `/root/g0-reviewer` |
 | `G1-runtime-product-audit` | Published runtime product and promotion sequence | `/root/g1_run_operations` (Luna/max) | `G0-bootstrap`, `G1-seed-pin` | Same thread; external audit only | `[observed]` old pin/release verified; current main and unpublished candidate distinguished | `G1/runtime-product-audit/{runtime-product-audit.json,PROMOTION.md}` | `/root/g0-reviewer` |
 | `G1-seed-pin` | Generator seed/pin reuse | `/root/g0_inventory` (Luna/max) | `G0-bootstrap`, `G0-inventory` | Thread `01a0ba72-3925-7141-b1f7-5529a5cf6c98`; worktree `generator→g0_inventory` | `[observed]` exact seed/pin review; clean pin adoption/regeneration pending | `G1/reviews/seed-pin.md` | `/root/g0-reviewer` |
-| `G1-scan-integrity` | Generated-output/source scan integrity | `/root/g0_inventory` | `G0-bootstrap`, `G1-hosted-config` | Worktree `dual-lane-scan-integrity`; source edits gated/reviewed | `[pending]` remove self-invalidation while preserving real source drift checks | `G1/scan-integrity.json` | `/root/g1_review_952` |
+| `G1-scan-integrity` | Generated-output/source scan integrity | `/root/g0_inventory` | `G0-bootstrap`, `G1-hosted-config` | Worktree `dual-lane-scan-integrity`; source edits gated/reviewed | `[observed]` candidate `6409a086` from parent `12cc87b` has 1740 source tests excluding expected stale snapshot plus fmt/clippy; approval pending exact G1-review952 | External `G1/scan-integrity/REPORT.md` and integration status | `/root/g1_review_952` |
 | `G2-native-packages` | Native package/Homebrew prerequisites | `/root/g2_native_packages` (Luna/max) | `G1`, `G0-distribution` | Thread `01a0ba7a-328e-7282-943e-5b54c2ac209d`; worktree `dual-lane-native-packages` | `[observed]` three ARM64 macOS binaries compile/smoke only; worker now also owns product/manifest contract; install/publication pending | `G0/native-packages/findings.md` | `/root/g0-reviewer` |
 | `G2-homebrew-contract` | Homebrew consumer/producer contract | `/root/g2_homebrew_contract` (Luna/max) | `G1`, `G0-distribution`, `G2-native-packages` | Thread `01a0ba80-8408-7380-8ac2-b743eb4494a5`; worktree `dual-lane-homebrew` | `[pending]` typed Homebrew contract and producer coordination | `G2/homebrew-contract/findings.md` | `/root/g2_distribution_review` |
 | `G2-native-product` | Product binary/component identity and authoritative package manifest | `/root/g2_native_packages` (Luna/max) | `G1`, `G0-distribution` | Thread `01a0ba7a-328e-7282-943e-5b54c2ac209d`; worktree `dual-lane-native-product` | `[pending]` application/runtime component inventory, identity, and package contract | `G2/native-product.json` | `/root/g2_distribution_review` |
@@ -82,11 +90,11 @@ exits. Their exact scoped repository lists are fixed above; compact records live
 in the named external G0 subdirectories.
 
 The checker workstream's contract is
-`docs/ci/github-first-dual-lane/evidence-schema.md` in its worktree. This
-manifest keeps both `schema_version: 1`/`manifest_id` and the existing
-`manifest_version: 1`/`schema` spelling so the checker can consume it while
-preparation rows remain nullable and fail G0 until live workload evidence is
-attached.
+`docs/ci/github-first-dual-lane/evidence-schema.md` in its worktree. The
+canonical manifest fields are `schema_version: 1` and `manifest_id`; this
+manifest uses those names only. `manifest_version` and `schema` are not
+aliases accepted by this records contract. Preparation rows remain nullable
+and fail G0 until live workload evidence replaces the unknowns.
 
 ## Ownership and mutation rules
 

@@ -19,13 +19,20 @@ unknown observation into a success.
   ref. It must not be committed to this source tree after the SHA it attests.
 - No credentials, raw logs, or unbounded artifacts belong in this directory.
 
-The external session and ownership record is
+The external session and ownership record is always read from the stable path
 `/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/session.json`.
-After the G0 records amendment its SHA-256 is
-`a60b01155210c8f6d5db9ddb48375c487baf4cbb788cb39116a9e6e3c5ebcd4f`.
-It records the orchestrator, assigned agents, worktree ownership, current
-gate, and the Velnor ruleset snapshot. Amendments to that record are durable
-outside the source checkout and must retain an amendment history.
+It is mutable operational state, not committed live evidence; its current
+SHA-256 belongs to the external checkpoint that reads it and is intentionally
+not pinned in this source document. It records the orchestrator, assigned
+agents, worktree ownership, current gate, ruleset snapshot, task graph
+extensions, and amendment history. Amendments remain durable outside the
+source checkout.
+
+The durable gate graph is [`PLAN.md`'s graph](./PLAN.md#durable-gate-graph).
+Current task ownership and graph amendments are in the external session
+record above. The current read-only G0 workload projection is
+`/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/workload-matrix.json`;
+it is inventory evidence, not generated G3 coverage or execution success.
 
 ### Effective execution settings
 
@@ -135,7 +142,7 @@ publication defect reopens the affected earlier gate.
 
 | ID | Entry/dependency | Required exit evidence | State at this snapshot |
 | --- | --- | --- | --- |
-| G0 | Initial checkout; no predecessor | 32 unique repositories; current default SHAs, PRs, checks, workflows, workload/platform matrix, dependency graph, access gaps, and effective model settings | In progress |
+| G0 | Initial checkout; no predecessor | 32 unique repositories; current default SHAs, PRs, checks, workflows, workload/platform matrix, dependency graph ([`PLAN.md`](./PLAN.md#durable-gate-graph) plus the external session task records), access gaps, and effective model settings | In progress |
 | G1 | G0 | Hosted generated policy, real required PR checks, and post-merge main CI pass without Velnor capacity | Pending |
 | G2 | G1 | New preview and stable Velnor releases install and upgrade through APT and Homebrew; product and both distribution repositories pass hosted checks | Pending |
 | G3 | G2 | All 32 use the approved generator; migration PRs and current main revisions pass hosted CI; open PR coverage reconciles | Pending |
@@ -381,15 +388,23 @@ install_upgrade_test_environment, installed_binary_identity, functional_result
 owner, reviewer, gate_status, blocker, next_action
 ```
 
-The checker validates exactly 32 coverage/uniqueness, pins/digests, current
-revision correspondence, nonempty workload inventory, provider/platform,
+The target checker contract requires exactly 32 coverage/uniqueness, immutable
+canonical scope, pins/digests, current revision correspondence, nonempty
+workload inventory, provider/platform and host identity, independently derived
 required conclusions, child-run completion, check-context association, and
-release/install evidence. It fails stale/missing/queued/canceled/timed-out/
+release/install evidence. It must fail stale/missing/queued/canceled/timed-out/
 unexpectedly-skipped/failed required work. It may accept an explicitly
 justified non-applicable row only as non-executed evidence. Fixtures must cover
 stale SHA, skipped job, missing repository, wrong provider, failed child, and
 mismatched artifact. It must test cold/warm representative evidence without an
 arbitrary soak duration.
+
+This is a required contract, not a claim about the current checker. The initial
+checker commit was rejected by independent review: its unit-test hygiene and
+475-finding failure do not prove semantic gate correctness. The v2 architecture
+must bind canonical scope, live snapshots, required work, run/provider identity,
+phase coverage, package/install applicability, strict canonical fields, and
+external reviewer attestation before any checker result can support a gate.
 
 ## 11. Final completion checklist
 
@@ -432,7 +447,7 @@ configuration, and explicit blockers; verbose jobs stay in the immutable ledger.
 At G0 start, the following are pending and must not be inferred green:
 
 - Live default branches, SHAs, open PRs, checks, workflows, workload matrices,
-  and access gaps for 31 repositories.
+  and access gaps for all 32 repositories.
 - Current Velnor hosted failure/recovery state and post-merge evidence.
 - Preview/stable product artifacts, APT signed feeds, Homebrew formulas, and
   clean-client installation/upgrade evidence.

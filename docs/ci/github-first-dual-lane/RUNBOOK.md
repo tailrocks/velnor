@@ -27,7 +27,7 @@ rtk --version
 rtk git status --short --branch
 # ## codex/github-first-records (clean at the initial snapshot)
 
-rtk git rev-parse HEAD
+rtk git -C /Users/donbeave/Projects/tailrocks/velnor-project/velnor3 rev-parse HEAD
 # abe9ad82a2d4d01b706bbc6122ab6ccb150faad9
 
 rtk proxy codex --version
@@ -68,7 +68,7 @@ gh run list --repo OWNER/REPO --limit 100 --json databaseId,headSha,event,status
 gh api --paginate repos/OWNER/REPO/commits/REV/check-runs?per_page=100
 
 # [PENDING] validate source record and exact manifest
-jq -e '.schema == "velnor.github-first-fleet.v1" and .scope.expected_repository_count == 32 and (.repositories | length == 32)' \
+jq -e '.schema_version == 1 and .manifest_id == "github-first-dual-lane-2026-09-19" and .scope.expected_repository_count == 32 and (.repositories | length == 32)' \
   docs/ci/github-first-dual-lane/fleet.json
 ```
 
@@ -184,12 +184,15 @@ operation. Do not prune unrelated Docker state or force Mac sleep/reboot.
 
 ## Pending: deterministic checker and final audit
 
-The checker agent owns implementation and invocation details. Until its command
-is committed, do not invent a path or claim a pass. The eventual invocation
-must read `fleet.json` and the immutable external ledger at a fresh snapshot,
-then fail stale/missing/queued/canceled/timed-out/skipped/failed required work.
-Fixtures must cover stale SHA, skipped job, missing row, wrong provider, failed
-child, and mismatched artifact.
+The checker agent owns implementation and invocation details. The initial
+`b3b6b2e` command is historical hygiene evidence only: its 216 tests/fmt/clippy
+passed, but independent review rejected its semantic contract and its live run
+returned 475 findings. Until the v2 command is committed and reviewed, do not
+claim a checker completion or gate pass. The v2 invocation must read the
+canonical manifest and external ledger at a fresh snapshot, then fail
+stale/missing/queued/canceled/timed-out/skipped/failed required work. Fixtures
+must cover stale SHA, skipped job, missing row, wrong provider, failed child,
+and mismatched artifact.
 
 ## Recovery and rollback rules
 
