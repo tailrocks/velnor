@@ -32,6 +32,10 @@ pub type AcquisitionFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>
 #[path = "github_transport.rs"]
 pub mod live_transport;
 
+/// Descriptor-relative content-addressed store for safe response bytes.
+#[path = "github_raw_store.rs"]
+pub mod raw_store;
+
 /// Current GitHub facts collector and typed observation mapping.  It remains
 /// behind this acquisition namespace until the checker owner approves the
 /// final `g0_contract` adapter seam.
@@ -2263,7 +2267,7 @@ fn request_digest(endpoint_or_operation: &str, query_or_document: &str) -> Strin
 
 fn content_addressed_storage_ref(digest: &str) -> String {
     let digest = digest.strip_prefix("sha256:").unwrap_or(digest);
-    format!("sha256://{digest}")
+    format!("artifact://sha256/{digest}")
 }
 
 fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, AcquisitionError> {
