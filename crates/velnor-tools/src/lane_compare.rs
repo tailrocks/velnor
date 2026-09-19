@@ -526,20 +526,26 @@ struct RunListItem {
     conclusion: Option<String>,
 }
 
+fn recent_run_args(repo: &str, workflow: &str, limit: usize) -> Vec<String> {
+    vec![
+        "run".to_owned(),
+        "list".to_owned(),
+        "--repo".to_owned(),
+        repo.to_owned(),
+        "--workflow".to_owned(),
+        workflow.to_owned(),
+        "--status".to_owned(),
+        "success".to_owned(),
+        "--limit".to_owned(),
+        limit.max(2).to_string(),
+        "--json".to_owned(),
+        "databaseId,status,conclusion".to_owned(),
+    ]
+}
+
 fn recent_run_items(repo: &str, workflow: &str, limit: usize) -> Result<Vec<RunListItem>> {
     let output = Command::new("gh")
-        .args([
-            "run",
-            "list",
-            "--repo",
-            repo,
-            "--workflow",
-            workflow,
-            "--limit",
-            &limit.max(2).to_string(),
-            "--json",
-            "databaseId,status,conclusion",
-        ])
+        .args(recent_run_args(repo, workflow, limit))
         .output()
         .with_context(|| format!("spawn gh run list for {repo} {workflow}"))?;
     if !output.status.success() {
@@ -2167,6 +2173,28 @@ mod tests {
             head_sha: "a".repeat(40),
             run_attempt: Some(1),
         }
+    }
+
+    #[test]
+    fn recent_run_query_limits_successful_runs() {
+        let args = recent_run_args("tailrocks/velnor", "compat.yml", 1);
+        assert_eq!(
+            args,
+            vec![
+                "run".to_owned(),
+                "list".to_owned(),
+                "--repo".to_owned(),
+                "tailrocks/velnor".to_owned(),
+                "--workflow".to_owned(),
+                "compat.yml".to_owned(),
+                "--status".to_owned(),
+                "success".to_owned(),
+                "--limit".to_owned(),
+                "2".to_owned(),
+                "--json".to_owned(),
+                "databaseId,status,conclusion".to_owned(),
+            ]
+        );
     }
 
     fn html_for_steps(numbers: &[u64]) -> BTreeMap<u64, HtmlStep> {
