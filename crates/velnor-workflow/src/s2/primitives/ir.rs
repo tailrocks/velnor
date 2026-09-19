@@ -2003,6 +2003,124 @@ fn candidate_publish_steps(upload_artifact_pin: &str) -> String {
     )
 }
 
+fn artifact_unit_selector(members: &[&Unit], predicate: impl Fn(&Unit) -> bool) -> Option<String> {
+    let ids = members
+        .iter()
+        .filter(|unit| predicate(unit))
+        .map(|unit| format!("inputs.unit == {}", crate::s2::shell_quote(&unit.id)))
+        .collect::<Vec<_>>();
+    (!ids.is_empty()).then(|| ids.join(" || "))
+}
+
+fn artifact_product_rows(unit: &Unit) -> impl Iterator<Item = &crate::s2::platform::NamedProduct> {
+    unit.products
+        .iter()
+        .filter(|product| product.artifact.is_some())
+}
+
+/// Hosted producer-side staging and publication for explicit product
+/// artifacts. The manifest binds the archive to the producer, product, path,
+/// kind, and exact source SHA; consumers verify all fields before extraction.
+fn render_product_upload_steps(upload_pin: &str, members: &[&Unit]) -> String {
+    let Some(selector) =
+        artifact_unit_selector(members, |unit| artifact_product_rows(unit).next().is_some())
+    else {
+        return String::new();
+    };
+    let mut cases = String::new();
+    for unit in members {
+        let products = artifact_product_rows(unit).collect::<Vec<_>>();
+        if products.is_empty() {
+            let _ = writeln!(
+                cases,
+                "            {}) exit 0 ;;",
+                crate::s2::shell_quote(&unit.id)
+            );
+            continue;
+        }
+        let _ = writeln!(cases, "            {})", crate::s2::shell_quote(&unit.id));
+        for product in products {
+            let Some(artifact) = product.artifact.as_ref() else {
+                continue;
+            };
+            let product_name = crate::s2::shell_quote(&product.name);
+            let path = crate::s2::shell_quote(&artifact.path);
+            let kind = crate::s2::shell_quote(artifact.kind.label());
+            let _ = writeln!(
+                cases,
+                "              path={path}\n              test -e \"$GITHUB_WORKSPACE/$path\" || {{ echo \"::error::artifact product {product_name} was not produced at $path\" >&2; exit 1; }}\n              case {kind} in\n                file) test -f \"$GITHUB_WORKSPACE/$path\" ;;\n                directory|xcframework) test -d \"$GITHUB_WORKSPACE/$path\" ;;\n                *) echo \"::error::unknown artifact kind {kind}\" >&2; exit 1 ;;\n              esac\n              product_dir=\"$stage/{product_name}\"\n              mkdir -p \"$product_dir\"\n              tar -C \"$GITHUB_WORKSPACE\" -cf \"$product_dir/archive.tar\" -- \"$path\"\n              digest=\"$(sha256 \"$product_dir/archive.tar\")\"\n              jq -n --arg producer \"$CI_UNIT_ID\" --arg product {product_name} --arg source_sha \"$HEAD_SHA\" --arg path {path} --arg kind {kind} --arg archive_sha256 \"$digest\" '{{schema: 1, producer: $producer, product: $product, source_sha: $source_sha, path: $path, kind: $kind, archive_sha256: $archive_sha256}}' > \"$product_dir/manifest.json\"",
+            );
+        }
+        let _ = writeln!(cases, "              ;;");
+    }
+    format!(
+        "      - name: Stage hosted product artifacts\n        if: success() && ({selector})\n        env:\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n        run: |\n          set -euo pipefail\n          sha256() {{\n            if command -v sha256sum >/dev/null 2>&1; then sha256sum \"$1\" | awk '{{print $1}}'; else shasum -a 256 \"$1\" | awk '{{print $1}}'; fi\n          }}\n          stage=\"$RUNNER_TEMP/velnor-products\"\n          rm -rf \"$stage\"\n          mkdir -p \"$stage\"\n          case \"$CI_UNIT_ID\" in\n{cases}            *) echo \"::error::unknown product producer unit: $CI_UNIT_ID\" >&2; exit 1 ;;\n          esac\n      - name: Publish hosted product artifacts\n        if: success() && ({selector})\n        uses: {upload_pin}\n        with:\n          name: ${{{{ format('velnor-products-{{0}}-{{1}}', inputs.unit, inputs.head_sha) }}}}\n          path: ${{{{ runner.temp }}}}/velnor-products\n          if-no-files-found: error\n          retention-days: 1\n",
+    )
+}
+
+/// Hosted consumer-side download and exact manifest/archive verification for
+/// explicit product artifacts. Extraction is deliberately before the unit
+/// command, so a missing or stale product fails instead of rebuilding locally.
+fn render_product_download_steps(
+    download_pin: &str,
+    members: &[&Unit],
+    all_units: &[Unit],
+) -> String {
+    let Some(selector) = artifact_unit_selector(members, |unit| {
+        unit.prerequisites.iter().any(|prerequisite| {
+            all_units.iter().any(|producer| {
+                producer.id == prerequisite.producer
+                    && producer.products.iter().any(|product| {
+                        product.name == prerequisite.product && product.artifact.is_some()
+                    })
+            })
+        })
+    }) else {
+        return String::new();
+    };
+    let mut cases = String::new();
+    for unit in members {
+        let prerequisites = unit
+            .prerequisites
+            .iter()
+            .filter_map(|prerequisite| {
+                let producer = all_units
+                    .iter()
+                    .find(|producer| producer.id == prerequisite.producer)?;
+                let product = producer
+                    .products
+                    .iter()
+                    .find(|product| product.name == prerequisite.product)?;
+                let artifact = product.artifact.as_ref()?;
+                Some((prerequisite, product, artifact))
+            })
+            .collect::<Vec<_>>();
+        if prerequisites.is_empty() {
+            let _ = writeln!(
+                cases,
+                "            {}) exit 0 ;;",
+                crate::s2::shell_quote(&unit.id)
+            );
+            continue;
+        }
+        let _ = writeln!(cases, "            {})", crate::s2::shell_quote(&unit.id));
+        for (prerequisite, product, artifact) in prerequisites {
+            let producer = crate::s2::shell_quote(&prerequisite.producer);
+            let product_name = crate::s2::shell_quote(&product.name);
+            let path = crate::s2::shell_quote(&artifact.path);
+            let kind = crate::s2::shell_quote(artifact.kind.label());
+            let _ = writeln!(
+                cases,
+                "              found=\"\"\n              while IFS= read -r manifest; do\n                if jq -e --arg producer {producer} --arg product {product_name} --arg source_sha \"$HEAD_SHA\" --arg path {path} --arg kind {kind} '.schema == 1 and .producer == $producer and .product == $product and .source_sha == $source_sha and .path == $path and .kind == $kind' \"$manifest\" >/dev/null; then\n                  test \"$found\" = \"\" || {{ echo \"::error::duplicate artifact manifests for {producer}:{product_name}\" >&2; exit 1; }}\n                  found=\"$manifest\"\n                fi\n              done < <(find \"$incoming\" -type f -name manifest.json -print)\n              test \"$found\" != \"\" || {{ echo \"::error::no exact artifact manifest for {producer}:{product_name} at source $HEAD_SHA\" >&2; exit 1; }}\n              archive=\"${{found%/manifest.json}}/archive.tar\"\n              actual=\"$(sha256 \"$archive\")\"\n              expected=\"$(jq -er '.archive_sha256' \"$found\")\"\n              test \"$actual\" = \"$expected\" || {{ echo \"::error::artifact digest mismatch for {producer}:{product_name}\" >&2; exit 1; }}\n              while IFS= read -r entry; do\n                case \"$entry\" in\n                  {path}|{path}/*) ;;\n                  *) echo \"::error::artifact archive contains unexpected path $entry\" >&2; exit 1 ;;\n                esac\n                case \"$entry\" in\n                  /*|../*|*/../*|*/..|.) echo \"::error::artifact archive traversal entry $entry\" >&2; exit 1 ;;\n                esac\n              done < <(tar -tf \"$archive\")\n              tar -C \"$GITHUB_WORKSPACE\" -xf \"$archive\"\n              destination=\"$GITHUB_WORKSPACE/{path}\"\n              test -e \"$destination\" || {{ echo \"::error::artifact did not materialize {path}\" >&2; exit 1; }}\n              case {kind} in\n                file) test -f \"$destination\" ;;\n                directory|xcframework) test -d \"$destination\" ;;\n              esac",
+            );
+        }
+        let _ = writeln!(cases, "              ;;");
+    }
+    format!(
+        "      - name: Download hosted product artifacts\n        if: success() && ({selector})\n        uses: {download_pin}\n        with:\n          pattern: velnor-products-*\n          path: ${{{{ runner.temp }}}}/velnor-product-inputs\n          merge-multiple: false\n      - name: Materialize hosted product artifacts\n        if: success() && ({selector})\n        env:\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n        run: |\n          set -euo pipefail\n          sha256() {{\n            if command -v sha256sum >/dev/null 2>&1; then sha256sum \"$1\" | awk '{{print $1}}'; else shasum -a 256 \"$1\" | awk '{{print $1}}'; fi\n          }}\n          incoming=\"$RUNNER_TEMP/velnor-product-inputs\"\n          test -d \"$incoming\" || {{ echo \"::error::product artifact download directory is missing\" >&2; exit 1; }}\n          case \"$CI_UNIT_ID\" in\n{cases}            *) echo \"::error::unknown product consumer unit: $CI_UNIT_ID\" >&2; exit 1 ;;\n          esac\n",
+    )
+}
+
 /// Whether any of the unit's commands drive the test runner through Cargo or
 /// Mr. Boxington. One predicate feeds both the `ToolRequirement` selection and
 /// the mise install list, so the two can never disagree about what a unit
@@ -3653,6 +3771,33 @@ impl WorkflowIr {
             .collect()
     }
 
+    fn artifact_producer_needs(&self, unit: &Unit, provider: ProviderId) -> Vec<String> {
+        if provider != ProviderId::GithubHosted {
+            return Vec::new();
+        }
+        let mut needs = Vec::new();
+        for prerequisite in &unit.prerequisites {
+            let Some(producer) = self
+                .units
+                .iter()
+                .find(|candidate| candidate.id == prerequisite.producer)
+            else {
+                continue;
+            };
+            let is_artifact = producer
+                .products
+                .iter()
+                .any(|product| product.name == prerequisite.product && product.artifact.is_some());
+            if is_artifact {
+                let job = unit_job_id(ProviderId::GithubHosted, &producer.id);
+                if !needs.contains(&job) {
+                    needs.push(job);
+                }
+            }
+        }
+        needs
+    }
+
     fn kind_file_needs_prepare_cargo(&self, file: &str) -> bool {
         self.providers.iter().any(|provider| provider.is_local())
             && kind_from_unit_workflow_file(file) == Some(UnitKind::Rust)
@@ -3766,6 +3911,8 @@ impl WorkflowIr {
             &mut needs,
             rust_dependency_needs(provider, unit, self.rust_needs, &self.units),
         );
+        let artifact_needs = self.artifact_producer_needs(unit, provider);
+        append_unique_needs(&mut needs, artifact_needs.iter().cloned());
         let mut conditions = vec![
             "always()".to_owned(),
             "needs.plan.result == 'success'".to_owned(),
@@ -3780,6 +3927,11 @@ impl WorkflowIr {
             );
         }
         for dependency in rust_dependency_needs(provider, unit, self.rust_needs, &self.units) {
+            conditions.push(format!(
+                "(needs.{dependency}.result == 'success' || needs.{dependency}.result == 'skipped')"
+            ));
+        }
+        for dependency in artifact_needs {
             conditions.push(format!(
                 "(needs.{dependency}.result == 'success' || needs.{dependency}.result == 'skipped')"
             ));
@@ -4780,6 +4932,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             render_ci_cargo_fetch_end_marker(output);
         }
 
+        if hosted {
+            output.push_str(&render_product_download_steps(
+                self.pins.download_artifact,
+                members,
+                &self.units,
+            ));
+        }
+
         // The generator's self-check (`--plain --check`) resolves the D19 pin's
         // closures from local history, but unit checkouts are shallow. Fetch
         // the pin commit for check-running members before verification.
@@ -4826,6 +4986,12 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         // owning unit publishes, only on pull requests (the steps carry
         // that event gate themselves), and only on success (no `always()`).
         let candidate = FeatureCoverage::over(&facts, |facts| facts.candidate_publish);
+        if hosted {
+            output.push_str(&render_product_upload_steps(
+                self.pins.upload_artifact,
+                members,
+            ));
+        }
         if hosted && candidate.any {
             output.push_str(&gated(
                 candidate_publish_steps(self.pins.upload_artifact),

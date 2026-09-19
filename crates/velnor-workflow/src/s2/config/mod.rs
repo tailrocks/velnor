@@ -578,6 +578,12 @@ pub(crate) struct ProductSection {
     task: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     env: Option<BTreeMap<String, String>>,
+    /// Repository-relative path staged into a hosted product artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    artifact_path: Option<String>,
+    /// Explicit artifact shape: `file`, `directory`, or `xcframework`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    artifact_kind: Option<String>,
 }
 
 /// One prerequisite edge a `[[units]]` row declares: the producer unit, the
@@ -1034,8 +1040,8 @@ impl UnitSection {
     /// The named products this row declares.
     ///
     /// # Errors
-    /// Returns a usage error for a product without a name, an invalid task
-    /// or env, or a name the row declares twice.
+    /// Returns a usage error for a product without a name, an invalid task,
+    /// env, or artifact contract, or a name the row declares twice.
     pub(crate) fn named_products(
         &self,
         id: &str,
@@ -1069,10 +1075,44 @@ impl UnitSection {
                     &format!("[[units]] {id} product `{name}`"),
                 )?;
             }
+            let artifact = match (
+                product.artifact_path.as_deref(),
+                product.artifact_kind.as_deref(),
+            ) {
+                (None, None) => None,
+                (Some(path), Some(kind)) => {
+                    if !crate::s2::platform::valid_artifact_path(path) {
+                        return Err(GeneratorError::usage(format!(
+                            "[[units]] {id} product `{name}` declares artifact_path `{path}`, which must be a safe repository-relative path without traversal, backslashes, or control characters"
+                        )));
+                    }
+                    Some(crate::s2::platform::ProductArtifact {
+                        path: path.to_owned(),
+                        kind: crate::s2::platform::ProductArtifactKind::parse(kind).map_err(
+                            |error| {
+                                GeneratorError::usage(format!(
+                                    "[[units]] {id} product `{name}`: {error}"
+                                ))
+                            },
+                        )?,
+                    })
+                }
+                (Some(_), None) | (None, Some(_)) => {
+                    return Err(GeneratorError::usage(format!(
+                        "[[units]] {id} product `{name}` must declare both `artifact_path` and `artifact_kind`"
+                    )));
+                }
+            };
+            if artifact.is_some() && product.task.is_none() {
+                return Err(GeneratorError::usage(format!(
+                    "[[units]] {id} product `{name}` must declare `task` when it crosses a hosted job boundary"
+                )));
+            }
             products.push(crate::s2::platform::NamedProduct {
                 name: name.to_owned(),
                 task: product.task.clone(),
                 env: product.env.clone().unwrap_or_default(),
+                artifact,
             });
         }
         Ok(products)

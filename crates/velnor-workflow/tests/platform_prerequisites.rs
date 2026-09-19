@@ -300,6 +300,70 @@ fn ffi_prerequisite_selects_the_consumer_and_prepares_the_product() {
 }
 
 #[test]
+fn artifact_prerequisite_builds_once_and_crosses_hosted_jobs() {
+    let root = unique_dir("ffi-artifact");
+    write_ffi_fixture(&root);
+    write_config(
+        &root,
+        "[workflow]\nrunners = \"github\"\ngithub_runner = \"ubuntu-24.04\"\n\n\
+         [[units]]\nid = \"rust-ffi\"\nos = \"macos\"\n\n\
+         [[units.products]]\nname = \"xcframework\"\ntask = \"build-xcframework\"\nartifact_path = \"target/xcframework/App.xcframework\"\nartifact_kind = \"xcframework\"\n\n\
+         [units.products.env]\nXCFRAMEWORK_PATH = \"target/xcframework/App.xcframework\"\n\n\
+         [[units]]\nid = \"swift-package-app\"\ncapabilities = [\"xcframework\"]\n\n\
+         [[units.prerequisites]]\nproducer = \"rust-ffi\"\nproduct = \"xcframework\"\n\n\
+         [units.prerequisites.env]\nTARGETS = \"ios\"\n",
+    );
+    let generated = generate(&root);
+    let project = generated.project();
+    let producer = unit_block(&project, "rust-ffi");
+    let consumer = unit_block(&project, "swift-package-app");
+    assert!(
+        producer.contains("TARGETS='ios' mise run build-xcframework"),
+        "the producer owns the artifact task and its inputs: {producer}"
+    );
+    assert!(
+        !consumer.contains("mise run build-xcframework"),
+        "the consumer must not silently rebuild a cross-job artifact: {consumer}"
+    );
+    let rust = generated.workflow("ci-unit-rust.yml");
+    assert!(
+        rust.contains("Publish hosted product artifacts")
+            && rust.contains("archive_sha256")
+            && rust.contains("source_sha"),
+        "the producer publishes an identity-bound manifest: {rust}"
+    );
+    let swift = generated.workflow("ci-unit-swift.yml");
+    assert!(
+        swift.contains("Download hosted product artifacts")
+            && swift.contains("Materialize hosted product artifacts")
+            && swift.contains("duplicate artifact manifests"),
+        "the consumer verifies and materializes the producer artifact: {swift}"
+    );
+    let aggregate = generated.workflow("ci-pr.yml");
+    assert!(
+        aggregate.contains("needs: [plan, github-rust-ffi]"),
+        "the consumer caller waits for the hosted producer job: {aggregate}"
+    );
+}
+
+#[test]
+fn artifact_contract_requires_both_typed_fields_and_a_task() {
+    let root = unique_dir("artifact-contract");
+    write_ffi_fixture(&root);
+    write_config(
+        &root,
+        "[workflow]\nrunners = \"github\"\ngithub_runner = \"ubuntu-24.04\"\n\n\
+         [[units]]\nid = \"rust-ffi\"\n\n\
+         [[units.products]]\nname = \"headers\"\nartifact_path = \"../outside\"\n",
+    );
+    let error = generate_fail(&root);
+    assert!(
+        error.contains("must declare both `artifact_path` and `artifact_kind`"),
+        "partial artifact metadata fails before rendering: {error}"
+    );
+}
+
+#[test]
 fn prerequisite_on_an_undeclared_product_fails_closed() {
     let root = unique_dir("missing-product");
     write_ffi_fixture(&root);

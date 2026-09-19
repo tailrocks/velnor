@@ -10,10 +10,12 @@
 //! products through named tasks, and a consumer declares which producer
 //! products it needs. Generation compiles each edge into the selection graph
 //! (`depends_on`, so producer changes select the consumer transitively) and
-//! into prepare commands (so the consumer rebuilds the product locally before
-//! its own checks), with environment flowing from task inputs to job outputs.
+//! into prepare commands (local products rebuild on the consumer; explicit
+//! artifact products build once on the producer and cross the hosted DAG),
+//! with environment flowing from task inputs to job outputs.
 
 use std::collections::BTreeMap;
+use std::path::{Component, Path};
 
 use serde::Serialize;
 
@@ -31,6 +33,48 @@ pub(crate) struct NamedProduct {
     pub(crate) task: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) env: BTreeMap<String, String>,
+    /// Optional cross-provider materialization contract. Without this field
+    /// the existing local prepare semantics remain in force.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) artifact: Option<ProductArtifact>,
+}
+
+/// A product archive that crosses hosted jobs. The path is restored exactly
+/// relative to the repository root; the kind lets the consumer prove that a
+/// bundle/file/directory was materialized before its checks run.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct ProductArtifact {
+    pub(crate) path: String,
+    pub(crate) kind: ProductArtifactKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ProductArtifactKind {
+    File,
+    Directory,
+    Xcframework,
+}
+
+impl ProductArtifactKind {
+    pub(crate) fn parse(value: &str) -> Result<Self, GeneratorError> {
+        match value {
+            "file" => Ok(Self::File),
+            "directory" => Ok(Self::Directory),
+            "xcframework" => Ok(Self::Xcframework),
+            other => Err(GeneratorError::usage(format!(
+                "product artifact kind `{other}` is unsupported; use `file`, `directory`, or `xcframework`"
+            ))),
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Directory => "directory",
+            Self::Xcframework => "xcframework",
+        }
+    }
 }
 
 /// One prerequisite edge: `producer` builds `product` for this consumer.
@@ -76,6 +120,20 @@ pub(crate) fn valid_task_name(value: &str) -> bool {
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'/' | b'-')
         })
+}
+
+/// An artifact path is a repository-relative, slash-separated path. Reject
+/// absolute paths, parent traversal, control bytes, and backslashes before it
+/// reaches tar or a generated shell step.
+pub(crate) fn valid_artifact_path(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 4096
+        && !value.starts_with('-')
+        && !value.contains('\\')
+        && !value.chars().any(char::is_control)
+        && Path::new(value)
+            .components()
+            .all(|component| matches!(component, Component::Normal(segment) if !segment.is_empty()))
 }
 
 /// An environment variable name for unit and task env.
@@ -183,17 +241,64 @@ fn find_product<'a>(
         .and_then(|unit| unit.products.iter().find(|product| product.name == name))
 }
 
-/// Compile prerequisite edges into `depends_on` (so producer changes select
-/// the consumer through the existing transitive closure), prepare commands
-/// (so the consumer rebuilds each product before its own checks on every
-/// provider), and consumer env (so product outputs reach the checks).
-fn materialize_prerequisites(config: &mut ProjectConfig) -> Result<(), GeneratorError> {
+fn validate_artifact_prerequisite(
+    config: &ProjectConfig,
+    unit: &Unit,
+    producer: &Unit,
+    prerequisite: &Prerequisite,
+    product: &NamedProduct,
+) -> Result<(), GeneratorError> {
+    let Some(artifact) = product.artifact.as_ref() else {
+        return Ok(());
+    };
+    if prerequisite.effective_task(product).is_none() {
+        return Err(GeneratorError::usage(format!(
+            "unit `{}` requires artifact product `{}:{}` but the producer declares no build task",
+            unit.id, prerequisite.producer, prerequisite.product
+        )));
+    }
+    if !config
+        .providers
+        .contains(&crate::s2::provider::ProviderId::GithubHosted)
+    {
+        return Err(GeneratorError::usage(format!(
+            "artifact product `{}:{}` requires the GitHub-hosted provider, but this project enables no hosted provider; keep the producer/consumer handoff on hosted jobs",
+            prerequisite.producer, prerequisite.product
+        )));
+    }
+    if !crate::s2::provider_supports_unit(crate::s2::provider::ProviderId::GithubHosted, producer)
+        || !crate::s2::provider_supports_unit(crate::s2::provider::ProviderId::GithubHosted, unit)
+    {
+        return Err(GeneratorError::usage(format!(
+            "artifact product `{}:{}` for unit `{}` requires both producer and consumer to be GitHub-hosted eligible; artifact transfer never falls back to a local provider",
+            prerequisite.producer, prerequisite.product, unit.id
+        )));
+    }
+    if artifact.kind == ProductArtifactKind::Xcframework
+        && (producer.platform != crate::s2::provider::Platform::MacosArm64
+            || unit.platform != crate::s2::provider::Platform::MacosArm64)
+    {
+        return Err(GeneratorError::usage(format!(
+            "XCFramework product `{}:{}` requires Apple-bound producer `{}` and consumer `{}` platform contracts",
+            prerequisite.producer, prerequisite.product, producer.id, unit.id
+        )));
+    }
+    if artifact.kind == ProductArtifactKind::Xcframework && prerequisite.task.is_some() {
+        return Err(GeneratorError::usage(format!(
+            "XCFramework prerequisite `{}:{}` cannot override the producer task; declare the canonical artifact-producing task on the producer product",
+            prerequisite.producer, prerequisite.product
+        )));
+    }
+    Ok(())
+}
+
+fn validate_prerequisite_edges(config: &ProjectConfig) -> Result<(), GeneratorError> {
     for unit in &config.units {
         for prerequisite in &unit.prerequisites {
             let Some(producer) = config
                 .units
                 .iter()
-                .find(|unit| unit.id == prerequisite.producer)
+                .find(|candidate| candidate.id == prerequisite.producer)
             else {
                 return Err(GeneratorError::usage(format!(
                     "unit `{}` requires product `{}` from `{}`, a unit the repository does not declare; known units: {}",
@@ -203,16 +308,16 @@ fn materialize_prerequisites(config: &mut ProjectConfig) -> Result<(), Generator
                     config
                         .units
                         .iter()
-                        .map(|unit| unit.id.as_str())
+                        .map(|candidate| candidate.id.as_str())
                         .collect::<Vec<_>>()
                         .join(", ")
                 )));
             };
-            if !producer
+            let Some(product) = producer
                 .products
                 .iter()
-                .any(|product| product.name == prerequisite.product)
-            {
+                .find(|product| product.name == prerequisite.product)
+            else {
                 let offered = producer
                     .products
                     .iter()
@@ -228,10 +333,22 @@ fn materialize_prerequisites(config: &mut ProjectConfig) -> Result<(), Generator
                     "unit `{}` requires product `{}` from `{}`, which does not produce it; {}",
                     unit.id, prerequisite.product, prerequisite.producer, offered
                 )));
-            }
+            };
+            validate_artifact_prerequisite(config, unit, producer, prerequisite, product)?;
         }
     }
+    Ok(())
+}
+
+/// Compile prerequisite edges into `depends_on` (so producer changes select
+/// the consumer through the existing transitive closure), prepare commands,
+/// and consumer env. Local products keep the old consumer-side prepare step;
+/// artifact products run their task in the producer and are transferred by
+/// the hosted workflow renderer.
+fn materialize_prerequisites(config: &mut ProjectConfig) -> Result<(), GeneratorError> {
+    validate_prerequisite_edges(config)?;
     let mut prepared: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut producer_prepared: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut inherited_env: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut edges: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for unit in &config.units {
@@ -255,10 +372,20 @@ fn materialize_prerequisites(config: &mut ProjectConfig) -> Result<(), Generator
                     .or_insert_with(|| value.clone());
             }
             if let Some(task) = prerequisite.effective_task(product) {
-                prepared
-                    .entry(unit.id.clone())
-                    .or_default()
-                    .push(prepare_command(task, &prerequisite.env));
+                if product.artifact.is_some() {
+                    let commands = producer_prepared
+                        .entry(prerequisite.producer.clone())
+                        .or_default();
+                    let command = prepare_command(task, &prerequisite.env);
+                    if !commands.contains(&command) {
+                        commands.push(command);
+                    }
+                } else {
+                    prepared
+                        .entry(unit.id.clone())
+                        .or_default()
+                        .push(prepare_command(task, &prerequisite.env));
+                }
             }
         }
     }
@@ -276,6 +403,9 @@ fn materialize_prerequisites(config: &mut ProjectConfig) -> Result<(), Generator
             }
         }
         if let Some(commands) = prepared.remove(&unit.id) {
+            prepend_prepare_commands(unit, &commands);
+        }
+        if let Some(commands) = producer_prepared.remove(&unit.id) {
             prepend_prepare_commands(unit, &commands);
         }
     }
@@ -329,8 +459,8 @@ pub(crate) fn agreed_env(
 #[cfg(test)]
 mod tests {
     use super::{
-        agreed_env, is_ffi_crate_type, prepare_command, valid_env_name, valid_env_value,
-        valid_product_name, valid_task_name, NamedProduct, Prerequisite,
+        agreed_env, is_ffi_crate_type, prepare_command, valid_artifact_path, valid_env_name,
+        valid_env_value, valid_product_name, valid_task_name, NamedProduct, Prerequisite,
     };
     use crate::s2::provider::{Capabilities, Platform, TrustReq};
     use crate::s2::{Unit, UnitKind};
@@ -404,6 +534,10 @@ mod tests {
         assert!(!valid_env_name("HAS-DASH"));
         assert!(valid_env_value("-C link-arg=-fuse-ld=mold"));
         assert!(!valid_env_value("line\nbreak"));
+        assert!(valid_artifact_path("target/xcframework/App.xcframework"));
+        assert!(!valid_artifact_path("../outside"));
+        assert!(!valid_artifact_path("/tmp/product"));
+        assert!(!valid_artifact_path("target\\product"));
     }
 
     #[test]
@@ -436,6 +570,7 @@ mod tests {
             name: "xcframework".to_owned(),
             task: Some("build-xcframework".to_owned()),
             env: std::collections::BTreeMap::new(),
+            artifact: None,
         };
         let plain = Prerequisite {
             producer: "rust-ffi".to_owned(),
