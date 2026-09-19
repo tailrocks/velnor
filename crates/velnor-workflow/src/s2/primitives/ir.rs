@@ -841,6 +841,11 @@ mod tests {
         assert!(producer.contains("CARGO_NET_OFFLINE=true"), "{producer}");
         assert!(producer.contains("profile: $profile"), "{producer}");
         assert!(
+            producer.contains("Remove candidate build workspace"),
+            "{producer}"
+        );
+        assert!(producer.contains("if: always()"), "{producer}");
+        assert!(
             producer.contains("build_image_platform_digest"),
             "{producer}"
         );
@@ -3183,7 +3188,6 @@ impl WorkflowIr {
           cleanup() {{
             status=$?
             if [[ -n "${{cid:-}}" ]]; then docker_cmd rm -f "$cid" >/dev/null 2>&1 || status=1; fi
-            rm -rf "$stage" || status=1
             trap - EXIT
             exit "$status"
           }}
@@ -3235,6 +3239,9 @@ impl WorkflowIr {
           path: ${{{{ runner.temp }}}}/velnor-workflow-candidate
           if-no-files-found: error
           retention-days: 1
+      - name: Remove candidate build workspace
+        if: always()
+        run: rm -rf -- "${{{{ runner.temp }}}}/velnor-workflow-candidate"
 "#,
             job = CANDIDATE_PRODUCER_JOB,
             artifact = crate::s2::CANDIDATE_ARTIFACT_NAME,
