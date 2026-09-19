@@ -50,10 +50,14 @@ pub struct LaneCompareArgs {
     /// Number of recent completed both-lane runs to inspect in --watch mode.
     #[arg(long, default_value_t = 5)]
     pub since: usize,
-    /// Compare exactly this GitHub-lane job id (skips name-based pairing).
+    /// Compare exactly this GitHub-lane job id as a diagnostic subset.  The
+    /// complete run census is still fetched and validated; selectors never
+    /// define the expected workload or produce a full-run gate result.
     #[arg(long, requires = "velnor_job")]
     pub github_job: Option<u64>,
-    /// Compare exactly this Velnor-lane job id (skips name-based pairing).
+    /// Compare exactly this Velnor-lane job id as a diagnostic subset.  The
+    /// complete run census is still fetched and validated; selectors never
+    /// define the expected workload or produce a full-run gate result.
     #[arg(long, requires = "github_job")]
     pub velnor_job: Option<u64>,
     /// Directory for the report and raw evidence.
@@ -119,6 +123,17 @@ struct Job {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct RunSummary {
+    id: u64,
+    status: String,
+    conclusion: Option<String>,
+    event: String,
+    head_sha: String,
+    #[serde(default)]
+    run_attempt: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct Step {
     name: String,
     #[allow(dead_code)]
@@ -153,6 +168,78 @@ struct LaneLogStats {
     ansi: bool,
 }
 
+#[derive(Debug, Clone)]
+struct PairEvidence {
+    github_html: BTreeMap<u64, HtmlStep>,
+    velnor_html: BTreeMap<u64, HtmlStep>,
+    github_log: String,
+    github_content: LaneLogStats,
+    velnor_content: LaneLogStats,
+}
+
+#[derive(Debug, Clone)]
+struct ValidatedRun {
+    summary: RunSummary,
+    census: PairingCensus,
+    velnor_content: String,
+    pair_evidence: BTreeMap<(u64, u64), PairEvidence>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComparisonScope {
+    FullRun,
+    SubsetDiagnostic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComparisonDecision {
+    AuxiliaryPass,
+    DiagnosticOnly,
+    Fail,
+}
+
+fn comparison_decision(
+    scope: ComparisonScope,
+    strict: bool,
+    worse_rows: usize,
+    budget_failures: usize,
+) -> ComparisonDecision {
+    if worse_rows > 0 || budget_failures > 0 {
+        return if strict {
+            ComparisonDecision::Fail
+        } else {
+            ComparisonDecision::DiagnosticOnly
+        };
+    }
+    if !strict || scope == ComparisonScope::SubsetDiagnostic {
+        ComparisonDecision::DiagnosticOnly
+    } else {
+        ComparisonDecision::AuxiliaryPass
+    }
+}
+
+fn select_pairs(
+    census: &PairingCensus,
+    selected_jobs: Option<(u64, u64)>,
+    run_id: u64,
+) -> Result<(Vec<(Job, Job)>, ComparisonScope)> {
+    let Some((github_id, velnor_id)) = selected_jobs else {
+        return Ok((census.matched_pairs(), ComparisonScope::FullRun));
+    };
+    let selected = census
+        .matched
+        .iter()
+        .find(|(github, velnor, _)| github.id == github_id && velnor.id == velnor_id)
+        .map(|(github, velnor, _)| (github.clone(), velnor.clone()));
+    selected
+        .map(|pair| (vec![pair], ComparisonScope::SubsetDiagnostic))
+        .with_context(|| {
+            format!(
+                "selected jobs {github_id}/{velnor_id} are not a validated pair in run {run_id}; selectors cannot bypass the census"
+            )
+        })
+}
+
 pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
     super::validate_repo_slug("--repo", &args.repo)?;
     if args.watch {
@@ -164,26 +251,11 @@ pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
     };
 
     let jobs = fetch_run_jobs(&args.repo, run_id)?;
-    let census = match (args.github_job, args.velnor_job) {
-        (Some(_), Some(_)) => None,
-        _ => Some(pair_lane_census(&jobs)),
-    };
-    let pairs = match (args.github_job, args.velnor_job) {
-        (Some(gh), Some(vl)) => {
-            let github = jobs
-                .iter()
-                .find(|job| job.id == gh)
-                .with_context(|| format!("job {gh} not found in run {run_id}"))?;
-            let velnor = jobs
-                .iter()
-                .find(|job| job.id == vl)
-                .with_context(|| format!("job {vl} not found in run {run_id}"))?;
-            vec![(github.clone(), velnor.clone())]
-        }
-        _ => census
-            .as_ref()
-            .map(PairingCensus::matched_pairs)
-            .unwrap_or_default(),
+    let census = pair_lane_census(&jobs);
+    let selected_jobs = match (args.github_job, args.velnor_job) {
+        (Some(github), Some(velnor)) => Some((github, velnor)),
+        (None, None) => None,
+        _ => bail!("--github-job and --velnor-job must be supplied together"),
     };
 
     let out_dir = if args.output_dir.is_absolute() {
@@ -203,63 +275,72 @@ pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
     writeln!(report)?;
     writeln!(
         report,
-        "Gate: equal-or-better — zero rows where the GitHub lane shows \
-         information the Velnor lane lacks. Strict mode also requires a 1:1 \
-         GitHub↔Velnor bijection of comparison units."
+        "Comparison: equal-or-better — zero rows where the GitHub lane shows \
+         information the Velnor lane lacks. Expected comparison units come \
+         from the complete Actions jobs census; selectors cannot redefine it."
     )?;
     writeln!(report)?;
-    if let Some(census) = &census {
-        report.push_str(&format_pairing_report(census)?);
-    } else {
-        writeln!(
-            report,
-            "Pairing: explicit `--github-job` / `--velnor-job` override; \
-             full-run bijection skipped."
-        )?;
-    }
+    report.push_str(&format_pairing_report(&census)?);
 
-    let pairing_failures = census
-        .as_ref()
-        .is_some_and(PairingCensus::has_parity_failures);
-    if args.strict && pairing_failures {
-        writeln!(report, "\n## Result")?;
-        writeln!(report)?;
-        writeln!(
-            report,
-            "**FAIL** — pairing bijection failed (orphans, duplicates, \
-             skipped counterpart, and/or ambiguous names)."
-        )?;
-        let report_path = run_dir.join("report.md");
-        fs::write(&report_path, &report)
-            .with_context(|| format!("write {}", report_path.display()))?;
-        println!("{report}");
-        println!("report: {}", report_path.display());
-        bail!("lane-compare gate failed: pairing bijection; see report above");
-    }
-
-    for (github, velnor) in &pairs {
-        for job in [github, velnor] {
-            if job_is_skipped(job) {
-                continue;
-            }
-            if job.status != "completed" {
-                bail!(
-                    "job {} ({}) is {}, not completed — compare a finished run",
-                    job.name,
-                    job.id,
-                    job.status
-                );
-            }
+    let validated = match validate_run_evidence(&args.repo, run_id, &jobs, census.clone()) {
+        Ok(validated) => validated,
+        Err(error) => {
+            writeln!(report, "\n## Evidence")?;
+            writeln!(report)?;
+            writeln!(report, "**FAIL** — {error:#}")?;
+            writeln!(report, "\n## Result")?;
+            writeln!(report)?;
+            writeln!(report, "**FAIL** — run evidence is incomplete or not successful; no comparison gate result.")?;
+            let report_path = run_dir.join("report.md");
+            fs::write(&report_path, &report)
+                .with_context(|| format!("write {}", report_path.display()))?;
+            println!("{report}");
+            println!("report: {}", report_path.display());
+            return Err(error.context("lane-compare run evidence validation failed"));
         }
-    }
+    };
+    writeln!(report, "## Independently fetched evidence")?;
+    writeln!(report)?;
+    writeln!(
+        report,
+        "Actions run `{}`: status `{}`, conclusion `{}`, event `{}`, head `{}`; attempt `{}`.",
+        validated.summary.id,
+        validated.summary.status,
+        validated.summary.conclusion.as_deref().unwrap_or("-"),
+        validated.summary.event,
+        validated.summary.head_sha,
+        validated
+            .summary
+            .run_attempt
+            .map_or_else(|| "-".to_owned(), |attempt| attempt.to_string()),
+    )?;
+    writeln!(
+        report,
+        "Validated {} nonempty GitHub↔Velnor comparison unit(s) from the complete paginated jobs census and {} required Velnor job-log artifact(s).",
+        validated.census.matched.len(),
+        validated.pair_evidence.len(),
+    )?;
+    writeln!(
+        report,
+        "Limit: lane-compare is auxiliary. It does not independently prove expected source/ref, checkout SHA, required-check association, provider, runner, host, or trust identity; the independent checker must bind those facts."
+    )?;
+    writeln!(report)?;
 
-    // Lane content: GitHub jobs expose a per-job log download; Velnor V2 jobs
-    // do not (no v1 archive), so read the Velnor lane's job-log artifact(s).
-    let velnor_content =
-        fetch_velnor_job_log_artifacts(&args.repo, run_id).unwrap_or_else(|error| {
-            eprintln!("warning: velnor job-log artifacts unavailable: {error:#}");
-            String::new()
-        });
+    let (pairs, scope) = match select_pairs(&validated.census, selected_jobs, run_id) {
+        Ok(selected) => selected,
+        Err(error) => {
+            writeln!(report, "## Result")?;
+            writeln!(report)?;
+            writeln!(report, "**FAIL** — {error:#}")?;
+            let report_path = run_dir.join("report.md");
+            fs::write(&report_path, &report)
+                .with_context(|| format!("write {}", report_path.display()))?;
+            println!("{report}");
+            println!("report: {}", report_path.display());
+            return Err(error);
+        }
+    };
+
     if let Some(class) = args.class {
         writeln!(report)?;
         writeln!(report, "## §2.11 Velnor budget ({class:?})")?;
@@ -287,67 +368,61 @@ pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
     }
 
     for (github, velnor) in &pairs {
-        let github_html = fetch_job_html_steps(github).unwrap_or_else(|error| {
-            eprintln!("warning: {}: {error:#}", github.id);
-            BTreeMap::new()
-        });
-        let velnor_html = fetch_job_html_steps(velnor).unwrap_or_else(|error| {
-            eprintln!("warning: {}: {error:#}", velnor.id);
-            BTreeMap::new()
-        });
-        let github_content = fetch_github_job_log(&args.repo, github.id)
-            .map(|text| {
-                let stats = analyze_lane_log(&text);
-                let _ = fs::write(run_dir.join(format!("github-job-{}.log", github.id)), text);
-                stats
-            })
-            .unwrap_or_else(|error| {
-                eprintln!("warning: github job log {}: {error:#}", github.id);
-                LaneLogStats::default()
-            });
-        let velnor_stats = analyze_lane_log(&velnor_content);
+        let evidence = validated
+            .pair_evidence
+            .get(&(github.id, velnor.id))
+            .with_context(|| {
+                format!(
+                    "missing validated evidence for pair {}/{}",
+                    github.id, velnor.id
+                )
+            })?;
+        fs::write(
+            run_dir.join(format!("github-job-{}.log", github.id)),
+            &evidence.github_log,
+        )?;
         let (section, worse) = compare_pair(
             github,
             velnor,
-            &github_html,
-            &velnor_html,
-            github_content,
-            velnor_stats,
+            &evidence.github_html,
+            &evidence.velnor_html,
+            evidence.github_content,
+            evidence.velnor_content,
         )?;
         worse_total += worse;
         report.push_str(&section);
     }
-    if !velnor_content.is_empty() {
-        fs::write(run_dir.join("velnor-job-log.log"), &velnor_content)
-            .context("save velnor job-log artifact content")?;
+    if !validated.velnor_content.is_empty() {
+        fs::write(
+            run_dir.join("velnor-job-log.log"),
+            &validated.velnor_content,
+        )
+        .context("save velnor job-log artifact content")?;
     }
 
     writeln!(report, "\n## Result")?;
     writeln!(report)?;
-    if worse_total == 0 && budget_failures == 0 {
-        writeln!(
+    let decision = comparison_decision(scope, args.strict, worse_total, budget_failures);
+    match decision {
+        ComparisonDecision::AuxiliaryPass => writeln!(
             report,
-            "**PASS** — no paired step is less informative than the GitHub lane."
-        )?;
-        if pairing_failures {
-            writeln!(
-                report,
-                "Pairing orphans/duplicates/skipped counterparts/ambiguous names \
-                 are reported above; `--strict false` does not fail on them."
-            )?;
-        }
-    } else {
-        writeln!(
+            "**AUXILIARY PASS** — no paired step is less informative than the GitHub lane; this is not an authoritative goal/checker gate."
+        )?,
+        ComparisonDecision::DiagnosticOnly => writeln!(
+            report,
+            "**DIAGNOSTIC ONLY** — selected scope or non-strict mode cannot produce a full-run gate result ({} parity row(s), {} §2.11 budget failure(s)).",
+            worse_total,
+            budget_failures,
+        )?,
+        ComparisonDecision::Fail => writeln!(
             report,
             "**FAIL** — {worse_total} parity row(s) and {budget_failures} §2.11 budget failure(s)."
-        )?;
+        )?,
     }
     writeln!(report)?;
     writeln!(
         report,
-        "Known documented divergence (not gated): V2 jobs have no v1 log \
-         archive, so the per-job raw-log download 404s on the Velnor lane; \
-         the `job-log` artifact is the workaround."
+        "Required log and HTML evidence were fetched fail-closed. A missing, empty, truncated, or unavailable artifact/log is an evidence failure, not an empty comparison."
     )?;
 
     let report_path = run_dir.join("report.md");
@@ -355,8 +430,12 @@ pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
     println!("{report}");
     println!("report: {}", report_path.display());
 
-    if args.strict && (worse_total > 0 || budget_failures > 0 || pairing_failures) {
+    if decision == ComparisonDecision::Fail {
         bail!("lane-compare gate failed: {worse_total} worse row(s), {budget_failures} budget failure(s); see report above");
+    }
+    if decision == ComparisonDecision::DiagnosticOnly && scope == ComparisonScope::SubsetDiagnostic
+    {
+        bail!("lane-compare subset diagnostic is not a full-run gate; see report above");
     }
     Ok(())
 }
@@ -429,6 +508,7 @@ struct RunListItem {
     #[serde(rename = "databaseId")]
     database_id: u64,
     status: String,
+    conclusion: Option<String>,
 }
 
 fn recent_completed_run_ids(repo: &str, workflow: &str, limit: usize) -> Result<Vec<u64>> {
@@ -443,7 +523,7 @@ fn recent_completed_run_ids(repo: &str, workflow: &str, limit: usize) -> Result<
             "--limit",
             &limit.max(2).to_string(),
             "--json",
-            "databaseId,status",
+            "databaseId,status,conclusion",
         ])
         .output()
         .with_context(|| format!("spawn gh run list for {repo} {workflow}"))?;
@@ -457,7 +537,13 @@ fn recent_completed_run_ids(repo: &str, workflow: &str, limit: usize) -> Result<
         serde_json::from_slice(&output.stdout).context("parse gh run list output")?;
     Ok(runs
         .into_iter()
-        .filter(|run| run.status == "completed")
+        .filter(|run| {
+            run.status.eq_ignore_ascii_case("completed")
+                && run
+                    .conclusion
+                    .as_deref()
+                    .is_some_and(|conclusion| conclusion.eq_ignore_ascii_case("success"))
+        })
         .map(|run| run.database_id)
         .collect())
 }
@@ -491,17 +577,38 @@ fn save_jobs_json(run_dir: &Path, jobs: &[Job]) -> Result<()> {
 
 fn fetch_run_jobs(repo: &str, run_id: u64) -> Result<Vec<Job>> {
     let mut jobs = Vec::new();
+    let mut seen_ids = BTreeSet::new();
     let mut page = 1u32;
+    let mut total_count = None;
     loop {
         let payload = gh_api_bytes(&format!(
             "repos/{repo}/actions/runs/{run_id}/jobs?per_page=100&page={page}"
         ))?;
         let response: JobsResponse =
             serde_json::from_slice(&payload).context("parse run jobs response")?;
+        total_count.get_or_insert(response.total_count);
+        if total_count != Some(response.total_count) {
+            bail!("run {run_id} jobs API changed total_count while paging");
+        }
         let fetched = response.jobs.len();
-        jobs.extend(response.jobs);
-        if fetched == 0 || jobs.len() as u64 >= response.total_count {
+        for job in response.jobs {
+            if !seen_ids.insert(job.id) {
+                bail!("run {run_id} jobs API repeated job id {}", job.id);
+            }
+            jobs.push(job);
+        }
+        let total = total_count.unwrap_or_default();
+        if jobs.len() as u64 > total {
+            bail!("run {run_id} jobs API returned more rows than total_count {total}");
+        }
+        if jobs.len() as u64 == total {
             break;
+        }
+        if fetched == 0 {
+            bail!(
+                "run {run_id} jobs API ended after {} of {total} jobs; census is truncated",
+                jobs.len(),
+            );
         }
         page += 1;
     }
@@ -509,6 +616,217 @@ fn fetch_run_jobs(repo: &str, run_id: u64) -> Result<Vec<Job>> {
         bail!("run {run_id} has no jobs in {repo}");
     }
     Ok(jobs)
+}
+
+fn fetch_run_summary(repo: &str, run_id: u64) -> Result<RunSummary> {
+    let payload = gh_api_bytes(&format!("repos/{repo}/actions/runs/{run_id}"))?;
+    let summary: RunSummary = serde_json::from_slice(&payload)
+        .with_context(|| format!("parse run {run_id} summary response"))?;
+    if summary.id != run_id {
+        bail!(
+            "run summary identity mismatch: requested {run_id}, received {}",
+            summary.id
+        );
+    }
+    Ok(summary)
+}
+
+fn validate_run_summary(summary: &RunSummary, run_id: u64) -> Result<()> {
+    if !summary.status.eq_ignore_ascii_case("completed") {
+        bail!(
+            "run {run_id} is {}, not completed; incomplete runs cannot produce comparison evidence",
+            summary.status
+        );
+    }
+    if summary.conclusion.as_deref() != Some("success") {
+        bail!(
+            "run {run_id} conclusion is {}, not success",
+            summary.conclusion.as_deref().unwrap_or("missing")
+        );
+    }
+    if summary.event.trim().is_empty() {
+        bail!("run {run_id} has no event identity");
+    }
+    if summary.head_sha.len() != 40
+        || !summary
+            .head_sha
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        bail!("run {run_id} has no valid source head SHA");
+    }
+    Ok(())
+}
+
+fn validate_census(census: &PairingCensus, run_id: u64) -> Result<()> {
+    if census.matched.is_empty() {
+        bail!(
+            "run {run_id} has an empty comparison census; at least one nonempty GitHub↔Velnor workload pair is required"
+        );
+    }
+    if census.has_parity_failures() {
+        bail!(
+            "run {run_id} comparison census is not a complete 1:1 bijection; orphans, duplicates, skipped counterparts, or ambiguous names are present"
+        );
+    }
+    Ok(())
+}
+
+fn validate_job_success(job: &Job, lane: Lane, run_id: u64) -> Result<()> {
+    if !job.status.eq_ignore_ascii_case("completed") {
+        bail!(
+            "run {run_id} {} job {} ({}) is {}, not completed",
+            lane_name(lane),
+            job.id,
+            job.name,
+            job.status
+        );
+    }
+    if job.conclusion.as_deref() != Some("success") {
+        bail!(
+            "run {run_id} {} job {} ({}) conclusion is {}, not success",
+            lane_name(lane),
+            job.id,
+            job.name,
+            job.conclusion.as_deref().unwrap_or("missing")
+        );
+    }
+    Ok(())
+}
+
+fn lane_name(lane: Lane) -> &'static str {
+    match lane {
+        Lane::GitHub => "GitHub",
+        Lane::Velnor => "Velnor",
+    }
+}
+
+fn assess_run_evidence(
+    run_id: u64,
+    jobs: &[Job],
+    census: PairingCensus,
+    summary: RunSummary,
+    velnor_content: String,
+    pair_evidence: BTreeMap<(u64, u64), PairEvidence>,
+) -> Result<ValidatedRun> {
+    validate_run_summary(&summary, run_id)?;
+    validate_census(&census, run_id)?;
+    let job_ids: BTreeSet<u64> = jobs.iter().map(|job| job.id).collect();
+    if job_ids.len() != jobs.len() {
+        bail!("run {run_id} jobs census contains duplicate job identities");
+    }
+    for (github, velnor, _) in &census.matched {
+        if !job_ids.contains(&github.id) || !job_ids.contains(&velnor.id) {
+            bail!(
+                "run {run_id} pairing census references job {} or {} outside the supplied jobs census",
+                github.id,
+                velnor.id
+            );
+        }
+        validate_job_success(github, Lane::GitHub, run_id)?;
+        validate_job_success(velnor, Lane::Velnor, run_id)?;
+        let evidence = pair_evidence
+            .get(&(github.id, velnor.id))
+            .with_context(|| {
+                format!(
+                    "missing HTML/log evidence for validated pair {}/{} in run {run_id}",
+                    github.id, velnor.id
+                )
+            })?;
+        if evidence.github_html.is_empty() || evidence.velnor_html.is_empty() {
+            bail!(
+                "run {run_id} pair {}/{} has missing HTML check-step evidence",
+                github.id,
+                velnor.id
+            );
+        }
+        require_nonempty_evidence(
+            &format!("GitHub job {} log", github.id),
+            &evidence.github_log,
+        )?;
+    }
+    if pair_evidence.len() != census.matched.len() {
+        bail!(
+            "run {run_id} evidence census has {} pair payload(s) for {} expected pair(s)",
+            pair_evidence.len(),
+            census.matched.len()
+        );
+    }
+    require_nonempty_evidence(
+        &format!("Velnor job-log artifacts for run {run_id}"),
+        &velnor_content,
+    )?;
+    Ok(ValidatedRun {
+        summary,
+        census,
+        velnor_content,
+        pair_evidence,
+    })
+}
+
+fn validate_run_evidence(
+    repo: &str,
+    run_id: u64,
+    jobs: &[Job],
+    census: PairingCensus,
+) -> Result<ValidatedRun> {
+    let summary = fetch_run_summary(repo, run_id)?;
+    validate_run_summary(&summary, run_id)?;
+    validate_census(&census, run_id)?;
+    for (github, velnor, _) in &census.matched {
+        validate_job_success(github, Lane::GitHub, run_id)?;
+        validate_job_success(velnor, Lane::Velnor, run_id)?;
+    }
+    let expected_velnor_job_ids: Vec<u64> = census
+        .matched
+        .iter()
+        .map(|(_, velnor, _)| velnor.id)
+        .collect();
+    let velnor_content = fetch_velnor_job_log_artifacts(repo, run_id, &expected_velnor_job_ids)?;
+    let velnor_stats = analyze_lane_log(&velnor_content);
+    if velnor_stats.lines == 0 {
+        bail!("run {run_id} Velnor job-log artifacts were present but empty");
+    }
+
+    let mut pair_evidence = BTreeMap::new();
+    for (github, velnor, _) in &census.matched {
+        let github_html = fetch_job_html_steps(github).with_context(|| {
+            format!(
+                "fetch GitHub job {} HTML evidence for run {run_id}",
+                github.id
+            )
+        })?;
+        let velnor_html = fetch_job_html_steps(velnor).with_context(|| {
+            format!(
+                "fetch Velnor job {} HTML evidence for run {run_id}",
+                velnor.id
+            )
+        })?;
+        let github_log = fetch_github_job_log(repo, github.id).with_context(|| {
+            format!(
+                "fetch GitHub job {} log evidence for run {run_id}",
+                github.id
+            )
+        })?;
+        let github_content = analyze_lane_log(&github_log);
+        if github_content.lines == 0 {
+            bail!(
+                "run {run_id} GitHub job {} log evidence was empty",
+                github.id
+            );
+        }
+        pair_evidence.insert(
+            (github.id, velnor.id),
+            PairEvidence {
+                github_html,
+                velnor_html,
+                github_log,
+                github_content,
+                velnor_content: velnor_stats,
+            },
+        );
+    }
+    assess_run_evidence(run_id, jobs, census, summary, velnor_content, pair_evidence)
 }
 
 /// `gh api` subprocess: bypasses the reqwest TLS-fingerprint throttling GitHub
@@ -527,9 +845,18 @@ fn gh_api_bytes(path: &str) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
+fn require_nonempty_evidence(kind: &str, text: &str) -> Result<()> {
+    if text.trim().is_empty() {
+        bail!("{kind} evidence is empty");
+    }
+    Ok(())
+}
+
 fn fetch_github_job_log(repo: &str, job_id: u64) -> Result<String> {
     let bytes = gh_api_bytes(&format!("repos/{repo}/actions/jobs/{job_id}/logs"))?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+    let log = String::from_utf8_lossy(&bytes).into_owned();
+    require_nonempty_evidence(&format!("GitHub job {job_id} log"), &log)?;
+    Ok(log)
 }
 
 /// Job page HTML via curl (public page; `gh api` cannot fetch web routes —
@@ -550,7 +877,11 @@ fn fetch_job_html_steps(job: &Job) -> Result<BTreeMap<u64, HtmlStep>> {
         );
     }
     let html = String::from_utf8_lossy(&output.stdout);
-    Ok(parse_check_steps(&html))
+    let steps = parse_check_steps(&html);
+    if steps.is_empty() {
+        bail!("job {} page contained no check-step evidence", job.id);
+    }
+    Ok(steps)
 }
 
 /// Extract `<check-step …>` elements: `data-number` plus whether
@@ -593,46 +924,152 @@ fn attr_value<'a>(element: &'a str, name: &str) -> Option<&'a str> {
     Some(&rest[..end])
 }
 
-/// Download every per-job `job-log-*` artifact of the run and concatenate
-/// their text content. Legacy runs may still contain the unsuffixed `job-log`
-/// name, so the prefix also preserves backwards compatibility.
-fn fetch_velnor_job_log_artifacts(repo: &str, run_id: u64) -> Result<String> {
-    let payload = gh_api_bytes(&format!(
-        "repos/{repo}/actions/runs/{run_id}/artifacts?per_page=100"
-    ))?;
-    let response: serde_json::Value =
-        serde_json::from_slice(&payload).context("parse artifacts response")?;
-    let artifacts = response
-        .get("artifacts")
-        .and_then(|value| value.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let mut content = String::new();
-    for artifact in artifacts {
-        let name = artifact.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        if !name.starts_with("job-log") {
-            continue;
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+struct ArtifactRef {
+    id: u64,
+    name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ArtifactsResponse {
+    total_count: u64,
+    artifacts: Vec<ArtifactRef>,
+}
+
+/// Collect all artifact pages, rejecting duplicates and truncation.  The
+/// expected job ids are supplied by the independently fetched jobs census;
+/// artifact names cannot define the expected workload themselves.
+fn collect_job_log_artifacts(
+    pages: impl IntoIterator<Item = Result<ArtifactsResponse>>,
+    expected_job_ids: &[u64],
+) -> Result<BTreeMap<String, ArtifactRef>> {
+    let expected: BTreeSet<String> = expected_job_ids
+        .iter()
+        .map(|id| format!("job-log-{id}"))
+        .collect();
+    if expected.is_empty() {
+        bail!("cannot collect Velnor job-log artifacts without expected job ids");
+    }
+    if expected.len() != expected_job_ids.len() {
+        bail!("expected Velnor job-log artifact census contains duplicate job ids");
+    }
+    let mut collected = BTreeMap::new();
+    let mut observed = 0u64;
+    let mut saw_page = false;
+    let mut total_count = None;
+    for page in pages {
+        let page = page?;
+        saw_page = true;
+        observed = observed.saturating_add(page.artifacts.len() as u64);
+        total_count.get_or_insert(page.total_count);
+        if total_count != Some(page.total_count) {
+            bail!("artifacts API changed total_count while paging");
         }
-        let Some(id) = artifact.get("id").and_then(|v| v.as_u64()) else {
-            continue;
-        };
-        let zip_bytes = gh_api_bytes(&format!("repos/{repo}/actions/artifacts/{id}/zip"))?;
+        for artifact in page.artifacts {
+            if collected.insert(artifact.name.clone(), artifact).is_some() {
+                bail!("artifacts API repeated artifact name");
+            }
+        }
+        let total = page.total_count;
+        if observed > total {
+            bail!("artifacts API returned more rows than total_count {total}");
+        }
+    }
+    if !saw_page {
+        bail!("artifacts API returned no pages");
+    }
+    if observed != total_count.unwrap_or_default() {
+        bail!(
+            "artifacts API pages are truncated: observed {observed} of {} rows",
+            total_count.unwrap_or_default()
+        );
+    }
+    let missing: Vec<String> = expected
+        .iter()
+        .filter(|name| !collected.contains_key(*name))
+        .cloned()
+        .collect();
+    if !missing.is_empty() {
+        bail!(
+            "missing required Velnor job-log artifact(s): {}",
+            missing.join(", ")
+        );
+    }
+    Ok(collected)
+}
+
+/// Download every expected per-job `job-log-<job-id>` artifact across all
+/// paginated API pages. Missing, empty, duplicate, or truncated evidence is a
+/// hard error; it is never converted into an empty log or warning.
+fn fetch_velnor_job_log_artifacts(
+    repo: &str,
+    run_id: u64,
+    expected_job_ids: &[u64],
+) -> Result<String> {
+    let mut pages = Vec::new();
+    let mut page_number = 1u32;
+    let mut observed = 0u64;
+    let mut total_count = None;
+    loop {
+        let payload = gh_api_bytes(&format!(
+            "repos/{repo}/actions/runs/{run_id}/artifacts?per_page=100&page={page_number}"
+        ))?;
+        let page: ArtifactsResponse =
+            serde_json::from_slice(&payload).context("parse artifacts response")?;
+        let fetched = page.artifacts.len() as u64;
+        observed = observed.saturating_add(fetched);
+        total_count.get_or_insert(page.total_count);
+        if total_count != Some(page.total_count) {
+            bail!("artifacts API changed total_count while paging");
+        }
+        let done = observed >= page.total_count;
+        pages.push(Ok(page));
+        if done {
+            break;
+        }
+        if fetched == 0 {
+            bail!(
+                "artifacts API ended after {observed} of {} rows; required log census is truncated",
+                total_count.unwrap_or_default()
+            );
+        }
+        page_number += 1;
+    }
+    let artifacts = collect_job_log_artifacts(pages, expected_job_ids)?;
+    let mut content = String::new();
+    for job_id in expected_job_ids {
+        let name = format!("job-log-{job_id}");
+        let artifact = artifacts
+            .get(&name)
+            .with_context(|| format!("missing required artifact {name}"))?;
+        let zip_bytes = gh_api_bytes(&format!(
+            "repos/{repo}/actions/artifacts/{}/zip",
+            artifact.id
+        ))?;
         let cursor = std::io::Cursor::new(zip_bytes);
-        let mut zip = zip::ZipArchive::new(cursor).context("open job-log artifact zip")?;
+        let mut zip =
+            zip::ZipArchive::new(cursor).with_context(|| format!("open {name} artifact zip"))?;
+        let mut artifact_content = String::new();
         for index in 0..zip.len() {
-            let mut file = zip.by_index(index).context("read artifact entry")?;
+            let mut file = zip
+                .by_index(index)
+                .with_context(|| format!("read {name} artifact entry"))?;
             if file.is_dir() {
                 continue;
             }
             let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes).context("read artifact file")?;
-            content.push_str(&String::from_utf8_lossy(&bytes));
-            content.push('\n');
+            file.read_to_end(&mut bytes)
+                .with_context(|| format!("read {name} artifact file"))?;
+            artifact_content.push_str(&String::from_utf8_lossy(&bytes));
+            artifact_content.push('\n');
         }
+        require_nonempty_evidence(&format!("Velnor artifact {name}"), &artifact_content)?;
+        content.push_str(&artifact_content);
     }
-    if content.is_empty() {
-        bail!("no job-log artifacts found in run {run_id}");
-    }
+    require_nonempty_evidence(
+        &format!("Velnor job-log artifacts for run {run_id}"),
+        &content,
+    )?;
     Ok(content)
 }
 
@@ -1058,9 +1495,7 @@ pub fn is_regression(
 fn lane_stats_for_run(repo: &str, run_id: u64) -> Result<LaneStats> {
     let jobs = fetch_run_jobs(repo, run_id)?;
     let census = pair_lane_census(&jobs);
-    if census.matched.is_empty() {
-        bail!("run {run_id} has no both-lane job pairs");
-    }
+    let validated = validate_run_evidence(repo, run_id, &jobs, census)?;
 
     let mut stats = LaneStats {
         run_id,
@@ -1068,22 +1503,33 @@ fn lane_stats_for_run(repo: &str, run_id: u64) -> Result<LaneStats> {
         parity_worse_rows: 0,
         jobs: BTreeMap::new(),
     };
-    for (github, velnor, key) in &census.matched {
-        let github_html = fetch_job_html_steps(github).unwrap_or_default();
-        let velnor_html = fetch_job_html_steps(velnor).unwrap_or_default();
+    for (github, velnor, key) in &validated.census.matched {
+        let evidence = validated
+            .pair_evidence
+            .get(&(github.id, velnor.id))
+            .with_context(|| {
+                format!(
+                    "missing validated evidence for pair {}/{}",
+                    github.id, velnor.id
+                )
+            })?;
         let (_section, worse) = compare_pair(
             github,
             velnor,
-            &github_html,
-            &velnor_html,
-            LaneLogStats::default(),
-            LaneLogStats::default(),
+            &evidence.github_html,
+            &evidence.velnor_html,
+            evidence.github_content,
+            evidence.velnor_content,
         )?;
         stats.parity_worse_rows += worse;
         let (Some(github_seconds), Some(velnor_seconds)) =
             (job_duration_seconds(github), job_duration_seconds(velnor))
         else {
-            continue;
+            bail!(
+                "run {run_id} pair {}/{} has incomplete timing evidence",
+                github.id,
+                velnor.id
+            );
         };
         stats.jobs.insert(
             key.clone(),
@@ -1100,6 +1546,16 @@ fn baseline_from_samples(samples: &[LaneStats]) -> Option<LaneStats> {
     if samples.is_empty() {
         return None;
     }
+    let expected_units: BTreeSet<&String> = samples[0].jobs.keys().collect();
+    if expected_units.is_empty()
+        || samples
+            .iter()
+            .any(|sample| sample.jobs.keys().collect::<BTreeSet<_>>() != expected_units)
+    {
+        // A timing baseline with an empty or changing workload set would hide
+        // missing units by averaging only whatever happened to be present.
+        return None;
+    }
     let mut sums: BTreeMap<String, (f64, f64, usize)> = BTreeMap::new();
     for sample in samples {
         for (job_class, stats) in &sample.jobs {
@@ -1110,9 +1566,6 @@ fn baseline_from_samples(samples: &[LaneStats]) -> Option<LaneStats> {
         }
     }
     if sums.is_empty() {
-        // No baseline sample produced a complete timing pair. A baseline with
-        // no job timings would silently skip every regression comparison and
-        // false-green the gate, so refuse the baseline instead.
         return None;
     }
     let jobs = sums
@@ -1203,9 +1656,14 @@ fn regression_report(
         writeln!(report)?;
         writeln!(
             report,
-            "**PASS** — no parity or timing regression detected."
+            "**AUXILIARY PASS** — no parity or timing regression detected; this watch report is not an authoritative goal/checker gate."
         )?;
     }
+    writeln!(report)?;
+    writeln!(
+        report,
+        "Limit: watch validates nonempty terminal-success comparison runs and complete evidence, but does not independently prove source/ref, checkout, required-check, provider, runner, host, or trust identity."
+    )?;
     Ok(report)
 }
 
@@ -1397,11 +1855,12 @@ fn step_verdict(
     }
     let gh_expandable = github_html.get(&github.number).map(|step| step.expandable);
     let vl_expandable = velnor_html.get(&velnor.number).map(|step| step.expandable);
-    if executed(github)
-        && executed(velnor)
-        && let (Some(true), Some(false)) = (gh_expandable, vl_expandable)
-    {
-        worse.push("not expandable".to_string());
+    if executed(github) && executed(velnor) {
+        if gh_expandable == Some(true) && vl_expandable == Some(false) {
+            worse.push("not expandable".to_string());
+        } else if gh_expandable == Some(true) && vl_expandable.is_none() {
+            worse.push("missing HTML check-step evidence".to_string());
+        }
     }
     if worse.is_empty() {
         ("ok".to_string(), false)
@@ -1491,9 +1950,10 @@ fn compare_pair(
                 )?;
             }
             AlignedRow::VelnorOnly(vl_step) => {
+                worse_count += 1;
                 writeln!(
                     section,
-                    "| —/{} | — | {} | — | {} | — | {} | — | {} | velnor-only |",
+                    "| —/{} | — | {} | — | {} | — | {} | — | {} | WORSE (unexpected Velnor-only step) |",
                     vl_step.number,
                     vl_step.name,
                     vl_step.conclusion.as_deref().unwrap_or("-"),
@@ -1597,6 +2057,78 @@ mod tests {
             html_url: None,
             steps: Vec::new(),
         }
+    }
+
+    fn successful_summary() -> RunSummary {
+        RunSummary {
+            id: 42,
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            event: "pull_request".to_owned(),
+            head_sha: "a".repeat(40),
+            run_attempt: Some(1),
+        }
+    }
+
+    fn html_for_steps(numbers: &[u64]) -> BTreeMap<u64, HtmlStep> {
+        numbers
+            .iter()
+            .map(|number| {
+                (
+                    *number,
+                    HtmlStep {
+                        number: *number,
+                        expandable: true,
+                        external_id: format!("external-{number}"),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn pair_evidence(github: &Job, velnor: &Job) -> PairEvidence {
+        PairEvidence {
+            github_html: html_for_steps(
+                &github
+                    .steps
+                    .iter()
+                    .map(|step| step.number)
+                    .collect::<Vec<_>>(),
+            ),
+            velnor_html: html_for_steps(
+                &velnor
+                    .steps
+                    .iter()
+                    .map(|step| step.number)
+                    .collect::<Vec<_>>(),
+            ),
+            github_log: "github log\n".to_owned(),
+            github_content: analyze_lane_log("github log\n"),
+            velnor_content: analyze_lane_log("velnor log\n"),
+        }
+    }
+
+    fn valid_pair_fixture() -> (Vec<Job>, PairingCensus, BTreeMap<(u64, u64), PairEvidence>) {
+        let github = Job {
+            id: 1,
+            name: "Rust · rust-policy / GitHub".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            html_url: None,
+            steps: vec![step(1, "Run check", "success")],
+        };
+        let velnor = Job {
+            id: 2,
+            name: "Rust · rust-policy / Velnor".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            html_url: None,
+            steps: vec![step(1, "Run check", "success")],
+        };
+        let jobs = vec![github.clone(), velnor.clone()];
+        let census = pair_lane_census(&jobs);
+        let evidence = BTreeMap::from([((github.id, velnor.id), pair_evidence(&github, &velnor))]);
+        (jobs, census, evidence)
     }
 
     #[test]
@@ -1797,6 +2329,305 @@ mod tests {
     }
 
     #[test]
+    fn explicit_selector_still_requires_census_and_is_never_a_gate() {
+        let (jobs, census, evidence) = valid_pair_fixture();
+        let validated = assess_run_evidence(
+            42,
+            &jobs,
+            census,
+            successful_summary(),
+            "velnor log\n".to_owned(),
+            evidence,
+        )
+        .unwrap();
+        let (pairs, scope) = select_pairs(&validated.census, Some((1, 2)), 42).unwrap();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(scope, ComparisonScope::SubsetDiagnostic);
+        assert_eq!(
+            comparison_decision(scope, true, 0, 0),
+            ComparisonDecision::DiagnosticOnly
+        );
+        assert!(select_pairs(&validated.census, Some((1, 999)), 42).is_err());
+    }
+
+    #[test]
+    fn complete_validated_fixture_reaches_only_auxiliary_full_run_decision() {
+        let (jobs, census, evidence) = valid_pair_fixture();
+        let validated = assess_run_evidence(
+            42,
+            &jobs,
+            census,
+            successful_summary(),
+            "velnor log\n".to_owned(),
+            evidence,
+        )
+        .unwrap();
+        let (pairs, scope) = select_pairs(&validated.census, None, 42).unwrap();
+        let mut worse = 0;
+        for (github, velnor) in pairs {
+            let pair = validated
+                .pair_evidence
+                .get(&(github.id, velnor.id))
+                .unwrap();
+            worse += compare_pair(
+                &github,
+                &velnor,
+                &pair.github_html,
+                &pair.velnor_html,
+                pair.github_content,
+                pair.velnor_content,
+            )
+            .unwrap()
+            .1;
+        }
+        assert_eq!(worse, 0);
+        assert_eq!(
+            comparison_decision(scope, true, worse, 0),
+            ComparisonDecision::AuxiliaryPass
+        );
+        assert_eq!(
+            comparison_decision(ComparisonScope::FullRun, false, 0, 0),
+            ComparisonDecision::DiagnosticOnly
+        );
+    }
+
+    #[test]
+    fn empty_control_only_census_is_not_a_comparison() {
+        let jobs = vec![named_job(1, "Control / Planning")];
+        let census = pair_lane_census(&jobs);
+        assert!(assess_run_evidence(
+            42,
+            &jobs,
+            census,
+            successful_summary(),
+            "velnor log\n".to_owned(),
+            BTreeMap::new(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn orphan_census_is_not_usable_for_watch() {
+        let jobs = vec![named_job(1, "Rust · rust-policy / GitHub")];
+        let census = pair_lane_census(&jobs);
+        assert!(assess_run_evidence(
+            42,
+            &jobs,
+            census,
+            successful_summary(),
+            "velnor log\n".to_owned(),
+            BTreeMap::new(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn completed_failed_cancelled_and_timed_out_jobs_fail_evidence() {
+        for (status, conclusion) in [
+            ("completed", Some("failure")),
+            ("completed", Some("cancelled")),
+            ("completed", Some("timed_out")),
+            ("completed", Some("skipped")),
+            ("cancelled", None),
+            ("skipped", None),
+            ("in_progress", None),
+        ] {
+            let (mut jobs, _, evidence) = valid_pair_fixture();
+            let velnor = jobs.iter_mut().find(|job| job.id == 2).unwrap();
+            velnor.status = status.to_owned();
+            velnor.conclusion = conclusion.map(str::to_owned);
+            let census = pair_lane_census(&jobs);
+            let error = assess_run_evidence(
+                42,
+                &jobs,
+                census,
+                successful_summary(),
+                "velnor log\n".to_owned(),
+                evidence,
+            )
+            .expect_err("non-success job cannot be accepted");
+            assert!(!error.to_string().is_empty(), "{error:#}");
+        }
+    }
+
+    #[test]
+    fn completed_failed_run_fails_evidence() {
+        let (jobs, census, evidence) = valid_pair_fixture();
+        let mut summary = successful_summary();
+        summary.conclusion = Some("failure".to_owned());
+        let error = assess_run_evidence(
+            42,
+            &jobs,
+            census,
+            summary,
+            "velnor log\n".to_owned(),
+            evidence,
+        )
+        .expect_err("failed run cannot be accepted");
+        assert!(error.to_string().contains("not success"), "{error:#}");
+    }
+
+    #[test]
+    fn missing_html_or_log_payload_cannot_become_empty_green_evidence() {
+        let (jobs, census, mut evidence) = valid_pair_fixture();
+        evidence.get_mut(&(1, 2)).unwrap().github_log.clear();
+        assert!(assess_run_evidence(
+            42,
+            &jobs,
+            census.clone(),
+            successful_summary(),
+            "velnor log\n".to_owned(),
+            evidence,
+        )
+        .is_err());
+
+        let (jobs, census, mut evidence) = valid_pair_fixture();
+        evidence.get_mut(&(1, 2)).unwrap().github_html.clear();
+        assert!(assess_run_evidence(
+            42,
+            &jobs,
+            census,
+            successful_summary(),
+            "velnor log\n".to_owned(),
+            evidence,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn unexpected_velnor_only_step_is_a_parity_failure() {
+        let github = Job {
+            id: 1,
+            name: "Rust · rust-policy / GitHub".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            html_url: None,
+            steps: vec![step(1, "Run check", "success")],
+        };
+        let velnor = Job {
+            id: 2,
+            name: "Rust · rust-policy / Velnor".to_owned(),
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            html_url: None,
+            steps: vec![
+                step(1, "Run check", "success"),
+                step(2, "Unexpected adapter step", "success"),
+            ],
+        };
+        let html = BTreeMap::from([(
+            1,
+            HtmlStep {
+                number: 1,
+                expandable: true,
+                external_id: String::new(),
+            },
+        )]);
+        let velnor_html = BTreeMap::from([
+            (
+                1,
+                HtmlStep {
+                    number: 1,
+                    expandable: true,
+                    external_id: String::new(),
+                },
+            ),
+            (
+                2,
+                HtmlStep {
+                    number: 2,
+                    expandable: true,
+                    external_id: String::new(),
+                },
+            ),
+        ]);
+        let (section, worse) = compare_pair(
+            &github,
+            &velnor,
+            &html,
+            &velnor_html,
+            analyze_lane_log("github log\n"),
+            analyze_lane_log("velnor log\n"),
+        )
+        .unwrap();
+        assert_eq!(worse, 1);
+        assert!(section.contains("unexpected Velnor-only step"));
+        assert_eq!(
+            comparison_decision(ComparisonScope::FullRun, true, worse, 0),
+            ComparisonDecision::Fail
+        );
+    }
+
+    #[test]
+    fn artifact_page_two_is_required_and_pagination_is_complete() {
+        let first_page = ArtifactsResponse {
+            total_count: 101,
+            artifacts: (0..100)
+                .map(|id| ArtifactRef {
+                    id,
+                    name: format!("unrelated-{id}"),
+                })
+                .collect(),
+        };
+        let second_page = ArtifactsResponse {
+            total_count: 101,
+            artifacts: vec![ArtifactRef {
+                id: 101,
+                name: "job-log-9001".to_owned(),
+            }],
+        };
+        let collected =
+            collect_job_log_artifacts(vec![Ok(first_page), Ok(second_page)], &[9001]).unwrap();
+        assert_eq!(collected["job-log-9001"].id, 101);
+    }
+
+    #[test]
+    fn artifact_census_rejects_truncation_duplicate_absence_and_api_error() {
+        let truncated = ArtifactsResponse {
+            total_count: 101,
+            artifacts: (0..100)
+                .map(|id| ArtifactRef {
+                    id,
+                    name: format!("unrelated-{id}"),
+                })
+                .collect(),
+        };
+        assert!(collect_job_log_artifacts(vec![Ok(truncated)], &[9001]).is_err());
+
+        let duplicate = ArtifactsResponse {
+            total_count: 2,
+            artifacts: vec![
+                ArtifactRef {
+                    id: 1,
+                    name: "job-log-9001".to_owned(),
+                },
+                ArtifactRef {
+                    id: 2,
+                    name: "job-log-9001".to_owned(),
+                },
+            ],
+        };
+        assert!(collect_job_log_artifacts(vec![Ok(duplicate)], &[9001]).is_err());
+
+        let absent = ArtifactsResponse {
+            total_count: 1,
+            artifacts: vec![ArtifactRef {
+                id: 1,
+                name: "job-log-9002".to_owned(),
+            }],
+        };
+        assert!(collect_job_log_artifacts(vec![Ok(absent)], &[9001]).is_err());
+        let api_error: Vec<Result<ArtifactsResponse>> = vec![Err(anyhow::anyhow!("rate limit"))];
+        assert!(collect_job_log_artifacts(api_error, &[9001]).is_err());
+    }
+
+    #[test]
+    fn empty_log_evidence_is_not_a_green_comparison() {
+        assert!(require_nonempty_evidence("fixture log", " \n").is_err());
+        assert!(require_nonempty_evidence("fixture log", "actual\n").is_ok());
+    }
+
+    #[test]
     fn parse_check_steps_reads_number_and_expandability() {
         let html = r#"
 <check-steps>
@@ -1894,6 +2725,16 @@ mod tests {
         );
         assert!(worse, "{verdict}");
         assert!(verdict.contains("not expandable"));
+
+        // Missing Velnor HTML is evidence loss, not an empty/green cell.
+        let (verdict, worse) = step_verdict(
+            &step(2, "Run actions/checkout@v6", "success"),
+            &step(2, "Run actions/checkout@v6", "success"),
+            &html_with(2, true),
+            &BTreeMap::new(),
+        );
+        assert!(worse, "{verdict}");
+        assert!(verdict.contains("missing HTML check-step evidence"));
 
         // Display-name divergence (e.g. unevaluated `${{ }}` or YAML id).
         let (verdict, worse) = step_verdict(
@@ -2097,13 +2938,10 @@ mod tests {
     }
 
     #[test]
-    fn baseline_from_samples_accepts_partial_timing_coverage() {
+    fn baseline_from_samples_rejects_partial_timing_coverage() {
         let samples = vec![lane_stats(100.0, 110.0, 0), LaneStats::default()];
 
-        let baseline = baseline_from_samples(&samples).expect("baseline should be usable");
-
-        assert_eq!(baseline.baseline_runs, 2);
-        assert_eq!(baseline.jobs.len(), 1);
+        assert!(baseline_from_samples(&samples).is_none());
     }
 
     #[test]
