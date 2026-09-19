@@ -1987,7 +1987,7 @@ fn validate_units(
         if let Some(platform) = row.platform.as_deref() {
             crate::s2::provider::Platform::parse(platform).map_err(|_| {
                 GeneratorError::usage(format!(
-                    "[[unit]] {id} declares platform `{platform}`; expected one of: linux-x64, linux-arm64, macos-arm64"
+                    "[[unit]] {id} declares platform `{platform}`; expected one of: linux-x64, linux-arm64, macos-arm64, macos-x64"
                 ))
             })?;
         }
@@ -4033,7 +4033,7 @@ mod tests {
         );
         assert!(
             error.to_string().contains(
-                "declares platform `macos-26`; expected one of: linux-x64, linux-arm64, macos-arm64"
+                "declares platform `macos-26`; expected one of: linux-x64, linux-arm64, macos-arm64, macos-x64"
             ),
             "{error}"
         );

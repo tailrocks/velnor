@@ -105,6 +105,12 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
             .find(|file| file.as_str() == format!("{container_root}/project.yml"))
             .and_then(|file| fs::read_to_string(root.join(file)).ok());
         let apple_native = xcode_native_contract(&project_contents, project_config.as_deref());
+        let mut platform = crate::platform::PlatformRequirement::apple_xcode();
+        if apple_native.as_ref().is_some_and(|contract| {
+            contract.execution_arch == crate::native_contract::AppleArch::X86_64
+        }) {
+            platform.arch = crate::platform::Arch::X86_64;
+        }
         let ios_destination = xcode_project_is_ios(&project_contents);
         let build_destination = if ios_destination {
             " -destination 'generic/platform=iOS Simulator'"
@@ -175,7 +181,7 @@ fn xcode_scheme_units(root: &Path, files: &[String]) -> Vec<Unit> {
             services: Vec::new(),
             requires_trusted: false,
             workspace_check: false,
-            platform: crate::platform::PlatformRequirement::apple_xcode(),
+            platform,
             apple_native,
             products: Vec::new(),
             prerequisites: Vec::new(),
@@ -207,6 +213,11 @@ pub(crate) fn detect(context: &ScanContext<'_>, shape: &mut RepositoryShape) {
             unit.platform = crate::platform::PlatformRequirement::apple_swift_package();
         }
         unit.apple_native = evidence.native;
+        if unit.apple_native.as_ref().is_some_and(|contract| {
+            contract.execution_arch == crate::native_contract::AppleArch::X86_64
+        }) {
+            unit.platform.arch = crate::platform::Arch::X86_64;
+        }
         shape.units.push(unit);
     }
     let mut xcode_units = xcode_scheme_units(context.root, context.files);

@@ -1421,9 +1421,7 @@ fn refresh_swift_executor_note(config: &mut ProjectConfig) {
     let defaulted: Vec<String> = config
         .units
         .iter()
-        .filter(|unit| {
-            unit.kind == UnitKind::Swift && unit.platform != provider::Platform::MacosArm64
-        })
+        .filter(|unit| unit.kind == UnitKind::Swift && !unit.platform.is_macos())
         .map(|unit| unit.id.clone())
         .collect();
     if defaulted.is_empty() {
@@ -2358,6 +2356,29 @@ fn apply_unit_rows(
     Ok(())
 }
 
+fn native_platform(contract: &crate::native_contract::AppleNativeContract) -> provider::Platform {
+    match contract.execution_arch {
+        crate::native_contract::AppleArch::Arm64 => provider::Platform::MacosArm64,
+        crate::native_contract::AppleArch::X86_64 => provider::Platform::MacosX64,
+    }
+}
+
+fn default_native_contract(
+    platform: provider::Platform,
+) -> crate::native_contract::AppleNativeContract {
+    let execution_arch = match platform {
+        provider::Platform::MacosX64 => crate::native_contract::AppleArch::X86_64,
+        _ => crate::native_contract::AppleArch::Arm64,
+    };
+    let mut contract = crate::native_contract::AppleNativeContract::new(
+        crate::native_contract::AppleSdkFamily::Macos,
+        None,
+    );
+    contract.execution_arch = execution_arch;
+    contract.build_arches = BTreeSet::from([execution_arch]);
+    contract
+}
+
 #[allow(clippy::too_many_lines)]
 fn apply_unit_row(
     config: &mut ProjectConfig,
@@ -2392,9 +2413,11 @@ fn apply_unit_row(
         let docker_contexts = row.named_docker_contexts(id, root)?;
         let env = row.validated_env(id)?.unwrap_or_default();
         let platform = match (row.platform(), explicit_native.as_ref()) {
-            (Some(value), Some(_)) if value != "macos-arm64" => {
+            (Some(value), Some(native)) if value != native_platform(native).as_str() => {
                 return Err(GeneratorError::usage(format!(
-                    "[[units]] {id}.native requires platform = \"macos-arm64\"; found `{value}`"
+                    "[[units]] {id}.native requires platform = \"{}\" for execution architecture {}; found `{value}`",
+                    native_platform(native),
+                    native.execution_arch.as_str()
                 )));
             }
             (Some(value), _) => provider::Platform::parse(value).map_err(|_| {
@@ -2402,7 +2425,7 @@ fn apply_unit_row(
                     "[[units]] {id} declares unknown platform `{value}`"
                 ))
             })?,
-            (None, Some(_)) => provider::Platform::MacosArm64,
+            (None, Some(native)) => native_platform(native),
             (None, None) => provider::Platform::LinuxX64,
         };
         config.units.push(Unit {
@@ -2521,13 +2544,15 @@ fn apply_unit_row(
         unit.platform = platform;
     }
     if let Some(explicit) = explicit_native {
-        if unit.platform != provider::Platform::MacosArm64 {
+        let required_platform = native_platform(&explicit);
+        if unit.platform != required_platform {
             if row.platform().is_some() {
                 return Err(GeneratorError::usage(format!(
-                    "[[units]] {id}.native requires platform = \"macos-arm64\"; remove the portable platform override"
+                    "[[units]] {id}.native requires platform = \"{required_platform}\" for execution architecture {}; remove the platform override",
+                    explicit.execution_arch.as_str()
                 )));
             }
-            unit.platform = provider::Platform::MacosArm64;
+            unit.platform = required_platform;
         }
         unit.apple_native = Some(match unit.apple_native.take() {
             Some(detected) => detected.strengthen_with(&explicit).map_err(|error| {
@@ -2983,28 +3008,31 @@ fn validate_unit_capabilities(config: &ProjectConfig) -> Result<(), GeneratorErr
 /// accepted only through the verified host-offer table; provider selectors do
 /// not turn a Linux label into an Apple capability.
 fn validate_native_host_contract(config: &mut ProjectConfig) -> Result<(), GeneratorError> {
-    let Some(offer) = crate::native_contract::hosted_apple_offer(MACOS_HOSTED_RUNS_ON) else {
-        return Err(GeneratorError::usage(format!(
-            "native hosted selector {MACOS_HOSTED_RUNS_ON} has no verified Apple capability offer; update the generator's verified hosted image table"
-        )));
-    };
+    let offer = crate::native_contract::latest_hosted_apple_offer();
     let hosted_enabled = config
         .providers
         .contains(&provider::ProviderId::GithubHosted);
     for unit in &mut config.units {
-        if unit.apple_native.is_none() && unit.platform == provider::Platform::MacosArm64 {
-            unit.apple_native = Some(crate::native_contract::AppleNativeContract::new(
-                crate::native_contract::AppleSdkFamily::Macos,
-                None,
-            ));
+        if unit.apple_native.is_none() && unit.platform.is_macos() {
+            unit.apple_native = Some(default_native_contract(unit.platform));
         }
         let Some(contract) = unit.apple_native.as_ref() else {
             continue;
         };
-        if unit.platform != provider::Platform::MacosArm64 {
+        if !unit.platform.is_macos() {
             return Err(GeneratorError::usage(format!(
                 "unit {} has Apple SDK evidence but config weakens placement to {}; remove the platform override",
                 unit.id,
+                unit.platform
+            )));
+        }
+        let expected_platform = native_platform(contract);
+        if unit.platform != expected_platform {
+            return Err(GeneratorError::usage(format!(
+                "unit {} requires {} execution on {}; configured platform {} would change the execution architecture",
+                unit.id,
+                contract.execution_arch.as_str(),
+                expected_platform,
                 unit.platform
             )));
         }
@@ -5085,7 +5113,7 @@ pub(crate) fn rust_dependency_needs(
 /// The GitHub-owned macOS image jobs with platform macos-arm64 run on.
 /// Hosted selectors carry Linux labels; Apple execution needs the macOS
 /// image, which only exists on the hosted provider.
-pub(crate) const MACOS_HOSTED_RUNS_ON: &str = "macos-26";
+pub(crate) const MACOS_HOSTED_RUNS_ON: &str = crate::native_contract::LATEST_HOSTED_APPLE_RUNNER;
 
 /// The `runs-on:` YAML value for one provider selector: a bare scalar for a
 /// single label, a flow list otherwise.
@@ -5826,11 +5854,7 @@ fn render_actionlint_config(config: &ProjectConfig) -> String {
             .iter()
             .any(|target| target.ends_with("-apple-darwin"))
     });
-    let macos = (config
-        .units
-        .iter()
-        .any(|unit| unit.platform == provider::Platform::MacosArm64)
-        || apple_release)
+    let macos = (config.units.iter().any(|unit| unit.platform.is_macos()) || apple_release)
         .then_some(MACOS_HOSTED_RUNS_ON.to_owned());
     // Universe-scoped: scan defaults seed selectors for providers outside
     // the repo's universe, but only universe routing can reach a `runs-on`.
@@ -6280,17 +6304,13 @@ fn generation_reasons(config: &ProjectConfig) -> Vec<String> {
     if config
         .units
         .iter()
-        .any(|unit| unit.kind == UnitKind::Swift && unit.platform != provider::Platform::MacosArm64)
+        .any(|unit| unit.kind == UnitKind::Swift && !unit.platform.is_macos())
     {
         reasons.push(
             "SwiftPM packages verify on the provider's default image wherever their toolchain provisions; they imply no Apple placement.".to_owned(),
         );
     }
-    if config
-        .units
-        .iter()
-        .any(|unit| unit.platform == provider::Platform::MacosArm64)
-    {
+    if config.units.iter().any(|unit| unit.platform.is_macos()) {
         reasons.push(
             "Shared Xcode schemes run as isolated Apple jobs on macOS; unknown schemes/destinations are not guessed.".to_owned(),
         );
@@ -9363,7 +9383,7 @@ mod tests {
             "swift kind has members",
         )
         .1;
-        assert!(swift_kind.contains("runs-on: macos-26"));
+        assert!(swift_kind.contains("runs-on: xcode-27"));
         assert!(swift_kind.contains("CI_UNIT_ID: ${{ inputs.unit }}"));
         let both_workflow = generated_ci_pr(&WorkflowIr::from_config(&ProjectConfig {
             providers: crate::s2::provider::ProviderId::ALL.into_iter().collect(),
@@ -9433,7 +9453,7 @@ mod tests {
         )
         .1;
         assert!(
-            swift_kind.contains("runs-on: macos-26"),
+            swift_kind.contains("runs-on: xcode-27"),
             "macos-platform units use the fixed GitHub-owned image: {swift_kind}"
         );
         assert!(
@@ -9632,7 +9652,7 @@ mod tests {
         )
         .1;
         assert!(
-            swift_kind.contains("runs-on: macos-26"),
+            swift_kind.contains("runs-on: xcode-27"),
             "xcode units use the fixed GitHub-owned image: {swift_kind}"
         );
         let _ = fs::remove_dir_all(root);
@@ -12020,7 +12040,7 @@ lockfile = true
         )
         .1;
         assert!(
-            swift_kind.contains("runs-on: macos-26"),
+            swift_kind.contains("runs-on: xcode-27"),
             "Apple jobs run on the fixed GitHub-owned image: {swift_kind}"
         );
         assert!(
@@ -14890,7 +14910,7 @@ lockfile = true
         });
         let actionlint = render_actionlint_config(&config);
         assert!(
-            actionlint.contains("    - macos-26\n"),
+            actionlint.contains("    - xcode-27\n"),
             "an apple release target needs the macos label: {actionlint}"
         );
         if let Some(release) = config.release.as_mut() {
@@ -14898,7 +14918,7 @@ lockfile = true
         }
         let linux_only = render_actionlint_config(&config);
         assert!(
-            !linux_only.contains("macos-26"),
+            !linux_only.contains("xcode-27"),
             "linux-only releases must not allowlist the macos label: {linux_only}"
         );
     }

@@ -18,7 +18,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
-use crate::native_contract::{hosted_apple_offer, offer_mismatches, AppleNativeContract};
+use crate::native_contract::{
+    latest_hosted_apple_offer, offer_mismatches, AppleArch, AppleNativeContract,
+    LATEST_HOSTED_APPLE_RUNNER,
+};
 use crate::{GeneratorError, ProjectConfig, RunnerMode, Unit, UnitKind};
 
 /// The SDK capability an Xcode scheme build needs. Only a macOS executor
@@ -49,6 +52,16 @@ pub(crate) enum Arch {
     X86_64,
     #[serde(rename = "aarch64")]
     Aarch64,
+}
+
+impl Arch {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Any => "any",
+            Self::X86_64 => "x86_64",
+            Self::Aarch64 => "aarch64",
+        }
+    }
 }
 
 /// What a unit needs from its executor: an OS, an architecture, and a set of
@@ -272,6 +285,11 @@ pub(crate) fn validate_native_host_contract(
     config: &mut ProjectConfig,
 ) -> Result<(), GeneratorError> {
     let macos_runner = config.macos_runner.clone();
+    if macos_runner != LATEST_HOSTED_APPLE_RUNNER {
+        return Err(GeneratorError::usage(format!(
+            "native Apple jobs require the latest verified hosted label {LATEST_HOSTED_APPLE_RUNNER}; selected {macos_runner} is an older or unverified fallback and cannot be used"
+        )));
+    }
     let native_units = config
         .units
         .iter_mut()
@@ -292,14 +310,20 @@ pub(crate) fn validate_native_host_contract(
         let Some(contract) = unit.apple_native.as_ref() else {
             continue;
         };
-        let Some(offer) = hosted_apple_offer(&macos_runner) else {
-            return Err(GeneratorError::usage(format!(
-                "unit {} requires {}; selected hosted label {} has no verified Apple capability offer; select macos-26 or macos-26-intel and rerun generation",
-                unit.id,
-                contract.describe(),
-                macos_runner
-            )));
+        let required_arch = match contract.execution_arch {
+            AppleArch::Arm64 => Arch::Aarch64,
+            AppleArch::X86_64 => Arch::X86_64,
         };
+        if unit.platform.arch != Arch::Any && unit.platform.arch != required_arch {
+            return Err(GeneratorError::usage(format!(
+                "unit {} requires {} execution but configured platform architecture is {}; cross-build architecture does not change host execution",
+                unit.id,
+                contract.execution_arch.as_str(),
+                unit.platform.arch.as_str()
+            )));
+        }
+        unit.platform.arch = required_arch;
+        let offer = latest_hosted_apple_offer();
         let mismatches = offer_mismatches(contract, offer);
         if !mismatches.is_empty() {
             return Err(GeneratorError::usage(format!(
