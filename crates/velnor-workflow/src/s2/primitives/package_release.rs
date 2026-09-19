@@ -714,12 +714,20 @@ rollback() {
     script.push_str(rollback_assets);
     script.push_str(
         r#"
-        [ "$?" -eq 0 ] || rollback_status=1
-        if [ -n "$old_tag_sha" ]; then
-          gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" -f "sha=$old_tag_sha" -F force=true >/dev/null || rollback_status=1
+        if [ "$?" -eq 0 ]; then
+          rollback_ready=1
+          if [ -n "$old_tag_sha" ] && ! gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/git/refs/tags/$rolling_tag" -f "sha=$old_tag_sha" -F force=true >/dev/null; then
+            rollback_ready=0
+          fi
+          if [ "$rollback_ready" = 1 ]; then
+            gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" \
+              -f "name=$old_name" -f "body=$old_body" -F "draft=$old_draft" -F "prerelease=$old_prerelease" -F make_latest=false >/dev/null || rollback_status=1
+          else
+            rollback_status=1
+          fi
+        else
+          rollback_status=1
         fi
-        gh api --method PATCH --repo "$GITHUB_REPOSITORY" "repos/$GITHUB_REPOSITORY/releases/$rolling_release_id" \
-          -f "name=$old_name" -f "body=$old_body" -F "draft=$old_draft" -F "prerelease=$old_prerelease" -F make_latest=false >/dev/null || rollback_status=1
       else
         rollback_status=1
       fi
