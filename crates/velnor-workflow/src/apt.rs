@@ -20,15 +20,23 @@
 //! branches on a name.
 
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(unix)]
+use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
 use std::io::{Read as _, Write as _};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+use std::os::unix::ffi::OsStringExt as _;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt as _;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt as _;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
 
 use sha2::{Digest as _, Sha256};
 
@@ -765,6 +773,34 @@ fn valid_discovery_script(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'/' | b'-'))
 }
 
+/// Validate the checked-in producer selector before a schema-2 config can
+/// render a workflow that invokes it.  The source-owned path is opened with
+/// the same component-wise no-follow and single-link rules as incoming
+/// release assets; generation therefore cannot bind a symlink, parent swap,
+/// or outside hard link as the discovery authority.
+pub(crate) fn validate_discovery_script(root: &Path, relative: &str) -> Result<(), String> {
+    if !valid_discovery_script(relative) {
+        return Err("apt discovery_script must be a safe repository-relative path".to_owned());
+    }
+    let path = root.join(relative);
+    let file = open_regular_file(&path).map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    if file
+        .metadata()
+        .map_err(|error| format!("stat discovery script {}: {error}", path.display()))?
+        .permissions()
+        .mode()
+        & 0o111
+        == 0
+    {
+        return Err(format!(
+            "apt discovery_script is not executable: {}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 fn valid_manifest_asset(value: &str) -> bool {
     !value.is_empty()
         && value.bytes().all(|byte| {
@@ -937,12 +973,80 @@ fn require_file(path: &Path) -> Result<(), GeneratorError> {
     Ok(())
 }
 
+#[cfg(unix)]
+fn open_path_nofollow(path: &Path, final_flags: rustix::fs::OFlags) -> std::io::Result<File> {
+    // macOS exposes temporary directories through the stable system aliases
+    // `/var` and `/tmp` (both may resolve to `/private/...`). Normalize only
+    // those fixed aliases; all caller-owned components still traverse with
+    // `O_NOFOLLOW` below and therefore cannot hide a parent symlink.
+    let mut normalized = path.to_owned();
+    for prefix in ["/var", "/tmp"] {
+        let prefix_path = Path::new(prefix);
+        if path.starts_with(prefix_path) {
+            let Some(rest) = path.strip_prefix(prefix_path).ok() else {
+                continue;
+            };
+            normalized = prefix_path.canonicalize()?.join(rest);
+            break;
+        }
+    }
+    let path = normalized.as_path();
+    let directory_flags = rustix::fs::OFlags::RDONLY
+        | rustix::fs::OFlags::DIRECTORY
+        | rustix::fs::OFlags::CLOEXEC
+        | rustix::fs::OFlags::NOFOLLOW;
+    let base = if path.is_absolute() {
+        Path::new("/")
+    } else {
+        Path::new(".")
+    };
+    let mut parent = File::from(
+        rustix::fs::openat(
+            rustix::fs::CWD,
+            base,
+            directory_flags,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?,
+    );
+    let mut names = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(name) => names.push(name),
+            Component::ParentDir | Component::Prefix(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "path traversal is not permitted",
+                ));
+            }
+        }
+    }
+    for (index, name) in names.iter().enumerate() {
+        let flags = if index + 1 == names.len() {
+            final_flags | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW
+        } else {
+            directory_flags
+        };
+        parent = File::from(
+            rustix::fs::openat(&parent, *name, flags, rustix::fs::Mode::empty())
+                .map_err(std::io::Error::from)?,
+        );
+    }
+    Ok(parent)
+}
+
+#[cfg(unix)]
+fn open_directory_nofollow(path: &Path) -> std::io::Result<File> {
+    open_path_nofollow(
+        path,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY,
+    )
+}
+
 fn require_directory(path: &Path) -> Result<(), GeneratorError> {
-    let mut options = OpenOptions::new();
-    options.read(true);
     #[cfg(unix)]
-    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    let file = options.open(path).map_err(|error| {
+    let file = open_directory_nofollow(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             GeneratorError::usage(format!("required directory missing: {}", path.display()))
         } else if std::fs::symlink_metadata(path)
@@ -952,6 +1056,14 @@ fn require_directory(path: &Path) -> Result<(), GeneratorError> {
                 "required directory is a symlink: {}",
                 path.display()
             ))
+        } else {
+            GeneratorError::io("open required directory", path, &error)
+        }
+    })?;
+    #[cfg(not(unix))]
+    let file = OpenOptions::new().read(true).open(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            GeneratorError::usage(format!("required directory missing: {}", path.display()))
         } else {
             GeneratorError::io("open required directory", path, &error)
         }
@@ -974,10 +1086,23 @@ fn require_directory(path: &Path) -> Result<(), GeneratorError> {
 /// accepting a hard link would let an outside writer mutate bytes after the
 /// path check and before verification.
 fn open_regular_file(path: &Path) -> Result<File, GeneratorError> {
-    let mut options = OpenOptions::new();
-    options.read(true);
     #[cfg(unix)]
-    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let file = open_path_nofollow(path, rustix::fs::OFlags::RDONLY).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            GeneratorError::usage(format!("required file missing: {}", path.display()))
+        } else if std::fs::symlink_metadata(path)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            GeneratorError::usage(format!("required file is a symlink: {}", path.display()))
+        } else {
+            GeneratorError::io("open required file", path, &error)
+        }
+    })?;
+    #[cfg(not(unix))]
+    let mut options = OpenOptions::new();
+    #[cfg(not(unix))]
+    options.read(true);
+    #[cfg(not(unix))]
     let file = options.open(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             GeneratorError::usage(format!("required file missing: {}", path.display()))
@@ -1160,15 +1285,51 @@ fn is_deb_file(name: &str) -> bool {
 }
 
 /// List the entries of a directory by file name.
+#[cfg(unix)]
+fn directory_entry_name(raw_name: &[u8], dir: &Path) -> Result<String, GeneratorError> {
+    OsString::from_vec(raw_name.to_owned())
+        .into_string()
+        .map_err(|_| {
+            GeneratorError::usage(format!(
+                "directory {} contains a non-UTF-8 entry",
+                dir.display()
+            ))
+        })
+}
+
 fn dir_names(dir: &Path) -> Result<Vec<String>, GeneratorError> {
-    require_directory(dir)?;
     let mut names = Vec::new();
-    let entries =
-        std::fs::read_dir(dir).map_err(|error| GeneratorError::io("list", dir, &error))?;
-    for entry in entries {
-        let entry = entry.map_err(|error| GeneratorError::io("list", dir, &error))?;
-        if let Some(name) = entry.file_name().to_str() {
-            names.push(name.to_owned());
+    #[cfg(unix)]
+    {
+        let directory = open_directory_nofollow(dir)
+            .map_err(|error| GeneratorError::io("open directory for listing", dir, &error))?;
+        let mut entries = rustix::fs::Dir::read_from(&directory)
+            .map_err(|error| GeneratorError::io("list", dir, &std::io::Error::from(error)))?;
+        while let Some(entry) = entries.read() {
+            let entry = entry
+                .map_err(|error| GeneratorError::io("list", dir, &std::io::Error::from(error)))?;
+            let raw_name = entry.file_name().to_bytes();
+            if raw_name == b"." || raw_name == b".." {
+                continue;
+            }
+            let name = directory_entry_name(raw_name, dir)?;
+            names.push(name);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        require_directory(dir)?;
+        let entries =
+            std::fs::read_dir(dir).map_err(|error| GeneratorError::io("list", dir, &error))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| GeneratorError::io("list", dir, &error))?;
+            let name = entry.file_name().into_string().map_err(|_| {
+                GeneratorError::usage(format!(
+                    "directory {} contains a non-UTF-8 entry",
+                    dir.display()
+                ))
+            })?;
+            names.push(name);
         }
     }
     names.sort();
@@ -1744,6 +1905,42 @@ fn validate_product_manifest_selection(
     {
         return Err(GeneratorError::usage(
             "discovery APT artifacts must target Linux architectures",
+        ));
+    }
+    for (name, _kind, target) in artifact_rows
+        .iter()
+        .filter(|(_, kind, _)| *kind == "apt-package")
+    {
+        let expected_target = if name.ends_with("-amd64.deb") {
+            "x86_64-unknown-linux-gnu"
+        } else if name.ends_with("-arm64.deb") {
+            "aarch64-unknown-linux-gnu"
+        } else {
+            return Err(GeneratorError::usage(
+                "discovery APT artifact name must end in -amd64.deb or -arm64.deb",
+            ));
+        };
+        if *target != expected_target {
+            return Err(GeneratorError::usage(
+                "discovery APT artifact name and target disagree",
+            ));
+        }
+    }
+    if artifact_rows
+        .iter()
+        .filter(|(_, kind, target)| *kind == "apt-package" && *target == "x86_64-unknown-linux-gnu")
+        .count()
+        != 1
+        || artifact_rows
+            .iter()
+            .filter(|(_, kind, target)| {
+                *kind == "apt-package" && *target == "aarch64-unknown-linux-gnu"
+            })
+            .count()
+            != 1
+    {
+        return Err(GeneratorError::usage(
+            "discovery APT artifact census must contain exactly one amd64 and one arm64 package",
         ));
     }
     Ok(())
@@ -5640,6 +5837,82 @@ mod tests {
         let _ = std::fs::remove_dir_all(&fixture.root);
     }
 
+    #[test]
+    fn discovery_product_manifest_requires_distinct_linux_apt_targets() {
+        let fixture = discovery_fixture("discovery-apt-target-census");
+        let mut tampered = fixture.document.clone();
+        let artifacts = tampered["manifest"]["artifacts"]
+            .as_array_mut()
+            .expect("fixture manifest artifacts array");
+        let arm = artifacts
+            .iter_mut()
+            .find(|artifact| artifact["name"] == "example-1.2.3-arm64.deb")
+            .expect("fixture arm64 artifact");
+        arm["target"] = serde_json::json!("x86_64-unknown-linux-gnu");
+        let manifest_bytes = must(
+            serde_json::to_vec(&tampered["manifest"]),
+            "serialize duplicate Linux target manifest",
+        );
+        tampered["manifest_sha256"] = serde_json::json!(sha256_hex(&manifest_bytes));
+        write_bytes(
+            &fixture.selection_path,
+            &must(
+                serde_json::to_vec(&tampered),
+                "serialize duplicate Linux target selection",
+            ),
+        );
+        let error = must_fail(
+            read_discovery_selection(&fixture.selection_path),
+            "reject duplicate Linux target census",
+        );
+        assert!(
+            error.contains("APT artifact") || error.contains("APT") || error.contains("census"),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(&fixture.root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn incoming_directory_listing_rejects_non_utf8_entries() {
+        let fixture = discovery_fixture("discovery-non-utf8");
+        let error = must_fail(
+            directory_entry_name(b"invalid-\xff", &fixture.incoming),
+            "reject non-UTF-8 incoming entry",
+        );
+        assert!(error.contains("non-UTF-8"), "{error}");
+        let _ = std::fs::remove_dir_all(&fixture.root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_extracted_parent_symlink_and_hardlink_are_rejected() {
+        let root = fixture_dir("archive-parent-boundary");
+        let real = root.join("real");
+        must(
+            std::fs::create_dir(&real),
+            "create extracted real directory",
+        );
+        write_bytes(&real.join("identity.json"), b"{}");
+
+        let symlink_parent = root.join("symlink-parent");
+        make_symlink(&real, &symlink_parent);
+        assert!(
+            require_file(&symlink_parent.join("identity.json")).is_err(),
+            "archive verifier must reject a symlinked extracted parent"
+        );
+
+        let outside = root.join("outside");
+        write_bytes(&outside, b"not a directory");
+        let hardlink_parent = root.join("hardlink-parent");
+        make_hard_link(&outside, &hardlink_parent);
+        assert!(
+            require_file(&hardlink_parent.join("identity.json")).is_err(),
+            "archive verifier must reject a hardlinked regular parent"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "hostile provenance mutations stay in one auditable fixture"
@@ -6615,6 +6888,75 @@ mod tests {
         deb
     }
 
+    #[cfg(unix)]
+    fn make_deb_with_parent_entry(dir: &Path, name: &str, symlink_parent: bool) -> PathBuf {
+        let work = dir.join(format!(".debwork-{name}"));
+        let control_dir = work.join("control");
+        let data_dir = work.join("data");
+        must(
+            std::fs::create_dir_all(&control_dir),
+            "malicious control dir",
+        );
+        must(
+            std::fs::create_dir_all(data_dir.join("usr/share")),
+            "malicious share dir",
+        );
+        write_bytes(
+            &control_dir.join("control"),
+            b"Package: example\nVersion: 1.2.3\nArchitecture: amd64\nMaintainer: Fixture <fixture@example.test>\nDescription: fixture\n",
+        );
+        if symlink_parent {
+            write_bytes(
+                &data_dir.join("outside/build-identity.json"),
+                b"outside identity\n",
+            );
+            must(
+                std::os::unix::fs::symlink("../../outside", data_dir.join("usr/share/app")),
+                "create malicious archive parent symlink",
+            );
+        } else {
+            write_bytes(&data_dir.join("usr/share/reference"), b"not a directory\n");
+            must(
+                std::fs::hard_link(
+                    data_dir.join("usr/share/reference"),
+                    data_dir.join("usr/share/app"),
+                ),
+                "create malicious archive parent hard link",
+            );
+        }
+        for (member, source) in [("control.tar.gz", &control_dir), ("data.tar.gz", &data_dir)] {
+            let status = must(
+                std::process::Command::new("tar")
+                    .args(["-czf"])
+                    .arg(work.join(member))
+                    .args(["-C"])
+                    .arg(source)
+                    .arg(".")
+                    .status(),
+                "tar malicious deb member",
+            );
+            assert!(status.success(), "tar {member} failed");
+        }
+        write_bytes(&work.join("debian-binary"), b"2.0\n");
+        let deb = dir.join(name);
+        let status = must(
+            std::process::Command::new("ar")
+                .args(["rcS"])
+                .arg(&deb)
+                .arg(work.join("debian-binary"))
+                .arg(work.join("control.tar.gz"))
+                .arg(work.join("data.tar.gz"))
+                .status(),
+            "ar malicious deb",
+        );
+        assert!(status.success(), "ar {name} failed");
+        must(
+            std::fs::remove_dir_all(&work),
+            "clean malicious deb workdir",
+        );
+        deb
+    }
+
     struct StableIncoming {
         dir: PathBuf,
         tag: String,
@@ -6753,6 +7095,32 @@ mod tests {
         assert!(extract.join("usr/bin/example").is_file());
         assert!(extract.join("usr/share/app/build-identity.json").is_file());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extracted_archive_symlink_and_hardlink_parents_fail_closed() {
+        for (name, symlink_parent) in [
+            ("example-parent-symlink.deb", true),
+            ("example-parent-hardlink.deb", false),
+        ] {
+            let dir = fixture_dir(if symlink_parent {
+                "deb-parent-symlink"
+            } else {
+                "deb-parent-hardlink"
+            });
+            let deb = make_deb_with_parent_entry(&dir, name, symlink_parent);
+            let extract = dir.join("extracted");
+            must(
+                deb_extract_data(&deb, &extract, DebBackend::ArTar, None),
+                "extract malicious parent archive",
+            );
+            assert!(
+                require_file(&extract.join("usr/share/app/build-identity.json")).is_err(),
+                "archive parent must not be trusted: {name}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]
