@@ -139,11 +139,23 @@ pub(crate) fn closure_of_tree(
     features: &str,
     profile: &str,
 ) -> Result<String, GeneratorError> {
+    // A closure is an authority input, not an informational listing. Do not
+    // let Git's replace refs, grafts, or alternates substitute a different
+    // source tree underneath the revision we are fingerprinting.
+    super::reject_git_object_overrides(repo)?;
     let mut arguments = vec!["ls-tree", "-r", rev, "--"];
     arguments.extend_from_slice(CLOSURE_PATHS);
     let output = Command::new("git")
         .arg("-C")
         .arg(repo)
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_NAMESPACE")
         .args(&arguments)
         .output()
         .map_err(|error| {
@@ -155,10 +167,12 @@ pub(crate) fn closure_of_tree(
             repo.display()
         )));
     }
-    let lines: Vec<String> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::to_owned)
-        .collect();
+    let listing = String::from_utf8(output.stdout).map_err(|error| {
+        GeneratorError::usage(format!(
+            "revision {rev} has invalid UTF-8 in its closure listing: {error}"
+        ))
+    })?;
+    let lines = validate_closure_listing(&listing, rev)?;
     if lines.is_empty() {
         return Err(GeneratorError::usage(format!(
             "revision {rev} has no closure inputs in {}",
@@ -166,6 +180,46 @@ pub(crate) fn closure_of_tree(
         )));
     }
     Ok(canonical_digest(&lines, features, profile))
+}
+
+/// Validate the typed records emitted by `git ls-tree -r` before they become
+/// source identity. A symlink, submodule, tree, malformed object ID, or
+/// ambiguous path is not a source blob and therefore cannot silently enter a
+/// product closure.
+fn validate_closure_listing(listing: &str, rev: &str) -> Result<Vec<String>, GeneratorError> {
+    let mut lines = Vec::new();
+    for line in listing.lines() {
+        let (metadata, path) = line.split_once('\t').ok_or_else(|| {
+            GeneratorError::usage(format!(
+                "revision {rev} has a malformed closure entry; expected a typed Git tree record"
+            ))
+        })?;
+        let mut fields = metadata.split(' ');
+        let mode = fields.next().unwrap_or_default();
+        let kind = fields.next().unwrap_or_default();
+        let object = fields.next().unwrap_or_default();
+        if fields.next().is_some()
+            || !matches!(mode, "100644" | "100755")
+            || kind != "blob"
+            || object.len() != 40
+            || !object.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || object.bytes().any(|byte| byte.is_ascii_uppercase())
+            || path.is_empty()
+            || path.starts_with('/')
+            || path
+                .split('/')
+                .any(|component| component.is_empty() || component == "." || component == "..")
+            || path
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || byte == b'\t')
+        {
+            return Err(GeneratorError::usage(format!(
+                "revision {rev} has an unsupported or malformed closure entry: {line:?}"
+            )));
+        }
+        lines.push(line.to_owned());
+    }
+    Ok(lines)
 }
 
 /// Digest identifying the candidate product for `rev`: the debug binary the
@@ -259,6 +313,31 @@ mod tests {
         let mut changed = fixture_lines();
         changed[0] = changed[0].replace('a', "d");
         assert_ne!(base, canonical_digest(&changed, "", PROFILE_RELEASE));
+    }
+
+    #[test]
+    fn closure_listing_rejects_non_blob_and_malformed_records() {
+        for line in [
+            "120000 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tcrates/velnor-workflow/link",
+            "100644 tree aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tcrates/velnor-workflow/tree",
+            "100644 blob AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\tCargo.toml",
+            "100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t../Cargo.toml",
+            "100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa Cargo.toml",
+        ] {
+            assert!(validate_closure_listing(line, "fixture").is_err());
+        }
+    }
+
+    #[test]
+    fn closure_listing_accepts_regular_source_blobs() {
+        let lines = must(
+            validate_closure_listing(
+                "100644 blob aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tCargo.toml\n100755 blob bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tcrates/velnor-workflow/build.sh",
+                "fixture",
+            ),
+            "regular source blobs are valid closure inputs",
+        );
+        assert_eq!(lines.len(), 2);
     }
 
     #[test]
