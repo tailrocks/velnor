@@ -119,7 +119,7 @@ named static-single-uploader-v1; there is no attestation fallback in this
 implementation. The gate remains BLOCKED until this mechanism and its hostile
 producer proof are implemented:
 
-* Each transport artifact namespace has exactly one fixed upload step and exactly one eligible job: candidate_upload for the static candidate namespace, handoff_upload for the handoff namespace, and result_upload for the result namespace. The existing fixed plan/runtime uploaders in ci-pr.yml are allowed only for their distinct static artifact names and cannot publish the candidate namespace. The static contract rejects any second path capable of publishing the candidate namespace, including computed or dynamic names, aliases, matrix duplicates, reusable-workflow uploaders, or post-job uploaders.
+* Each transport artifact namespace has exactly one fixed upload step and exactly one eligible job: candidate_upload for the exact static candidate name velnor-workflow-candidate-linux-x64, handoff_upload for the exact handoff name, and result_upload for the exact result name. The existing fixed plan/runtime uploaders in ci-pr.yml are allowed under their own one-uploader contracts for distinct static artifact names and cannot publish the candidate name. The candidate contract rejects any second path capable of publishing velnor-workflow-candidate-linux-x64, including computed or dynamic names, aliases, matrix duplicates, reusable-workflow uploaders, or post-job uploaders.
 * The base verifier fetches the exact workflow blob from the target head object and checks it against a base-owned normalized contract digest: exact workflow path, exact job ID/name, exact upload step ID/action commit, exact permissions, exact static artifact name, no extra jobs that can upload, and no candidate-controlled upload action. A missing or changed contract is red. For base-owned policy workflows, the same contract is checked against the base pinned blob.
 * Only after that contract check does the verifier derive artifact uploader_job_id/name from the unique uploader. It records artifact_binding_method=static-single-uploader-v1 and still rechecks the selected job REST id/run id/run attempt. The artifact service digest and raw ZIP digest remain mandatory. The derivation is a proof from the trusted workflow contract plus singularity, not an invented API field.
 * If the workflow cannot be independently normalized and contract-hashed, or if the artifact service later provides an uploader job/attempt field, the transport fails closed. It must not infer ownership from timing, names, candidate JSON, or job/artifact numeric proximity.
@@ -128,13 +128,28 @@ This is a concrete blocker from G1/bootstrap-artifact-feasibility-2026-09-20.md 
 
 ### Producer-hostile build proof
 
-The actual generated ci-pr.yml candidate_producer job must run a hostile build
-fixture from the base-pinned trusted test harness at
-crates/velnor-workflow/tests/fixtures/bootstrap-hostile-producer/. The fixture
-and assertion harness are checked out from the trusted base revision, not from
-the PR head and not from a PR-modifiable canary. The harness invokes the same
-PR-head build command that creates the candidate binary; it is not a unit-test
-string or a synthetic manifest.
+The actual generated ci-pr.yml candidate_producer boundary must be tested by a
+trusted hosted canary whose malicious binary bytes and action bytes come from a
+base-pinned revision and whose raw SHA-256 values are independently recorded
+in the trusted contract. Equivalently, a base-pinned action may inject that
+fixed malicious binary into the producer boundary; a PR-modifiable fixture,
+PR-modifiable canary, or candidate-written manifest is never evidence. The
+trusted harness must exercise the same fixed build/uploader boundary used by
+the PR-head candidate; it is not a unit-test string or a synthetic manifest.
+
+The required source owner is
+crates/velnor-workflow/tests/fixtures/bootstrap-hostile-producer/, but its
+bytes and runner must be fetched from the base pin, independently hashed, and
+verified before use. If the base-pinned binary/action hashes or trusted hosted
+injection cannot be established, this producer security gate remains BLOCKED.
+
+Before execution, a base-owned verifier fetches the exact fixture/action object
+from the pinned base repository, computes SHA-256 over the raw binary and raw
+action archive, and compares both values with immutable contract digests stored
+in the base-owned generator contract. The verifier performs this comparison in
+a separate fixed step before the producer build/uploader starts; it rejects
+missing, changed, or candidate-supplied digest values. The canary's output
+cannot mint or replace either contract digest.
 It attempts to read ACTIONS_RUNTIME_TOKEN, ACTIONS_RUNTIME_URL,
 ACTIONS_ID_TOKEN_REQUEST_TOKEN, GITHUB_TOKEN, GITHUB_OUTPUT, GITHUB_ENV,
 GITHUB_PATH, GITHUB_STATE, and the runner command files; it attempts to call
@@ -149,10 +164,11 @@ publish the candidate namespace, and exactly one candidate artifact exists
 The candidate build must run under an explicit unprivileged env-i/container
 boundary with no ACTIONS_RUNTIME_TOKEN or uploader-service socket. The fixed
 uploader is a separate step after trusted output validation; its action archive
-and artifact service digest are checked as described above. A producer canary
-that finds any runtime token, can call the artifact service, or can create an
-extra uploader path is red. This test is mandatory evidence for H1/H2/H6 and
-must run on the actual generated ci-pr.yml job before source approval.
+and artifact service digest are checked as described above. A trusted producer
+canary that finds any runtime token, can call the artifact service, or can
+create an extra candidate-namespace uploader path is red. This test is
+mandatory evidence for H1/H2/H6 and must run against the actual generated
+ci-pr.yml job before source approval.
 
 ### API selection: exact, singular, and stale-safe
 
