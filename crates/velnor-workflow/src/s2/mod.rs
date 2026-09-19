@@ -1310,7 +1310,24 @@ struct ScannedTarget {
 /// path names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RawInventory {
-    entries: BTreeMap<PathBuf, FilePreimage>,
+    entries: BTreeMap<PathBuf, RawInventoryEntry>,
+}
+
+/// A raw filesystem entry is intentionally broader than a generated-file
+/// preimage. Untracked files, symlinks, and other non-regular entries must be
+/// visible to the fixed-point observation even though the detector itself
+/// only consumes safe regular files from the Git index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RawInventoryEntry {
+    Regular(FilePreimage),
+    Symlink {
+        identity: FileIdentity,
+        target: PathBuf,
+    },
+    Other {
+        identity: FileIdentity,
+        kind: String,
+    },
 }
 
 impl RawInventory {
@@ -1327,7 +1344,10 @@ impl RawInventory {
             .collect()
     }
 
-    fn fingerprint(&self, detector_inputs: &BTreeSet<PathBuf>) -> BTreeMap<PathBuf, FilePreimage> {
+    fn fingerprint(
+        &self,
+        detector_inputs: &BTreeSet<PathBuf>,
+    ) -> BTreeMap<PathBuf, RawInventoryEntry> {
         detector_inputs
             .iter()
             .filter_map(|path| {
@@ -1341,12 +1361,12 @@ impl RawInventory {
 }
 
 fn capture_raw_inventory(root: &Path, exclude: &[String]) -> Result<RawInventory, GeneratorError> {
-    let mut paths = scan::file_walk::repository_files(root, exclude)?;
-    // The file walk deliberately omits fixed generator controls. Retain their
-    // preimages in the raw view so reports and race fingerprints cannot lose
-    // them; detector_inputs still removes exactly this code-owned set.
+    let mut paths = scan::file_walk::repository_inventory_files(root, exclude)?;
+    // The inventory walk deliberately omits fixed generator controls. Retain
+    // their raw entries so reports and race fingerprints cannot lose them;
+    // detector_inputs still removes exactly this code-owned set.
     for fixed in [OWNERSHIP_STATE, "config/fleet/velnor-host.env"] {
-        if root.join(fixed).exists() {
+        if fs::symlink_metadata(root.join(fixed)).is_ok() {
             paths.push(fixed.to_owned());
         }
     }
@@ -1356,10 +1376,37 @@ fn capture_raw_inventory(root: &Path, exclude: &[String]) -> Result<RawInventory
         .into_iter()
         .map(|relative| {
             let path = PathBuf::from(&relative);
-            capture_file_preimage(&root.join(&path), &path).map(|preimage| (path, preimage))
+            capture_raw_inventory_entry(&root.join(&path), &path).map(|entry| (path, entry))
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
     Ok(RawInventory { entries })
+}
+
+fn capture_raw_inventory_entry(
+    path: &Path,
+    relative: &Path,
+) -> Result<RawInventoryEntry, GeneratorError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| GeneratorError::io("inspect raw repository entry", path, &error))?;
+    let identity = file_identity(&metadata);
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        let target = fs::read_link(path)
+            .map_err(|error| GeneratorError::io("read raw repository symlink", path, &error))?;
+        return Ok(RawInventoryEntry::Symlink { identity, target });
+    }
+    if file_type.is_file() {
+        return capture_file_preimage(path, relative).map(RawInventoryEntry::Regular);
+    }
+    let kind = if file_type.is_dir() {
+        "directory"
+    } else {
+        "other"
+    };
+    Ok(RawInventoryEntry::Other {
+        identity,
+        kind: kind.to_owned(),
+    })
 }
 
 /// Immutable local operator baseline. The ownership sidecar is read only from
@@ -8614,6 +8661,49 @@ mod tests {
         let root = env::temp_dir().join(format!("velnor-workflow-test-{name}-{}", unique_suffix()));
         must(fs::create_dir_all(&root), "create test directory");
         root
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn raw_inventory_retains_untracked_files_and_symlinks_without_following_links() {
+        use std::os::unix::fs::symlink;
+
+        let root = temporary_repository("raw-inventory-links");
+        let outside = temporary_directory("raw-inventory-outside");
+        must(
+            fs::write(root.join("untracked-input.txt"), "untracked\n"),
+            "write untracked input",
+        );
+        must(
+            fs::write(outside.join("hidden-input.txt"), "outside\n"),
+            "write linked input",
+        );
+        must(
+            symlink(&outside, root.join("linked-inputs")),
+            "create linked input directory",
+        );
+
+        let inventory = must(capture_raw_inventory(&root, &[]), "capture raw inventory");
+        assert!(inventory
+            .entries
+            .contains_key(Path::new("untracked-input.txt")));
+        let linked_entry = inventory.entries.get(Path::new("linked-inputs"));
+        assert!(
+            matches!(linked_entry, Some(RawInventoryEntry::Symlink { .. })),
+            "expected a retained symlink entry, got {linked_entry:?}"
+        );
+        if let Some(RawInventoryEntry::Symlink { target, .. }) = linked_entry {
+            assert_eq!(target, &outside);
+        }
+        assert!(
+            !inventory.entries.keys().any(|path| {
+                path != Path::new("linked-inputs") && path.starts_with("linked-inputs")
+            }),
+            "raw inventory must not follow a linked directory"
+        );
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
     }
 
     #[expect(

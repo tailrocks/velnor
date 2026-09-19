@@ -60,6 +60,28 @@ pub(crate) fn repository_files_with_owned_paths(
     Ok(files)
 }
 
+/// Every filesystem entry that can affect a raw generation observation,
+/// including untracked files and symlinks. The detector-facing
+/// [`repository_files`] view intentionally remains index-backed; this second
+/// view is only for fixed-point race detection and must not follow links.
+pub(crate) fn repository_inventory_files(
+    root: &Path,
+    exclude: &[String],
+) -> Result<Vec<String>, GeneratorError> {
+    if !root.is_dir() {
+        return Err(GeneratorError::usage(format!(
+            "not a repository directory: {}",
+            root.display()
+        )));
+    }
+    let excludes = exclude_set(exclude)?;
+    let mut files = Vec::new();
+    collect_inventory_files(root, root, &excludes, &mut files)?;
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
 fn exclude_set(patterns: &[String]) -> Result<GlobSet, GeneratorError> {
     let mut builder = GlobSetBuilder::new();
     for pattern in patterns {
@@ -192,6 +214,47 @@ fn collect_files(
                 GeneratorError::usage(format!("make repository path relative: {error}"))
             })?;
             files.push(normalize_relative_path(relative)?);
+        }
+    }
+    Ok(())
+}
+
+fn collect_inventory_files(
+    root: &Path,
+    directory: &Path,
+    excludes: &GlobSet,
+    files: &mut Vec<String>,
+) -> Result<(), GeneratorError> {
+    let entries = fs::read_dir(directory)
+        .map_err(|error| GeneratorError::io("read directory", directory, &error))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| GeneratorError::io("read directory entry", directory, &error))?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        // A linked worktree exposes `.git` as a file. Never treat repository
+        // metadata as a project input, whether it is a directory or a file.
+        if name == ".git" {
+            continue;
+        }
+        let kind = entry
+            .file_type()
+            .map_err(|error| GeneratorError::io("read file type", &path, &error))?;
+        if kind.is_dir() {
+            if is_excluded_directory(name.as_ref()) {
+                continue;
+            }
+            collect_inventory_files(root, &path, excludes, files)?;
+            continue;
+        }
+        let relative = path.strip_prefix(root).map_err(|error| {
+            GeneratorError::usage(format!("make repository path relative: {error}"))
+        })?;
+        let relative = normalize_relative_path(relative)?;
+        if !excludes.is_match(&relative) && !GENERATOR_OWNED_SCAN_FILES.contains(&relative.as_str())
+        {
+            files.push(relative);
         }
     }
     Ok(())
