@@ -15,6 +15,7 @@ mod node;
 mod opentofu;
 pub(crate) mod rust;
 mod signals;
+mod skills;
 mod swift;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -40,12 +41,12 @@ pub(crate) fn scan_shape(
     default_branch: &str,
     exclude: &[String],
 ) -> Result<RepositoryShape, GeneratorError> {
-    let files = file_walk::repository_files(root, exclude)?;
-    let file_set: BTreeSet<String> = files.iter().cloned().collect();
-    let context = ScanContext {
+    let all_files = file_walk::repository_files(root, exclude)?;
+    let all_file_set: BTreeSet<String> = all_files.iter().cloned().collect();
+    let all_context = ScanContext {
         root,
-        files: &files,
-        file_set: &file_set,
+        files: &all_files,
+        file_set: &all_file_set,
     };
     let mut shape = RepositoryShape {
         files: Vec::new(),
@@ -62,7 +63,23 @@ pub(crate) fn scan_shape(
     };
     // Detector order is part of the contract: ids are sorted stably below, so
     // the first detector to claim an id keeps the un-suffixed form.
-    file_walk::detect(&context, &mut shape);
+    file_walk::detect(&all_context, &mut shape);
+    // Skills repositories carry executable-looking examples below an
+    // explicit `skills/<name>/templates/` boundary. Validate that boundary
+    // from the plugin catalog before hiding those files from generic language
+    // detectors; ordinary repositories and helper packages remain visible.
+    let template_files = skills::detect(&all_context, &mut shape)?;
+    let files = all_files
+        .iter()
+        .filter(|file| !template_files.contains(*file))
+        .cloned()
+        .collect::<Vec<_>>();
+    let file_set: BTreeSet<String> = files.iter().cloned().collect();
+    let context = ScanContext {
+        root,
+        files: &files,
+        file_set: &file_set,
+    };
     rust::detect(&context, &mut shape)?;
     signals::detect(&context, &mut shape);
     gradle::detect(&context, &mut shape)?;
@@ -73,7 +90,7 @@ pub(crate) fn scan_shape(
     homebrew::detect(&context, &mut shape);
     docs::detect(&context, &mut shape);
     shape.finalize();
-    shape.files = files;
+    shape.files = all_files;
     Ok(shape)
 }
 
@@ -200,7 +217,7 @@ fn detection_contract(kind: UnitKind) -> (Platform, TrustReq, Capabilities) {
         // A SwiftPM package is portable: it verifies wherever its toolchain
         // provisions. Only Xcode scheme work and XCFramework consumers carry
         // the Apple need, which the Swift detector overlays afterwards.
-        UnitKind::Swift => (Platform::LinuxX64, trust, Capabilities::default()),
+        UnitKind::Swift | UnitKind::Skills => (Platform::LinuxX64, trust, Capabilities::default()),
         UnitKind::Docker => (
             Platform::LinuxX64,
             trust,

@@ -1,0 +1,1232 @@
+//! Skills/plugin repository detector.
+//!
+//! A skills repository is metadata, documentation, and helper tooling. Its
+//! nested examples are not executable project units. This detector validates
+//! the repository-owned contract before generic language detectors run, then
+//! returns the template paths that generic detectors must not claim.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::Path;
+
+use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
+use serde_json::Value;
+
+use super::{unit, RepositoryShape, ScanContext};
+use crate::s2::{GeneratorError, UnitKind};
+
+const CATALOG: &str = "catalog.json";
+const DOCS_INDEX: &str = "docs/index.json";
+const DOCS_README: &str = "docs/README.md";
+const REQUIRED_PLUGIN_FILES: [&str; 5] = [
+    "plugin.json",
+    ".codex-plugin/plugin.json",
+    ".kimi-plugin/plugin.json",
+    ".claude-plugin/plugin.json",
+    ".claude-plugin/marketplace.json",
+];
+
+const DOC_DRIFT_COMMAND: &str = "tmp=$(mktemp -d) && trap 'rm -rf \"$tmp\"' EXIT && repo=$(basename \"$PWD\") && mkdir \"$tmp/$repo\" && git archive --format=tar HEAD | tar -x -C \"$tmp/$repo\" && cp -R \"$tmp/$repo/docs\" \"$tmp/docs.expected\" && bun \"$tmp/$repo/scripts/generate-docs.ts\" && diff -ru \"$tmp/docs.expected\" \"$tmp/$repo/docs\"";
+const HELPER_SYNTAX_COMMAND: &str = "tmp=$(mktemp -d) && trap 'rm -rf \"$tmp\"' EXIT && find scripts -type f -name '*.ts' -print0 | xargs -0 bun build --target=bun --no-bundle --outdir \"$tmp\"";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Frontmatter {
+    values: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Catalog {
+    names: Vec<String>,
+    plugin_name: String,
+}
+
+/// Detect and validate one canonical skills/plugin repository.
+///
+/// The empty result means the repository is not a skills repository. A plugin
+/// marker without the complete contract is an error: silently falling through
+/// to a language detector would turn a malformed plugin into a false ordinary
+/// project.
+pub(crate) fn detect(
+    context: &ScanContext<'_>,
+    shape: &mut RepositoryShape,
+) -> Result<BTreeSet<String>, GeneratorError> {
+    if !has_plugin_marker(context) {
+        return Ok(BTreeSet::new());
+    }
+    let catalog = read_catalog(context)?;
+    validate_plugin_manifests(context, &catalog.plugin_name)?;
+    let template_skills = validate_skills(context, &catalog.names)?;
+    validate_docs(context, &catalog.names)?;
+    validate_links(context)?;
+    let template_files = template_files(context, &template_skills);
+    validate_templates(context, &template_files)?;
+    if !context.file_set.contains("scripts/generate-docs.ts") {
+        return Err(GeneratorError::usage(
+            "skills plugin is missing scripts/generate-docs.ts",
+        ));
+    }
+    // The canonical repositories run the shared Bun helper without a
+    // repository-proven version. Keep that fact visible in the scan instead
+    // of rendering an apparently pinned version from a nested example
+    // template or silently claiming reproducibility.
+    shape.limitations.push(
+        "Skills helper checks have no repository-proven Bun version; setup-bun uses the generator action pin without a bun-version input."
+            .to_owned(),
+    );
+    let mut skill_unit = unit(
+        UnitKind::Skills,
+        ".",
+        vec![
+            "README.md".to_owned(),
+            CATALOG.to_owned(),
+            "plugin.json".to_owned(),
+            ".codex-plugin/**".to_owned(),
+            ".kimi-plugin/**".to_owned(),
+            ".claude-plugin/**".to_owned(),
+            "skills/**".to_owned(),
+            "docs/index.json".to_owned(),
+            "docs/README.md".to_owned(),
+            "docs/skills/**".to_owned(),
+            "scripts/**".to_owned(),
+        ],
+        Vec::new(),
+        None,
+    );
+    skill_unit.pr_commands = vec![
+        DOC_DRIFT_COMMAND.to_owned(),
+        HELPER_SYNTAX_COMMAND.to_owned(),
+    ];
+    skill_unit.full_commands.clone_from(&skill_unit.pr_commands);
+    shape.units.push(skill_unit);
+    shape.detected.push("skills-plugin".to_owned());
+    shape
+        .detected
+        .push(format!("skills-count:{}", catalog.names.len()));
+    Ok(template_files)
+}
+
+fn has_plugin_marker(context: &ScanContext<'_>) -> bool {
+    REQUIRED_PLUGIN_FILES[1..]
+        .iter()
+        .any(|path| context.file_set.contains(*path))
+        || (context.file_set.contains(CATALOG)
+            && context
+                .files
+                .iter()
+                .any(|file| file.starts_with("skills/") && file.ends_with("/SKILL.md")))
+}
+
+fn read_catalog(context: &ScanContext<'_>) -> Result<Catalog, GeneratorError> {
+    require_file(context, CATALOG)?;
+    let path = context.root.join(CATALOG);
+    let text = read_text(&path, "read catalog.json")?;
+    let value = parse_json(&text, &path, "catalog.json")?;
+    let object = value.as_object().ok_or_else(|| {
+        GeneratorError::usage("catalog.json must contain an object with a skills array")
+    })?;
+    let entries = object
+        .get("skills")
+        .and_then(Value::as_array)
+        .ok_or_else(|| GeneratorError::usage("catalog.json must contain a skills array"))?;
+    let mut names = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let name = entry
+            .as_str()
+            .ok_or_else(|| GeneratorError::usage("catalog.json skills entries must be strings"))?;
+        validate_skill_name(name)?;
+        if names.iter().any(|candidate| candidate == name) {
+            return Err(GeneratorError::usage(format!(
+                "catalog.json contains duplicate skill `{name}`"
+            )));
+        }
+        names.push(name.to_owned());
+    }
+    if names.is_empty() {
+        return Err(GeneratorError::usage("catalog.json skills array is empty"));
+    }
+    let root_plugin = read_json_object(context, "plugin.json")?;
+    let plugin_name = string_field(&root_plugin, "name", "plugin.json")?.to_owned();
+    if plugin_name.is_empty() {
+        return Err(GeneratorError::usage("plugin.json name must not be empty"));
+    }
+    Ok(Catalog { names, plugin_name })
+}
+
+fn validate_skill_name(name: &str) -> Result<(), GeneratorError> {
+    if name.is_empty()
+        || name.trim().is_empty()
+        || name != name.trim()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err(GeneratorError::usage(format!(
+            "catalog.json contains unsafe skill name `{name}`"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_plugin_manifests(
+    context: &ScanContext<'_>,
+    expected_name: &str,
+) -> Result<(), GeneratorError> {
+    for path in REQUIRED_PLUGIN_FILES {
+        require_file(context, path)?;
+    }
+    let codex = read_json_object(context, ".codex-plugin/plugin.json")?;
+    let kimi = read_json_object(context, ".kimi-plugin/plugin.json")?;
+    let claude = read_json_object(context, ".claude-plugin/plugin.json")?;
+    let marketplace = read_json_object(context, ".claude-plugin/marketplace.json")?;
+    for (path, object) in [
+        (".codex-plugin/plugin.json", &codex),
+        (".kimi-plugin/plugin.json", &kimi),
+        (".claude-plugin/plugin.json", &claude),
+    ] {
+        let name = string_field(object, "name", path)?;
+        if name != expected_name {
+            return Err(GeneratorError::usage(format!(
+                "{path} name `{name}` does not match plugin.json name `{expected_name}`"
+            )));
+        }
+        let version = string_field(object, "version", path)?;
+        if version.is_empty() {
+            return Err(GeneratorError::usage(format!(
+                "{path} version must not be empty"
+            )));
+        }
+    }
+    for path in [".codex-plugin/plugin.json", ".kimi-plugin/plugin.json"] {
+        let object = if path.starts_with(".codex") {
+            &codex
+        } else {
+            &kimi
+        };
+        if string_field(object, "skills", path)? != "./skills/" {
+            return Err(GeneratorError::usage(format!(
+                "{path} skills must be `./skills/`"
+            )));
+        }
+    }
+    let codex_version = string_field(&codex, "version", ".codex-plugin/plugin.json")?;
+    for (path, object) in [
+        (".kimi-plugin/plugin.json", &kimi),
+        (".claude-plugin/plugin.json", &claude),
+    ] {
+        if string_field(object, "version", path)? != codex_version {
+            return Err(GeneratorError::usage(format!(
+                "{path} version does not match .codex-plugin/plugin.json"
+            )));
+        }
+    }
+    let marketplace_plugins = marketplace
+        .get("plugins")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            GeneratorError::usage(".claude-plugin/marketplace.json must contain a plugins array")
+        })?;
+    if marketplace_plugins.len() != 1 {
+        return Err(GeneratorError::usage(
+            ".claude-plugin/marketplace.json must contain exactly one plugin",
+        ));
+    }
+    let marketplace_plugin = marketplace_plugins[0].as_object().ok_or_else(|| {
+        GeneratorError::usage(".claude-plugin/marketplace.json plugins entries must be objects")
+    })?;
+    if string_field(
+        marketplace_plugin,
+        "name",
+        ".claude-plugin/marketplace.json",
+    )? != expected_name
+        || string_field(
+            marketplace_plugin,
+            "source",
+            ".claude-plugin/marketplace.json",
+        )? != "./"
+        || string_field(
+            marketplace_plugin,
+            "version",
+            ".claude-plugin/marketplace.json",
+        )? != codex_version
+    {
+        return Err(GeneratorError::usage(
+            ".claude-plugin/marketplace.json plugin name, source, and version do not match provider manifests",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_skills(
+    context: &ScanContext<'_>,
+    names: &[String],
+) -> Result<BTreeSet<String>, GeneratorError> {
+    let expected = names
+        .iter()
+        .map(|name| format!("skills/{name}/SKILL.md"))
+        .collect::<BTreeSet<_>>();
+    let mut template_skills = BTreeSet::new();
+    for path in &expected {
+        require_file(context, path)?;
+        let text = read_text(&context.root.join(path), "read skill definition")?;
+        let frontmatter = parse_frontmatter(&text, path)?;
+        let expected_name = path
+            .strip_prefix("skills/")
+            .and_then(|value| value.strip_suffix("/SKILL.md"))
+            .ok_or_else(|| GeneratorError::usage(format!("invalid skill path `{path}`")))?;
+        if frontmatter.values.get("name").map(String::as_str) != Some(expected_name) {
+            return Err(GeneratorError::usage(format!(
+                "{path} frontmatter name does not match catalog entry `{expected_name}`"
+            )));
+        }
+        require_frontmatter_value(&frontmatter, "description", path)?;
+        require_frontmatter_value(&frontmatter, "argument-hint", path)?;
+        if frontmatter.values.get("license").map(String::as_str) != Some("Apache-2.0") {
+            return Err(GeneratorError::usage(format!(
+                "{path} frontmatter license must be Apache-2.0"
+            )));
+        }
+        if frontmatter.values.get("user-invocable").map(String::as_str) != Some("true") {
+            return Err(GeneratorError::usage(format!(
+                "{path} frontmatter user-invocable must be true"
+            )));
+        }
+        if let Some(value) = frontmatter.values.get("disable-model-invocation")
+            && value != "true"
+            && value != "false"
+        {
+            return Err(GeneratorError::usage(format!(
+                "{path} frontmatter disable-model-invocation must be true or false"
+            )));
+        }
+        if has_template_context(&text) {
+            template_skills.insert(expected_name.to_owned());
+        }
+    }
+    let extra = context
+        .files
+        .iter()
+        .filter(|file| is_root_skill_definition(file))
+        .filter(|file| !expected.contains(*file))
+        .cloned()
+        .collect::<Vec<_>>();
+    if let Some(path) = extra.first() {
+        return Err(GeneratorError::usage(format!(
+            "skill definition `{path}` is not listed in catalog.json"
+        )));
+    }
+    Ok(template_skills)
+}
+
+fn validate_docs(context: &ScanContext<'_>, names: &[String]) -> Result<(), GeneratorError> {
+    require_file(context, DOCS_INDEX)?;
+    require_file(context, DOCS_README)?;
+    let path = context.root.join(DOCS_INDEX);
+    let text = read_text(&path, "read docs/index.json")?;
+    let entries = parse_json(&text, &path, DOCS_INDEX)?
+        .as_array()
+        .cloned()
+        .ok_or_else(|| GeneratorError::usage("docs/index.json must contain an array"))?;
+    let entry_names = entries
+        .iter()
+        .map(|entry| {
+            let object = entry
+                .as_object()
+                .ok_or_else(|| GeneratorError::usage("docs/index.json entries must be objects"))?;
+            let name = nonempty_string_field(object, "name", DOCS_INDEX)?.to_owned();
+            for field in ["description", "overview", "definition", "source"] {
+                nonempty_string_field(object, field, DOCS_INDEX)?;
+            }
+            let overview = nonempty_string_field(object, "overview", DOCS_INDEX)?;
+            let definition = nonempty_string_field(object, "definition", DOCS_INDEX)?;
+            require_docs_file(context, overview)?;
+            require_docs_file(context, definition)?;
+            Ok(name)
+        })
+        .collect::<Result<Vec<_>, GeneratorError>>()?;
+    if entry_names != names {
+        return Err(GeneratorError::usage(
+            "docs/index.json names must exactly match catalog.json order",
+        ));
+    }
+    let readme = read_text(&context.root.join(DOCS_README), "read docs README")?;
+    for name in names {
+        let marker = format!("- [{name}](skills/{name}/index.md)");
+        if !readme.contains(&marker) {
+            return Err(GeneratorError::usage(format!(
+                "docs/README.md is missing catalog skill `{name}`"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_links(context: &ScanContext<'_>) -> Result<(), GeneratorError> {
+    for file in context.files.iter().filter(|file| {
+        file.starts_with("skills/")
+            && Path::new(file)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("mdx")
+                })
+    }) {
+        let text = read_text(&context.root.join(file), "read Markdown reference")?;
+        let mut fenced = false;
+        for (line_number, line) in text.lines().enumerate() {
+            if line.trim_start().as_bytes().starts_with(&[96, 96, 96]) {
+                fenced = !fenced;
+                continue;
+            }
+            if fenced {
+                continue;
+            }
+            let mut remaining = line;
+            while let Some(start) = remaining.find("](") {
+                let target_start = start + 2;
+                let Some(end) = remaining[target_start..].find(')') else {
+                    break;
+                };
+                let target = remaining[target_start..target_start + end].trim();
+                remaining = &remaining[target_start + end + 1..];
+                let target = target.split('#').next().unwrap_or_default().trim();
+                if target.is_empty()
+                    || target.starts_with("http://")
+                    || target.starts_with("https://")
+                    || target.starts_with("mailto:")
+                    || target.starts_with('#')
+                {
+                    continue;
+                }
+                if is_markdown_placeholder(target) {
+                    continue;
+                }
+                let resolved = resolve_markdown_path(file, target).ok_or_else(|| {
+                    GeneratorError::usage(format!(
+                        "unsafe Markdown link `{target}` at {file}:{}",
+                        line_number + 1
+                    ))
+                })?;
+                if !context.file_set.contains(&resolved)
+                    && !context
+                        .files
+                        .iter()
+                        .any(|candidate| candidate.starts_with(&format!("{resolved}/")))
+                {
+                    return Err(GeneratorError::usage(format!(
+                        "missing Markdown link `{target}` at {file}:{}",
+                        line_number + 1
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn resolve_markdown_path(source: &str, target: &str) -> Option<String> {
+    if target.starts_with('/') || target.chars().any(char::is_control) {
+        return None;
+    }
+    let mut parts = source
+        .rsplit_once('/')
+        .map(|(parent, _)| parent.split('/').map(str::to_owned).collect::<Vec<_>>())
+        .unwrap_or_default();
+    for component in target.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            value => parts.push(value.to_owned()),
+        }
+    }
+    Some(parts.join("/"))
+}
+
+fn is_root_skill_definition(file: &str) -> bool {
+    let mut segments = file.split('/');
+    segments.next() == Some("skills")
+        && segments.next().is_some()
+        && segments.next() == Some("SKILL.md")
+        && segments.next().is_none()
+}
+
+fn require_docs_file(context: &ScanContext<'_>, relative: &str) -> Result<(), GeneratorError> {
+    let resolved = resolve_markdown_path(DOCS_INDEX, relative).ok_or_else(|| {
+        GeneratorError::usage(format!(
+            "{DOCS_INDEX} contains unsafe generated-document path {relative}"
+        ))
+    })?;
+    if !resolved.starts_with("docs/") {
+        return Err(GeneratorError::usage(format!(
+            "{DOCS_INDEX} path {relative} escapes docs/"
+        )));
+    }
+    require_file(context, &resolved)
+}
+
+fn is_markdown_placeholder(target: &str) -> bool {
+    target.split('/').any(|component| {
+        let inner = component
+            .strip_prefix('<')
+            .and_then(|value| value.strip_suffix('>'));
+        inner.is_some_and(|value| {
+            !value.is_empty()
+                && !value
+                    .chars()
+                    .any(|character| character == '<' || character == '>' || character.is_control())
+        })
+    })
+}
+
+fn has_template_context(text: &str) -> bool {
+    text.lines().any(|line| {
+        line.contains("](templates/")
+            || line.contains("`templates/")
+            || line.contains("templates/`")
+    })
+}
+
+fn template_files(context: &ScanContext<'_>, names: &BTreeSet<String>) -> BTreeSet<String> {
+    names
+        .iter()
+        .flat_map(|name| {
+            let prefix = format!("skills/{name}/templates/");
+            context
+                .files
+                .iter()
+                .filter(move |file| file.starts_with(&prefix))
+                .cloned()
+        })
+        .collect()
+}
+
+fn validate_templates(
+    context: &ScanContext<'_>,
+    template_files: &BTreeSet<String>,
+) -> Result<(), GeneratorError> {
+    for file in template_files {
+        let path = context.root.join(file);
+        let text = read_text(&path, "read template")?;
+        match Path::new(file)
+            .extension()
+            .and_then(|extension| extension.to_str())
+        {
+            Some("md") if file.ends_with("/SKILL.md") => {
+                parse_frontmatter(&text, file)?;
+            }
+            Some("json") => {
+                parse_json(&text, &path, "JSON template")?;
+            }
+            Some("toml") => {
+                text.parse::<toml::Table>().map_err(|error| {
+                    GeneratorError::usage(format!("invalid TOML template {file}: {error}"))
+                })?;
+            }
+            Some("yaml" | "yml") => {
+                serde_yaml::from_str::<serde_yaml::Value>(&text).map_err(|error| {
+                    GeneratorError::usage(format!("invalid YAML template {file}: {error}"))
+                })?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn parse_frontmatter(text: &str, path: &str) -> Result<Frontmatter, GeneratorError> {
+    let mut lines = text.lines();
+    if lines.next().map(str::trim_end) != Some("---") {
+        return Err(GeneratorError::usage(format!(
+            "{path} is missing opening frontmatter delimiter"
+        )));
+    }
+    let mut values: BTreeMap<String, String> = BTreeMap::new();
+    let mut yaml_lines = Vec::new();
+    let mut active_folded: Option<String> = None;
+    let mut closed = false;
+    for raw_line in lines {
+        let line = raw_line.trim_end_matches('\r');
+        if line == "---" {
+            closed = true;
+            break;
+        }
+        yaml_lines.push(line.to_owned());
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            continue;
+        }
+        if let Some(key) = active_folded.as_ref()
+            && line.chars().next().is_some_and(char::is_whitespace)
+        {
+            let value = values.entry(key.clone()).or_default();
+            if !value.is_empty() {
+                value.push(' ');
+            }
+            value.push_str(line.trim());
+            continue;
+        }
+        active_folded = None;
+        let Some((key, raw_value)) = line.split_once(':') else {
+            return Err(GeneratorError::usage(format!(
+                "{path} has malformed frontmatter line `{line}`"
+            )));
+        };
+        let key = key.trim();
+        if key.is_empty() || key.chars().any(char::is_control) {
+            return Err(GeneratorError::usage(format!(
+                "{path} has an unsafe frontmatter key"
+            )));
+        }
+        if values.contains_key(key) {
+            return Err(GeneratorError::usage(format!(
+                "{path} has duplicate frontmatter key {key}"
+            )));
+        }
+        let value = raw_value.trim().trim_matches(['\"', '\'']);
+        if value == ">" || value == ">-" {
+            values.insert(key.to_owned(), String::new());
+            active_folded = Some(key.to_owned());
+        } else {
+            values.insert(key.to_owned(), value.to_owned());
+        }
+    }
+    if !closed {
+        return Err(GeneratorError::usage(format!(
+            "{path} is missing closing frontmatter delimiter"
+        )));
+    }
+    let yaml =
+        serde_yaml::from_str::<serde_yaml::Value>(&yaml_lines.join("\n")).map_err(|error| {
+            GeneratorError::usage(format!("{path} has invalid YAML frontmatter: {error}"))
+        })?;
+    if !yaml.is_mapping() {
+        return Err(GeneratorError::usage(format!(
+            "{path} frontmatter must contain a YAML mapping"
+        )));
+    }
+    if !values.contains_key("name") || !values.contains_key("description") {
+        return Err(GeneratorError::usage(format!(
+            "{path} frontmatter requires name and description"
+        )));
+    }
+    Ok(Frontmatter { values })
+}
+
+fn require_frontmatter_value(
+    frontmatter: &Frontmatter,
+    key: &str,
+    path: &str,
+) -> Result<(), GeneratorError> {
+    if frontmatter
+        .values
+        .get(key)
+        .is_none_or(|value| value.trim().is_empty())
+    {
+        return Err(GeneratorError::usage(format!(
+            "{path} frontmatter {key} must not be empty"
+        )));
+    }
+    Ok(())
+}
+
+fn read_json_object(
+    context: &ScanContext<'_>,
+    relative: &str,
+) -> Result<serde_json::Map<String, Value>, GeneratorError> {
+    require_file(context, relative)?;
+    let path = context.root.join(relative);
+    let text = read_text(&path, "read JSON manifest")?;
+    let value = parse_json(&text, &path, relative)?;
+    value.as_object().cloned().ok_or_else(|| {
+        GeneratorError::usage(format!("JSON manifest {relative} must contain an object"))
+    })
+}
+
+fn parse_json(text: &str, path: &Path, label: &str) -> Result<Value, GeneratorError> {
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    let value = StrictJsonValue::deserialize(&mut deserializer).map_err(|error| {
+        GeneratorError::usage(format!("invalid {label} at {}: {error}", path.display()))
+    })?;
+    deserializer.end().map_err(|error| {
+        GeneratorError::usage(format!("invalid {label} at {}: {error}", path.display()))
+    })?;
+    Ok(value.0)
+}
+
+struct StrictJsonValue(Value);
+
+impl<'de> Deserialize<'de> for StrictJsonValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(StrictJsonVisitor)
+    }
+}
+
+struct StrictJsonVisitor;
+
+impl<'de> Visitor<'de> for StrictJsonVisitor {
+    type Value = StrictJsonValue;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON value with unique object keys")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(StrictJsonValue(Value::Bool(value)))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(StrictJsonValue(Value::Number(value.into())))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(StrictJsonValue(Value::Number(value.into())))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        serde_json::Number::from_f64(value)
+            .map(|number| StrictJsonValue(Value::Number(number)))
+            .ok_or_else(|| E::custom("JSON number is not finite"))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(StrictJsonValue(Value::String(value.to_owned())))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(StrictJsonValue(Value::String(value)))
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(StrictJsonValue(Value::Null))
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(StrictJsonValue(Value::Null))
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut values = Vec::new();
+        while let Some(value) = sequence.next_element::<StrictJsonValue>()? {
+            values.push(value.0);
+        }
+        Ok(StrictJsonValue(Value::Array(values)))
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut object = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if object.contains_key(&key) {
+                return Err(de::Error::custom(format!(
+                    "duplicate JSON object key {key}"
+                )));
+            }
+            let value = map.next_value::<StrictJsonValue>()?;
+            object.insert(key, value.0);
+        }
+        Ok(StrictJsonValue(Value::Object(object)))
+    }
+}
+
+fn string_field<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    key: &str,
+    path: &str,
+) -> Result<&'a str, GeneratorError> {
+    object
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| GeneratorError::usage(format!("{path} requires string field `{key}`")))
+}
+
+fn nonempty_string_field<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    key: &str,
+    path: &str,
+) -> Result<&'a str, GeneratorError> {
+    let value = string_field(object, key, path)?;
+    if value.trim().is_empty() {
+        return Err(GeneratorError::usage(format!(
+            "{path} field {key} must not be empty"
+        )));
+    }
+    Ok(value)
+}
+
+fn require_file(context: &ScanContext<'_>, relative: &str) -> Result<(), GeneratorError> {
+    if context.file_set.contains(relative) {
+        Ok(())
+    } else {
+        Err(GeneratorError::usage(format!(
+            "skills plugin is missing tracked file `{relative}`"
+        )))
+    }
+}
+
+fn read_text(path: &Path, operation: &str) -> Result<String, GeneratorError> {
+    fs::read_to_string(path).map_err(|error| GeneratorError::io(operation, path, &error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{detect, is_markdown_placeholder, parse_frontmatter, resolve_markdown_path};
+    use crate::s2::provider::{ProviderId, ProviderSet};
+    use crate::s2::scan::{RepositoryShape, ScanContext};
+    use crate::s2::{GeneratorError, UnitKind};
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
+
+    #[expect(clippy::panic, reason = "fixture setup failures must name their cause")]
+    fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("{context}: {error}"),
+        }
+    }
+
+    struct Fixture {
+        root: PathBuf,
+        files: Vec<String>,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "velnor-skills-detector-{}-{}",
+                std::process::id(),
+                NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = fs::remove_dir_all(&root);
+            let files = [
+                "catalog.json",
+                "plugin.json",
+                ".codex-plugin/plugin.json",
+                ".kimi-plugin/plugin.json",
+                ".claude-plugin/plugin.json",
+                ".claude-plugin/marketplace.json",
+                "docs/index.json",
+                "docs/README.md",
+                "docs/skills/example/index.md",
+                "docs/skills/example/definition.md",
+                "skills/example/SKILL.md",
+                "skills/example/references/policy.md",
+                "skills/example/templates/package.json",
+                "skills/example/templates/Cargo.toml",
+                "skills/example/templates/config.yaml",
+                "skills/example/helpers/package.json",
+                "scripts/generate-docs.ts",
+                "scripts/helper.ts",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+            let fixture = Self { root, files };
+            for file in &fixture.files {
+                let content = match file.as_str() {
+                    "catalog.json" => r#"{"skills":["example"]}"#,
+                    "plugin.json" => r#"{"name":"example-plugin"}"#,
+                    ".codex-plugin/plugin.json" | ".kimi-plugin/plugin.json" => {
+                        r#"{"name":"example-plugin","version":"1.0.0","skills":"./skills/"}"#
+                    }
+                    ".claude-plugin/plugin.json" => {
+                        r#"{"name":"example-plugin","version":"1.0.0"}"#
+                    }
+                    ".claude-plugin/marketplace.json" => {
+                        r#"{"plugins":[{"name":"example-plugin","source":"./","version":"1.0.0"}]}"#
+                    }
+                    "docs/index.json" => {
+                        r#"[{"name":"example","description":"Example","overview":"skills/example/index.md","definition":"skills/example/definition.md","source":"https://example.invalid/example"}]"#
+                    }
+                    "docs/README.md" => "- [example](skills/example/index.md)\n",
+                    "docs/skills/example/index.md" => "# Example\n",
+                    "docs/skills/example/definition.md" => "# Definition\n",
+                    "skills/example/SKILL.md" => {
+                        "---\nname: example\ndescription: >-\n  Use the example skill.\nargument-hint: \"<path>\"\nlicense: Apache-2.0\nuser-invocable: true\n---\n# Example\nSee [policy](references/policy.md) and [templates](templates/).\n"
+                    }
+                    "skills/example/references/policy.md" => "# Policy\n",
+                    "skills/example/templates/package.json" => r#"{"name":"template"}"#,
+                    "skills/example/templates/Cargo.toml" => {
+                        "[package]\nname = \"template\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"
+                    }
+                    "skills/example/templates/config.yaml" => "name: template\n",
+                    "skills/example/helpers/package.json" => {
+                        r#"{"name":"helper","packageManager":"bun@1.2.3","scripts":{"check":"bun test"}}"#
+                    }
+                    "scripts/generate-docs.ts" | "scripts/helper.ts" => "console.log('ok');\n",
+                    _ => unreachable!("fixture file has content"),
+                };
+                fixture.write(file, content);
+            }
+            fixture
+        }
+
+        fn write(&self, relative: &str, content: &str) {
+            let path = self.root.join(relative);
+            if let Some(parent) = path.parent() {
+                must(fs::create_dir_all(parent), "create fixture parent");
+            }
+            must(fs::write(path, content), "write fixture file");
+        }
+
+        fn run_detect(&self) -> Result<(BTreeSet<String>, RepositoryShape), GeneratorError> {
+            let file_set = self.files.iter().cloned().collect::<BTreeSet<_>>();
+            let context = ScanContext {
+                root: &self.root,
+                files: &self.files,
+                file_set: &file_set,
+            };
+            let mut shape = empty_shape();
+            let hidden = detect(&context, &mut shape)?;
+            Ok((hidden, shape))
+        }
+
+        fn run_scan(&self) -> Result<RepositoryShape, GeneratorError> {
+            super::super::scan_shape(
+                &self.root,
+                &ProviderSet::from([ProviderId::GithubHosted]),
+                "main",
+                &[],
+            )
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn empty_shape() -> RepositoryShape {
+        RepositoryShape {
+            files: Vec::new(),
+            units: Vec::new(),
+            detected: Vec::new(),
+            limitations: Vec::new(),
+            default_branch: "main".to_owned(),
+            providers: ProviderSet::from([ProviderId::GithubHosted]),
+        }
+    }
+
+    #[test]
+    fn frontmatter_parser_accepts_folded_descriptions() {
+        let parsed = parse_frontmatter(
+            "---\nname: example\ndescription: >-\n  first line\n  second line\nargument-hint: \"<args>\"\n---\n",
+            "skills/example/SKILL.md",
+        )
+        .unwrap_or_else(|error| panic!("frontmatter fixture parses: {error}"));
+        assert_eq!(parsed.values["name"], "example");
+        assert_eq!(parsed.values["description"], "first line second line");
+    }
+
+    #[test]
+    fn frontmatter_parser_rejects_missing_delimiter() {
+        let error = match parse_frontmatter("# not frontmatter\n", "skills/example/SKILL.md") {
+            Ok(_) => panic!("missing frontmatter must fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("opening frontmatter"));
+    }
+
+    #[test]
+    fn malformed_yaml_frontmatter_is_rejected() {
+        let error = match parse_frontmatter(
+            "---\nname: example\ndescription: [unterminated\nargument-hint: args\nlicense: Apache-2.0\nuser-invocable: true\n---\n",
+            "skills/example/SKILL.md",
+        ) {
+            Ok(_) => panic!("malformed YAML frontmatter must fail"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("invalid YAML frontmatter"));
+    }
+
+    #[test]
+    fn markdown_paths_stay_inside_repository() {
+        assert_eq!(
+            resolve_markdown_path("skills/example/SKILL.md", "references/policy.md"),
+            Some("skills/example/references/policy.md".to_owned())
+        );
+        assert_eq!(
+            resolve_markdown_path(
+                "skills/example/references/policy.md",
+                "../../../scripts/helper.ts"
+            ),
+            Some("scripts/helper.ts".to_owned())
+        );
+        assert_eq!(
+            resolve_markdown_path("skills/example/SKILL.md", "../../../outside.md"),
+            None
+        );
+    }
+
+    #[test]
+    fn valid_plugin_shape_hides_only_metadata_declared_templates() {
+        let fixture = Fixture::new();
+        let (hidden, shape) = fixture
+            .run_detect()
+            .unwrap_or_else(|error| panic!("valid skills fixture detects: {error}"));
+        assert!(hidden.contains("skills/example/templates/package.json"));
+        assert!(hidden.contains("skills/example/templates/Cargo.toml"));
+        assert!(hidden.contains("skills/example/templates/config.yaml"));
+        assert!(!hidden.contains("skills/example/helpers/package.json"));
+        assert_eq!(shape.units.len(), 1);
+        assert_eq!(shape.units[0].kind, UnitKind::Skills);
+        assert!(shape
+            .limitations
+            .iter()
+            .any(|limitation| limitation.contains("no repository-proven Bun version")));
+        assert!(shape.units[0]
+            .pr_commands
+            .iter()
+            .any(|command| command.contains("generate-docs.ts")));
+        assert!(shape.units[0]
+            .pr_commands
+            .iter()
+            .any(|command| command.contains("find scripts") && command.contains("bun build")));
+    }
+
+    #[test]
+    fn full_scan_keeps_real_helper_package_and_drops_template_units() {
+        let fixture = Fixture::new();
+        let shape = fixture
+            .run_scan()
+            .unwrap_or_else(|error| panic!("scan skills fixture: {error}"));
+        assert!(shape.units.iter().any(|unit| unit.kind == UnitKind::Skills));
+        assert!(shape
+            .units
+            .iter()
+            .any(|unit| { unit.kind == UnitKind::Bun && unit.root == "skills/example/helpers" }));
+        assert!(!shape.units.iter().any(|unit| {
+            unit.root.contains("/templates") || unit.root.starts_with("skills/example/templates")
+        }));
+    }
+
+    #[test]
+    fn malformed_catalog_duplicate_key_is_rejected() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "catalog.json",
+            r#"{"skills":["example"],"skills":["example"]}"#,
+        );
+        let error = fixture
+            .run_detect()
+            .expect_err("duplicate catalog key must fail");
+        assert!(error.to_string().contains("duplicate JSON object key"));
+    }
+
+    #[test]
+    fn duplicate_frontmatter_key_is_rejected() {
+        let fixture = Fixture::new();
+        let skill = must(
+            fs::read_to_string(fixture.root.join("skills/example/SKILL.md")),
+            "read skill fixture",
+        );
+        fixture.write(
+            "skills/example/SKILL.md",
+            &skill.replacen("name: example", "name: example\nname: duplicate", 1),
+        );
+        let error = fixture
+            .run_detect()
+            .expect_err("duplicate frontmatter key must fail");
+        assert!(error.to_string().contains("duplicate frontmatter key"));
+    }
+
+    #[test]
+    fn missing_reference_is_rejected() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "skills/example/references/policy.md",
+            "[missing](missing.md)\n",
+        );
+        let error = fixture
+            .run_detect()
+            .expect_err("missing Markdown reference must fail");
+        assert!(error.to_string().contains("missing Markdown link"));
+    }
+
+    #[test]
+    fn placeholder_links_require_an_explicit_component_marker() {
+        assert!(is_markdown_placeholder("research/<topic>/README.md"));
+        assert!(!is_markdown_placeholder("pure-rust-macos-ui/README.md"));
+        assert!(!is_markdown_placeholder("reference/topic<name>/README.md"));
+    }
+
+    #[test]
+    fn invalid_template_is_rejected() {
+        let fixture = Fixture::new();
+        fixture.write("skills/example/templates/package.json", "{\n");
+        let error = fixture
+            .run_detect()
+            .expect_err("invalid template must fail");
+        assert!(error.to_string().contains("invalid JSON template"));
+    }
+
+    #[test]
+    fn plugin_marker_without_catalog_is_not_a_noop() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-skills-marker-{}-{}",
+            std::process::id(),
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let file = ".codex-plugin/plugin.json".to_owned();
+        must(
+            fs::create_dir_all(root.join(".codex-plugin")),
+            "create marker fixture",
+        );
+        must(
+            fs::write(root.join(&file), r#"{"name":"broken"}"#),
+            "write marker fixture",
+        );
+        let files = vec![file.clone()];
+        let file_set = BTreeSet::from([file]);
+        let context = ScanContext {
+            root: &root,
+            files: &files,
+            file_set: &file_set,
+        };
+        let mut shape = empty_shape();
+        let error = detect(&context, &mut shape)
+            .expect_err("plugin marker without catalog must fail closed");
+        assert!(error.to_string().contains("catalog.json"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn catalog_skill_marker_without_provider_manifests_fails_closed() {
+        let fixture = Fixture::new();
+        let files = fixture
+            .files
+            .iter()
+            .filter(|file| {
+                !file.starts_with(".codex-plugin/")
+                    && !file.starts_with(".kimi-plugin/")
+                    && !file.starts_with(".claude-plugin/")
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let file_set = files.iter().cloned().collect::<BTreeSet<_>>();
+        let context = ScanContext {
+            root: &fixture.root,
+            files: &files,
+            file_set: &file_set,
+        };
+        let mut shape = empty_shape();
+        let error = detect(&context, &mut shape)
+            .expect_err("catalog plus direct skill marker must not silently no-op");
+        assert!(error.to_string().contains(".codex-plugin/plugin.json"));
+    }
+
+    #[test]
+    fn ordinary_rust_and_bun_packages_keep_their_language_units() {
+        let rust = std::env::temp_dir().join(format!(
+            "velnor-skills-rust-control-{}-{}",
+            std::process::id(),
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+        ));
+        must(fs::create_dir_all(rust.join("src")), "create Rust control");
+        must(
+            fs::write(
+                rust.join("Cargo.toml"),
+                "[package]\nname = \"control\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+            ),
+            "write Rust control",
+        );
+        must(
+            fs::write(
+                rust.join("rust-toolchain.toml"),
+                "[toolchain]\nchannel = \"stable\"\n",
+            ),
+            "write Rust toolchain",
+        );
+        must(
+            fs::write(rust.join("src/lib.rs"), "pub fn control() {}\n"),
+            "write Rust source",
+        );
+        let rust_shape = super::super::scan_shape(
+            &rust,
+            &ProviderSet::from([ProviderId::GithubHosted]),
+            "main",
+            &[],
+        )
+        .unwrap_or_else(|error| panic!("scan ordinary Rust package: {error}"));
+        assert!(rust_shape
+            .units
+            .iter()
+            .any(|unit| unit.kind == UnitKind::Rust));
+        assert!(!rust_shape
+            .units
+            .iter()
+            .any(|unit| unit.kind == UnitKind::Skills));
+
+        let bun = std::env::temp_dir().join(format!(
+            "velnor-skills-bun-control-{}-{}",
+            std::process::id(),
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+        ));
+        must(fs::create_dir_all(&bun), "create Bun control");
+        must(
+            fs::write(
+                bun.join("package.json"),
+                r#"{"name":"control","packageManager":"bun@1.2.3","scripts":{"test":"bun test"}}"#,
+            ),
+            "write Bun control",
+        );
+        must(fs::write(bun.join("bun.lock"), "{}\n"), "write Bun lock");
+        let bun_shape = super::super::scan_shape(
+            &bun,
+            &ProviderSet::from([ProviderId::GithubHosted]),
+            "main",
+            &[],
+        )
+        .unwrap_or_else(|error| panic!("scan ordinary Bun package: {error}"));
+        assert!(bun_shape
+            .units
+            .iter()
+            .any(|unit| unit.kind == UnitKind::Bun));
+        assert!(!bun_shape
+            .units
+            .iter()
+            .any(|unit| unit.kind == UnitKind::Skills));
+        let _ = fs::remove_dir_all(rust);
+        let _ = fs::remove_dir_all(bun);
+    }
+}
