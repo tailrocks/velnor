@@ -4860,8 +4860,11 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
           command -v timeout >/dev/null
           command -v sha256sum >/dev/null
           command -v jq >/dev/null
-          docker info >/dev/null
-          test "$(docker info --format '{{{{.OSType}}}}')" = linux
+          docker_cmd() {{
+            env -i PATH="$PATH" HOME=/tmp/policy-execute-home DOCKER_CONFIG="$RUNNER_TEMP/docker-config" docker "$@"
+          }}
+          docker_cmd info >/dev/null
+          test "$(docker_cmd info --format '{{{{.OSType}}}}')" = linux
           test -f "$HANDOFF/handoff.json"
           test -f "$HANDOFF/candidate-manifest.json"
           test -f "$HANDOFF/velnor-workflow"
@@ -4905,17 +4908,17 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
           test -n "$SANDBOX_IMAGE_DIGEST"
           case "$SANDBOX_IMAGE_DIGEST" in sha256:[0-9a-f]{{64}}) ;; *) exit 1 ;; esac
           image="$SANDBOX_IMAGE_REPOSITORY@$SANDBOX_IMAGE_DIGEST"
-          docker buildx imagetools inspect --raw "$image" > "$RUNNER_TEMP/sandbox-index.json"
+          docker_cmd buildx imagetools inspect --raw "$image" > "$RUNNER_TEMP/sandbox-index.json"
           jq -e '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64") | select((.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest")] | length == 1' "$RUNNER_TEMP/sandbox-index.json" >/dev/null
           platform_digest="$(jq -er '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64") | select((.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest") | .digest] | if length == 1 then .[0] else error("platform digest is not unique") end' "$RUNNER_TEMP/sandbox-index.json")"
           case "$platform_digest" in sha256:[0-9a-f]{{64}}) ;; *) exit 1 ;; esac
           platform_image="$SANDBOX_IMAGE_REPOSITORY@$platform_digest"
-          docker buildx imagetools inspect --raw "$platform_image" > "$RUNNER_TEMP/sandbox-platform.json"
+          docker_cmd buildx imagetools inspect --raw "$platform_image" > "$RUNNER_TEMP/sandbox-platform.json"
           config_digest="$(jq -er '.config.digest | strings | select(test("^sha256:[0-9a-f]{{64}}$"))' "$RUNNER_TEMP/sandbox-platform.json")"
-          docker buildx imagetools inspect "$platform_image" --format '{{{{json .Image}}}}' > "$RUNNER_TEMP/sandbox-config.json"
+          docker_cmd buildx imagetools inspect "$platform_image" --format '{{{{json .Image}}}}' > "$RUNNER_TEMP/sandbox-config.json"
           jq -e '(.architecture == "amd64" and .os == "linux") and ((.config.Env // []) | sort == ["PATH=/usr/bin:/bin"]) and ((.config.User // "") == "") and ((.config.Entrypoint // []) == []) and ((.config.Cmd // []) == []) and ((.config.WorkingDir // "/") == "/") and (.config.Volumes == null) and (.config.ExposedPorts == null) and (.config.Healthcheck == null) and (.config.Labels["org.velnor.sandbox"] // "") == "true"' "$RUNNER_TEMP/sandbox-config.json" >/dev/null
-          docker pull --quiet --platform linux/amd64 "$platform_image"
-          docker image inspect "$platform_image" --format '{{{{json .}}}}' > "$RUNNER_TEMP/sandbox-local.json"
+          docker_cmd pull --quiet --platform linux/amd64 "$platform_image"
+          docker_cmd image inspect "$platform_image" --format '{{{{json .}}}}' > "$RUNNER_TEMP/sandbox-local.json"
           jq -e --arg id "$config_digest" --arg ref "$platform_image" '.[0].Id == $id and (.[0].RepoDigests | index($ref) != null) and .[0].Os == "linux" and .[0].Architecture == "amd64" and ((.[0].Config.Env // []) | sort == ["PATH=/usr/bin:/bin"]) and ((.[0].Config.Entrypoint // []) == []) and ((.[0].Config.Cmd // []) == []) and ((.[0].Config.User // "") == "") and (.[0].Config.Volumes == null) and (.[0].Config.ExposedPorts == null) and (.[0].Config.Healthcheck == null)' "$RUNNER_TEMP/sandbox-local.json" >/dev/null
           stage="$(mktemp -d "$RUNNER_TEMP/velnor-sandbox.XXXXXX")"
           trap 'rm -rf "$stage"' EXIT
@@ -4961,16 +4964,16 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
           for value in "$head_sha" "$head_tree_sha" "$head_repository" "$source_closure"; do
             case "$value" in *$'\\n'*|*$'\\r'*|*' '*|*'"'*) exit 1 ;; esac
           done
-          cid="$(docker create --name "velnor-sandbox-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --platform linux/amd64 --pull=never --network=none --read-only --pid=private --cap-drop=ALL --security-opt no-new-privileges=true --pids-limit=128 --memory=512m --memory-swap=512m --cpus=1 --ulimit fsize=67108864:67108864 --ulimit nofile=1024:1024 --ulimit core=0 --shm-size=16m --stop-timeout=5 --log-driver=none --user "$uid:$gid" --workdir /input --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m,nr_inodes=4096,mode=700,uid=$uid,gid=$gid --tmpfs /output:rw,noexec,nosuid,nodev,size=64m,nr_inodes=4096,mode=700,uid=$uid,gid=$gid --mount "type=bind,src=$input,dst=/input,readonly,bind-propagation=rprivate" --mount "type=bind,src=$candidate,dst=/candidate,readonly,bind-propagation=rprivate" --env "SOURCE_HEAD_SHA=$head_sha" --env "SOURCE_TREE_SHA=$head_tree_sha" --env "SOURCE_REPOSITORY=$head_repository" --env "SOURCE_CLOSURE=$source_closure" --env HOME=/tmp/home --env PATH=/usr/bin:/bin --entrypoint /candidate/velnor-workflow "$platform_image" /input --output /output --plain --force --default-branch "$DEFAULT_BRANCH")"
+          cid="$(docker_cmd create --name "velnor-sandbox-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --platform linux/amd64 --pull=never --network=none --read-only --pid=private --cap-drop=ALL --security-opt no-new-privileges=true --pids-limit=128 --memory=512m --memory-swap=512m --cpus=1 --ulimit fsize=67108864:67108864 --ulimit nofile=1024:1024 --ulimit core=0 --shm-size=16m --stop-timeout=5 --log-driver=none --user "$uid:$gid" --workdir /input --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m,nr_inodes=4096,mode=700,uid=$uid,gid=$gid --tmpfs /output:rw,noexec,nosuid,nodev,size=64m,nr_inodes=4096,mode=700,uid=$uid,gid=$gid --mount "type=bind,src=$input,dst=/input,readonly,bind-propagation=rprivate" --mount "type=bind,src=$candidate,dst=/candidate,readonly,bind-propagation=rprivate" --env "SOURCE_HEAD_SHA=$head_sha" --env "SOURCE_TREE_SHA=$head_tree_sha" --env "SOURCE_REPOSITORY=$head_repository" --env "SOURCE_CLOSURE=$source_closure" --env HOME=/tmp/home --env PATH=/usr/bin:/bin --entrypoint /candidate/velnor-workflow "$platform_image" /input --output /output --plain --force --default-branch "$DEFAULT_BRANCH")"
           cleanup() {{
             status=$?
-            if [[ -n "${{cid:-}}" ]]; then docker rm -f "$cid" >/dev/null 2>&1 || status=1; fi
+            if [[ -n "${{cid:-}}" ]]; then docker_cmd rm -f "$cid" >/dev/null 2>&1 || status=1; fi
             rm -rf "$stage" || status=1
             trap - EXIT
             exit "$status"
           }}
           trap cleanup EXIT
-          docker inspect "$cid" > "$stage/container.json"
+          docker_cmd inspect "$cid" > "$stage/container.json"
           jq -e --arg user "$uid:$gid" --arg input "$input" --arg candidate "$candidate" --arg uid "$uid" --arg gid "$gid" '
             .[0].HostConfig.NetworkMode == "none" and
             .[0].HostConfig.ReadonlyRootfs == true and
@@ -5008,15 +5011,15 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
             ([.[0].HostConfig.Ulimits[]? | select(.Name == "nofile" and .Soft == 1024 and .Hard == 1024)] | length) == 1 and
             ([.[0].HostConfig.Ulimits[]? | select(.Name == "core" and .Soft == 0 and .Hard == 0)] | length) == 1
           ' "$stage/container.json" >/dev/null
-          docker start "$cid" >/dev/null
-          if ! timeout --foreground --kill-after=10s 900s docker wait "$cid" > "$stage/exit"; then
-            docker kill "$cid" >/dev/null 2>&1 || true
+          docker_cmd start "$cid" >/dev/null
+          if ! timeout --foreground --kill-after=10s 900s env -i PATH="$PATH" HOME=/tmp/policy-execute-home DOCKER_CONFIG="$RUNNER_TEMP/docker-config" docker wait "$cid" > "$stage/exit"; then
+            docker_cmd kill "$cid" >/dev/null 2>&1 || true
             echo "candidate execution timed out" >&2
             exit 1
           fi
-          docker inspect "$cid" > "$stage/after.json"
+          docker_cmd inspect "$cid" > "$stage/after.json"
           jq -e '.[0].State.Status == "exited" and .[0].State.ExitCode == 0 and .[0].State.OOMKilled == false and .[0].State.Error == ""' "$stage/after.json" >/dev/null
-          docker cp "$cid:/output/." "$output/"
+          docker_cmd cp "$cid:/output/." "$output/"
           test -z "$(find -P "$output" -type l -print -quit)"
           test -z "$(find -P "$output" ! -type f ! -type d -print -quit)"
           test "$(find -P "$output" -type f | wc -l | tr -d ' ')" -le 4096

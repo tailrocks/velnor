@@ -657,6 +657,8 @@ fn owner_entrypoint_renders_the_isolated_candidate_transport() {
     assert!(job.contains("--cap-drop=ALL"), "{job}");
     assert!(job.contains("uid=65532; gid=65532"), "{job}");
     assert!(job.contains("SOURCE_CLOSURE"), "{job}");
+    assert!(job.contains("docker_cmd()"), "{job}");
+    assert!(job.contains("env -i PATH=\"$PATH\""), "{job}");
     assert!(!job.contains("--hostname=velnor-sandbox"), "{job}");
     assert!(!job.contains("--env HOSTNAME=velnor-sandbox"), "{job}");
     assert!(
