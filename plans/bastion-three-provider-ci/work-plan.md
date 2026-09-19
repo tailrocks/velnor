@@ -273,10 +273,38 @@ A later generic fix returns to its affected author/verifier pair. Tooling is pub
 4. Drain affected jobs per the implemented package procedure; preserve config/secrets.
 5. Run the root installation transaction with `VERSION` set to the B4-verified candidate:
    `install -d -m 0750 /run/velnor`, `apt-get update`, `apt-cache policy velnor-runner`,
-   `/usr/bin/flock --exclusive --nonblock --no-fork /run/velnor/package-transaction.lock
-   apt-get install "velnor-runner=${VERSION}"`, `dpkg-query -W velnor-runner`.
-   Never `dpkg -i`, `apt install ./file.deb`, copied executables, disabled signature
-   verification, or altered packaged files.
+   then run the whole hold/upgrade/re-hold procedure under one exclusive package lock:
+   ```sh
+   : "${VERSION:?set to the B4-verified candidate}"
+   export VERSION
+   /usr/bin/flock --exclusive --nonblock --no-fork /run/velnor/package-transaction.lock \
+     /bin/bash -euo pipefail -c '
+       was_held=0
+       if apt-mark showhold | grep -qx velnor-runner; then
+         was_held=1
+         apt-mark unhold velnor-runner
+       fi
+       rehold_runner() {
+         rc=$?
+         trap - EXIT
+         set +e
+         status=$(dpkg-query -W -f="\${Status}" velnor-runner 2>/dev/null)
+         if [ "$was_held" = 1 ] || printf "%s\n" "$status" | grep -Eq " (installed|unpacked|half-configured|half-installed)$"; then
+           apt-mark hold velnor-runner || rc=1
+         fi
+         exit "$rc"
+       }
+       trap rehold_runner EXIT
+       apt-get install "velnor-runner=${VERSION}"
+       apt-mark hold velnor-runner
+       trap - EXIT
+     '
+   dpkg-query -W velnor-runner
+   ```
+   The lock-owning shell stays an ancestor of apt, dpkg, and maintainer scripts;
+   the package's lock check accepts that verified ancestor. Never `dpkg -i`,
+   `apt install ./file.deb`, copied executables, disabled signature verification,
+   or altered packaged files.
 6. Verify installed identity: compatible package/manifest/binary record, then
    `release verify-installed` BEFORE starting services. Never assume install starts the fleet.
 7. Derive activation, drain, and health commands from the implemented package/help and verify
