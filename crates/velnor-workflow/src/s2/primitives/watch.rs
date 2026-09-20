@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 
 use super::{Args, Primitive, RenderCtx, Rendered, WATCH_GRAPH};
-use crate::s2::scan::file_walk::{has_extension, is_test_support_path};
+use crate::s2::scan::file_walk::{has_extension, is_test_support_path, join_repo_path};
 use crate::s2::{GeneratorError, Unit, UnitKind};
 
 /// Whole-tree crate globs duplicate per-crate units; `workspace_check` gates
@@ -46,10 +46,8 @@ impl Primitive for WatchGraph {
             // the image's dependency closure. A package unit watches what its
             // own manifest and layout proved; a family the scan could not pin
             // down watches what the scan derived for it.
-            let derived = matches!(
-                unit.kind,
-                UnitKind::Bun | UnitKind::Docs | UnitKind::OpenTofu
-            ) || (unit.kind == UnitKind::Docker && unit.root == ".");
+            let derived = matches!(unit.kind, UnitKind::Docs | UnitKind::OpenTofu)
+                || (unit.kind == UnitKind::Docker && unit.root == ".");
             let mut watch = BTreeSet::new();
             if !derived {
                 watch.extend(
@@ -68,26 +66,7 @@ impl Primitive for WatchGraph {
                 // A root package watches its manifests, its sources, and every
                 // root-level build configuration the walk observed.
                 UnitKind::Bun => {
-                    watch.extend([
-                        "package.json".to_owned(),
-                        "bun.lock".to_owned(),
-                        "bun.lockb".to_owned(),
-                        "package-lock.json".to_owned(),
-                        "src/**".to_owned(),
-                        "scripts/**".to_owned(),
-                    ]);
-                    watch.extend(
-                        ctx.shape
-                            .files()
-                            .iter()
-                            .filter(|file| {
-                                crate::s2::parent_path(file) == "."
-                                    && (file.ends_with(".config.js")
-                                        || file.ends_with(".config.ts")
-                                        || file.as_str() == "tsconfig.json")
-                            })
-                            .cloned(),
-                    );
+                    add_bun_watch_paths(&mut watch, &unit, ctx.shape.files());
                 }
                 UnitKind::Docs => {
                     watch.extend(
@@ -127,6 +106,42 @@ impl Primitive for WatchGraph {
             units,
             ..Rendered::default()
         })
+    }
+}
+
+fn add_bun_watch_paths(watch: &mut BTreeSet<String>, unit: &Unit, files: &[String]) {
+    watch.extend(package_manager_watch_paths(unit));
+    if unit.root.is_empty() || unit.root == "." {
+        // Preserve the root Bun scanner contract. The scanner's unit.watch
+        // carries discovered assets and source families; these two broad
+        // roots were also an explicit root-package input before metadata was
+        // made unit-relative.
+        watch.extend(["src/**".to_owned(), "scripts/**".to_owned()]);
+    }
+    watch.extend(
+        files
+            .iter()
+            .filter(|file| {
+                crate::s2::parent_path(file) == unit.root
+                    && (file.ends_with(".config.js")
+                        || file.ends_with(".config.ts")
+                        || file.rsplit('/').next() == Some("tsconfig.json"))
+            })
+            .cloned(),
+    );
+}
+
+fn package_manager_watch_paths(unit: &Unit) -> impl Iterator<Item = String> {
+    ["package.json", "bun.lock", "bun.lockb", "package-lock.json"]
+        .into_iter()
+        .map(|path| scoped_repo_path(unit.root.as_str(), path))
+}
+
+fn scoped_repo_path(root: &str, child: &str) -> String {
+    if root.is_empty() || root == "." {
+        child.to_owned()
+    } else {
+        join_repo_path(root, child)
     }
 }
 
@@ -306,7 +321,134 @@ pub(crate) fn validate_canonical_release_products(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_broad_per_crate_source_watch, opentofu_watch_paths};
+    use super::{
+        add_bun_watch_paths, is_broad_per_crate_source_watch, opentofu_watch_paths, WatchGraph,
+    };
+    use crate::s2::primitives::{Args, Primitive, RenderCtx};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        fs,
+    };
+
+    #[test]
+    fn watch_graph_render_keeps_scanner_bun_inputs_for_root_and_nested(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let root =
+            std::env::temp_dir().join(format!("velnor-watch-bun-{}", crate::unique_suffix()));
+        fs::create_dir_all(root.join("ui"))?;
+        fs::create_dir_all(root.join("src"))?;
+        fs::create_dir_all(root.join("scripts"))?;
+        fs::write(
+            root.join("package.json"),
+            r#"{"name":"root","packageManager":"bun@1.3.14","scripts":{"build":"bun build"}}"#,
+        )?;
+        fs::write(root.join("bun.lock"), "lock")?;
+        fs::write(root.join("src/index.ts"), "export {};\n")?;
+        fs::write(root.join("scripts/check.ts"), "export {};\n")?;
+        fs::write(
+            root.join("ui/package.json"),
+            r#"{"name":"ui","packageManager":"bun@1.3.14","scripts":{"build":"bun build"}}"#,
+        )?;
+        fs::write(root.join("ui/bun.lock"), "lock")?;
+        fs::write(root.join("ui/codegen.ts"), "export {};\n")?;
+        fs::write(root.join("ui/tsconfig.json"), "{}\n")?;
+        fs::write(root.join("ui/vite.config.ts"), "export {};\n")?;
+
+        let scan_providers: crate::s2::provider::ProviderSet =
+            crate::s2::provider::ProviderId::ALL.into_iter().collect();
+        let shape = crate::s2::scan::scan_shape(&root, &scan_providers, "main", &[])?;
+        let config = crate::s2::ProjectConfig::from(shape.clone());
+        let units = config.units.iter().collect::<Vec<_>>();
+        let pins = super::super::Pins::resolved();
+        let providers = super::super::providers::resolve(&config, &[])?;
+        let cache = super::super::cache::resolve(&[])?;
+        let nodes = Vec::new();
+        let contracts = BTreeMap::new();
+        let ctx = RenderCtx {
+            root: &root,
+            shape: &shape,
+            config: &config,
+            unit: None,
+            units: &units,
+            file: None,
+            family: super::super::WATCH_GRAPH,
+            pins: &pins,
+            providers: &providers,
+            cache: &cache,
+            nodes: &nodes,
+            contracts: &contracts,
+        };
+        let args = BTreeMap::new();
+        let rendered = Primitive::render(&WatchGraph, &ctx, &Args(&args))?;
+        let root_unit = rendered
+            .units
+            .iter()
+            .find(|unit| unit.root == ".")
+            .ok_or_else(|| std::io::Error::other("root Bun unit missing"))?;
+        let nested_unit = rendered
+            .units
+            .iter()
+            .find(|unit| unit.root == "ui")
+            .ok_or_else(|| std::io::Error::other("nested Bun unit missing"))?;
+
+        assert!(root_unit.watch.contains(&"**/*.ts".to_owned()));
+        assert!(root_unit.watch.contains(&"src/**".to_owned()));
+        assert!(root_unit.watch.contains(&"scripts/**".to_owned()));
+        assert!(nested_unit.watch.contains(&"ui/**/*.ts".to_owned()));
+        assert!(nested_unit.watch.contains(&"ui/package.json".to_owned()));
+        assert!(nested_unit.watch.contains(&"ui/tsconfig.json".to_owned()));
+        assert!(nested_unit.watch.contains(&"ui/vite.config.ts".to_owned()));
+        assert!(!nested_unit.watch.contains(&"package.json".to_owned()));
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn nested_bun_watch_merges_scanner_inputs_and_rooted_metadata() {
+        let unit = crate::s2::scan::unit(
+            crate::s2::UnitKind::Bun,
+            "ui",
+            vec!["ui/src/**".to_owned(), "ui/codegen.ts".to_owned()],
+            vec!["bun run build".to_owned()],
+            None,
+        );
+        let files = [
+            "ui/package.json".to_owned(),
+            "ui/bun.lock".to_owned(),
+            "ui/tsconfig.json".to_owned(),
+            "ui/vite.config.ts".to_owned(),
+            "package.json".to_owned(),
+            "src/index.ts".to_owned(),
+        ];
+        let mut watch = unit.watch.iter().cloned().collect::<BTreeSet<_>>();
+        add_bun_watch_paths(&mut watch, &unit, &files);
+        assert!(watch.contains("ui/src/**"));
+        assert!(watch.contains("ui/codegen.ts"));
+        assert!(watch.contains("ui/package.json"));
+        assert!(watch.contains("ui/bun.lock"));
+        assert!(watch.contains("ui/tsconfig.json"));
+        assert!(watch.contains("ui/vite.config.ts"));
+        assert!(!watch.contains("package.json"));
+        assert!(!watch.contains("src/**"));
+    }
+
+    #[test]
+    fn root_bun_watch_keeps_source_families_and_scanner_assets() {
+        let unit = crate::s2::scan::unit(
+            crate::s2::UnitKind::Bun,
+            ".",
+            vec!["assets/**".to_owned(), "src/styles.css".to_owned()],
+            vec!["bun run build".to_owned()],
+            None,
+        );
+        let mut watch = unit.watch.iter().cloned().collect::<BTreeSet<_>>();
+        add_bun_watch_paths(&mut watch, &unit, &["package.json".to_owned()]);
+        assert!(watch.contains("assets/**"));
+        assert!(watch.contains("src/styles.css"));
+        assert!(watch.contains("src/**"));
+        assert!(watch.contains("scripts/**"));
+    }
 
     #[test]
     fn workspace_topology_gate_ignores_whole_crate_trees() {

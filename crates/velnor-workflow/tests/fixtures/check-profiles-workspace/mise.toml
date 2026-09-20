@@ -1,3 +1,6 @@
+[tools]
+ripgrep = "14.1.1"
+
 [tasks.check-smoke]
 run = "echo smoke"
 

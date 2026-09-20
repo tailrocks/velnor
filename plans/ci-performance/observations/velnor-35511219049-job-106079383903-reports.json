@@ -1,0 +1,45 @@
+{
+  "schema_version": 2,
+  "job": "rust-velnor-runner",
+  "log_present": true,
+  "queue_seconds": null,
+  "queue_source": null,
+  "total_source": "job_markers",
+  "runner_setup_seconds": 4,
+  "selection_transport_seconds": 0,
+  "tool_bootstrap_seconds": 25,
+  "cache_prep_seconds": 5,
+  "cargo_fetch_seconds": 1,
+  "checks_wall_seconds": 424,
+  "checks_seconds": 424,
+  "cleanup_seconds": 0,
+  "total_seconds": 459,
+  "cache_outcomes": {
+    "lane": "github",
+    "rustup": "exact",
+    "mold": "exact",
+    "cargo": "prefix",
+    "mbx": "unknown",
+    "docker_seed": null
+  },
+  "cache_declarations": {
+    "host_warm_layers": []
+  },
+  "origin_downloads": {
+    "updating_crates_io_index": 0,
+    "updating_git": 0,
+    "downloading_crates": 0,
+    "downloaded_lines": []
+  },
+  "compiler": {
+    "mbx_outcomes": [
+      "mbx[cache]: object cache: 3 hits, 0 misses, 1879 not looked up, 131 bypassed; 0 B downloaded, 0 B uploaded, 703.4 MiB stored locally",
+      "mbx[cache]: object cache: 3 hits, 3 misses, 1807 not looked up, 131 bypassed; 0 B downloaded, 0 B uploaded, 6.6 GiB stored locally"
+    ],
+    "finished_segments": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 19s",
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 31s"
+    ],
+    "compiling_lines": 370
+  }
+}

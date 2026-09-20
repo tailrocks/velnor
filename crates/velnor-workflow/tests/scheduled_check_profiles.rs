@@ -301,6 +301,14 @@ fn evented_file_renders_push_pr_cron_and_pr_only_cancel() {
 fn an_unknown_event_stops_generation() {
     let workspace = tempfile();
     let root = copy_fixture(&workspace.join("fixture"));
+    let baseline = generate(&root);
+    assert!(
+        baseline
+            .workflow_files()
+            .iter()
+            .any(|file| file == "scheduled-daily.yml"),
+        "the valid fixture must generate before the event mutation"
+    );
     let config = root.join(".github-gen/velnor-workflow.toml");
     let before = fs::read_to_string(&config).unwrap();
     let after = before.replace(

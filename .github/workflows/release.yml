@@ -3879,7 +3879,7 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-metadata
-          path: metadata
+          path: ${{ runner.temp }}/release-metadata
       - name: Download release binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -3928,22 +3928,24 @@ jobs:
       - name: Stage acyclic identity files packaged into the deb
         run: |
           set -euo pipefail
-          test -s metadata/build-identity.json || { echo "::error::release metadata missing build-identity.json" >&2; exit 1; }
-          test -s metadata/manifest.json || { echo "::error::release metadata missing manifest.json" >&2; exit 1; }
-          jq -e '.source_sha and .crate_version' metadata/build-identity.json >/dev/null
-          jq -e 'type == "object"' metadata/manifest.json >/dev/null
+          metadata_dir="$RUNNER_TEMP/release-metadata"
+          test -s "$metadata_dir/build-identity.json" || { echo "::error::release metadata missing build-identity.json" >&2; exit 1; }
+          test -s "$metadata_dir/manifest.json" || { echo "::error::release metadata missing manifest.json" >&2; exit 1; }
+          jq -e '.source_sha and .crate_version' "$metadata_dir/build-identity.json" >/dev/null
+          jq -e 'type == "object"' "$metadata_dir/manifest.json" >/dev/null
           mkdir -p 'crates/velnor-runner/release'
-          cp metadata/build-identity.json metadata/manifest.json 'crates/velnor-runner/release'/
+          cp "$metadata_dir/build-identity.json" "$metadata_dir/manifest.json" 'crates/velnor-runner/release'/
       - name: Stage the deb's own package record
         run: |
           set -euo pipefail
-          chmod +x metadata/velnor-runner-release-tool
+          metadata_dir="$RUNNER_TEMP/release-metadata"
+          chmod +x "$metadata_dir/velnor-runner-release-tool"
           binary="target/$TARGET/release/velnor-runner"
           test -s "$binary" || { echo "::error::missing cross-built runner binary" >&2; exit 1; }
           binary_sha256="$(sha256sum "$binary" | awk '{print $1}')"
-          manifest_sha256="$(sha256sum metadata/manifest.json | awk '{print $1}')"
-          manifest_version="$(jq -er '.version | numbers' metadata/manifest.json)"
-          source_sha=$(jq -er '.source_sha' metadata/build-identity.json)
+          manifest_sha256="$(sha256sum "$metadata_dir/manifest.json" | awk '{print $1}')"
+          manifest_version="$(jq -er '.version | numbers' "$metadata_dir/manifest.json")"
+          source_sha=$(jq -er '.source_sha' "$metadata_dir/build-identity.json")
           jq -n \
             --arg schema "velnor.package-record/v1" \
             --arg repo 'tailrocks/velnor' \
@@ -3963,7 +3965,7 @@ jobs:
                        manifest_version: $mv, manifest_sha256: $mhash },
               architecture: { arch: $arch, target: $target, binary_sha256: $binary }
             }' > package-record.candidate.json
-          metadata/velnor-runner-release-tool release emit \
+          "$metadata_dir/velnor-runner-release-tool" release emit \
             --record package-record.candidate.json \
             --binary "$binary" \
             --out 'crates/velnor-runner/release'/package-record.json

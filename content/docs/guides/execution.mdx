@@ -221,17 +221,21 @@ are lane-agnostic; transport, budget, and retention differ.
   Platform cap: 10 GB (7-day LRU)       Platform cap: host disk + slot GC
   mbx: backend github, objects         mbx: backend local, per-slot store
   PR: restore-only (no trusted save)   PR: host store writes (trust-scoped)
-  Outcomes: exact | prefix | cold      Outcomes: host_warm (persistent paths)
+  Outcomes: exact | prefix | cold |     Outcomes: keyed evidence or unknown
+            unknown                   Declarations: host_warm_layers
 ```
 
-Each unit job emits a `VELNOR_CI_REPORT` line and a step summary through
+Each unit job emits a schema-version-2 `VELNOR_CI_REPORT` line and a step summary through
 `report-velnor-ci-outcomes`. On the GitHub lane, `cache_outcomes.{rustup,mold,
 cargo,mbx,docker_seed}` classify `actions/cache/restore` results with
-`cache-primary-key` versus `cache-matched-key` (`exact`, `prefix`, or `cold`);
-mbx also consults its setup outputs and step-summary wording. On the Velnor
-lane the same fields report `host_warm` for layers backed by host-persistent
-stores (cargo registry/git, mise, mbx local backend, image-baked rustup/mold).
-Cold layers log `::warning::` and never fail the job.
+`cache-primary-key` versus `cache-matched-key` (`exact`, `prefix`, or `cold`).
+The pinned MBX action exposes an exact-hit boolean and primary key, but no
+matched key; a false result is therefore `unknown` unless a producer supplies
+explicit matched-key evidence. Compiler-cache summaries remain in the
+separate `compiler.mbx_outcomes` field. On the Velnor lane,
+`cache_declarations.host_warm_layers` records the runner's persistent-path
+declaration; it is kept separate from keyed cache proof. Only explicit cold
+layers log `::warning::`, and telemetry never fails the job.
 
 Trusted producers (`push` to the default branch, `schedule`, and trusted
 `workflow_dispatch`) save GitHub-lane snapshots; pull requests and fork PRs

@@ -1,0 +1,41 @@
+[
+  {
+    "schema_version": 2,
+    "job": "docker",
+    "log_present": true,
+    "queue_seconds": null,
+    "queue_source": null,
+    "total_source": "job_markers",
+    "runner_setup_seconds": 3,
+    "selection_transport_seconds": 0,
+    "tool_bootstrap_seconds": 13,
+    "cache_prep_seconds": 7,
+    "cargo_fetch_seconds": 0,
+    "checks_wall_seconds": 68,
+    "checks_seconds": 68,
+    "cleanup_seconds": 0,
+    "total_seconds": 91,
+    "cache_outcomes": {
+      "lane": "github",
+      "rustup": null,
+      "mold": null,
+      "cargo": null,
+      "mbx": "unknown",
+      "docker_seed": "prefix"
+    },
+    "cache_declarations": {
+      "host_warm_layers": []
+    },
+    "origin_downloads": {
+      "updating_crates_io_index": 0,
+      "updating_git": 0,
+      "downloading_crates": 0,
+      "downloaded_lines": []
+    },
+    "compiler": {
+      "mbx_outcomes": [],
+      "finished_segments": [],
+      "compiling_lines": 0
+    }
+  }
+]

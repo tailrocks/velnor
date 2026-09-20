@@ -40,6 +40,10 @@ inputs:
   cache_mbx_primary:
     required: false
     default: ""
+  cache_mbx_matched:
+    description: Matched archive key, only when the cache producer explicitly exposes it
+    required: false
+    default: ""
   cache_docker_seed_primary:
     required: false
     default: ""
@@ -70,6 +74,7 @@ runs:
         VELNOR_CACHE_CARGO_MATCHED: ${{ inputs.cache_cargo_matched }}
         VELNOR_CACHE_MBX_HIT: ${{ inputs.cache_mbx_hit }}
         VELNOR_CACHE_MBX_PRIMARY: ${{ inputs.cache_mbx_primary }}
+        VELNOR_CACHE_MBX_MATCHED: ${{ inputs.cache_mbx_matched }}
         VELNOR_CACHE_DOCKER_SEED_PRIMARY: ${{ inputs.cache_docker_seed_primary }}
         VELNOR_CACHE_DOCKER_SEED_MATCHED: ${{ inputs.cache_docker_seed_matched }}
       run: |
@@ -189,67 +194,82 @@ runs:
           if [[ -z "$primary" && -z "$matched" ]]; then
             return 0
           fi
+          # A matched key without its primary key is incomplete producer
+          # evidence. Do not manufacture a prefix result from it.
+          if [[ -z "$primary" ]]; then
+            echo unknown
+            return
+          fi
           if [[ -z "$matched" ]]; then
             echo cold
+          else
+            classify_complete_cache_keys "$primary" "$matched"
+          fi
+        }
+        classify_complete_cache_keys() {
+          local primary="${1:-}" matched="${2:-}"
+          if [[ -z "$primary" || -z "$matched" ]]; then
+            echo unknown
           elif [[ "$primary" == "$matched" ]]; then
             echo exact
           else
             echo prefix
           fi
         }
-        host_warm_layer() {
-          local layer="$1"
-          local layers="${VELNOR_HOST_WARM_LAYERS:-}"
-          [[ -n "$layers" ]] || return 1
-          [[ ",$layers," == *",$layer,"* ]]
-        }
         classify_mbx() {
-          if host_warm_layer mbx; then
-            echo host_warm
-            return
-          fi
           local hit="${VELNOR_CACHE_MBX_HIT:-}"
-          if [[ "$hit" == "true" ]]; then
-            echo exact
-            return
-          fi
-          if [[ -s "$log" ]]; then
-            if grep -qiE 'exact hit' "$log"; then
-              echo exact
-              return
-            fi
-            if grep -qiE 'warm start' "$log"; then
-              echo prefix
-              return
-            fi
-            if grep -qiE '(^|[^a-z])miss([^a-z]|$)' "$log"; then
-              echo cold
-              return
-            fi
-          fi
-          if [[ "$hit" == "false" ]]; then
-            echo prefix
-            return
-          fi
-          echo cold
+          local primary="${1:-}"
+          local matched="${2:-}"
+          case "$hit" in
+            true)
+              # Mr. Boxington defines true as an exact-key match and exposes
+              # the primary key, but not a matched key. That is sufficient
+              # exact evidence when the primary key is present. A nonempty,
+              # differing matched key contradicts the boolean.
+              if [[ -z "$primary" ]]; then
+                echo unknown
+              elif [[ -z "$matched" || "$primary" == "$matched" ]]; then
+                echo exact
+              else
+                echo unknown
+              fi
+              ;;
+            false)
+              # false + equal keys contradicts the exact-hit bit. A differing
+              # complete pair is explicit prefix evidence.
+              if [[ -n "$primary" && -n "$matched" && "$primary" != "$matched" ]]; then
+                echo prefix
+              else
+                echo unknown
+              fi
+              ;;
+            "")
+              classify_complete_cache_keys "$primary" "$matched"
+              ;;
+            *)
+              echo unknown
+              ;;
+          esac
         }
         cache_outcome_for() {
           local layer="$1"
           local primary="${2:-}" matched="${3:-}"
-          if host_warm_layer "$layer"; then
-            echo host_warm
-            return
-          fi
           if [[ "$layer" == mbx ]]; then
-            classify_mbx
+            classify_mbx "$primary" "$matched"
             return
           fi
           classify_gha_cache "$primary" "$matched"
         }
+        cache_declarations_json='{"host_warm_layers":[]}'
+        if command -v jq >/dev/null 2>&1; then
+          cache_declarations_json="$(printf '%s' "${VELNOR_HOST_WARM_LAYERS:-}" | jq -Rsc \
+            'split(",") | map(gsub("^ +| +$"; "")) | map(select(length > 0)) | {host_warm_layers: .}' \
+            2>/dev/null || echo '{"host_warm_layers":[]}')"
+        fi
         rustup_outcome="$(cache_outcome_for rustup "${VELNOR_CACHE_RUSTUP_PRIMARY:-}" "${VELNOR_CACHE_RUSTUP_MATCHED:-}")"
         mold_outcome="$(cache_outcome_for mold "${VELNOR_CACHE_MOLD_PRIMARY:-}" "${VELNOR_CACHE_MOLD_MATCHED:-}")"
         cargo_outcome="$(cache_outcome_for cargo "${VELNOR_CACHE_CARGO_PRIMARY:-}" "${VELNOR_CACHE_CARGO_MATCHED:-}")"
-        mbx_outcome="$(cache_outcome_for mbx "" "")"
+        mbx_outcome="$(cache_outcome_for mbx "${VELNOR_CACHE_MBX_PRIMARY:-}" "${VELNOR_CACHE_MBX_MATCHED:-}")"
         docker_seed_outcome="$(cache_outcome_for docker_seed "${VELNOR_CACHE_DOCKER_SEED_PRIMARY:-}" "${VELNOR_CACHE_DOCKER_SEED_MATCHED:-}")"
         updating_index=0
         updating_git=0
@@ -326,8 +346,9 @@ runs:
           --argjson mbx "$(printf '%s' "$mbx_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \
           --argjson finished "$(printf '%s' "$finished_lines" | jq -Rsc 'split("\n") | map(select(length > 0))' || true)" \
           --argjson cache_outcomes "$cache_outcomes_json" \
+          --argjson cache_declarations "$cache_declarations_json" \
           '{
-            schema_version: 1,
+            schema_version: 2,
             job: $job,
             log_present: $log_present,
             queue_seconds: ($queue | if test("^[0-9]+$") then tonumber else null end),
@@ -343,6 +364,7 @@ runs:
             cleanup_seconds: ($cleanup | if test("^[0-9]+$") then tonumber else null end),
             total_seconds: ($total | if test("^[0-9]+$") then tonumber else null end),
             cache_outcomes: $cache_outcomes,
+            cache_declarations: $cache_declarations,
             origin_downloads: {
               updating_crates_io_index: $updating_index,
               updating_git: $updating_git,
@@ -375,6 +397,7 @@ runs:
           echo "| cache_outcomes.cargo | ${cargo_outcome:-n/a} |"
           echo "| cache_outcomes.mbx | ${mbx_outcome:-n/a} |"
           echo "| cache_outcomes.docker_seed | ${docker_seed_outcome:-n/a} |"
+          echo "| cache_declarations.host_warm_layers | ${VELNOR_HOST_WARM_LAYERS:-none} |"
           echo "| queue_seconds | ${queue:-unknown} |"
           echo "| runner_setup_seconds | ${runner_setup:-unknown} |"
           echo "| selection_transport_seconds | ${selection_transport:-unknown} |"

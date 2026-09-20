@@ -3410,10 +3410,11 @@ fn validate_check_profile_result(
     Ok(())
 }
 
-/// The declared tool ids against the root lock: shape first so a compromised
-/// lock can never smuggle shell syntax into `install_args` through membership.
-/// An empty key set means the scan root has no `mise.lock`, so identity has
-/// nothing to check against and shape alone rules.
+/// The declared tool ids against the root lock: shape and duplicate checks run
+/// first so a compromised lock can never smuggle shell syntax into
+/// `install_args` through membership.
+/// A non-empty tool declaration requires a non-empty `mise.lock` key set:
+/// strict `mise --locked install` must have a pinned identity to enforce.
 fn validate_check_profile_tools(
     id: &str,
     tools: &[String],
@@ -3431,7 +3432,19 @@ fn validate_check_profile_tools(
                 "[[check_profile]] {id} declares tool {tool}, which is not a plain tool id; use ids such as cargo-binstall without versions, flags, whitespace, traversal, or shell metacharacters"
             )));
         }
-        if !mise_lock_keys.is_empty() && !mise_lock_keys.contains(tool) {
+        if !seen.insert(tool) {
+            return Err(GeneratorError::usage(format!(
+                "[[check_profile]] {id} declares tool {tool} more than once"
+            )));
+        }
+    }
+    if mise_lock_keys.is_empty() {
+        return Err(GeneratorError::usage(format!(
+            "[[check_profile]] {id} declares tools but the repository has no pinned mise.lock tool keys; strict locked installation requires mise.lock"
+        )));
+    }
+    for tool in tools {
+        if !mise_lock_keys.contains(tool) {
             let known = mise_lock_keys
                 .iter()
                 .cloned()
@@ -3439,11 +3452,6 @@ fn validate_check_profile_tools(
                 .join(", ");
             return Err(GeneratorError::usage(format!(
                 "[[check_profile]] {id} declares tool {tool}, which mise.lock does not pin; install_args must equal the lock keys, known keys: {known}"
-            )));
-        }
-        if !seen.insert(tool) {
-            return Err(GeneratorError::usage(format!(
-                "[[check_profile]] {id} declares tool {tool} more than once"
             )));
         }
     }
@@ -5502,6 +5510,21 @@ mod tests {
         must(
             config.validate(&[], &[], &BTreeSet::new()),
             "two coherent profiles validate",
+        );
+    }
+
+    #[test]
+    fn check_profile_tools_require_pinned_lock_keys() {
+        let body = "[[check_profile]]\nid = \"smoke\"\ntasks = [\"check-smoke\"]\ntools = [\"cargo-binstall\"]\n";
+        let error = must_fail(
+            config_for(&check_profile_config(body)).validate(&[], &[], &BTreeSet::new()),
+            "check-profile tools without a lock must fail",
+        );
+        assert!(error.to_string().contains("requires mise.lock"), "{error}");
+
+        must(
+            config_for(&check_profile_config(body)).validate(&[], &[], &mixed_lock_keys()),
+            "check-profile tools pinned by the lock must validate",
         );
     }
 

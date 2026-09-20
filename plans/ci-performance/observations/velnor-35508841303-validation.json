@@ -1,0 +1,36 @@
+{
+  "status": "second_successful_correctness_observation_not_performance_acceptance",
+  "head_sha": "6544ad3a49f99721aa2831980614f17e37e4e423",
+  "run_id": 35508841303,
+  "attempt": 1,
+  "policy_run_id": 35508839330,
+  "trigger_to_required_seconds": 534.0,
+  "aggregate_execution_seconds": 1314.0,
+  "executed_jobs": 20,
+  "skipped_jobs": 48,
+  "runner_job_seconds": 508,
+  "generator_job_seconds": 167,
+  "docker_job_seconds": 98,
+  "generator_tests": {
+    "passed": 1943,
+    "skipped": 0
+  },
+  "runner_tests": {
+    "passed": 2516,
+    "skipped": 5,
+    "leaky": 1,
+    "leaky_test": "execution::guest_agent::tests::guest_docker_probe_kills_hung_process_at_deadline"
+  },
+  "runner_image": "ubuntu-24.04 20260907.300.1",
+  "runner_version": "2.337.0",
+  "azure_region": "centralus",
+  "comparison_limits": [
+    "Two observations do not establish noise or a speedup.",
+    "Same image and region; physical CPU and contention not observed.",
+    "MBX unknown transport state and native bypasses prevent treating outer cache hits as compiler reuse.",
+    "Documentation/evidence and effective merge revisions differ; not identical source-tree repetitions."
+  ],
+  "independent_result_review": "jackin_inventory confirms raw timestamps, totals, required results, test counts and no speedup claim",
+  "iteration_credit": 0,
+  "effective_merge_sha": "005f1508f49b589240537aa04f615970202d12f4"
+}

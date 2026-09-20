@@ -1,0 +1,26 @@
+2026-09-20T03:39:06.3293419Z Cache mode: write
+2026-09-20T03:39:11.2595987Z Cache hit for: velnor-rustup-Linux-X64-01ca15e1b24a13a2533dc81d701f5db1ad9bd6bd978dbd566dac8f8bf1d492dd
+2026-09-20T03:39:18.8253282Z Cache hit for: mise-v1-linux-x64-ubuntu24-a5063e727332d1c9af8b487f9cdc11a46fc36896710ec0340e7016cefd70dc92-7fe30dd76815c63a947a5b04a9e97984435f7e4d72d81e30db0f42a038cbb013
+2026-09-20T03:39:22.6543848Z Cache hit for: velnor-mold-2.42.0-Linux-X64
+2026-09-20T03:39:23.3659973Z Cache hit for restore-key: ci-Linux-X64-github-hosted-linux-x64-untrusted-ok-rust-e9e7dacb27628ca60b251a506d29cbbde79dc0607ae3dff6d944127ada09e0dd
+2026-09-20T03:40:28.5182834Z     Finished `dev` profile [unoptimized + debuginfo] target(s) in 59.98s
+2026-09-20T03:40:28.5748623Z mbx[cache]: object cache: 0 hits, 0 misses, 135 not looked up, 1 bypassed; 0 B downloaded, 0 B uploaded, 978.5 MiB stored locally
+2026-09-20T03:40:28.5750213Z mbx[cache]: 60.08s session; 0ns estimated compiler time avoided (summed across compilations)
+2026-09-20T03:40:28.5751532Z mbx[cache]: 135 compilations had no usable prior inputs or matching prediction for a lookup
+2026-09-20T03:40:28.5752492Z mbx[cache]: bypass reasons: 1 build-script-always-rerun
+2026-09-20T03:40:28.5753472Z mbx[cache]: Cargo artifact reuse and CI cache archive transfers are not included above
+2026-09-20T03:44:47.7281822Z     Finished `test` profile [unoptimized + debuginfo] target(s) in 4m 13s
+2026-09-20T03:45:11.9580308Z      Summary [  24.129s] 1908 tests run: 1908 passed, 0 skipped
+2026-09-20T03:45:12.2302067Z mbx[cache]: object cache: 3 hits, 0 misses, 1813 not looked up, 132 bypassed; 0 B downloaded, 0 B uploaded, 2.8 GiB stored locally
+2026-09-20T03:45:12.2303290Z mbx[cache]: 278.64s session; 0ns estimated compiler time avoided (summed across compilations)
+2026-09-20T03:45:12.2304205Z mbx[cache]: 1813 compilations had no usable prior inputs or matching prediction for a lookup
+2026-09-20T03:45:12.2305508Z mbx[cache]: bypass reasons: 71 cc-tool-passthrough, 39 cc-unsupported-language, 15 cc-missing-output, 4 native-library, 2 cc-unknown-flag, 1 build-script-always-rerun
+2026-09-20T03:45:12.2307085Z mbx[cache]: Cargo artifact reuse and CI cache archive transfers are not included above
+2026-09-20T03:48:17.9161287Z     Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 05s
+2026-09-20T03:48:18.4077296Z mbx[cache]: object cache: 3 hits, 3 misses, 1836 not looked up, 132 bypassed; 0 B downloaded, 0 B uploaded, 430.1 MiB stored locally
+2026-09-20T03:48:18.4078354Z mbx[cache]: 186.16s session; 0ns estimated compiler time avoided (summed across compilations)
+2026-09-20T03:48:18.4079710Z mbx[cache]: 1836 compilations had no usable prior inputs or matching prediction for a lookup
+2026-09-20T03:48:18.4080913Z mbx[cache]: bypass reasons: 71 cc-tool-passthrough, 39 cc-unsupported-language, 15 cc-missing-output, 4 native-library, 2 cc-unknown-flag, 1 build-script-always-rerun
+2026-09-20T03:48:18.4082076Z mbx[cache]: Cargo artifact reuse and CI cache archive transfers are not included above
+2026-09-20T03:48:26.7073907Z Finished uploading artifact content to blob storage!
+2026-09-20T03:48:27.0768034Z VELNOR_CI_REPORT {"schema_version":1,"job":"rust-velnor-workflow","log_present":true,"queue_seconds":null,"queue_source":null,"total_source":"job_markers","runner_setup_seconds":2,"selection_transport_seconds":0,"tool_bootstrap_seconds":13,"cache_prep_seconds":3,"cargo_fetch_seconds":1,"checks_wall_seconds":530,"checks_seconds":530,"cleanup_seconds":8,"total_seconds":559,"cache_outcomes":{"lane":"github","rustup":"exact","mold":"exact","cargo":"prefix","mbx":"cold","docker_seed":null},"origin_downloads":{"updating_crates_io_index":0,"updating_git":0,"downloading_crates":0,"downloaded_lines":[]},"compiler":{"mbx_outcomes":["mbx[cache]: object cache: 0 hits, 0 misses, 135 not looked up, 1 bypassed; 0 B downloaded, 0 B uploaded, 978.5 MiB stored locally","mbx[cache]: object cache: 3 hits, 0 misses, 1813 not looked up, 132 bypassed; 0 B downloaded, 0 B uploaded, 2.8 GiB stored locally","mbx[cache]: object cache: 3 hits, 3 misses, 1836 not looked up, 132 bypassed; 0 B downloaded, 0 B uploaded, 430.1 MiB stored locally"],"finished_segments":["    Finished `dev` profile [unoptimized + debuginfo] target(s) in 59.98s","    Finished `test` profile [unoptimized + debuginfo] target(s) in 4m 13s","    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 05s"],"compiling_lines":413}}

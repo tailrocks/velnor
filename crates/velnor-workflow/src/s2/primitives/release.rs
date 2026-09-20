@@ -1420,19 +1420,23 @@ fn debian_identity_steps(
     kind: &str,
     crate_expr: &str,
     preview: bool,
+    metadata_dir: &str,
 ) -> String {
     let release_dir = shell_quote(release_dir);
     let repository = shell_quote(repository);
-    let tool = format!("metadata/{binary}-release-tool");
+    // Artifact downloads are untracked workspace files. Keep them under the
+    // runner's temp directory so release-build's clean-tree identity gate
+    // observes only the checked-out source, never its input artifacts.
+    let tool = format!("\"$metadata_dir/{binary}-release-tool\"");
     let source_check = if preview {
-        "          jq -e --arg sha \"$SOURCE_COMMIT\" '.source_sha == $sha' metadata/build-identity.json >/dev/null \\\n            || { echo \"::error::build identity source_sha != preview source commit $SOURCE_COMMIT\" >&2; exit 1; }\n"
+        "          jq -e --arg sha \"$SOURCE_COMMIT\" '.source_sha == $sha' \"$metadata_dir/build-identity.json\" >/dev/null \\\n            || { echo \"::error::build identity source_sha != preview source commit $SOURCE_COMMIT\" >&2; exit 1; }\n"
     } else {
         ""
     };
     let commit_value = if preview {
         "\"$SOURCE_COMMIT\"".to_owned()
     } else {
-        "$(jq -er '.source_sha' metadata/build-identity.json)".to_owned()
+        "$(jq -er '.source_sha' \"$metadata_dir/build-identity.json\")".to_owned()
     };
     let record_check = if preview {
         format!(
@@ -1442,7 +1446,22 @@ fn debian_identity_steps(
         String::new()
     };
     format!(
-        "      - name: Stage acyclic identity files packaged into the deb\n        run: |\n          set -euo pipefail\n          test -s metadata/build-identity.json || {{ echo \"::error::release metadata missing build-identity.json\" >&2; exit 1; }}\n          test -s metadata/manifest.json || {{ echo \"::error::release metadata missing manifest.json\" >&2; exit 1; }}\n          jq -e '.source_sha and .crate_version' metadata/build-identity.json >/dev/null\n          jq -e 'type == \"object\"' metadata/manifest.json >/dev/null\n{source_check}          mkdir -p {release_dir}\n          cp metadata/build-identity.json metadata/manifest.json {release_dir}/\n      - name: Stage the deb's own package record\n        run: |\n          set -euo pipefail\n          chmod +x {tool}\n          binary=\"target/$TARGET/release/{binary}\"\n          test -s \"$binary\" || {{ echo \"::error::missing cross-built runner binary\" >&2; exit 1; }}\n          binary_sha256=\"$(sha256sum \"$binary\" | awk '{{print $1}}')\"\n          manifest_sha256=\"$(sha256sum metadata/manifest.json | awk '{{print $1}}')\"\n          manifest_version=\"$(jq -er '.version | numbers' metadata/manifest.json)\"\n          source_sha={commit_value}\n          jq -n \\\n            --arg schema \"velnor.package-record/v1\" \\\n            --arg repo {repository} \\\n            --arg kind \"{kind}\" \\\n            --arg commit \"$source_sha\" \\\n            --arg crate {crate_expr} \\\n            --arg debian \"$VERSION\" \\\n            --argjson mv \"$manifest_version\" \\\n            --arg mhash \"$manifest_sha256\" \\\n            --arg arch \"${{{{ matrix.arch }}}}\" \\\n            --arg target \"$TARGET\" \\\n            --arg binary \"$binary_sha256\" \\\n            '{{\n              schema: $schema,\n              build: {{ repository: $repo, kind: $kind, commit: $commit,\n                       crate_version: $crate, debian_version: $debian,\n                       manifest_version: $mv, manifest_sha256: $mhash }},\n              architecture: {{ arch: $arch, target: $target, binary_sha256: $binary }}\n            }}' > package-record.candidate.json\n          {tool} release emit \\\n            --record package-record.candidate.json \\\n            --binary \"$binary\" \\\n            --out {release_dir}/package-record.json\n{record_check}"
+        "      - name: Stage acyclic identity files packaged into the deb\n        run: |\n          set -euo pipefail\n          metadata_dir=\"{metadata_dir}\"\n          test -s \"$metadata_dir/build-identity.json\" || {{ echo \"::error::release metadata missing build-identity.json\" >&2; exit 1; }}\n          test -s \"$metadata_dir/manifest.json\" || {{ echo \"::error::release metadata missing manifest.json\" >&2; exit 1; }}\n          jq -e '.source_sha and .crate_version' \"$metadata_dir/build-identity.json\" >/dev/null\n          jq -e 'type == \"object\"' \"$metadata_dir/manifest.json\" >/dev/null\n{source_check}          mkdir -p {release_dir}\n          cp \"$metadata_dir/build-identity.json\" \"$metadata_dir/manifest.json\" {release_dir}/\n      - name: Stage the deb's own package record\n        run: |\n          set -euo pipefail\n          metadata_dir=\"{metadata_dir}\"\n          chmod +x {tool}\n          binary=\"target/$TARGET/release/{binary}\"\n          test -s \"$binary\" || {{ echo \"::error::missing cross-built runner binary\" >&2; exit 1; }}\n          binary_sha256=\"$(sha256sum \"$binary\" | awk '{{print $1}}')\"\n          manifest_sha256=\"$(sha256sum \"$metadata_dir/manifest.json\" | awk '{{print $1}}')\"\n          manifest_version=\"$(jq -er '.version | numbers' \"$metadata_dir/manifest.json\")\"\n          source_sha={commit_value}\n          jq -n \\\n            --arg schema \"velnor.package-record/v1\" \\\n            --arg repo {repository} \\\n            --arg kind \"{kind}\" \\\n            --arg commit \"$source_sha\" \\\n            --arg crate {crate_expr} \\\n            --arg debian \"$VERSION\" \\\n            --argjson mv \"$manifest_version\" \\\n            --arg mhash \"$manifest_sha256\" \\\n            --arg arch \"${{{{ matrix.arch }}}}\" \\\n            --arg target \"$TARGET\" \\\n            --arg binary \"$binary_sha256\" \\\n            '{{\n              schema: $schema,\n              build: {{ repository: $repo, kind: $kind, commit: $commit,\n                       crate_version: $crate, debian_version: $debian,\n                       manifest_version: $mv, manifest_sha256: $mhash }},\n              architecture: {{ arch: $arch, target: $target, binary_sha256: $binary }}\n            }}' > package-record.candidate.json\n          {tool} release emit \\\n            --record package-record.candidate.json \\\n            --binary \"$binary\" \\\n            --out {release_dir}/package-record.json\n{record_check}"
+    )
+}
+
+fn release_metadata_artifact_name(preview: bool) -> &'static str {
+    if preview {
+        "preview-metadata"
+    } else {
+        "release-metadata"
+    }
+}
+
+fn release_metadata_staging() -> (&'static str, &'static str) {
+    (
+        "${{ runner.temp }}/release-metadata",
+        "$RUNNER_TEMP/release-metadata",
     )
 }
 
@@ -1587,13 +1606,10 @@ fn render_identity_debian_job(
         )
     };
     let lane_env = identity_debian_lane_env(preview, version);
-    let metadata_artifact = if preview {
-        "preview-metadata"
-    } else {
-        "release-metadata"
-    };
+    let metadata_artifact = release_metadata_artifact_name(preview);
+    let (metadata_path, metadata_dir) = release_metadata_staging();
     let mut steps = format!(
-        "      - name: Checkout\n        uses: {checkout}\n        with:\n{checkout_ref}          persist-credentials: false\n{setup}      - name: Add Rust target\n        run: rustup target add \"$TARGET\"\n      - name: Set up sccache\n        uses: {sccache}\n        with:\n          version: v0.16.0\n      - name: Install cargo-deb\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: |\n          set -euo pipefail\n          cargo install cargo-deb --version 3.7.0 --locked\n          cargo-deb --version\n      - name: Download release metadata\n        uses: {download}\n        with:\n          name: {metadata_artifact}\n          path: metadata\n",
+        "      - name: Checkout\n        uses: {checkout}\n        with:\n{checkout_ref}          persist-credentials: false\n{setup}      - name: Add Rust target\n        run: rustup target add \"$TARGET\"\n      - name: Set up sccache\n        uses: {sccache}\n        with:\n          version: v0.16.0\n      - name: Install cargo-deb\n        env:\n          CARGO_INCREMENTAL: \"0\"\n          RUSTC_WRAPPER: sccache\n        run: |\n          set -euo pipefail\n          cargo install cargo-deb --version 3.7.0 --locked\n          cargo-deb --version\n      - name: Download release metadata\n        uses: {download}\n        with:\n          name: {metadata_artifact}\n          path: {metadata_path}\n",
     );
     if preview {
         let _ = writeln!(
@@ -1611,6 +1627,7 @@ fn render_identity_debian_job(
         kind,
         crate_expr,
         preview,
+        metadata_dir,
     ));
     if guest {
         steps.push_str(&debian_guest_steps(config, release, cargo_cmd));
@@ -4840,6 +4857,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
 
     use sha2::{Digest as _, Sha256};
 
@@ -4849,6 +4867,189 @@ mod tests {
     /// A fixed generator pin so the pinned render digests below never move
     /// with the commit that builds the test binary.
     const FIXTURE_REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    const EMITTED_RELEASE_TOOL_STUB: &str = r#"#!/usr/bin/env bash
+set -euo pipefail
+[[ "$#" -eq 8 && "$1" == release && "$2" == emit && "$3" == --record ]] || exit 90
+record="$4"
+[[ "$5" == --binary ]] || exit 91
+binary="$6"
+[[ "$7" == --out ]] || exit 92
+out="$8"
+test -s "$record"
+test -s "$binary"
+cp "$record" "$out"
+"#;
+
+    fn emitted_stage_scripts(config: &ProjectConfig) -> (String, String, String, String) {
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract")
+        };
+        let preview = super::render_preview(config, Some(release));
+        let stable = super::render_release(config, release);
+        (
+            yaml_run_step(
+                &preview,
+                "debian",
+                "Stage acyclic identity files packaged into the deb",
+            ),
+            yaml_run_step(
+                &stable,
+                "debian",
+                "Stage acyclic identity files packaged into the deb",
+            ),
+            yaml_run_step(&preview, "debian", "Stage the deb's own package record"),
+            yaml_run_step(&stable, "debian", "Stage the deb's own package record"),
+        )
+    }
+
+    fn initialize_emitted_checkout(checkout: &Path) {
+        let initialized = must(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(checkout)
+                .status(),
+            "initialize clean source checkout",
+        );
+        assert!(initialized.success());
+        let clean = must(
+            Command::new("git")
+                .args(["status", "--porcelain", "--untracked-files=all"])
+                .current_dir(checkout)
+                .output(),
+            "verify downloaded metadata leaves source clean",
+        );
+        assert!(clean.status.success());
+        assert!(clean.stdout.is_empty(), "metadata polluted source checkout");
+    }
+
+    #[cfg(unix)]
+    fn make_emitted_tool_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions =
+            must(fs::metadata(path), "read release tool permissions").permissions();
+        permissions.set_mode(0o755);
+        must(
+            fs::set_permissions(path, permissions),
+            "make emitted-stage release tool executable",
+        );
+    }
+
+    #[cfg(not(unix))]
+    fn make_emitted_tool_executable(_path: &Path) {}
+
+    fn emitted_stage_fixture(
+        label: &str,
+        identity_source: &str,
+        include_manifest: bool,
+    ) -> (PathBuf, PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "velnor emitted metadata {label} {}",
+            crate::unique_suffix()
+        ));
+        let checkout = root.join("checkout");
+        let runner_temp = root.join("runner temp [spaces]");
+        let metadata = runner_temp.join("release-metadata");
+        must(
+            fs::create_dir_all(&checkout),
+            "create emitted-stage checkout",
+        );
+        must(
+            fs::create_dir_all(&metadata),
+            "create emitted-stage metadata",
+        );
+        must(
+            fs::write(
+                metadata.join("build-identity.json"),
+                format!(r#"{{"source_sha":"{identity_source}","crate_version":"1.2.3"}}"#),
+            ),
+            "write emitted-stage build identity",
+        );
+        if include_manifest {
+            must(
+                fs::write(metadata.join("manifest.json"), r#"{"version":1}"#),
+                "write emitted-stage manifest",
+            );
+        }
+        initialize_emitted_checkout(&checkout);
+        let target = checkout.join("target/x86_64-unknown-linux-gnu/release");
+        must(fs::create_dir_all(&target), "create emitted-stage target");
+        must(
+            fs::write(target.join("example"), b"release binary fixture\n"),
+            "write emitted-stage binary",
+        );
+        let release_tool = metadata.join("example-release-tool");
+        must(
+            fs::write(&release_tool, EMITTED_RELEASE_TOOL_STUB),
+            "write emitted-stage release tool",
+        );
+        make_emitted_tool_executable(&release_tool);
+        (root, checkout, runner_temp)
+    }
+
+    fn execute_emitted_stage(
+        script: &str,
+        checkout: &Path,
+        runner_temp: &Path,
+        source_sha: &str,
+    ) -> std::process::ExitStatus {
+        must(
+            Command::new("bash")
+                .args(["-euo", "pipefail", "-c", script])
+                .current_dir(checkout)
+                .env("RUNNER_TEMP", runner_temp)
+                .env("SOURCE_COMMIT", source_sha)
+                .env("TARGET", "x86_64-unknown-linux-gnu")
+                .env("VERSION", "1.2.3")
+                .env("CRATE_VERSION", "1.2.3")
+                .status(),
+            "execute emitted metadata stage",
+        )
+    }
+
+    fn run_valid_emitted_stage(label: &str, stage: &str, record_stage: &str, source_sha: &str) {
+        let (root, checkout, runner_temp) = emitted_stage_fixture(label, source_sha, true);
+        let status = execute_emitted_stage(stage, &checkout, &runner_temp, source_sha);
+        assert!(status.success(), "{label} emitted stage failed: {status}");
+        assert!(checkout.join("release/build-identity.json").is_file());
+        assert!(checkout.join("release/manifest.json").is_file());
+        assert!(
+            !checkout.join("release-metadata").exists(),
+            "{label} metadata must remain outside the source checkout"
+        );
+        let record_stage = record_stage.replace("${{ matrix.arch }}", "amd64");
+        let status = execute_emitted_stage(&record_stage, &checkout, &runner_temp, source_sha);
+        assert!(
+            status.success(),
+            "{label} emitted package-record stage failed: {status}"
+        );
+        let record = checkout.join("release/package-record.json");
+        assert!(record.is_file(), "{label} emitted record is missing");
+        let record = must(fs::read_to_string(record), "read emitted package record");
+        assert!(
+            record.contains(source_sha),
+            "{label} record lost source identity"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn run_rejected_emitted_stage(
+        label: &str,
+        stage: &str,
+        identity_source: &str,
+        source_sha: &str,
+        include_manifest: bool,
+    ) {
+        let (root, checkout, runner_temp) =
+            emitted_stage_fixture(label, identity_source, include_manifest);
+        let status = execute_emitted_stage(stage, &checkout, &runner_temp, source_sha);
+        assert!(!status.success(), "{label} metadata must fail closed");
+        assert!(
+            !checkout.join("release/build-identity.json").exists(),
+            "{label} metadata must not stage identity files"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
 
     fn must<T, E: std::fmt::Display>(result: Result<T, E>, context: &str) -> T {
         match result {
@@ -4918,6 +5119,48 @@ mod tests {
             workflow.get(start..end.unwrap_or(workflow.len())),
             &format!("{id} job bytes"),
         )
+    }
+
+    /// Extract one complete emitted `run: |` body from a generated job. The
+    /// fixture executes this exact body; it must not reconstruct a similar
+    /// command from individual assertions because that could miss quoting or
+    /// path changes in the renderer.
+    fn yaml_run_step(workflow: &str, job: &str, name: &str) -> String {
+        let job = yaml_job(workflow, job);
+        let marker = format!("      - name: {name}");
+        let mut in_step = false;
+        let mut in_run = false;
+        let mut script = String::new();
+        for line in job.lines() {
+            if line == marker {
+                in_step = true;
+                continue;
+            }
+            if in_step && line.starts_with("      - name: ") {
+                break;
+            }
+            if !in_step {
+                continue;
+            }
+            if line == "        run: |" {
+                in_run = true;
+                continue;
+            }
+            if in_run {
+                if let Some(body) = line.strip_prefix("          ") {
+                    script.push_str(body);
+                    script.push('\n');
+                } else if line.is_empty() {
+                    script.push('\n');
+                } else {
+                    break;
+                }
+            }
+        }
+        assert!(in_step, "generated step is missing: {name}");
+        assert!(in_run, "generated step has no run body: {name}");
+        assert!(!script.is_empty(), "generated step body is empty: {name}");
+        script
     }
 
     fn assert_cache_retention_has_actions_write(workflow: &str) {
@@ -5530,11 +5773,11 @@ mod tests {
         const PINNED: &[(&str, &str)] = &[
             (
                 "release.yml",
-                "be72b8ec1252d670495df4d184c26b50c08ae0e2847d1191688851d3e5eb9c2c",
+                "084a34fb4f212c89ce2e09912961d4e7cb8ab47a1ad0ea16583d9dbd88e5ee95",
             ),
             (
                 "preview.yml",
-                "4922e8b7aded3ec357e776fec51fad0ef4d408db8117801c87ec7dfeefb36368",
+                "310361c6c2868ae9e039fca375dfd2c6acea5801ec0e8d1a869619fd61d6bb94",
             ),
         ];
         let root = scanned_root("identity-pinned");
@@ -5554,6 +5797,67 @@ mod tests {
             divergent.join("\n  ")
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_identity_metadata_uses_external_quoted_paths() {
+        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let Some(release) = config.release.as_ref() else {
+            panic!("identity fixture must carry a release contract")
+        };
+        let preview = super::render_preview(&config, Some(release));
+        let debian = yaml_job(&preview, "debian");
+        for marker in [
+            "path: ${{ runner.temp }}/release-metadata",
+            "metadata_dir=\"$RUNNER_TEMP/release-metadata\"",
+            "test -s \"$metadata_dir/build-identity.json\"",
+            "test -s \"$metadata_dir/manifest.json\"",
+            "sha256sum \"$metadata_dir/manifest.json\"",
+            "build identity source_sha != preview source commit",
+        ] {
+            assert!(
+                debian.contains(marker),
+                "quoted metadata path missing: {marker}\n{debian}"
+            );
+        }
+        assert!(
+            !debian.contains(" $metadata_dir/"),
+            "unquoted metadata path: {debian}"
+        );
+        assert!(
+            !debian.contains("path: metadata\n"),
+            "metadata must not enter the source checkout: {debian}"
+        );
+    }
+
+    #[test]
+    fn native_identity_executes_complete_emitted_metadata_stages() {
+        let config = native_identity_config(&["release.yml", "preview.yml"]);
+        let (preview_stage, stable_stage, preview_record, stable_record) =
+            emitted_stage_scripts(&config);
+        run_valid_emitted_stage("preview", &preview_stage, &preview_record, "preview-source");
+        run_valid_emitted_stage("stable", &stable_stage, &stable_record, "stable-source");
+        run_rejected_emitted_stage(
+            "mismatch",
+            &preview_stage,
+            "different-source",
+            "expected-source",
+            true,
+        );
+        run_rejected_emitted_stage(
+            "missing",
+            &preview_stage,
+            "expected-source",
+            "expected-source",
+            false,
+        );
+        run_rejected_emitted_stage(
+            "missing-stable",
+            &stable_stage,
+            "expected-source",
+            "expected-source",
+            false,
+        );
     }
 
     #[test]
