@@ -1,0 +1,19 @@
+{
+  "base_policy_blob_sha": "6666666666666666666666666666666666666666",
+  "base_policy_workflow_sha": "5555555555555555555555555555555555555555",
+  "canonical_root_sha256": "e2b30dc21732f957ee9b69b45f270b2d72a995b624d4b19a448eb86985e404f8",
+  "mode": "permanent_pin",
+  "permanent_trust_root": "fixture-trust-root-v11",
+  "pr_base_sha": "325719f1e05d3d46322c9fd3eeb9ad545e175638",
+  "pr_head_sha": "2445c647dafa43acbc5285c873d3b04174ff75c6",
+  "pr_number": 969,
+  "provider_result_digest": "01efb3de3486e97d42765983ee77edeadfee979a01711dafe11d98bb59c6f708",
+  "release_manifest_digest": "ecbe6e70cb562f3ae1161a27ddc0f380d4746cc32f839cce8a8da9439d5838ea",
+  "resulting_main_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "resulting_main_tree_sha": "cccccccccccccccccccccccccccccccccccccccc",
+  "schema_sha256": "39d25b7623c55cf05bf1de41181bfb3225f4cafbff8e028a8e0f49540ff4a3ed",
+  "source_template_map_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "temporary_authority_removed": true,
+  "terminal_census_digest": "f6a91bc83cb5d20e0c15e87e2724bf2241a643c68664a539016ca411e805d5d6",
+  "validated_utc": "2026-09-20T03:58:55Z"
+}

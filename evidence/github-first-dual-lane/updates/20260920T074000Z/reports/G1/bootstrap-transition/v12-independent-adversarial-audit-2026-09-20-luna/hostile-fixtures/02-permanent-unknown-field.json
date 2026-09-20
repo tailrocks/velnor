@@ -1,0 +1,192 @@
+{
+  "actions": {
+    "artifact_metadata_write": true,
+    "attest_sha": "fixture-0002",
+    "create_storage_record": true,
+    "push_to_registry": true,
+    "upload_artifact_sha": "fixture-0005"
+  },
+  "artifact": {
+    "expired": true,
+    "id": 1008,
+    "inner_payload_sha256": "fixture-0008",
+    "inner_payload_size": 1010,
+    "name": "fixture-0010",
+    "rest_service_zip_sha256": "fixture-0011",
+    "rest_service_zip_size": 1013,
+    "service_zip_sha256": "fixture-0013",
+    "service_zip_size": 1015,
+    "workflow_run_id": 1016
+  },
+  "attestation": {
+    "binding_digest": "fixture-0016",
+    "binding_predicate_path": "fixture-0017",
+    "binding_predicate_type": "fixture-0018",
+    "binding_subject_name": "fixture-0019",
+    "binding_subject_sha256": "fixture-0020",
+    "certificate_verified": true,
+    "release_manifest_subject_sha256": "fixture-0022",
+    "release_predicate_path": "fixture-0023",
+    "release_predicate_type": "fixture-0024",
+    "signer_repository": "fixture-0025",
+    "signer_source_ref": "fixture-0026",
+    "signer_workflow": "fixture-0027"
+  },
+  "binary": {
+    "architecture": "fixture-0028",
+    "closure": "fixture-0029",
+    "mode": 1031,
+    "revision": "fixture-0031",
+    "sha256": "fixture-0032",
+    "size": 1034
+  },
+  "forged": true,
+  "job": {
+    "check_run_id": 1035,
+    "conclusion": "fixture-0035",
+    "head_sha": "fixture-0036",
+    "id": 1038,
+    "key": "fixture-0038",
+    "run_attempt": 1040,
+    "run_id": 1041,
+    "status": "fixture-0041"
+  },
+  "kind": "fixture-0042",
+  "manifest": {
+    "sha256": "fixture-0043",
+    "size": 1045
+  },
+  "product": {
+    "application_namespace_reuse": false,
+    "asset": "velnor-workflow-policy-validator-Linux-X64",
+    "features": "",
+    "mutable_latest": false,
+    "overwrite": false,
+    "platform": "Linux-X64",
+    "product_id": "velnor-workflow-policy-validator",
+    "profile": "fixture-0052",
+    "purpose": "fixture-0053",
+    "runner": "ubuntu-24.04",
+    "schema": "velnor.workflow-policy-validator.v1",
+    "tag": "fixture-0056"
+  },
+  "publisher": {
+    "attest_permissions": "fixture-0057",
+    "build_permissions": "fixture-0058",
+    "event": "fixture-0059",
+    "head_branch": "fixture-0060",
+    "head_sha": "fixture-0061",
+    "path": "fixture-0062",
+    "ref": "fixture-0063",
+    "repository": "fixture-0064",
+    "repository_id": 1066,
+    "reserve_publish_permissions": "fixture-0066",
+    "sha": "fixture-0067"
+  },
+  "release": {
+    "attestation_signed_after_draft_id": true,
+    "draft_first": true,
+    "draft_reserved": true,
+    "id": 1072,
+    "manifest_signed_after_draft_id": true,
+    "published": true,
+    "tag": "fixture-0074",
+    "tag_immutable": true,
+    "target_sha": "fixture-0076"
+  },
+  "run": {
+    "attempt": 1078,
+    "conclusion": "fixture-0078",
+    "database_id": 1080,
+    "event": "fixture-0080",
+    "head_branch": "fixture-0081",
+    "head_sha": "fixture-0082",
+    "id": 1084,
+    "repository_id": 1085,
+    "status": "fixture-0085",
+    "workflow_sha": "fixture-0086"
+  },
+  "source": {
+    "closure": "fixture-0087",
+    "ref": "fixture-0088",
+    "repository": "fixture-0089",
+    "repository_id": 1091,
+    "sha": "fixture-0091",
+    "tree_sha": "fixture-0092"
+  },
+  "steps": {
+    "attest_binding": {
+      "conclusion": "fixture-0093",
+      "id": "fixture-0094",
+      "name": "fixture-0095",
+      "status": "fixture-0096"
+    },
+    "attest_release": {
+      "conclusion": "fixture-0097",
+      "id": "fixture-0098",
+      "name": "fixture-0099",
+      "status": "fixture-0100"
+    },
+    "build": {
+      "conclusion": "fixture-0101",
+      "id": "fixture-0102",
+      "name": "fixture-0103",
+      "status": "fixture-0104"
+    },
+    "publish": {
+      "conclusion": "fixture-0105",
+      "id": "fixture-0106",
+      "name": "fixture-0107",
+      "status": "fixture-0108"
+    },
+    "reserve_release": {
+      "conclusion": "fixture-0109",
+      "id": "fixture-0110",
+      "name": "fixture-0111",
+      "status": "fixture-0112"
+    },
+    "upload": {
+      "conclusion": "fixture-0113",
+      "id": "fixture-0114",
+      "name": "fixture-0115",
+      "status": "fixture-0116"
+    }
+  },
+  "trust": {
+    "oidc_issuer": "fixture-0117",
+    "oidc_policy_revision_sha256": "fixture-0118",
+    "repository_id": 1120,
+    "signer_repository": "fixture-0120",
+    "signer_workflow": "fixture-0121",
+    "source_ref": "fixture-0122",
+    "source_sha": "fixture-0123",
+    "temporary_key_used": false
+  },
+  "upload": {
+    "artifact_digest_output": "fixture-0125",
+    "artifact_id_output": 1127,
+    "step_id": "fixture-0127"
+  },
+  "verification": {
+    "binding_digest_verified": true,
+    "cryptographic_attestation_verified": true,
+    "custom_predicate_verified": true,
+    "draft_first_verified": true,
+    "evidence_state": "fixture-0132",
+    "inner_payload_verified": true,
+    "main_ref_verified": true,
+    "manifest_verified": true,
+    "permanent_trust_policy_sha256": "fixture-0136",
+    "producer_api_verified": true,
+    "raw_zip_verified": true,
+    "release_api_verified": true,
+    "temporary_authority_used": true
+  },
+  "verifier": {
+    "check_name": "fixture-0141",
+    "permissions": "fixture-0142",
+    "provider_app_id": 1144,
+    "verifier_revision": "fixture-0144",
+    "write_authority": true
+  }
+}

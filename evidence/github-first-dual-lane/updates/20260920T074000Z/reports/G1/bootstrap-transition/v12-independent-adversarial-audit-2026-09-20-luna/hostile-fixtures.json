@@ -1,0 +1,209 @@
+{
+  "cases": [
+    {
+      "case": "permanent-const-forged",
+      "errors": [
+        "product.product_id: 'velnor-workflow-policy-validator' was expected"
+      ],
+      "expected": "reject",
+      "fixture": "hostile-fixtures/01-permanent-const-forged.json",
+      "rationale": "product identity constant",
+      "schema": "permanent_binding",
+      "schema_observed": "reject",
+      "semantic_status": "pass"
+    },
+    {
+      "case": "permanent-unknown-field",
+      "errors": [
+        ": Additional properties are not allowed ('forged' was unexpected)"
+      ],
+      "expected": "reject",
+      "fixture": "hostile-fixtures/02-permanent-unknown-field.json",
+      "rationale": "additionalProperties=false",
+      "schema": "permanent_binding",
+      "schema_observed": "reject",
+      "semantic_status": "pass"
+    },
+    {
+      "case": "release-leaf-omitted",
+      "errors": [
+        ": 'asset_id' is a required property"
+      ],
+      "expected": "reject",
+      "fixture": "hostile-fixtures/03-release-leaf-omitted.json",
+      "rationale": "all 14 release leaves required",
+      "schema": "release_manifest",
+      "schema_observed": "reject",
+      "semantic_status": "pass"
+    },
+    {
+      "case": "artifact-raw-prefix-mismatch",
+      "errors": [
+        "artifact_digest: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' does not match '^[0-9a-f]{64}$'"
+      ],
+      "expected": "reject",
+      "fixture": "hostile-fixtures/04-artifact-raw-prefix-mismatch.json",
+      "rationale": "bare canonical artifact digest",
+      "schema": "pre_record_transport",
+      "schema_observed": "reject",
+      "semantic_status": "pass"
+    },
+    {
+      "case": "provider-check-name-forged",
+      "errors": [
+        "provider_check_name: 'Policy-bootstrap-B' was expected"
+      ],
+      "expected": "reject",
+      "fixture": "hostile-fixtures/05-provider-check-name-forged.json",
+      "rationale": "permanent B context constant",
+      "schema": "provider_result",
+      "schema_observed": "reject",
+      "semantic_status": "pass"
+    },
+    {
+      "case": "provider-status-forged",
+      "errors": [
+        "provider_check_status: 'completed' was expected"
+      ],
+      "expected": "reject",
+      "fixture": "hostile-fixtures/06-provider-status-forged.json",
+      "rationale": "terminal provider check constant",
+      "schema": "provider_result",
+      "schema_observed": "reject",
+      "semantic_status": "pass"
+    },
+    {
+      "case": "provider-check-head-mismatch",
+      "errors": [],
+      "expected": "reject",
+      "fixture": "hostile-fixtures/07-provider-check-head-mismatch.json",
+      "rationale": "must equal resulting main SHA; no cross-field schema equality",
+      "schema": "provider_result",
+      "schema_observed": "accept",
+      "semantic_status": "unimplemented"
+    },
+    {
+      "case": "provider-external-id-mismatch",
+      "errors": [],
+      "expected": "reject",
+      "fixture": "hostile-fixtures/08-provider-external-id-mismatch.json",
+      "rationale": "must equal provider_result_id; no cross-field schema equality",
+      "schema": "provider_result",
+      "schema_observed": "accept",
+      "semantic_status": "unimplemented"
+    },
+    {
+      "case": "provider-source-artifact-id-mismatch",
+      "errors": [],
+      "expected": "reject",
+      "fixture": "hostile-fixtures/09-provider-source-artifact-id-mismatch.json",
+      "rationale": "must equal Actions transport artifact ID; no joined schema",
+      "schema": "provider_result",
+      "schema_observed": "accept",
+      "semantic_status": "unimplemented"
+    },
+    {
+      "case": "verify-policy-head-mismatch",
+      "errors": [],
+      "expected": "reject",
+      "fixture": "hostile-fixtures/10-verify-policy-head-mismatch.json",
+      "rationale": "must equal resulting_main_sha",
+      "schema": "verify_b",
+      "schema_observed": "accept",
+      "semantic_status": "unimplemented"
+    },
+    {
+      "case": "verify-called-workflow-attacker",
+      "errors": [],
+      "expected": "reject",
+      "fixture": "hostile-fixtures/11-verify-called-workflow-attacker.json",
+      "rationale": "must bind repository/path/ref to called workflow Contents and OIDC",
+      "schema": "verify_b",
+      "schema_observed": "accept",
+      "semantic_status": "unimplemented"
+    },
+    {
+      "case": "verify-terminal-row-head-mismatch",
+      "errors": [],
+      "expected": "reject",
+      "fixture": "hostile-fixtures/12-verify-terminal-row-head-mismatch.json",
+      "rationale": "must equal resulting main SHA",
+      "schema": "verify_b",
+      "schema_observed": "accept",
+      "semantic_status": "unimplemented"
+    },
+    {
+      "case": "verify-terminal-row-path-duplicate",
+      "errors": [],
+      "expected": "reject",
+      "fixture": "hostile-fixtures/13-verify-terminal-row-path-duplicate.json",
+      "rationale": "must cover exactly one row per required workflow",
+      "schema": "verify_b",
+      "schema_observed": "accept",
+      "semantic_status": "unimplemented"
+    },
+    {
+      "case": "verify-terminal-row-check-id-duplicate",
+      "errors": [],
+      "expected": "reject",
+      "fixture": "hostile-fixtures/14-verify-terminal-row-check-id-duplicate.json",
+      "rationale": "must have unique check identity",
+      "schema": "verify_b",
+      "schema_observed": "accept",
+      "semantic_status": "unimplemented"
+    },
+    {
+      "case": "verify-terminal-row-extra",
+      "errors": [],
+      "expected": "reject",
+      "fixture": "hostile-fixtures/15-verify-terminal-row-extra.json",
+      "rationale": "schema minItems does not enforce exactly 15",
+      "schema": "verify_b",
+      "schema_observed": "accept",
+      "semantic_status": "unimplemented"
+    },
+    {
+      "case": "verify-terminal-digest-mismatch",
+      "errors": [],
+      "expected": "reject",
+      "fixture": "hostile-fixtures/16-verify-terminal-digest-mismatch.json",
+      "rationale": "must equal canonical rows digest",
+      "schema": "verify_b",
+      "schema_observed": "accept",
+      "semantic_status": "unimplemented"
+    },
+    {
+      "case": "release-target-tag-mismatch",
+      "errors": [],
+      "expected": "reject",
+      "fixture": "hostile-fixtures/17-release-target-tag-mismatch.json",
+      "rationale": "tag suffix and target SHA must be joined",
+      "schema": "release_manifest",
+      "schema_observed": "accept",
+      "semantic_status": "unimplemented"
+    },
+    {
+      "case": "adoption-main-mismatch",
+      "errors": [],
+      "expected": "reject",
+      "fixture": "hostile-fixtures/18-adoption-main-mismatch.json",
+      "rationale": "adoption must match provider/release/census readback",
+      "schema": "adoption",
+      "schema_observed": "accept",
+      "semantic_status": "unimplemented"
+    },
+    {
+      "case": "pre-record-raw-equality-forged",
+      "errors": [
+        "verification.raw_downloads_equal_digests: True was expected"
+      ],
+      "expected": "reject",
+      "fixture": "hostile-fixtures/19-pre-record-raw-equality-forged.json",
+      "rationale": "byte equality is semantic and bytes are absent",
+      "schema": "pre_record",
+      "schema_observed": "reject",
+      "semantic_status": "pass"
+    }
+  ],
+  "schema": "velnor.authority-transition.v12-luna-hostile-fixtures"
+}

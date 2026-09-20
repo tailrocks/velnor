@@ -1,0 +1,70 @@
+{
+  "$schema": "velnor.external-evidence-checkpoint.v1",
+  "attestation": "none",
+  "gate_status": "not-evaluated",
+  "captured_at_utc": "2026-09-20T07:48:10Z",
+  "source_capture_cutoff_utc": "2026-09-20T07:40:00Z",
+  "ref": "refs/heads/evidence/github-first-dual-lane-20260919T181508Z",
+  "repository": "tailrocks/velnor",
+  "publication_owner": "/root",
+  "records_owner": "/root/g0_records",
+  "original_evidence_root": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence",
+  "source_base_revision": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+  "parent_checkpoint_commit": "1101eec44291c59992ead80a14c400bfb1bc7221",
+  "historical_failed_checkpoint_commit": "de326237e604ecd8847e6ee7cf5ecb82f1b7ba9d",
+  "historical_failed_checkpoint_status": "integrity-failed-preserved",
+  "correction_checkpoint_status": "raw-byte-corrected-preserved",
+  "stability": {
+    "selected_paths_are_regular_non_symlinks": true,
+    "source_hash_reads": 2,
+    "source_hash_reads_match": true,
+    "destination_hash_and_size_reconciliation": "pass",
+    "source_tree_modified": false,
+    "included_file_count": 107,
+    "included_source_bytes": 3401260,
+    "included_groups": {
+      "G0": {"files": 19, "bytes": 1198848},
+      "G1": {"files": 88, "bytes": 2202412}
+    },
+    "exact_manifest": "INVENTORY.tsv"
+  },
+  "included_scope": [
+    "stable post-1101 review reports",
+    "corrected expected-workload and adapter source contracts",
+    "G0 source integration queue",
+    "v12 canonical repair source, fixtures, manifests, and independent reviews",
+    "v12 Luna authority-focused hostile fixtures and review results",
+    "terminal-census schema, positive/negative fixtures, and test results"
+  ],
+  "excluded_scope": [
+    "G0/g0-run-metadata-capture-* live capture trees and writer scripts",
+    "G1/integration/execution-health-*.json point captures",
+    "hosted-config and checker WIP",
+    "raw logs and raw .response/.body capture partitions",
+    "build outputs, source archives, repository clones, and .git metadata",
+    "credentials and secrets",
+    "__pycache__",
+    "paths newer than the 2026-09-20T07:40:00Z cutoff"
+  ],
+  "preserved_correction_chain": {
+    "de326_review_sha256": "919fafed1586e2ccfec9fa1a186a156674e764ec5a1a1790b3ed3ce03e7773b7",
+    "1101_packaging_review_path": "reports/G0/evidence-checkpoint-review/1101eec44291c59992ead80a14c400bfb1bc7221-packaging-review.md",
+    "1101_packaging_review_sha256": "f752d6b4134e553096d4b7e7e1a32b75912950857fe6fc2271ea11b606d4e38d",
+    "gitattributes_verified_at": "1101eec44291c59992ead80a14c400bfb1bc7221"
+  },
+  "validation": {
+    "json_and_ndjson_parse": "pass (73 JSON files, 1 NDJSON file)",
+    "high_confidence_secret_scan": "pass (no high-confidence token/private-key matches)",
+    "fresh_committed_object_checkout": "pass for commit 4b327fef78f31ac4d5e59c6e7f434b8dafa9b501: fresh clone verified new SHA256SUMS, INVENTORY.tsv destination hashes, parent raw SHA256SUMS, and .gitattributes attributes",
+    "attestation": "none",
+    "gate_status": "not-evaluated"
+  },
+  "no_mutations": [
+    "source repository",
+    "GitHub authority/rulesets",
+    "workflow dispatch",
+    "release/publication",
+    "merge",
+    "gate state"
+  ]
+}

@@ -1,0 +1,1132 @@
+{
+  "authority_claim": false,
+  "consumer_rows": [
+    {
+      "check": {
+        "app_id": 9900,
+        "conclusion": "neutral",
+        "external_id": "terminal-check-1",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7601,
+        "name": "ci-main",
+        "status": "completed"
+      },
+      "consumer": {
+        "check_app_id": 9900,
+        "check_external_id": "terminal-check-1",
+        "check_name": "ci-main",
+        "id": ".github/workflows/ci-main.yml::ci-main-required::ci-main",
+        "job_key": "ci-main-required",
+        "workflow_path": ".github/workflows/ci-main.yml"
+      },
+      "job": {
+        "check_run_id": 7601,
+        "conclusion": "success",
+        "id": 7501,
+        "key": "ci-main-required",
+        "name": "ci-main-required",
+        "run_attempt": 1,
+        "run_id": 7401,
+        "status": "completed",
+        "steps": [
+          {
+            "conclusion": "success",
+            "name": "terminal-census-source",
+            "number": 1,
+            "status": "completed"
+          }
+        ]
+      },
+      "producer": {
+        "check_api": "https://api.github.com/repos/tailrocks/velnor/check-runs/7601",
+        "job": "verify-B",
+        "jobs_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7401/attempts/1/jobs",
+        "run_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7401",
+        "source_record": {
+          "check_run_id": 7601,
+          "job_id": 7501,
+          "run_attempt": 1,
+          "run_id": 7401
+        },
+        "stage": "S7c_verify_b",
+        "step": "terminal-census-api",
+        "workflow_contents_api": "https://api.github.com/repos/tailrocks/velnor/contents/.github/workflows/ci-main.yml?ref=5555555555555555555555555555555555555555"
+      },
+      "run": {
+        "attempt": 1,
+        "conclusion": "success",
+        "event": "push",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7401,
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "status": "completed",
+        "workflow_path": ".github/workflows/ci-main.yml",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      },
+      "source": {
+        "blob_sha": "6666666666666666666666666666666666666666",
+        "path": ".github/workflows/ci-main.yml",
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "source_kind": "workflow_contents_api",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      }
+    },
+    {
+      "check": {
+        "app_id": 9900,
+        "conclusion": "success",
+        "external_id": "terminal-check-2",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7602,
+        "name": "ci-policy",
+        "status": "completed"
+      },
+      "consumer": {
+        "check_app_id": 9900,
+        "check_external_id": "terminal-check-2",
+        "check_name": "ci-policy",
+        "id": ".github/workflows/ci-policy.yml::ci-policy-required::ci-policy",
+        "job_key": "ci-policy-required",
+        "workflow_path": ".github/workflows/ci-policy.yml"
+      },
+      "job": {
+        "check_run_id": 7602,
+        "conclusion": "success",
+        "id": 7502,
+        "key": "ci-policy-required",
+        "name": "ci-policy-required",
+        "run_attempt": 1,
+        "run_id": 7402,
+        "status": "completed",
+        "steps": [
+          {
+            "conclusion": "success",
+            "name": "terminal-census-source",
+            "number": 1,
+            "status": "completed"
+          }
+        ]
+      },
+      "producer": {
+        "check_api": "https://api.github.com/repos/tailrocks/velnor/check-runs/7602",
+        "job": "verify-B",
+        "jobs_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7402/attempts/1/jobs",
+        "run_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7402",
+        "source_record": {
+          "check_run_id": 7602,
+          "job_id": 7502,
+          "run_attempt": 1,
+          "run_id": 7402
+        },
+        "stage": "S7c_verify_b",
+        "step": "terminal-census-api",
+        "workflow_contents_api": "https://api.github.com/repos/tailrocks/velnor/contents/.github/workflows/ci-policy.yml?ref=5555555555555555555555555555555555555555"
+      },
+      "run": {
+        "attempt": 1,
+        "conclusion": "success",
+        "event": "push",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7402,
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "status": "completed",
+        "workflow_path": ".github/workflows/ci-policy.yml",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      },
+      "source": {
+        "blob_sha": "6666666666666666666666666666666666666666",
+        "path": ".github/workflows/ci-policy.yml",
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "source_kind": "workflow_contents_api",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      }
+    },
+    {
+      "check": {
+        "app_id": 9900,
+        "conclusion": "success",
+        "external_id": "terminal-check-3",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7603,
+        "name": "ci-pr",
+        "status": "completed"
+      },
+      "consumer": {
+        "check_app_id": 9900,
+        "check_external_id": "terminal-check-3",
+        "check_name": "ci-pr",
+        "id": ".github/workflows/ci-pr.yml::ci-pr-required::ci-pr",
+        "job_key": "ci-pr-required",
+        "workflow_path": ".github/workflows/ci-pr.yml"
+      },
+      "job": {
+        "check_run_id": 7603,
+        "conclusion": "success",
+        "id": 7503,
+        "key": "ci-pr-required",
+        "name": "ci-pr-required",
+        "run_attempt": 1,
+        "run_id": 7403,
+        "status": "completed",
+        "steps": [
+          {
+            "conclusion": "success",
+            "name": "terminal-census-source",
+            "number": 1,
+            "status": "completed"
+          }
+        ]
+      },
+      "producer": {
+        "check_api": "https://api.github.com/repos/tailrocks/velnor/check-runs/7603",
+        "job": "verify-B",
+        "jobs_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7403/attempts/1/jobs",
+        "run_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7403",
+        "source_record": {
+          "check_run_id": 7603,
+          "job_id": 7503,
+          "run_attempt": 1,
+          "run_id": 7403
+        },
+        "stage": "S7c_verify_b",
+        "step": "terminal-census-api",
+        "workflow_contents_api": "https://api.github.com/repos/tailrocks/velnor/contents/.github/workflows/ci-pr.yml?ref=5555555555555555555555555555555555555555"
+      },
+      "run": {
+        "attempt": 1,
+        "conclusion": "success",
+        "event": "push",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7403,
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "status": "completed",
+        "workflow_path": ".github/workflows/ci-pr.yml",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      },
+      "source": {
+        "blob_sha": "6666666666666666666666666666666666666666",
+        "path": ".github/workflows/ci-pr.yml",
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "source_kind": "workflow_contents_api",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      }
+    },
+    {
+      "check": {
+        "app_id": 9900,
+        "conclusion": "success",
+        "external_id": "terminal-check-4",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7604,
+        "name": "ci-unit-rust",
+        "status": "completed"
+      },
+      "consumer": {
+        "check_app_id": 9900,
+        "check_external_id": "terminal-check-4",
+        "check_name": "ci-unit-rust",
+        "id": ".github/workflows/ci-unit-rust.yml::ci-unit-rust-required::ci-unit-rust",
+        "job_key": "ci-unit-rust-required",
+        "workflow_path": ".github/workflows/ci-unit-rust.yml"
+      },
+      "job": {
+        "check_run_id": 7604,
+        "conclusion": "success",
+        "id": 7504,
+        "key": "ci-unit-rust-required",
+        "name": "ci-unit-rust-required",
+        "run_attempt": 1,
+        "run_id": 7404,
+        "status": "completed",
+        "steps": [
+          {
+            "conclusion": "success",
+            "name": "terminal-census-source",
+            "number": 1,
+            "status": "completed"
+          }
+        ]
+      },
+      "producer": {
+        "check_api": "https://api.github.com/repos/tailrocks/velnor/check-runs/7604",
+        "job": "verify-B",
+        "jobs_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7404/attempts/1/jobs",
+        "run_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7404",
+        "source_record": {
+          "check_run_id": 7604,
+          "job_id": 7504,
+          "run_attempt": 1,
+          "run_id": 7404
+        },
+        "stage": "S7c_verify_b",
+        "step": "terminal-census-api",
+        "workflow_contents_api": "https://api.github.com/repos/tailrocks/velnor/contents/.github/workflows/ci-unit-rust.yml?ref=5555555555555555555555555555555555555555"
+      },
+      "run": {
+        "attempt": 1,
+        "conclusion": "success",
+        "event": "push",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7404,
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "status": "completed",
+        "workflow_path": ".github/workflows/ci-unit-rust.yml",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      },
+      "source": {
+        "blob_sha": "6666666666666666666666666666666666666666",
+        "path": ".github/workflows/ci-unit-rust.yml",
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "source_kind": "workflow_contents_api",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      }
+    },
+    {
+      "check": {
+        "app_id": 9900,
+        "conclusion": "success",
+        "external_id": "terminal-check-5",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7605,
+        "name": "ci-unit-bun",
+        "status": "completed"
+      },
+      "consumer": {
+        "check_app_id": 9900,
+        "check_external_id": "terminal-check-5",
+        "check_name": "ci-unit-bun",
+        "id": ".github/workflows/ci-unit-bun.yml::ci-unit-bun-required::ci-unit-bun",
+        "job_key": "ci-unit-bun-required",
+        "workflow_path": ".github/workflows/ci-unit-bun.yml"
+      },
+      "job": {
+        "check_run_id": 7605,
+        "conclusion": "success",
+        "id": 7505,
+        "key": "ci-unit-bun-required",
+        "name": "ci-unit-bun-required",
+        "run_attempt": 1,
+        "run_id": 7405,
+        "status": "completed",
+        "steps": [
+          {
+            "conclusion": "success",
+            "name": "terminal-census-source",
+            "number": 1,
+            "status": "completed"
+          }
+        ]
+      },
+      "producer": {
+        "check_api": "https://api.github.com/repos/tailrocks/velnor/check-runs/7605",
+        "job": "verify-B",
+        "jobs_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7405/attempts/1/jobs",
+        "run_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7405",
+        "source_record": {
+          "check_run_id": 7605,
+          "job_id": 7505,
+          "run_attempt": 1,
+          "run_id": 7405
+        },
+        "stage": "S7c_verify_b",
+        "step": "terminal-census-api",
+        "workflow_contents_api": "https://api.github.com/repos/tailrocks/velnor/contents/.github/workflows/ci-unit-bun.yml?ref=5555555555555555555555555555555555555555"
+      },
+      "run": {
+        "attempt": 1,
+        "conclusion": "success",
+        "event": "push",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7405,
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "status": "completed",
+        "workflow_path": ".github/workflows/ci-unit-bun.yml",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      },
+      "source": {
+        "blob_sha": "6666666666666666666666666666666666666666",
+        "path": ".github/workflows/ci-unit-bun.yml",
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "source_kind": "workflow_contents_api",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      }
+    },
+    {
+      "check": {
+        "app_id": 9900,
+        "conclusion": "success",
+        "external_id": "terminal-check-6",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7606,
+        "name": "ci-unit-docker",
+        "status": "completed"
+      },
+      "consumer": {
+        "check_app_id": 9900,
+        "check_external_id": "terminal-check-6",
+        "check_name": "ci-unit-docker",
+        "id": ".github/workflows/ci-unit-docker.yml::ci-unit-docker-required::ci-unit-docker",
+        "job_key": "ci-unit-docker-required",
+        "workflow_path": ".github/workflows/ci-unit-docker.yml"
+      },
+      "job": {
+        "check_run_id": 7606,
+        "conclusion": "success",
+        "id": 7506,
+        "key": "ci-unit-docker-required",
+        "name": "ci-unit-docker-required",
+        "run_attempt": 1,
+        "run_id": 7406,
+        "status": "completed",
+        "steps": [
+          {
+            "conclusion": "success",
+            "name": "terminal-census-source",
+            "number": 1,
+            "status": "completed"
+          }
+        ]
+      },
+      "producer": {
+        "check_api": "https://api.github.com/repos/tailrocks/velnor/check-runs/7606",
+        "job": "verify-B",
+        "jobs_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7406/attempts/1/jobs",
+        "run_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7406",
+        "source_record": {
+          "check_run_id": 7606,
+          "job_id": 7506,
+          "run_attempt": 1,
+          "run_id": 7406
+        },
+        "stage": "S7c_verify_b",
+        "step": "terminal-census-api",
+        "workflow_contents_api": "https://api.github.com/repos/tailrocks/velnor/contents/.github/workflows/ci-unit-docker.yml?ref=5555555555555555555555555555555555555555"
+      },
+      "run": {
+        "attempt": 1,
+        "conclusion": "success",
+        "event": "push",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7406,
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "status": "completed",
+        "workflow_path": ".github/workflows/ci-unit-docker.yml",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      },
+      "source": {
+        "blob_sha": "6666666666666666666666666666666666666666",
+        "path": ".github/workflows/ci-unit-docker.yml",
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "source_kind": "workflow_contents_api",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      }
+    },
+    {
+      "check": {
+        "app_id": 9900,
+        "conclusion": "success",
+        "external_id": "terminal-check-7",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7607,
+        "name": "ci-unit-docs",
+        "status": "completed"
+      },
+      "consumer": {
+        "check_app_id": 9900,
+        "check_external_id": "terminal-check-7",
+        "check_name": "ci-unit-docs",
+        "id": ".github/workflows/ci-unit-docs.yml::ci-unit-docs-required::ci-unit-docs",
+        "job_key": "ci-unit-docs-required",
+        "workflow_path": ".github/workflows/ci-unit-docs.yml"
+      },
+      "job": {
+        "check_run_id": 7607,
+        "conclusion": "success",
+        "id": 7507,
+        "key": "ci-unit-docs-required",
+        "name": "ci-unit-docs-required",
+        "run_attempt": 1,
+        "run_id": 7407,
+        "status": "completed",
+        "steps": [
+          {
+            "conclusion": "success",
+            "name": "terminal-census-source",
+            "number": 1,
+            "status": "completed"
+          }
+        ]
+      },
+      "producer": {
+        "check_api": "https://api.github.com/repos/tailrocks/velnor/check-runs/7607",
+        "job": "verify-B",
+        "jobs_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7407/attempts/1/jobs",
+        "run_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7407",
+        "source_record": {
+          "check_run_id": 7607,
+          "job_id": 7507,
+          "run_attempt": 1,
+          "run_id": 7407
+        },
+        "stage": "S7c_verify_b",
+        "step": "terminal-census-api",
+        "workflow_contents_api": "https://api.github.com/repos/tailrocks/velnor/contents/.github/workflows/ci-unit-docs.yml?ref=5555555555555555555555555555555555555555"
+      },
+      "run": {
+        "attempt": 1,
+        "conclusion": "success",
+        "event": "push",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7407,
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "status": "completed",
+        "workflow_path": ".github/workflows/ci-unit-docs.yml",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      },
+      "source": {
+        "blob_sha": "6666666666666666666666666666666666666666",
+        "path": ".github/workflows/ci-unit-docs.yml",
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "source_kind": "workflow_contents_api",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      }
+    },
+    {
+      "check": {
+        "app_id": 9900,
+        "conclusion": "success",
+        "external_id": "terminal-check-8",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7608,
+        "name": "ci-unit-opentofu",
+        "status": "completed"
+      },
+      "consumer": {
+        "check_app_id": 9900,
+        "check_external_id": "terminal-check-8",
+        "check_name": "ci-unit-opentofu",
+        "id": ".github/workflows/ci-unit-opentofu.yml::ci-unit-opentofu-required::ci-unit-opentofu",
+        "job_key": "ci-unit-opentofu-required",
+        "workflow_path": ".github/workflows/ci-unit-opentofu.yml"
+      },
+      "job": {
+        "check_run_id": 7608,
+        "conclusion": "success",
+        "id": 7508,
+        "key": "ci-unit-opentofu-required",
+        "name": "ci-unit-opentofu-required",
+        "run_attempt": 1,
+        "run_id": 7408,
+        "status": "completed",
+        "steps": [
+          {
+            "conclusion": "success",
+            "name": "terminal-census-source",
+            "number": 1,
+            "status": "completed"
+          }
+        ]
+      },
+      "producer": {
+        "check_api": "https://api.github.com/repos/tailrocks/velnor/check-runs/7608",
+        "job": "verify-B",
+        "jobs_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7408/attempts/1/jobs",
+        "run_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7408",
+        "source_record": {
+          "check_run_id": 7608,
+          "job_id": 7508,
+          "run_attempt": 1,
+          "run_id": 7408
+        },
+        "stage": "S7c_verify_b",
+        "step": "terminal-census-api",
+        "workflow_contents_api": "https://api.github.com/repos/tailrocks/velnor/contents/.github/workflows/ci-unit-opentofu.yml?ref=5555555555555555555555555555555555555555"
+      },
+      "run": {
+        "attempt": 1,
+        "conclusion": "success",
+        "event": "push",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7408,
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "status": "completed",
+        "workflow_path": ".github/workflows/ci-unit-opentofu.yml",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      },
+      "source": {
+        "blob_sha": "6666666666666666666666666666666666666666",
+        "path": ".github/workflows/ci-unit-opentofu.yml",
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "source_kind": "workflow_contents_api",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      }
+    },
+    {
+      "check": {
+        "app_id": 9900,
+        "conclusion": "success",
+        "external_id": "terminal-check-9",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7609,
+        "name": "maintenance",
+        "status": "completed"
+      },
+      "consumer": {
+        "check_app_id": 9900,
+        "check_external_id": "terminal-check-9",
+        "check_name": "maintenance",
+        "id": ".github/workflows/maintenance.yml::maintenance-required::maintenance",
+        "job_key": "maintenance-required",
+        "workflow_path": ".github/workflows/maintenance.yml"
+      },
+      "job": {
+        "check_run_id": 7609,
+        "conclusion": "success",
+        "id": 7509,
+        "key": "maintenance-required",
+        "name": "maintenance-required",
+        "run_attempt": 1,
+        "run_id": 7409,
+        "status": "completed",
+        "steps": [
+          {
+            "conclusion": "success",
+            "name": "terminal-census-source",
+            "number": 1,
+            "status": "completed"
+          }
+        ]
+      },
+      "producer": {
+        "check_api": "https://api.github.com/repos/tailrocks/velnor/check-runs/7609",
+        "job": "verify-B",
+        "jobs_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7409/attempts/1/jobs",
+        "run_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7409",
+        "source_record": {
+          "check_run_id": 7609,
+          "job_id": 7509,
+          "run_attempt": 1,
+          "run_id": 7409
+        },
+        "stage": "S7c_verify_b",
+        "step": "terminal-census-api",
+        "workflow_contents_api": "https://api.github.com/repos/tailrocks/velnor/contents/.github/workflows/maintenance.yml?ref=5555555555555555555555555555555555555555"
+      },
+      "run": {
+        "attempt": 1,
+        "conclusion": "success",
+        "event": "push",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7409,
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "status": "completed",
+        "workflow_path": ".github/workflows/maintenance.yml",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      },
+      "source": {
+        "blob_sha": "6666666666666666666666666666666666666666",
+        "path": ".github/workflows/maintenance.yml",
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "source_kind": "workflow_contents_api",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      }
+    },
+    {
+      "check": {
+        "app_id": 9900,
+        "conclusion": "success",
+        "external_id": "terminal-check-10",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7610,
+        "name": "preview",
+        "status": "completed"
+      },
+      "consumer": {
+        "check_app_id": 9900,
+        "check_external_id": "terminal-check-10",
+        "check_name": "preview",
+        "id": ".github/workflows/preview.yml::preview-required::preview",
+        "job_key": "preview-required",
+        "workflow_path": ".github/workflows/preview.yml"
+      },
+      "job": {
+        "check_run_id": 7610,
+        "conclusion": "success",
+        "id": 7510,
+        "key": "preview-required",
+        "name": "preview-required",
+        "run_attempt": 1,
+        "run_id": 7410,
+        "status": "completed",
+        "steps": [
+          {
+            "conclusion": "success",
+            "name": "terminal-census-source",
+            "number": 1,
+            "status": "completed"
+          }
+        ]
+      },
+      "producer": {
+        "check_api": "https://api.github.com/repos/tailrocks/velnor/check-runs/7610",
+        "job": "verify-B",
+        "jobs_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7410/attempts/1/jobs",
+        "run_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7410",
+        "source_record": {
+          "check_run_id": 7610,
+          "job_id": 7510,
+          "run_attempt": 1,
+          "run_id": 7410
+        },
+        "stage": "S7c_verify_b",
+        "step": "terminal-census-api",
+        "workflow_contents_api": "https://api.github.com/repos/tailrocks/velnor/contents/.github/workflows/preview.yml?ref=5555555555555555555555555555555555555555"
+      },
+      "run": {
+        "attempt": 1,
+        "conclusion": "success",
+        "event": "push",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7410,
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "status": "completed",
+        "workflow_path": ".github/workflows/preview.yml",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      },
+      "source": {
+        "blob_sha": "6666666666666666666666666666666666666666",
+        "path": ".github/workflows/preview.yml",
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "source_kind": "workflow_contents_api",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      }
+    },
+    {
+      "check": {
+        "app_id": 9900,
+        "conclusion": "success",
+        "external_id": "terminal-check-11",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7611,
+        "name": "release",
+        "status": "completed"
+      },
+      "consumer": {
+        "check_app_id": 9900,
+        "check_external_id": "terminal-check-11",
+        "check_name": "release",
+        "id": ".github/workflows/release.yml::release-required::release",
+        "job_key": "release-required",
+        "workflow_path": ".github/workflows/release.yml"
+      },
+      "job": {
+        "check_run_id": 7611,
+        "conclusion": "success",
+        "id": 7511,
+        "key": "release-required",
+        "name": "release-required",
+        "run_attempt": 1,
+        "run_id": 7411,
+        "status": "completed",
+        "steps": [
+          {
+            "conclusion": "success",
+            "name": "terminal-census-source",
+            "number": 1,
+            "status": "completed"
+          }
+        ]
+      },
+      "producer": {
+        "check_api": "https://api.github.com/repos/tailrocks/velnor/check-runs/7611",
+        "job": "verify-B",
+        "jobs_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7411/attempts/1/jobs",
+        "run_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7411",
+        "source_record": {
+          "check_run_id": 7611,
+          "job_id": 7511,
+          "run_attempt": 1,
+          "run_id": 7411
+        },
+        "stage": "S7c_verify_b",
+        "step": "terminal-census-api",
+        "workflow_contents_api": "https://api.github.com/repos/tailrocks/velnor/contents/.github/workflows/release.yml?ref=5555555555555555555555555555555555555555"
+      },
+      "run": {
+        "attempt": 1,
+        "conclusion": "success",
+        "event": "push",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7411,
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "status": "completed",
+        "workflow_path": ".github/workflows/release.yml",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      },
+      "source": {
+        "blob_sha": "6666666666666666666666666666666666666666",
+        "path": ".github/workflows/release.yml",
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "source_kind": "workflow_contents_api",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      }
+    },
+    {
+      "check": {
+        "app_id": 9900,
+        "conclusion": "success",
+        "external_id": "terminal-check-12",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7612,
+        "name": "ci-runtime-products",
+        "status": "completed"
+      },
+      "consumer": {
+        "check_app_id": 9900,
+        "check_external_id": "terminal-check-12",
+        "check_name": "ci-runtime-products",
+        "id": ".github/workflows/ci-runtime-products.yml::ci-runtime-products-required::ci-runtime-products",
+        "job_key": "ci-runtime-products-required",
+        "workflow_path": ".github/workflows/ci-runtime-products.yml"
+      },
+      "job": {
+        "check_run_id": 7612,
+        "conclusion": "success",
+        "id": 7512,
+        "key": "ci-runtime-products-required",
+        "name": "ci-runtime-products-required",
+        "run_attempt": 1,
+        "run_id": 7412,
+        "status": "completed",
+        "steps": [
+          {
+            "conclusion": "success",
+            "name": "terminal-census-source",
+            "number": 1,
+            "status": "completed"
+          }
+        ]
+      },
+      "producer": {
+        "check_api": "https://api.github.com/repos/tailrocks/velnor/check-runs/7612",
+        "job": "verify-B",
+        "jobs_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7412/attempts/1/jobs",
+        "run_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7412",
+        "source_record": {
+          "check_run_id": 7612,
+          "job_id": 7512,
+          "run_attempt": 1,
+          "run_id": 7412
+        },
+        "stage": "S7c_verify_b",
+        "step": "terminal-census-api",
+        "workflow_contents_api": "https://api.github.com/repos/tailrocks/velnor/contents/.github/workflows/ci-runtime-products.yml?ref=5555555555555555555555555555555555555555"
+      },
+      "run": {
+        "attempt": 1,
+        "conclusion": "success",
+        "event": "push",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7412,
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "status": "completed",
+        "workflow_path": ".github/workflows/ci-runtime-products.yml",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      },
+      "source": {
+        "blob_sha": "6666666666666666666666666666666666666666",
+        "path": ".github/workflows/ci-runtime-products.yml",
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "source_kind": "workflow_contents_api",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      }
+    },
+    {
+      "check": {
+        "app_id": 9900,
+        "conclusion": "success",
+        "external_id": "terminal-check-13",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7613,
+        "name": "Policy-bootstrap-B",
+        "status": "completed"
+      },
+      "consumer": {
+        "check_app_id": 9900,
+        "check_external_id": "terminal-check-13",
+        "check_name": "Policy-bootstrap-B",
+        "id": ".github/workflows/ci-policy-validator-products.yml::policy-validator-B::Policy-bootstrap-B",
+        "job_key": "policy-validator-B",
+        "workflow_path": ".github/workflows/ci-policy-validator-products.yml"
+      },
+      "job": {
+        "check_run_id": 7613,
+        "conclusion": "success",
+        "id": 7513,
+        "key": "policy-validator-B",
+        "name": "policy-validator-B",
+        "run_attempt": 1,
+        "run_id": 7413,
+        "status": "completed",
+        "steps": [
+          {
+            "conclusion": "success",
+            "name": "terminal-census-source",
+            "number": 1,
+            "status": "completed"
+          }
+        ]
+      },
+      "producer": {
+        "check_api": "https://api.github.com/repos/tailrocks/velnor/check-runs/7613",
+        "job": "verify-B",
+        "jobs_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7413/attempts/1/jobs",
+        "run_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7413",
+        "source_record": {
+          "check_run_id": 7613,
+          "job_id": 7513,
+          "run_attempt": 1,
+          "run_id": 7413
+        },
+        "stage": "S7c_verify_b",
+        "step": "terminal-census-api",
+        "workflow_contents_api": "https://api.github.com/repos/tailrocks/velnor/contents/.github/workflows/ci-policy-validator-products.yml?ref=5555555555555555555555555555555555555555"
+      },
+      "run": {
+        "attempt": 1,
+        "conclusion": "success",
+        "event": "push",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7413,
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "status": "completed",
+        "workflow_path": ".github/workflows/ci-policy-validator-products.yml",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      },
+      "source": {
+        "blob_sha": "6666666666666666666666666666666666666666",
+        "path": ".github/workflows/ci-policy-validator-products.yml",
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "source_kind": "workflow_contents_api",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      }
+    },
+    {
+      "check": {
+        "app_id": 9900,
+        "conclusion": "success",
+        "external_id": "terminal-check-14",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7614,
+        "name": "nightly",
+        "status": "completed"
+      },
+      "consumer": {
+        "check_app_id": 9900,
+        "check_external_id": "terminal-check-14",
+        "check_name": "nightly",
+        "id": ".github/workflows/nightly.yml::nightly-required::nightly",
+        "job_key": "nightly-required",
+        "workflow_path": ".github/workflows/nightly.yml"
+      },
+      "job": {
+        "check_run_id": 7614,
+        "conclusion": "success",
+        "id": 7514,
+        "key": "nightly-required",
+        "name": "nightly-required",
+        "run_attempt": 1,
+        "run_id": 7414,
+        "status": "completed",
+        "steps": [
+          {
+            "conclusion": "success",
+            "name": "terminal-census-source",
+            "number": 1,
+            "status": "completed"
+          }
+        ]
+      },
+      "producer": {
+        "check_api": "https://api.github.com/repos/tailrocks/velnor/check-runs/7614",
+        "job": "verify-B",
+        "jobs_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7414/attempts/1/jobs",
+        "run_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7414",
+        "source_record": {
+          "check_run_id": 7614,
+          "job_id": 7514,
+          "run_attempt": 1,
+          "run_id": 7414
+        },
+        "stage": "S7c_verify_b",
+        "step": "terminal-census-api",
+        "workflow_contents_api": "https://api.github.com/repos/tailrocks/velnor/contents/.github/workflows/nightly.yml?ref=5555555555555555555555555555555555555555"
+      },
+      "run": {
+        "attempt": 1,
+        "conclusion": "success",
+        "event": "push",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7414,
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "status": "completed",
+        "workflow_path": ".github/workflows/nightly.yml",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      },
+      "source": {
+        "blob_sha": "6666666666666666666666666666666666666666",
+        "path": ".github/workflows/nightly.yml",
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "source_kind": "workflow_contents_api",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      }
+    },
+    {
+      "check": {
+        "app_id": 9900,
+        "conclusion": "success",
+        "external_id": "terminal-check-15",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7615,
+        "name": "ci-release-package-signer",
+        "status": "completed"
+      },
+      "consumer": {
+        "check_app_id": 9900,
+        "check_external_id": "terminal-check-15",
+        "check_name": "ci-release-package-signer",
+        "id": ".github/workflows/ci-release-package-signer.yml::ci-release-package-signer-required::ci-release-package-signer",
+        "job_key": "ci-release-package-signer-required",
+        "workflow_path": ".github/workflows/ci-release-package-signer.yml"
+      },
+      "job": {
+        "check_run_id": 7615,
+        "conclusion": "success",
+        "id": 7515,
+        "key": "ci-release-package-signer-required",
+        "name": "ci-release-package-signer-required",
+        "run_attempt": 1,
+        "run_id": 7415,
+        "status": "completed",
+        "steps": [
+          {
+            "conclusion": "success",
+            "name": "terminal-census-source",
+            "number": 1,
+            "status": "completed"
+          }
+        ]
+      },
+      "producer": {
+        "check_api": "https://api.github.com/repos/tailrocks/velnor/check-runs/7615",
+        "job": "verify-B",
+        "jobs_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7415/attempts/1/jobs",
+        "run_api": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7415",
+        "source_record": {
+          "check_run_id": 7615,
+          "job_id": 7515,
+          "run_attempt": 1,
+          "run_id": 7415
+        },
+        "stage": "S7c_verify_b",
+        "step": "terminal-census-api",
+        "workflow_contents_api": "https://api.github.com/repos/tailrocks/velnor/contents/.github/workflows/ci-release-package-signer.yml?ref=5555555555555555555555555555555555555555"
+      },
+      "run": {
+        "attempt": 1,
+        "conclusion": "success",
+        "event": "push",
+        "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "id": 7415,
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "status": "completed",
+        "workflow_path": ".github/workflows/ci-release-package-signer.yml",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      },
+      "source": {
+        "blob_sha": "6666666666666666666666666666666666666666",
+        "path": ".github/workflows/ci-release-package-signer.yml",
+        "ref": "refs/heads/main",
+        "repository": "tailrocks/velnor",
+        "source_kind": "workflow_contents_api",
+        "workflow_sha": "5555555555555555555555555555555555555555"
+      }
+    }
+  ],
+  "event": "push",
+  "excluded_rows": [
+    {
+      "check_external_id": "provider-result-v12-fixture",
+      "check_name": "Policy-bootstrap-B",
+      "id": "excluded::verify-B",
+      "job_key": "verify-B",
+      "reason": "verify-B producer self-row excluded by exact identity tuple",
+      "repository": "tailrocks/velnor",
+      "workflow_path": ".github/workflows/ci-policy-validator-products.yml"
+    },
+    {
+      "check_external_id": "policy-main",
+      "check_name": "Policy",
+      "id": "excluded::Policy",
+      "job_key": "Policy",
+      "reason": "Policy wrapper excluded by exact identity tuple",
+      "repository": "tailrocks/velnor",
+      "workflow_path": ".github/workflows/ci-main.yml"
+    },
+    {
+      "check_external_id": "provider-result-v12-fixture",
+      "check_name": "Policy-bootstrap-B",
+      "id": "excluded::Policy-bootstrap-B",
+      "job_key": "policy-validator-B",
+      "reason": "provider policy check excluded from upstream consumer census",
+      "repository": "tailrocks/velnor",
+      "workflow_path": ".github/workflows/ci-policy-validator-products.yml"
+    },
+    {
+      "check_external_id": "caller-wrapper",
+      "check_name": "policy-validator-B",
+      "id": "excluded::caller-wrapper",
+      "job_key": "caller-wrapper",
+      "reason": "workflow-call caller wrapper excluded by exact identity tuple",
+      "repository": "tailrocks/velnor",
+      "workflow_path": ".github/workflows/ci-main.yml"
+    }
+  ],
+  "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "ref": "refs/heads/main",
+  "repository": "tailrocks/velnor",
+  "rows_digest": "ca0ef16f6373228f99015a22f9a80e2054cc4128d50765c16509811b77a6c177",
+  "run_attempt": 1,
+  "schema": "velnor.workflow-policy-validator.terminal-census.v1",
+  "status": "synthetic_fixture",
+  "synthetic_only": true
+}

@@ -1,0 +1,79 @@
+{
+  "authority_claim": false,
+  "current_gap": {
+    "verify_b_terminal_census_rows_maxItems": null,
+    "verify_b_terminal_census_rows_minItems": 15,
+    "verify_b_terminal_census_rows_uniqueItems": false
+  },
+  "exact_integration": {
+    "live_boundary": "All IDs, app and hashes here are synthetic; live verifier must read Actions/Contents/Checks APIs.",
+    "new_schema": "terminal-census.schema.json",
+    "required_schema_changes": [
+      {
+        "json_pointer": "/properties/terminal_census_rows/maxItems",
+        "value": 15
+      },
+      {
+        "json_pointer": "/properties/terminal_census_rows/uniqueItems",
+        "value": true
+      },
+      {
+        "json_pointer": "/properties/terminal_census_rows/items",
+        "value": "strict consumer/source/run/job/check/producer row"
+      },
+      {
+        "json_pointer": "/properties/terminal_census_rows/items/properties/job/properties/steps/minItems",
+        "value": 1
+      },
+      {
+        "json_pointer": "/properties/terminal_census_rows/items/properties/job/properties/conclusion/const",
+        "value": "success"
+      },
+      {
+        "json_pointer": "/properties/terminal_census_rows/items/properties/check/properties/conclusion/const",
+        "value": "success"
+      }
+    ],
+    "verifier_must_enforce": [
+      "exact set equality against the trusted 15-entry registry",
+      "unique composite repository/workflow/run/attempt/job/check/external/app identity",
+      "source Contents path/ref/repository/commit/blob equality",
+      "run event/ref/head/repository/attempt equality",
+      "job/check/step parent equality and child presence",
+      "check name/external_id/app/head/status/conclusion equality",
+      "verify-B stage/job/step/API/source-record lineage",
+      "exact exclusion tuples, never names-only",
+      "canonical rows digest recomputation",
+      "reject omitted/duplicate/substituted/extra/failed/skipped/neutral/wrong-app/wrong-source rows"
+    ],
+    "verify_b_pointer": "/properties/terminal_census_rows"
+  },
+  "negative_contract_mapping": {
+    "child-check-absent": "child check absent",
+    "child-job-absent": "child job absent",
+    "child-step-absent": "child step absent",
+    "duplicate-consumer": "duplicate identity with changed provenance",
+    "excluded-identity-included": "excluded identity included",
+    "extra-failed-row": "extra failed child row",
+    "extra-success-row": "extra row",
+    "failed-job": "failed child",
+    "neutral-check": "neutral check",
+    "omitted-consumer": "required row omitted",
+    "rows-digest-mismatch": "digest mismatch",
+    "skipped-job": "skipped child",
+    "source-blob-absent": "source blob absent",
+    "substitute-consumer": "substituted required identity",
+    "wrong-app": "wrong app",
+    "wrong-check-external-id": "check identity mismatch",
+    "wrong-check-parent": "check parent mismatch",
+    "wrong-event": "wrong event",
+    "wrong-job-parent": "job parent mismatch",
+    "wrong-producer": "producer mismatch",
+    "wrong-ref": "wrong ref",
+    "wrong-run-attempt": "wrong attempt",
+    "wrong-source": "wrong source",
+    "wrong-source-ref": "wrong source ref"
+  },
+  "schema": "velnor.workflow-policy-validator.terminal-census-schema-integration.v1",
+  "status": "recommendation_only"
+}

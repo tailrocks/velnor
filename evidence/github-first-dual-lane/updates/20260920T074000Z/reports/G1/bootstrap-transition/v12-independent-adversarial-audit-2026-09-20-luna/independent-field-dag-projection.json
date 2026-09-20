@@ -1,0 +1,80 @@
+{
+  "bundle_root_digest": "e2b30dc21732f957ee9b69b45f270b2d72a995b624d4b19a448eb86985e404f8",
+  "field_count": 311,
+  "model_sha256": "5c3c7722481adf5c025502e7ba0d0edc252d066dd1cafb219a4b4a208b3a5062",
+  "old_pre_schema_sha256": "f5d04aad1cb6ee764bdd70e13961ca7ec28924994e149c3a49933fdb9441e26c",
+  "origin_main": "89f82dd8b287f46a3cf4c0920f341f6ca6c736db",
+  "origin_main_missing_typed_paths": [
+    ".github/workflows/ci-policy-validator-products.yml",
+    ".github-gen/sources/workflows/ci-policy-validator-products.yml"
+  ],
+  "preimage_excluded_counts": {
+    "S4_binding": 206,
+    "S6_release": 180,
+    "S7b_provider_result": 255,
+    "S7c_terminal_census": 310
+  },
+  "preimage_ordered_counts": {
+    "S4_binding": 105,
+    "S6_release": 131,
+    "S7b_provider_result": 56,
+    "S7c_terminal_census": 1
+  },
+  "provider_declared_preimage_digest": "a8378ea1897e8024563cbedd50f47131d3733dd6f198d860588ca84135da5768",
+  "provider_emitted_digest": "01efb3de3486e97d42765983ee77edeadfee979a01711dafe11d98bb59c6f708",
+  "provider_missing_output_fields": [
+    "permanent.verification.binding_digest_verified",
+    "permanent.verification.cryptographic_attestation_verified",
+    "permanent.verification.custom_predicate_verified",
+    "permanent.verification.draft_first_verified",
+    "permanent.verification.evidence_state",
+    "permanent.verification.inner_payload_verified",
+    "permanent.verification.main_ref_verified",
+    "permanent.verification.manifest_verified",
+    "permanent.verification.permanent_trust_policy_sha256",
+    "permanent.verification.producer_api_verified",
+    "permanent.verification.raw_zip_verified",
+    "permanent.verification.release_api_verified",
+    "permanent.verification.temporary_authority_used",
+    "permanent.verifier.check_name",
+    "permanent.verifier.permissions",
+    "permanent.verifier.provider_app_id",
+    "permanent.verifier.verifier_revision",
+    "permanent.verifier.write_authority"
+  ],
+  "provider_own_fields_in_emitted_payload": [
+    "provider_attestation_digest",
+    "provider_check_external_id",
+    "provider_check_run_id",
+    "provider_check_status",
+    "provider_result_id",
+    "provider_result_nonce"
+  ],
+  "schema": "velnor.authority-transition.v12-luna-independent-projection",
+  "schema_leaf_counts": {
+    "adoption": 17,
+    "permanent_binding": 145,
+    "pre_record": 72,
+    "pre_record_transport": 11,
+    "provider_result": 30,
+    "release_manifest": 14,
+    "verify_b": 22
+  },
+  "stage_field_counts": {
+    "S0_caller_readback": 54,
+    "S1_build": 19,
+    "S2_artifact_verify": 37,
+    "S3_release_reserve": 17,
+    "S4_binding_attest": 33,
+    "S5_publish": 8,
+    "S6_release_attest": 40,
+    "S7a_pre_record_transport": 15,
+    "S7b_provider_result": 48,
+    "S7c_verify_b": 23,
+    "TreeB_adoption": 17
+  },
+  "transport_edge_count": 56,
+  "transport_labels": [
+    "explicit producer output, immutable artifact, or persistent record; needs is scheduling only"
+  ]
+}

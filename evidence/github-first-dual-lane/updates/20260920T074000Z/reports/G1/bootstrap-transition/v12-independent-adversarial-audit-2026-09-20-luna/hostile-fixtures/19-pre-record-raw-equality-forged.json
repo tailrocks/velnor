@@ -1,0 +1,94 @@
+{
+  "artifact": {
+    "binary_architecture": "x86_64",
+    "binary_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "binary_size": 1004,
+    "inner_payload_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "inner_payload_size": 1006,
+    "service_zip_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "service_zip_size": 1008
+  },
+  "binding": {
+    "attestation_digest": "88154507b482eb8846a65ee8c01d739ab410bc976bd0d49d13d4a076d422a90a",
+    "attestation_id": 1010,
+    "core_digest": "8ec6eb53dceda0d90f06e043e9360518535a54138cda408fea633a8dc363a7e7",
+    "final_manifest_artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "final_manifest_artifact_id": 1013,
+    "final_manifest_digest": "ecbe6e70cb562f3ae1161a27ddc0f380d4746cc32f839cce8a8da9439d5838ea",
+    "predicate_path": "attestations/velnor-policy-validator-binding.v1.json",
+    "predicate_type": "https://velnor.dev/attestations/policy-validator-binding/v1",
+    "subject_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "subject_name": "fixture-0017"
+  },
+  "caller_workflow": {
+    "capture_step_id": "fixture-0018",
+    "file_blob_sha": "e177e995eb4272367394869c1449cd4c1a65b5ed",
+    "path": "fixture-0020",
+    "ref": "fixture-0021",
+    "run_attempt": 1023,
+    "run_id": 1024,
+    "workflow_sha": "a03d15586d9479340befde74db2d4c50db4d650e"
+  },
+  "canonical_release_schema_sha256": "5af18cfb39db00a2d268403c0cfdeae76c501cd441d86733162518979b847384",
+  "canonical_root_manifest_sha256": "e2b30dc21732f957ee9b69b45f270b2d72a995b624d4b19a448eb86985e404f8",
+  "producer": {
+    "check_run_id": 1028,
+    "job_id": 1029,
+    "job_workflow_sha": "717f77f9995898a6eb8db3db54d63d3ef66b44e8",
+    "run_attempt": 1031,
+    "run_id": 1032,
+    "workflow_file_blob_sha": "43bae46d17b6b6a21a8cc9ea2b55278b3d44cc85",
+    "workflow_path": "fixture-0033",
+    "workflow_ref": "fixture-0034"
+  },
+  "product": {
+    "architecture": "x86_64",
+    "name": "velnor-workflow-policy-validator",
+    "namespace": "velnor.workflow-policy-validator",
+    "platform": "Linux-X64"
+  },
+  "record_kind": "policy-validator-b-pre-provider",
+  "release": {
+    "asset_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "asset_id": 7102,
+    "manifest_digest": "ecbe6e70cb562f3ae1161a27ddc0f380d4746cc32f839cce8a8da9439d5838ea",
+    "release_id": 7101,
+    "tag": "velnor-workflow-policy-validator-v1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "target_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "release_attestation": {
+    "attestation_digest": "2532942f2a1d8e60c306fd0e225d03a8bedaf0c85fb360d826e24a0827f5e43c",
+    "attestation_id": 7501,
+    "certificate_identity": "https://github.com/tailrocks/velnor/.github/workflows/ci-release-package-signer.yml@refs/heads/main",
+    "certificate_verified": true,
+    "manifest_subject_sha256": "ecbe6e70cb562f3ae1161a27ddc0f380d4746cc32f839cce8a8da9439d5838ea",
+    "oidc_issuer": "https://token.actions.githubusercontent.com",
+    "oidc_policy_revision_sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+    "predicate_path": "attestations/velnor-policy-validator-release.v1.json",
+    "predicate_type": "https://velnor.dev/attestations/velnor-policy-validator-release/v1",
+    "signer_repository": "tailrocks/velnor",
+    "signer_source_ref": "refs/heads/main",
+    "signer_workflow": ".github/workflows/ci-release-package-signer.yml"
+  },
+  "schema_version": "2",
+  "source": {
+    "closure_digest": "80c5928bde856fee002297511d16355e17ad16a24631831bc92ece247a0e7f2d",
+    "ref": "fixture-0060",
+    "repository": "fixture-0061",
+    "sha": "dddddddddddddddddddddddddddddddddddddddd",
+    "tree_sha": "cccccccccccccccccccccccccccccccccccccccc"
+  },
+  "verification": {
+    "binding_preimage_sha256": "f23cf4899f1571b0a32865dcf20ab4f393ffed35282e909e839aadb20052c966",
+    "raw_downloads_equal_digests": false,
+    "release_preimage_sha256": "c221cf48e0395d3cd3130170c72b53b21743ff21dce9b64f930f0ec7357ada37",
+    "required_step_conclusions": {
+      "artifact-verify": "success",
+      "attest-binding": "success",
+      "attest-release": "success",
+      "build-linux-x64": "success",
+      "publish": "success",
+      "reserve-release": "success"
+    }
+  }
+}

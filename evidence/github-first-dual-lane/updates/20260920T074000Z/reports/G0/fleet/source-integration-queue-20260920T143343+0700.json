@@ -1,0 +1,230 @@
+{
+  "schema": "g0-source-integration-queue/v1",
+  "captured_at": "2026-09-20T14:33:43+07:00",
+  "claim_boundary": "Read-only queue preparation. No source integration, branch creation, merge, main push, workflow dispatch, release, publication, ruleset, or permission action was performed during this capture.",
+  "integration_target": {
+    "worktree": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-source-integration",
+    "branch": "codex/github-first-source-integration",
+    "origin_main_sha": "89f82dd8b287f46a3cf4c0920f341f6ca6c736db",
+    "current_head": "3c7a732f26c77fa5c3e9cc58a2233c52440ce469",
+    "current_head_remote_equal": true,
+    "current_scoped_paths": [
+      "config/estate-repositories.json",
+      "crates/velnor-tools/src/audit_ci.rs",
+      "crates/velnor-tools/tests/estate_concern_authority_cli.rs"
+    ],
+    "current_head_review": {
+      "path": "G0/estate-scope-review/review-3c7a732f26c77fa5c3e9cc58a2233c52440ce469.md",
+      "sha256": "90a1a64094e58aec9a5eab762157218487e49d871f54bf76187bf130ae7d83c9",
+      "verdict": "APPROVED exact source integration; 232 all-targets, 90 audit, 5 CLI, clippy and fmt pass",
+      "scope_boundary": "Source review only; no G0 gate or merge approval."
+    },
+    "root_agents_file": {
+      "path": "AGENTS.md",
+      "present_in_target": false,
+      "present_scoped_files": [
+        ".github/AGENTS.md",
+        ".github/workflows/AGENTS.md",
+        "crates/velnor-workflow/AGENTS.md"
+      ],
+      "action": "Flag missing root AGENTS.md before any further source integration; do not silently treat the task-injected root rule as a checked-in target-tree rule."
+    }
+  },
+  "approved_queue": [
+    {
+      "id": "rust-scanner-eca2460",
+      "status": "eligible_source_unit_exact_review",
+      "candidate_sha": "eca2460e9b8b3eddfc5883f0c1f0c8850cc36484",
+      "candidate_parent": "d2395fc70a32864796a6cec271966d6cb002bcb5",
+      "review": {
+        "path": "G0/rust-scan-review/eca2460-review.md",
+        "sha256": "8b60d3c5935c1a971514008509c2e8fdc8ff97a7e0c44796e95f78fde0149c39",
+        "verdict": "APPROVE exact scanner candidate for bounded G3 scanner scope",
+        "scope_boundary": "Source approval only; not consumer rollout, hosted proof, or fleet claim."
+      },
+      "atomic_source_chain": [
+        "4320e628518a62b61b4c97a2e0557b513d6dbe59",
+        "08d19cf0b09a2d7b2e60f68dae14867bd2cc9a33",
+        "d2395fc70a32864796a6cec271966d6cb002bcb5",
+        "eca2460e9b8b3eddfc5883f0c1f0c8850cc36484"
+      ],
+      "chain_note": "The exact eca review covers the four-commit scanner chain. d239 was rejected as an intermediate exact candidate for a field-include false negative; eca closes that finding. Port the chain atomically, not eca alone and not d239 alone.",
+      "merge_base_with_origin_main": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+      "ancestor_of_origin_main": false,
+      "changed_paths": [
+        "Cargo.lock",
+        "Cargo.toml",
+        "crates/velnor-workflow/Cargo.toml",
+        "crates/velnor-workflow/src/lib.rs",
+        "crates/velnor-workflow/src/rust_include.rs",
+        "crates/velnor-workflow/src/s2/scan/rust.rs",
+        "crates/velnor-workflow/src/scan/rust.rs"
+      ],
+      "overlap_with_current_integration": [],
+      "overlap_with_native_policy_candidate": [
+        "crates/velnor-workflow/src/lib.rs",
+        "crates/velnor-workflow/src/s2/scan/rust.rs",
+        "crates/velnor-workflow/src/scan/rust.rs"
+      ],
+      "recommended_order": 1,
+      "dependencies": [
+        "Reconcile the four-commit scanner chain against fresh origin/main before cherry-pick.",
+        "Run scanner package/full workspace checks after port; no consumer rollout or hosted claim follows from this queue entry."
+      ]
+    },
+    {
+      "id": "native-policy-598bf6d9",
+      "status": "eligible_source_unit_exact_review_with_rollout_blocker",
+      "candidate_sha": "598bf6d9d408c43da092e7ed84694cf1a267945a",
+      "candidate_parent": "18d6a3cf3148b47204b216bca94e5a971e475d29",
+      "review": {
+        "path": "G0/native-review/review-native-policy-598bf6d9.md",
+        "sha256": "4832aae6f08ad9bf98a06623e1f9fcea934991da5bb0cbfa740355ac589c41d4",
+        "verdict": "NATIVE POLICY DELTA PASS; FULL ROLLOUT CHANGES REQUIRED",
+        "scope_boundary": "Exact source policy delta only; runtime-product integration and publication are open P1 follow-ups."
+      },
+      "atomic_source_chain": [
+        "746745c56a6798a13d176341b4996f66cdee2958",
+        "8d0428dc7d9fe3ef37056dabcd67d7d01de7c939",
+        "28802126ef66478a6b429c6baf3792aa3e89bf33",
+        "38f71725df9998f125a0e3cffeff3105a5644061",
+        "d83b7e20f43f55c7d678344c035989003a3fca9c",
+        "ec81f9ef7808b3f3f69915f3bd2d231ceb483e27",
+        "35eb4e7df6c8c65889da18e00e867712f1b73b74",
+        "8bf6665af7ed269f0d05813ac98f4faa329aaa29",
+        "d7faee290a8a0053e24b3fb523baccf1a1e2b108",
+        "18d6a3cf3148b47204b216bca94e5a971e475d29",
+        "598bf6d9d408c43da092e7ed84694cf1a267945a"
+      ],
+      "chain_note": "The chain list preserves the reviewed native-policy ancestry with exact full IDs. Do not port only 598 onto an unrelated base.",
+      "merge_base_with_origin_main": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+      "ancestor_of_origin_main": false,
+      "latest_macos_rule_boundary": {
+        "preserved_by_review": true,
+        "exact_hosted_label": "xcode-27",
+        "execution_architecture": "arm64",
+        "sdk_families": ["macosx27.0", "iphoneos27.0", "iphonesimulator27.0"],
+        "intel_27": "unsupported until an official Intel label exists",
+        "forbidden_fallbacks": ["macos-15", "macos-26", "macos-26-intel", "macos-latest", "macos-27", "architecture substitution", "broad xcode-* admission"]
+      },
+      "changed_paths": [
+        "crates/velnor-workflow/src/config/mod.rs",
+        "crates/velnor-workflow/src/lib.rs",
+        "crates/velnor-workflow/src/native_contract.rs",
+        "crates/velnor-workflow/src/platform.rs",
+        "crates/velnor-workflow/src/primitives/ir.rs",
+        "crates/velnor-workflow/src/primitives/release.rs",
+        "crates/velnor-workflow/src/primitives/runtime_products.rs",
+        "crates/velnor-workflow/src/s2/config/mod.rs",
+        "crates/velnor-workflow/src/s2/mod.rs",
+        "crates/velnor-workflow/src/s2/platform.rs",
+        "crates/velnor-workflow/src/s2/primitives/check_profiles.rs",
+        "crates/velnor-workflow/src/s2/primitives/ir.rs",
+        "crates/velnor-workflow/src/s2/primitives/release.rs",
+        "crates/velnor-workflow/src/s2/primitives/runtime_products.rs",
+        "crates/velnor-workflow/src/s2/provider.rs",
+        "crates/velnor-workflow/src/s2/scan/mod.rs",
+        "crates/velnor-workflow/src/s2/scan/rust.rs",
+        "crates/velnor-workflow/src/s2/scan/swift.rs",
+        "crates/velnor-workflow/src/s2/tui/mod.rs",
+        "crates/velnor-workflow/src/s2/tui/view.rs",
+        "crates/velnor-workflow/src/scan/mod.rs",
+        "crates/velnor-workflow/src/scan/rust.rs",
+        "crates/velnor-workflow/src/scan/swift.rs",
+        "crates/velnor-workflow/src/swift_capability.rs",
+        "crates/velnor-workflow/src/tui/mod.rs",
+        "crates/velnor-workflow/src/tui/view.rs",
+        "crates/velnor-workflow/tests/platform_prerequisites.rs"
+      ],
+      "overlap_with_current_integration": [],
+      "overlap_with_scanner_candidate": [
+        "crates/velnor-workflow/src/lib.rs",
+        "crates/velnor-workflow/src/s2/scan/rust.rs",
+        "crates/velnor-workflow/src/scan/rust.rs"
+      ],
+      "recommended_order": 2,
+      "dependencies": [
+        "Port scanner chain first or explicitly reconcile the three shared paths; preserve both native apple_native fields and Rust include parser changes.",
+        "Keep exact xcode-27 arm64 admission and Intel fail-closed semantics.",
+        "PR957 source/generated seam 92387 is source-approved but live/publication-blocked; do not claim full native rollout until its runtime publication/validator transition is resolved.",
+        "Do not import runtime-product generated changes from rejected or pending runtime branches."
+      ]
+    }
+  ],
+  "source_only_candidates": [
+    {
+      "id": "bootstrap-isolation-f5f166f7",
+      "status": "source_only_pass_adoption_blocked",
+      "candidate_sha": "f5f166f70eb7547ea3f3eb3ba04160681ef01cda",
+      "candidate_parent": "6d231d43fc5a05d29ea375757779fcd792da2e61",
+      "review": {
+        "path": "G1/bootstrap/source-review-f5f166f70eb7547ea3f3eb3ba04160681ef01cda.md",
+        "sha256": "dcd5bbca550b1df0ac55ff5f59965d42a2eba5f0119e91cd5114d30e54235751",
+        "verdict": "Source seams PASS; adoption CHANGES REQUIRED. No G1 approval.",
+        "scope_boundary": "Offline source and fixture review only; no generated fixed-point, hosted, Docker, publication, installation, or G1 proof."
+      },
+      "changed_paths": [
+        "crates/velnor-workflow/src/s2/mod.rs"
+      ],
+      "dependencies": [
+        "Regenerate checked-in workflows from the repaired generator and reconcile the declared .github-gen pin; current ci-pr.yml and ci-policy.yml remain stale one-checkout output.",
+        "Assign and verify a reviewed producer builder image digest; the empty checked-in digest is rejected and the fixture-local sha256 override is test-only.",
+        "Re-run exact generated/source and transport checks after regeneration; do not treat the source seam review as G1 or integration authorization."
+      ],
+      "integration_authorization": "not_runnable_until_generated_fixed_point_and_reviewed_digest_are resolved",
+      "queue_note": "Keep separate from approved source queue. Do not integrate, publish, or claim G1 from this source-only candidate."
+    }
+  ],
+  "approved_prerequisite_not_ready": [
+    {
+      "id": "pr957-source-generated-92387",
+      "revision": "92387e88c32f933a9061b819256e535662655cb2",
+      "review_path": "G0/native-review/review-pr957-92387e88.md",
+      "review_verdict": "Source/generated delta APPROVE; merge/live gate NOT READY",
+      "status": "publication_and_base_validator_blocked",
+      "reason": "Unpublished runtime closure and base validator do not recognize xcode-27; no runtime release/publication exists for the candidate closure."
+    }
+  ],
+  "excluded_until_review_resolves": [
+    {
+      "revision": "d97c29b52c632d424f0231610dd7fde1b3f3850c",
+      "label": "runtime successor",
+      "reason": "Exact review pending; do not integrate."
+    },
+    {
+      "revision": "225c800acfb9763daf973c3cecee66631eafe71b",
+      "label": "runtime predecessor",
+      "reason": "Runtime review rejected/unfinished; explicitly excluded."
+    },
+    {
+      "revision": "f5f166f70eb7547ea3f3eb3ba04160681ef01cda",
+      "label": "bootstrap isolation",
+      "reason": "Moved to source_only_candidates: source seams pass, but generated fixed-point drift and empty producer digest remain; no G1/integration authorization."
+    },
+    {
+      "revision": "cf5f34b4cf7d2107b989342077e4a65ea90c2177",
+      "label": "native product",
+      "reason": "Review unresolved; explicitly excluded."
+    },
+    {
+      "revision": "27f22303f76c9f59c3909215d51c8135e0bc3b64",
+      "label": "checker",
+      "reason": "Review unresolved; explicitly excluded."
+    },
+    {
+      "revision": "fe81c3ab66966e7fc19836ae28d5203f5ba6554f",
+      "label": "mapper",
+      "reason": "Review unresolved; explicitly excluded."
+    },
+    {
+      "revision": "cf7854e842d3e587e7b1c524cd7ebee731a36366",
+      "label": "APT schema",
+      "reason": "Review unresolved; explicitly excluded."
+    }
+  ],
+  "queue_order": [
+    "rust-scanner-eca2460",
+    "native-policy-598bf6d9"
+  ],
+  "no_other_eligible_units_found": "Skills, action scanner, runtime, checker, mapper, native product, and APT candidates had rejected, conditional, incomplete, or unresolved exact review state in the inspected artifacts; they are not added to the approved runnable queue. Bootstrap is recorded separately as source_only_candidates and is not integration-authorized. Native routing is represented atomically by the approved native-policy chain, not as a separate unit."
+}

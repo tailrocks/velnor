@@ -1,0 +1,462 @@
+{
+  "$id": "https://velnor.dev/schemas/v12-terminal-census.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "authority_claim": {
+      "const": false,
+      "type": "boolean"
+    },
+    "consumer_rows": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "check": {
+            "additionalProperties": false,
+            "properties": {
+              "app_id": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "conclusion": {
+                "const": "success",
+                "type": "string"
+              },
+              "external_id": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "head_sha": {
+                "pattern": "^[0-9a-f]{40}$",
+                "type": "string"
+              },
+              "id": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "name": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "status": {
+                "const": "completed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "app_id",
+              "conclusion",
+              "external_id",
+              "head_sha",
+              "id",
+              "name",
+              "status"
+            ],
+            "type": "object"
+          },
+          "consumer": {
+            "additionalProperties": false,
+            "properties": {
+              "check_app_id": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "check_external_id": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "check_name": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "id": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "job_key": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "workflow_path": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "check_app_id",
+              "check_external_id",
+              "check_name",
+              "id",
+              "job_key",
+              "workflow_path"
+            ],
+            "type": "object"
+          },
+          "job": {
+            "additionalProperties": false,
+            "properties": {
+              "check_run_id": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "conclusion": {
+                "const": "success",
+                "type": "string"
+              },
+              "id": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "key": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "name": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "run_attempt": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "run_id": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "status": {
+                "const": "completed",
+                "type": "string"
+              },
+              "steps": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "conclusion": {
+                      "const": "success",
+                      "type": "string"
+                    },
+                    "name": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "number": {
+                      "minimum": 1,
+                      "type": "integer"
+                    },
+                    "status": {
+                      "const": "completed",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "conclusion",
+                    "name",
+                    "number",
+                    "status"
+                  ],
+                  "type": "object"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "check_run_id",
+              "conclusion",
+              "id",
+              "key",
+              "name",
+              "run_attempt",
+              "run_id",
+              "status",
+              "steps"
+            ],
+            "type": "object"
+          },
+          "producer": {
+            "additionalProperties": false,
+            "properties": {
+              "check_api": {
+                "format": "uri",
+                "type": "string"
+              },
+              "job": {
+                "const": "verify-B",
+                "type": "string"
+              },
+              "jobs_api": {
+                "format": "uri",
+                "type": "string"
+              },
+              "run_api": {
+                "format": "uri",
+                "type": "string"
+              },
+              "source_record": {
+                "additionalProperties": false,
+                "properties": {
+                  "check_run_id": {
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "job_id": {
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "run_attempt": {
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "run_id": {
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "check_run_id",
+                  "job_id",
+                  "run_attempt",
+                  "run_id"
+                ],
+                "type": "object"
+              },
+              "stage": {
+                "const": "S7c_verify_b",
+                "type": "string"
+              },
+              "step": {
+                "const": "terminal-census-api",
+                "type": "string"
+              },
+              "workflow_contents_api": {
+                "format": "uri",
+                "type": "string"
+              }
+            },
+            "required": [
+              "check_api",
+              "job",
+              "jobs_api",
+              "run_api",
+              "source_record",
+              "stage",
+              "step",
+              "workflow_contents_api"
+            ],
+            "type": "object"
+          },
+          "run": {
+            "additionalProperties": false,
+            "properties": {
+              "attempt": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "conclusion": {
+                "const": "success",
+                "type": "string"
+              },
+              "event": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "head_sha": {
+                "pattern": "^[0-9a-f]{40}$",
+                "type": "string"
+              },
+              "id": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "ref": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "repository": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "status": {
+                "const": "completed",
+                "type": "string"
+              },
+              "workflow_path": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "workflow_sha": {
+                "pattern": "^[0-9a-f]{40}$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "attempt",
+              "conclusion",
+              "event",
+              "head_sha",
+              "id",
+              "ref",
+              "repository",
+              "status",
+              "workflow_path",
+              "workflow_sha"
+            ],
+            "type": "object"
+          },
+          "source": {
+            "additionalProperties": false,
+            "properties": {
+              "blob_sha": {
+                "pattern": "^[0-9a-f]{40}$",
+                "type": "string"
+              },
+              "path": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "ref": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "repository": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "source_kind": {
+                "const": "workflow_contents_api",
+                "type": "string"
+              },
+              "workflow_sha": {
+                "pattern": "^[0-9a-f]{40}$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "blob_sha",
+              "path",
+              "ref",
+              "repository",
+              "source_kind",
+              "workflow_sha"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "check",
+          "consumer",
+          "job",
+          "producer",
+          "run",
+          "source"
+        ],
+        "type": "object"
+      },
+      "maxItems": 15,
+      "minItems": 15,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "event": {
+      "const": "push",
+      "type": "string"
+    },
+    "excluded_rows": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "check_external_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "check_name": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "job_key": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "reason": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "repository": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "workflow_path": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "check_external_id",
+          "check_name",
+          "id",
+          "job_key",
+          "reason",
+          "repository",
+          "workflow_path"
+        ],
+        "type": "object"
+      },
+      "maxItems": 4,
+      "minItems": 4,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "head_sha": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "ref": {
+      "const": "refs/heads/main",
+      "type": "string"
+    },
+    "repository": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "rows_digest": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "run_attempt": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "schema": {
+      "const": "velnor.workflow-policy-validator.terminal-census.v1",
+      "type": "string"
+    },
+    "status": {
+      "const": "synthetic_fixture",
+      "type": "string"
+    },
+    "synthetic_only": {
+      "const": true,
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema",
+    "status",
+    "synthetic_only",
+    "authority_claim",
+    "repository",
+    "event",
+    "ref",
+    "head_sha",
+    "run_attempt",
+    "consumer_rows",
+    "excluded_rows",
+    "rows_digest"
+  ],
+  "title": "Velnor exact terminal consumer census",
+  "type": "object"
+}

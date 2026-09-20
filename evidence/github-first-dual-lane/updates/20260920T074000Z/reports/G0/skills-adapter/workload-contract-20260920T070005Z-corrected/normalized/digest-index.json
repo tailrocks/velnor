@@ -1,0 +1,72 @@
+{
+  "archives": [
+    {
+      "bytes": 1208320,
+      "path": "source-archives/tailrocks-typescript-skills-f434715f7c664af431f0be62982aa379400102de.tar",
+      "repository": "tailrocks/tailrocks-typescript-skills",
+      "revision": "f434715f7c664af431f0be62982aa379400102de",
+      "sha256": "49fb0735c9241714e701fecf092be5718c7d7c548b530850b4c1c3e05cc5ded3",
+      "tracked_entry_count": 221
+    },
+    {
+      "bytes": 1054720,
+      "path": "source-archives/tailrocks-skill-authoring-skills-9e25890fd63f7ca6c587490ba7cc432f5fdd98d6.tar",
+      "repository": "tailrocks/tailrocks-skill-authoring-skills",
+      "revision": "9e25890fd63f7ca6c587490ba7cc432f5fdd98d6",
+      "sha256": "cc0507d04e04639a8241c1957991a0a0e3700491003b6430cc52dc62e77f244a",
+      "tracked_entry_count": 141
+    },
+    {
+      "bytes": 1525760,
+      "path": "source-archives/tailrocks-rust-skills-bcc31b1d935dac4de191a6b71b3091f628d204c0.tar",
+      "repository": "tailrocks/tailrocks-rust-skills",
+      "revision": "bcc31b1d935dac4de191a6b71b3091f628d204c0",
+      "sha256": "b9bad1041609654e3da2f6c3aadce85dce88a51218d1822b7005b9fa11a9b8c6",
+      "tracked_entry_count": 253
+    },
+    {
+      "bytes": 1413120,
+      "path": "source-archives/tailrocks-roadmap-skills-66d9c79f6472ddace0e265335dc8dd36cdeb8a86.tar",
+      "repository": "tailrocks/tailrocks-roadmap-skills",
+      "revision": "66d9c79f6472ddace0e265335dc8dd36cdeb8a86",
+      "sha256": "bf485c9f998a400d9d4056c166018d0ea9c6a6b0054fa134d23c365d4d188c47",
+      "tracked_entry_count": 207
+    },
+    {
+      "bytes": 993280,
+      "path": "source-archives/tailrocks-pull-request-skills-2b4f71f49fd27061e64d16b2b7f83d9bd2df5612.tar",
+      "repository": "tailrocks/tailrocks-pull-request-skills",
+      "revision": "2b4f71f49fd27061e64d16b2b7f83d9bd2df5612",
+      "sha256": "01b88f25c3f76000a76cf1325b28e66353192f2292ceee651b1e8ad2f125e8db",
+      "tracked_entry_count": 133
+    },
+    {
+      "bytes": 972800,
+      "path": "source-archives/tailrocks-open-source-skills-6e77a448f9776e837bfc9ab18b833bd5fdc26d3a.tar",
+      "repository": "tailrocks/tailrocks-open-source-skills",
+      "revision": "6e77a448f9776e837bfc9ab18b833bd5fdc26d3a",
+      "sha256": "0753a93c14577daac9a26bdfe4b120c7399450d0fc3c409d6d1f8fecc40f5a21",
+      "tracked_entry_count": 135
+    },
+    {
+      "bytes": 1802240,
+      "path": "source-archives/tailrocks-macos-skills-1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2.tar",
+      "repository": "tailrocks/tailrocks-macos-skills",
+      "revision": "1fb177a9a4dc16120b4bc7ca9c0eb4e68f9119d2",
+      "sha256": "139f325185189dcd02756e322cf4d2d28743e46c3277ff1c948dcb5229343bd8",
+      "tracked_entry_count": 283
+    },
+    {
+      "bytes": 1095680,
+      "path": "source-archives/tailrocks-code-quality-skills-0b9a1eaa83ca2ad9b2c895741648e7cde10f6189.tar",
+      "repository": "tailrocks/tailrocks-code-quality-skills",
+      "revision": "0b9a1eaa83ca2ad9b2c895741648e7cde10f6189",
+      "sha256": "a70d4e8e50c9ee656c064f2ecafd5dac4d50e68d6645878b1d9d58fa81a750be",
+      "tracked_entry_count": 184
+    }
+  ],
+  "contract": "contract.json",
+  "rows": 1557,
+  "schema": "g0.skills.source-files.v1",
+  "sha256": "80f6975952ac6d4500aecb6e75ec3749eaa0bd1a9152c5d058aa3d30f7190b09"
+}

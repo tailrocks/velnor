@@ -1,0 +1,44 @@
+[
+  {
+    "case": "s7b-ordered-fields-vs-provider-payload",
+    "detail": "declared S7b preimage has 56 ordered fields; emitted provider payload only covers its own object and hashes excluded own fields",
+    "expected": "reject",
+    "observed": "fail"
+  },
+  {
+    "case": "s5-release-asset-consumed-as-s3",
+    "detail": "pre_record.release.asset_id/asset_digest are staged S3 and sent reserve-release -> attest-binding although release asset is S5",
+    "expected": "reject",
+    "observed": "fail"
+  },
+  {
+    "case": "s7b-permanent-provider-fields-no-output-leaf",
+    "detail": "19 permanent.verification/verifier fields claim external-provider-result producer but provider_result.schema has no corresponding output leaves",
+    "expected": "reject",
+    "observed": "fail"
+  },
+  {
+    "case": "transport-edge-dropped-channel",
+    "detail": "typed edges use one abstract phrase and no field-to-output/artifact/record channel mapping",
+    "expected": "reject",
+    "observed": "fail"
+  },
+  {
+    "case": "old-pre-schema-contract-input",
+    "detail": "build_v12_bundle.py loads OLD_PRE to form pre_content_desc; model does not enumerate those leaves",
+    "expected": "reject",
+    "observed": "fail"
+  },
+  {
+    "case": "raw-zip-inner-binary-release-asset-bytes",
+    "detail": "no executable verifier or byte corpus; digest/size claims cannot prove byte identity",
+    "expected": "reject",
+    "observed": "unimplemented"
+  },
+  {
+    "case": "provider-check-pre-sign-vs-terminal-success",
+    "detail": "signed status/conclusion are specified before post-signature terminalization; no provider implementation proves a non-cyclic sequence",
+    "expected": "reject",
+    "observed": "unimplemented"
+  }
+]

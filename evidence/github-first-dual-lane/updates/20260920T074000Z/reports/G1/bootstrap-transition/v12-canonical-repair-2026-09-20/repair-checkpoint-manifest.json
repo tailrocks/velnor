@@ -1,0 +1,62 @@
+{
+  "schema": "velnor.canonical-repair-checkpoint-manifest.v1",
+  "checkpoint": "v12-canonical-repair-2026-09-20",
+  "status": "bounded_repair_external_blocked",
+  "frozen_prior": {
+    "bundle": "v12-contract-bundle-2026-09-20",
+    "freeze_manifest_sha256": "0693377186d05348585749f199450cb4f3e69c9641118157ad10a862f7887b69",
+    "model_sha256": "5c3c7722481adf5c025502e7ba0d0edc252d066dd1cafb219a4b4a208b3a5062",
+    "generator_sha256": "1a7ed9ab4bcb099cdb03d66d132e535ca9d0974c3e733990e13bd630e76c948c",
+    "canonical_root_sha256": "e2b30dc21732f957ee9b69b45f270b2d72a995b624d4b19a448eb86985e404f8",
+    "independent_adversarial_report_sha256": "ec76d861e01bbe7316c9b131eda698e9128a4c19fdbde3e9b486422217fa45c7",
+    "authority_review_sha256": "e58dce3d772205fab900afade1d45d33d9fa1f59192de5fc27354a10352549e6"
+  },
+  "repair_input": {
+    "model_file": "canonical-model-v3.json",
+    "model_version": "12-repair-3",
+    "model_sha256": "7996c852e749c32eafb338a38f0b7e865ee7ea22e0325de7d504db07c67b9aea",
+    "declared_preimage_module_sha256": "2483866b234ef329fb5adac2622f53769d3ac3eb8ce02c79afba2cbe3e457b7a",
+    "sole_input": true,
+    "historical_schema_reads": false
+  },
+  "repair_implementation": {
+    "generator_sha256": "35a5de03a169bc795a108cc60a25ee752b725aeef0de6666bf2927dcb5a89047",
+    "independent_recomputation_sha256": "bccefbfd39281a632b1efca323b88c78b060a31c93e769e56e4562e50e8cf74b",
+    "shared_audit_sha256": "4248ac9d606fb5f2e8680c9ab27c29d5396df75ed77c8ad614a48a69e0e03bba"
+  },
+  "results": {
+    "checkpoint_results_sha256": "315aaeb6db10cc477a9de5053fd78b9d6a2506c212f1455ef6b32ce05fb19883",
+    "checkpoint_report_sha256": "5ea415d0836c1dd71497ae117da5775a607197468f4ba6db85ffa0653c1dbfcd",
+    "independent_results_sha256": "4d8eba57f1ccc70f74fa0ea5dcea44818fb4e2fa90abb478690145bd523ac0c2",
+    "independent_report_sha256": "740df5ac401dd321af1d1fe3cc51fa0ab65e45c2fb62d809d9f1b71cf2a99c73",
+    "audit_results_sha256": "3814a24106737bcc1c282a456f5925a61020a03746b16539bf207d8fe7e19d09",
+    "audit_report_sha256": "49b3a41d20e8532063a7524cc0f90e71d330bf18c67f92328a0e26c5c826f54f",
+    "provider_result_digest": "3590a056efa0be7bb719b31c2797bc8e8e4b7449049a334e58bd7afb6fb55516",
+    "provider_preimage_field_count": 38,
+    "strict_schema_pass": true,
+    "temporal_lint_pass": true,
+    "provider_schema_coverage_pass": true,
+    "independent_recomputation_pass": true,
+    "shared_audit_pass": true
+  },
+  "fixture_sha256": {
+    "adoption.json": "b44272ec29c566446a5b580ac403b55365f9a3396f5a780419e027ed1fc86045",
+    "permanent_binding.json": "6376cf07c4eb33d33edc6dc9f7d275f34ad7f17ca125ada73c3d89144561e082",
+    "pre_record.json": "99e80cd8e3d3d984e9a30256b5c132ea7f93e7a524e08e95f6c5bd1f0e9de8bc",
+    "pre_record_transport.json": "510c2b25173818899a9914a53ec2996e9378ab755c0a73b6c096aa841ffc1b9c",
+    "provider_result.json": "49cafa1df74a99ef462e826af05fc0e90bfe74134aed1d3e850ce51684a4cdb8",
+    "release_manifest.json": "c2ad31e556aeff09e4a8b92a448bfd658fdea82ad6a41b204f734044f0320bd7",
+    "verify_b.json": "e1a04bc29a34ef836d80216ae9f1c98e110e89d2e43ff24b5823420810a7e804"
+  },
+  "mutation": {
+    "source": false,
+    "authority": false,
+    "github": false,
+    "release": false
+  },
+  "remaining_external_gates": [
+    "typed transport channels and terminal semantic census require independent implementation/review",
+    "raw ZIP/inner payload/binary/release byte equality requires live external verification",
+    "provider identities, freeze authority, and GitHub production execution remain unresolved"
+  ]
+}
