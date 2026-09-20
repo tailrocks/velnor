@@ -354,6 +354,22 @@ mod tests {
             "mixed members gate the sccache alternative on the selected member"
         );
         assert!(
+            kind.contains(
+                "- name: Configure sccache environment\n        if: ${{ inputs.mbx_enabled == false }}"
+            ),
+            "mixed members gate the sccache environment on the selected member"
+        );
+        for assignment in [
+            "CARGO_INCREMENTAL=0",
+            "RUSTC_WRAPPER=sccache",
+            "SCCACHE_GHA_ENABLED=true",
+        ] {
+            assert!(
+                kind.contains(&format!("echo '{assignment}' >> \"$GITHUB_ENV\"")),
+                "mixed sccache members export {assignment}: {kind}"
+            );
+        }
+        assert!(
             kind.contains("hashFiles(inputs.mbx_dependency_files)"),
             "MBX members keep their per-member snapshot key inputs"
         );
@@ -409,6 +425,11 @@ mod tests {
         let kind = must_render_kind(&ir);
         assert!(!kind.contains("Set up Mr. Boxington"));
         assert_eq!(kind.matches("Set up sccache").count(), 1);
+        assert_eq!(
+            kind.matches("Configure sccache environment").count(),
+            1,
+            "the all-disabled job configures sccache once"
+        );
         assert!(!kind.contains("if: ${{ inputs.mbx_enabled }}"));
         assert!(!kind.contains("if: ${{ inputs.mbx_enabled == false }}"));
         let facts = ir.unit_lane_facts(
@@ -1792,6 +1813,26 @@ fn collapsed_checks_env(offline: FeatureCoverage) -> String {
     }
     env.push_str(mise_auto_install_env());
     env
+}
+
+/// Export the sccache defaults after setup for the selected member. Collapsed
+/// jobs cannot use [`render_job_env`] because one job serves members with
+/// mutually exclusive MBX and sccache transports; `GITHUB_ENV` carries the
+/// selected member's values to every later command without assigning empty
+/// wrapper variables to MBX members.
+fn render_collapsed_sccache_env_step(
+    output: &mut String,
+    sccache: FeatureCoverage,
+    mbx_input: &str,
+) {
+    if !sccache.any {
+        return;
+    }
+    let block = "      - name: Configure sccache environment\n        run: |\n          echo 'CARGO_INCREMENTAL=0' >> \"$GITHUB_ENV\"\n          echo 'RUSTC_WRAPPER=sccache' >> \"$GITHUB_ENV\"\n          echo 'SCCACHE_GHA_ENABLED=true' >> \"$GITHUB_ENV\"\n";
+    output.push_str(&prefix_step_block_with_if(
+        block,
+        sccache.absent_gate(mbx_input).as_deref(),
+    ));
 }
 
 fn cargo_offline_run_prelude(members: &[&Unit]) -> String {
@@ -4890,6 +4931,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 &block,
                 sccache.absent_gate(lane_input::MBX_ENABLED).as_deref(),
             ));
+            render_collapsed_sccache_env_step(output, sccache, lane_input::MBX_ENABLED);
         }
         if github_lane && kind_tools.contains(&ToolRequirement::Bun) {
             let versioned = FeatureCoverage::over(&facts, |facts| facts.tool_version.is_some());
