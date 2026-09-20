@@ -15061,7 +15061,7 @@ lockfile = true
         config.repository = workflow_setup_action_repository().to_owned();
         let actionlint = render_actionlint_config(&config);
         assert!(
-            actionlint.contains("    - macos-26\n"),
+            actionlint.contains("    - xcode-27\n"),
             "the owner runtime-product matrix needs the macos label: {actionlint}"
         );
     }

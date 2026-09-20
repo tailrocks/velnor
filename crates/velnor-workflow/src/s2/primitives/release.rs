@@ -5972,7 +5972,7 @@ mod tests {
             sign.contains("if: ${{ github.event_name != 'workflow_dispatch' }}"),
             "{sign}"
         );
-        assert!(sign.contains("runs-on: macos-26"), "{sign}");
+        assert!(sign.contains("runs-on: xcode-27"), "{sign}");
         assert!(sign.contains("environment: release-macos"), "{sign}");
         assert!(
             sign.contains("contents: read"),
