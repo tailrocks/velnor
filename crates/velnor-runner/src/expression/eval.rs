@@ -4,12 +4,12 @@
 //! (commit 397b032cbf865e9c3ddfab89d533ec19325e1273), files under
 //! `src/Sdk/DTExpressions2/Expressions2/Sdk/`.
 
-use super::parser::ParseEnvironment;
-use super::value::{
+use super::ExpressionError;
+use velnor_expression::value::{
     format_number, ordinal_ignore_case_contains, ordinal_ignore_case_ends_with,
     ordinal_ignore_case_starts_with, ArrayValue, ObjectValue, Value,
 };
-use super::{parse, BinaryOperator, ExpressionError, Node};
+use velnor_expression::{parse, BinaryOperator, Node, ParseEnvironment};
 
 /// What an expression is evaluated against: the root contexts and the
 /// extension functions the runner registers
@@ -351,7 +351,7 @@ fn evaluate_format(
 
 /// The template half of `format()`, separated from argument evaluation so that
 /// a caller which cannot evaluate every argument — see
-/// [`super::spans`] — still gets upstream's exact brace, escape and
+/// [`velnor_expression::function_call_argument_spans`] — still gets upstream's exact brace, escape and
 /// specifier handling.
 ///
 /// `resolve` is upstream's lazy argument builder (`Format.cs:215-268`): it is
@@ -493,7 +493,7 @@ fn evaluate_join(args: &[Node], context: &dyn EvaluationContext) -> Result<Value
     if let Value::Array(array) = &items
         && !array.is_empty()
     {
-        let separator = if args.len() > 1 {
+        let separator = if args.len() > 1 && array.len() > 1 {
             let separator = evaluate_node(&args[1], context)?;
             if separator.is_primitive() {
                 separator.convert_to_string()

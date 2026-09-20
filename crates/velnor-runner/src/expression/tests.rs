@@ -5,8 +5,9 @@
 //! each block cites the upstream file it was derived from.
 
 use super::eval::{from_serde_json, to_json};
-use super::value::{format_number, parse_number, ArrayValue, ObjectValue};
-use super::{evaluate, EvaluationContext, ExpressionError, ParseEnvironment, Value};
+use super::{evaluate, EvaluationContext, ExpressionError};
+use velnor_expression::value::{format_number, parse_number, ArrayValue, ObjectValue};
+use velnor_expression::{ParseEnvironment, Value};
 
 /// Minimal harness: a fixed set of root contexts plus the four status
 /// functions and `hashFiles`, exactly the extension set the worker registers
@@ -550,6 +551,10 @@ fn join_function() {
         eval("join(github.list, ' - ')", &context).convert_to_string(),
         "a - b"
     );
+    assert_eq!(
+        eval("join(fromJson('[\"x\"]'), fromJson('bad'))", &context).convert_to_string(),
+        "x"
+    );
     assert_eq!(eval("join(github.empty)", &context).convert_to_string(), "");
     assert_eq!(
         eval("join(github.scalar)", &context).convert_to_string(),
@@ -882,7 +887,7 @@ fn property_conversions_are_total() {
 /// cannot do this for nested calls or indexes.
 #[test]
 fn function_call_argument_spans_are_verbatim() {
-    let (name, spans) = super::function_call_argument_spans(
+    let (name, spans) = velnor_expression::function_call_argument_spans(
         "format('a{0}b', join(matrix.list, ', '), steps.build.outputs['sha'])",
     )
     .expect("splittable");
@@ -901,9 +906,10 @@ fn function_call_argument_spans_are_verbatim() {
 /// argument.
 #[test]
 fn function_call_argument_spans_respect_quoting_and_grouping() {
-    let (_, spans) =
-        super::function_call_argument_spans("format('x', 'a,b', ('c' == matrix.d), 'it''s')")
-            .expect("splittable");
+    let (_, spans) = velnor_expression::function_call_argument_spans(
+        "format('x', 'a,b', ('c' == matrix.d), 'it''s')",
+    )
+    .expect("splittable");
     assert_eq!(spans, vec!["'x'", "'a,b'", "('c' == matrix.d)", "'it''s'"]);
 }
 
@@ -919,7 +925,7 @@ fn function_call_argument_spans_reject_non_calls() {
         "",
     ] {
         assert!(
-            super::function_call_argument_spans(expression).is_none(),
+            velnor_expression::function_call_argument_spans(expression).is_none(),
             "{expression:?} must not split"
         );
     }
