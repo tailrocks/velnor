@@ -1,0 +1,81 @@
+{
+  "kind": "executable-4fa-admission-probe",
+  "date": "2026-09-20",
+  "audited_commit": "7df0481e3f38f9f662d25cd963c99d24bc32357b",
+  "audited_tree": "c6dbb8dace01b9a84ec169ad9142d9fe6995a40e",
+  "base_commit": "9e5c0eb215d4169578d6f064806e89fe4c793e85",
+  "trusted_revision": "4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d",
+  "trusted_tree": "36462a36373085356cd24272afab063bdbd390fa",
+  "release": {
+    "id": 392384468,
+    "tag": "velnor-workflow-runtime-v1-af140ad4d8d84326",
+    "closure": "af140ad4d8d84326d5676f626ce4261fd7914ac41d521d851484dcb8253270e7",
+    "manifest_sha256": "1c3d1b0776d21fb6ba988064a18cbe2752639dcbde3ab58e12e615df72082f88",
+    "linux_x64_sha256": "672de6b171eba0f9e8053e96974cf361a6788af22ca2d498eabba71b1d73c236",
+    "macos_arm64_sha256": "7bee5aabdea114e3c7a869101b7bd951619455605addfcb896e69e229e5af49c",
+    "attestation_command": "gh attestation verify <asset> --repo tailrocks/velnor --format json",
+    "attestation_result": "verified SLSA source digest 4fa; signer workflow .github/workflows/ci-runtime-products.yml",
+    "revision_result": "4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d",
+    "closure_result": "af140ad4d8d84326d5676f626ce4261fd7914ac41d521d851484dcb8253270e7"
+  },
+  "fixtures": {
+    "clean_root": "/tmp/velnor-4fa-7df-probe.VM6IqM",
+    "xcode_root": "/tmp/velnor-4fa-7df-xcode27.nbiD01",
+    "xcode_diff_sha256": "f9de5996f9ce2c77dbee6cedfe67f1428545991b41cdaf90d6ef97a9594e727a",
+    "xcode_config_sha256": "d42a10c819ea665455c809bae87a2e57a60f596ac9dbf61ec55500b957e41ca5",
+    "changed_files": {
+      ".github/actionlint.yaml": "10d7eee7db15ceff26921b8a688e9d81219df0c0bad01c098776186fe9308ae6",
+      ".github/workflows/ci-runtime-products.yml": "93eb04cb68acdf0d778cdd5214484b4e2b6fb9cb9b819c5bc46545c0a1d4e7c7"
+    },
+    "transformation": "replace exact generated-output bytes macos-26 -> xcode-27 in the two files; no config pin change"
+  },
+  "commands": [
+    {
+      "name": "linux-x64-host-execution",
+      "command": "/tmp/velnor-4fa-runtime.qgE9ts/verified-velnor-workflow --revision",
+      "exit": 126,
+      "raw": "zsh: exec format error: /tmp/velnor-4fa-runtime.qgE9ts/verified-velnor-workflow",
+      "reason": "Darwin arm64 host cannot execute attested Linux x86-64 ELF; no Docker/QEMU used"
+    },
+    {
+      "name": "published-check-clean",
+      "command": "cd /tmp/velnor-4fa-7df-probe.VM6IqM && /tmp/velnor-4fa-runtime.qgE9ts/velnor-workflow-macOS-ARM64 --plain --check /tmp/velnor-4fa-7df-probe.VM6IqM",
+      "exit": 1,
+      "raw": "error: generated files differ: .github/ci/project.toml, .github/ci/.github-actions-generator-state; rerun generate"
+    },
+    {
+      "name": "published-check-xcode-fixture",
+      "command": "cd /tmp/velnor-4fa-7df-xcode27.nbiD01 && /tmp/velnor-4fa-runtime.qgE9ts/velnor-workflow-macOS-ARM64 --plain --check /tmp/velnor-4fa-7df-xcode27.nbiD01",
+      "exit": 1,
+      "raw": "error: refusing to overwrite manually modified generated file: .github/actionlint.yaml; restore its recorded generated content or reconcile it manually"
+    },
+    {
+      "name": "policy-clean",
+      "command": "env -u VELNOR_WORKFLOW_CANDIDATE_MANIFEST VELNOR_WORKFLOW_PINNED_BINARY=/tmp/velnor-4fa-runtime.qgE9ts/velnor-workflow-macOS-ARM64 /tmp/velnor-4fa-runtime.qgE9ts/velnor-workflow-macOS-ARM64 policy --workflow-root /tmp/velnor-4fa-7df-probe.VM6IqM --head-sha 7df0481e3f38f9f662d25cd963c99d24bc32357b --base-sha 9e5c0eb215d4169578d6f064806e89fe4c793e85 --base-revision 4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d --ruleset-contexts DCO,Policy,ci-required",
+      "exit": 1,
+      "failed_rules": ["generated-tree"],
+      "trusted_runners": "PASS",
+      "candidate_manifest": "unset",
+      "pin_build": false
+    },
+    {
+      "name": "policy-xcode-fixture",
+      "command": "env -u VELNOR_WORKFLOW_CANDIDATE_MANIFEST VELNOR_WORKFLOW_PINNED_BINARY=/tmp/velnor-4fa-runtime.qgE9ts/velnor-workflow-macOS-ARM64 /tmp/velnor-4fa-runtime.qgE9ts/velnor-workflow-macOS-ARM64 policy --workflow-root /tmp/velnor-4fa-7df-xcode27.nbiD01 --head-sha 7df0481e3f38f9f662d25cd963c99d24bc32357b --base-sha 9e5c0eb215d4169578d6f064806e89fe4c793e85 --base-revision 4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d --ruleset-contexts DCO,Policy,ci-required",
+      "exit": 1,
+      "failed_rules": ["generated-tree", "trusted-runners"],
+      "trusted_runners": "FAIL: .github/workflows/ci-runtime-products.yml: job build: runs-on does not match any declared provider selector",
+      "candidate_manifest": "unset",
+      "pin_build": false
+    }
+  ],
+  "source_proof": {
+    "4fa_s2_policy_blob": "7529ce3f687576e77d8d394193925d86562e20a0",
+    "4fa_s2_generator_blob": "32238d24572da2a9dffe8f1bf6647d3758b64d05",
+    "7df_native_contract_blob": "8ebfdeb5597d581e220cdd951954b8ecde3aa60f",
+    "7df_platform_blob": "8baa90b462ce443c6fa4e9e359753c79ed7a2266",
+    "old_hosted_prefixes": ["ubuntu-", "macos-", "windows-"],
+    "new_exact_apple_label": "xcode-27",
+    "old_generator_macos_constant": "macos-26"
+  },
+  "verdict": "4fa admits baseline hosted labels but rejects xcode-27 as foreign; current native xcode-27 contract requires a protected validator/contract transition"
+}

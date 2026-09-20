@@ -1,0 +1,64 @@
+{
+  "$schema": "g0-mapping-owner-handoff.v1",
+  "created_at_utc": "2026-09-20T09:45:08Z",
+  "status": "coordination_checkpoint_no_source_edits",
+  "scope": "Canonical input seam for the accepted 32-row source graph. This file is not checker input.",
+  "checker_owner": {
+    "interface_commit": "101aa26b849d507d6bdc702d55619bb830c65706",
+    "current_head_observed": "2b042d26365ac8befb269fe264a5c1143baf66e0",
+    "paths": [
+      "dual-lane-checker/crates/velnor-tools/src/g0_contract.rs",
+      "dual-lane-checker/crates/velnor-tools/src/evidence_check.rs"
+    ],
+    "canonical_input_rule": "Do not accept ready-rows.ndjson as ManifestDocument/SnapshotDocument/G0CollectorSnapshot. It is source-row evidence only.",
+    "required_producer_inputs": [
+      "typed all-32 ManifestRepository rows with unknown/not-applicable states preserved",
+      "typed all-32 SnapshotRepository rows with rulesets and immutable workflow bytes",
+      "check producer App/suite/run/job/event/source+checkout joins",
+      "canonical snapshot bytes and CAS/raw-object bindings"
+    ],
+    "known_raw_only_inputs": [
+      "raw check target/body pages",
+      "historical run/job/check observations",
+      "partition expected workload IDs"
+    ]
+  },
+  "mapper_owner": {
+    "interface_commit": "5c2877dd80c825a8cfa9438a004f0f5e141537c5",
+    "current_head_observed": "6dd5cd28ddee3d8d3ecc87678eb421eb9ab2f9f0",
+    "paths": [
+      "g3-combined2/crates/velnor-tools/src/g0_live_mapping.rs",
+      "g3-combined2/crates/velnor-tools/src/github_live_collector.rs"
+    ],
+    "canonical_input_rule": "Keep source joins and execution observations separate. Never map raw run counts, API heads, or partition plan jobs into actual execution rows.",
+    "fail_closed_seams": [
+      "repository source_invalidated/churn",
+      "artifact run_attempt and exact archive binding",
+      "actual checkout proof",
+      "bound model.session and workload.artifact raw objects",
+      "immutable workflow/dependency source bytes"
+    ],
+    "required_producer_inputs": [
+      "stable 32-repository closing collection",
+      "typed raw object/request/CAS ledger",
+      "typed model.session/workload.artifact local bindings",
+      "attempt-bound artifact rows and checkout proof observations"
+    ]
+  },
+  "shared_join_contract": {
+    "repository_key": "exact owner/name string from fixed 32 set",
+    "source_revision_key": "accepted_default_branch_sha; raw opening/closing SHA must match or row remains blocked",
+    "workload_key": "repository + workload_id; never global workload ID alone",
+    "workflow_key": "repository + path + revision + source_sha + exact immutable source bytes",
+    "execution_key": "repository + run_id + run_attempt + event + trigger_source_sha + actual_checkout_sha",
+    "check_key": "context + App ID + check_suite_id + check_run_id + provider execution key",
+    "artifact_key": "repository + artifact_id + run_id + run_attempt + exact archive digest",
+    "graph_key": "node/edge ID + source revision + source/target refs",
+    "unknown_rule": "missing, absent, 404, churn, unrun, unproven, and not-applicable remain distinct; none is success"
+  },
+  "handoff_files": [
+    "ready-rows.ndjson",
+    "field-join-ledger.json",
+    "candidate.json"
+  ]
+}

@@ -1,0 +1,143 @@
+{
+  "schema": "velnor.bootstrap-path-feasibility.delta.v2",
+  "observed_at_utc": "2026-09-20T10:36:01Z",
+  "status": "read_only",
+  "mutation_performed": false,
+  "fixture_hash": null,
+  "source": {
+    "repository": "tailrocks/velnor",
+    "main_sha": "9e5c0eb215d4169578d6f064806e89fe4c793e85",
+    "parent_sha": "4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d",
+    "tree_sha": "195fe763a91dece44ae2de34e12a613ec9432af6",
+    "config_blob": "29d41a410d06a37dcb257b51be223c18fb42e9ee",
+    "policy_blob": "30331c11bb45d176cea686ba8819794212992a6d",
+    "setup_action_blob": "4e48bc2694af7b3d1a969cb108234a9a92b515d3",
+    "runtime_publisher_blob": "c35974071e31f1cbef495776fc5167ab8748908b",
+    "generator_source_blob": "32238d24572da2a9dffe8f1bf6647d3758b64d05",
+    "generator_revision": "54",
+    "config_pin": "4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d"
+  },
+  "verdicts": {
+    "generic_base_checker_admission": "positive",
+    "ordinary_pr_transition_without_app": "not_proven_for_arbitrary_pr; current_main_push_positive_only",
+    "typed_validator_b_admission": "negative",
+    "new_native_runner_contract": "negative",
+    "candidate_semantic_authority_allowed": false,
+    "ordinary_bootstrap_of_b_available": false
+  },
+  "validator_absence": {
+    "tree_paths": [],
+    "validator_tag_http_status": 404,
+    "matching_actions_artifacts": [],
+    "policy_validator_table": false
+  },
+  "runner_contract": {
+    "accepted_spec_label": "xcode-27",
+    "current_runtime_publisher_mac_label": "macos-26",
+    "current_tree_contains_xcode_27": false,
+    "fallback_or_downgrade_accepted": false
+  },
+  "generic_runtime_product": {
+    "producer_run_id": 35503134829,
+    "producer_source_sha": "4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d",
+    "release_id": 392384468,
+    "tag": "velnor-workflow-runtime-v1-af140ad4d8d84326",
+    "tag_target_sha": "4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d",
+    "closure": "af140ad4d8d84326d5676f626ce4261fd7914ac41d521d851484dcb8253270e7",
+    "manifest_sha256": "1c3d1b0776d21fb6ba988064a18cbe2752639dcbde3ab58e12e615df72082f88",
+    "assets": {
+      "Linux-X64": "672de6b171eba0f9e8053e96974cf361a6788af22ca2d498eabba71b1d73c236",
+      "Linux-ARM64": "1df81f61fc3a654e30bd872077085892c57c74e4bfb156f8cf5dbabe8b25b97b",
+      "macOS-ARM64": "7bee5aabdea114e3c7a869101b7bd951619455605addfcb896e69e229e5af49c"
+    },
+    "manifest_revision": "4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d",
+    "manifest_profile": "release",
+    "attestation": {
+      "signer_workflow": "tailrocks/velnor/.github/workflows/ci-runtime-products.yml",
+      "source_digest": "4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d",
+      "source_ref": "refs/heads/main",
+      "predicate": "https://slsa.dev/provenance/v1",
+      "verified_assets": ["manifest.json", "velnor-workflow-Linux-X64", "velnor-workflow-Linux-ARM64", "velnor-workflow-macOS-ARM64"]
+    },
+    "publisher_runner_labels": {
+      "Linux-X64": ["ubuntu-24.04"],
+      "Linux-ARM64": ["ubuntu-24.04-arm"],
+      "macOS-ARM64": ["macos-26"]
+    }
+  },
+  "runs": {
+    "runtime_current_main": {
+      "id": 35504500569,
+      "head_sha": "9e5c0eb215d4169578d6f064806e89fe4c793e85",
+      "conclusion": "success",
+      "updated_at": "2026-09-20T10:14:34Z",
+      "job_results": {
+        "success": 1,
+        "skipped": 2,
+        "jobs": {
+          "resolve_runtime_closure": {"id": 106061909689, "result": "success"},
+          "build_runtime": {"id": 106061932013, "result": "skipped"},
+          "publish_runtime_products": {"id": 106061932161, "result": "skipped"}
+        }
+      }
+    },
+    "ci_main_current": {
+      "id": 35504500738,
+      "head_sha": "9e5c0eb215d4169578d6f064806e89fe4c793e85",
+      "conclusion": "success",
+      "updated_at": "2026-09-20T10:29:36Z",
+      "job_counts": {"success": 21, "skipped": 48, "failure": 0},
+      "required_jobs": {
+        "policy": {"id": 106061912271, "result": "success"},
+        "planning": {"id": 106061912424, "result": "success"},
+        "ci_required": {"id": 106063742286, "result": "success"},
+        "control_required": {"id": 106063750441, "result": "success"}
+      },
+      "policy_log": {
+        "candidate_manifest": "",
+        "head_sha": "9e5c0eb215d4169578d6f064806e89fe4c793e85",
+        "base_sha": "9e5c0eb215d4169578d6f064806e89fe4c793e85",
+        "generated_tree": "pass",
+        "policy_rules": 11,
+        "policy_failures": 0,
+        "ruleset_contexts": ["DCO", "Policy", "ci-required"]
+      }
+    },
+    "preview_current": {
+      "id": 35504500719,
+      "head_sha": "9e5c0eb215d4169578d6f064806e89fe4c793e85",
+      "conclusion": "failure",
+      "updated_at": "2026-09-20T10:32:14Z",
+      "job_counts": {"success": 4, "failure": 2, "skipped": 2},
+      "failed_jobs": {
+        "arm64": {"id": 106063528246, "cause": "missing aarch64-linux-gnu-gcc in aws-lc-sys/openssl-sys build"},
+        "amd64": {"id": 106063528303, "cause": "preview-build refusing dirty tree: 1 changed path"}
+      }
+    },
+    "historical_4fa_before_promotion": {
+      "id": 35503134923,
+      "head_sha": "4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d",
+      "conclusion": "failure",
+      "cause": "stale 0dc pin, generated-tree mismatch, candidate ce870d7c6fbfb4a4-Linux-X64 absent"
+    }
+  },
+  "commands": [
+    "rtk gh api repos/tailrocks/velnor/git/ref/heads/main",
+    "rtk gh api 'repos/tailrocks/velnor/commits/9e5c0eb215d4169578d6f064806e89fe4c793e85'",
+    "rtk gh api 'repos/tailrocks/velnor/contents/.github-gen/velnor-workflow.toml?ref=9e5c0eb215d4169578d6f064806e89fe4c793e85'",
+    "rtk gh api 'repos/tailrocks/velnor/contents/.github/workflows/ci-policy.yml?ref=9e5c0eb215d4169578d6f064806e89fe4c793e85'",
+    "rtk gh api 'repos/tailrocks/velnor/contents/.github/actions/setup-velnor-workflow/action.yml?ref=9e5c0eb215d4169578d6f064806e89fe4c793e85'",
+    "rtk gh api 'repos/tailrocks/velnor/contents/.github/workflows/ci-runtime-products.yml?ref=9e5c0eb215d4169578d6f064806e89fe4c793e85'",
+    "rtk gh api 'repos/tailrocks/velnor/git/trees/195fe763a91dece44ae2de34e12a613ec9432af6?recursive=1'",
+    "rtk gh api 'repos/tailrocks/velnor/releases?per_page=100' --paginate",
+    "rtk gh api 'repos/tailrocks/velnor/git/ref/tags/velnor-workflow-runtime-v1-af140ad4d8d84326'",
+    "rtk gh run view 35504500569 --json databaseId,status,conclusion,updatedAt,jobs",
+    "rtk gh run view 35504500738 --json databaseId,status,conclusion,updatedAt,jobs",
+    "rtk gh run view 35504500719 --json databaseId,status,conclusion,updatedAt,jobs",
+    "gh run view 35504500738 --job 106061912271 --log",
+    "gh run view 35503134923 --log-failed",
+    "gh run view 35504500719 --log-failed",
+    "gh attestation verify <each 4fa release asset> --repo tailrocks/velnor --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-digest 4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d --source-ref refs/heads/main --format json"
+  ],
+  "historical_distinction": "0dc/e717 and pre-promotion 4fa failures are historical; current 9e generic Policy admission is separate evidence"
+}

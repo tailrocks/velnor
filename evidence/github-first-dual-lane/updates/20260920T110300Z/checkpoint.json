@@ -1,0 +1,47 @@
+{
+  "schema": "dual-lane/stable-external-evidence-checkpoint/v1",
+  "capture_cutoff_utc": "2026-09-20T11:03:00Z",
+  "parent_checkpoint": "264315ff5f6778d62d297ffb3f4df34e1ef27a8f",
+  "update_path": "evidence/github-first-dual-lane/updates/20260920T110300Z",
+  "source_root": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence",
+  "counts": {
+    "regular_non_symlink_files": 87,
+    "source_bytes": 3131231,
+    "g0_files": 66,
+    "g0_bytes": 2891703,
+    "g1_files": 21,
+    "g1_bytes": 239528
+  },
+  "stability": {
+    "source_two_read_snapshot_equal": true,
+    "destination_matches_source_inventory": true,
+    "cutoff_enforced": true,
+    "source_manifests_verified": true,
+    "symlinks_selected": 0
+  },
+  "included": [
+    {"id": "workflow-source-inventory-102146", "path": "G0/workflow-source-inventory-20260920T102146Z/", "files": 58, "review_status": "pending_explicit_review", "gate_status": "not-evaluated"},
+    {"id": "canonical-mapping-gap-094508", "path": "G0/canonical-mapping-gap-20260920T094508Z/", "files": 6, "status": "source_mapping_gap_no_candidate"},
+    {"id": "checker-54ea1724", "path": "G0/checker-v2-review/54ea2b09138a2218fee2aa0e9846def03ad9d675-successor-review.md", "sha256": "1724eafdaf08f31430d1db6503ab32d50702239f615adee5d990a8fe50b9c839", "scope": "checker-test-only"},
+    {"id": "native-990b1ea-sourceid", "path": "G1/reviews/native-id-9908296d-independent.md", "sha256": "b1ea37e593a2b487444b9245822f8f6e37669f6906e7decdcd9f81a3f6551887", "scope": "release-id-source-fix-only"},
+    {"id": "bootstrap-cross-job-25759", "path": "G1/reviews/bootstrap-artifact-cross-job-independent-review-2026-09-20.md", "sha256": "25759b7bf0e5633c967b3216f8e012693f38e68942563db0eef3f61240e8b2b7", "status": "changes_required"},
+    {"id": "bootstrap-run-isolation-5a59", "path": "G1/bootstrap/artifact-binding-repair-final-20260920.md", "sha256": "5a59f867177de9e53275ff9fd4da43381a7ddea7aa262609a956f34fb4587fd0", "status": "design_not_approved"},
+    {"id": "bootstrap-run-isolation-followup", "path": "G1/reviews/bootstrap-artifact-binding-run-isolation-followup-20260920.md", "sha256": "56bf72bca3ddf60503f567326c5a90399b562510130b784e75e0805e533e647f", "missing_input": "8fd6a3d0da3e9715cc31d4b43a915ba7ef900c56a42dc64c66780935fe824d07"},
+    {"id": "bootstrap-hostile-fixture-4f6", "path": "G1/reviews/bootstrap-transport-hostile-fixtures-f2f1a3b0.md", "sha256": "4f6aed10d664730fcba212a3e2667ec29a9c01cc26410ff34291aefbcfb10850", "scope": "offline_fixture_only"},
+    {"id": "image-original-review-6f5", "path": "G1/bootstrap/bootstrap-image-build-contract-review-20260920.md", "sha256": "6f5ce0d29e9bcfda5bc20115e9a4ab3ea687645031a8bfc9ddfde463eca277ce", "status": "changes_required"},
+    {"id": "image-proposal-v2-2aa-readiness-acdd", "paths": ["G1/bootstrap/bootstrap-image-build-contract-proposal-v2-20260920.md", "G1/bootstrap/bootstrap-image-build-contract-proposal-v2-readiness-review-20260920.md"], "sha256": ["2aa209303a86a8fc099bd9d4667345e56089ef18c1ceabeacc451602ba47e545", "acdd5da1741ad81338c4f908c317256db7505508df569c75cb4f11a6279a6916"], "status": "unapproved_not_ready"},
+    {"id": "source-integration-7df4bc3", "path": "G1/integration/source-integration-merge-checkpoint-20260920.json", "sha256": "4bc3ecd88d587d9f5e83be6d5fbf0b82bd4cffb0db7b63680a0a2100962c9e6d", "scope": "read_only_no_merge"},
+    {"id": "new-main-9e5-probe-43b-cbe", "paths": ["G1/bootstrap-transition/BOOTSTRAP-PATH-FEASIBILITY-DELTA-9E5-PIN-2026-09-20.md", "G1/bootstrap-transition/BOOTSTRAP-PATH-FEASIBILITY-DELTA-9E5-PIN-2026-09-20.json"], "sha256": ["43b5013a44442dae787592e403f9bf5ae8e82f270c0464515876a7c8a65dfbe4", "cbe034c98c66fb36a07e5b1ca7e38ca3f7d986308d7872fccf7ec17bc594b310"], "scope": "read_only_feasibility"},
+    {"id": "apt-5ef9cff", "path": "G1/reviews/apt-5ef7c9a-60a-independent.md", "sha256": "9cffec3fe928996aff330590df4f6b56f5100c4be1519ca8d43fc969a80201c0", "scope": "source_fix_only"},
+    {"id": "docs-23b0fc", "path": "G0/docs-review/review-23b69394243bb430b4b261fec24fa0e94488e688.md", "sha256": "0fc47e550eb6a9d8072e28f98850eb93fcea3fb22488db4dc8ad444e2d75c6bf", "scope": "documentation_only"},
+    {"id": "dependency-delta-5329", "path": "G1/dependency-graph-refresh-20260920T085949Z/delta-20260920T102957Z.json", "sha256": "5329357b91303d77d7445b5a0ec7bc448b0b00b2c684811490600d297ea7b3d3", "scope": "baseline_correction_only"}
+  ],
+  "excluded": {
+    "missing_reports": ["8fd6a3d0da3e9715cc31d4b43a915ba7ef900c56a42dc64c66780935fe824d07"],
+    "active_collector_roots": ["G0/live-collector-20260920T095716Z-05e", "G0/live-collector-20260920T101603Z-8d3", "G0/live-collector-20260920T103455Z-413"],
+    "other": ["moving WIP/owner ledgers", "raw logs", "builds/targets", "clones/source archives", "credentials/secrets"]
+  },
+  "mutations": {"source": false, "github": false, "dispatch": false, "merge": false, "release": false, "authority": false},
+  "attestation": "none",
+  "gate_status": "not-evaluated"
+}

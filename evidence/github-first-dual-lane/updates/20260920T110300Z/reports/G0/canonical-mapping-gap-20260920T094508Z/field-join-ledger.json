@@ -1,0 +1,820 @@
+{
+  "$schema": "g0-actual32-field-join-ledger.v1",
+  "artifact_kind": "g0_actual32_mapping_gap_audit",
+  "canonical_contract_interfaces": [
+    {
+      "current_worktree_head": "2b042d26365ac8befb269fe264a5c1143baf66e0",
+      "name": "checker_g0_contract",
+      "path": "crates/velnor-tools/src/g0_contract.rs",
+      "relevant_lines": "30-466",
+      "reviewed_commit": "101aa26b849d507d6bdc702d55619bb830c65706"
+    },
+    {
+      "current_worktree_head": "2b042d26365ac8befb269fe264a5c1143baf66e0",
+      "name": "checker_manifest_snapshot",
+      "path": "crates/velnor-tools/src/evidence_check.rs",
+      "relevant_lines": "247-500",
+      "reviewed_commit": "101aa26b849d507d6bdc702d55619bb830c65706"
+    },
+    {
+      "current_worktree_head": "6dd5cd28ddee3d8d3ecc87678eb421eb9ab2f9f0",
+      "interface_commit": "5c2877dd80c825a8cfa9438a004f0f5e141537c5",
+      "name": "mapper",
+      "path": "crates/velnor-tools/src/g0_live_mapping.rs",
+      "relevant_lines": "31-254,610-704,1255-1578,2101-2320,2285-3190"
+    }
+  ],
+  "created_at_utc": "2026-09-20T09:45:08Z",
+  "evidence_catalog": [
+    {
+      "id": "partition_index",
+      "path": "G0/partition-index-20260920T073424Z/index.json",
+      "role": "accepted five-partition source index",
+      "sha256": "43cb2affeca84e59379844bcef1d53d7ead2e1b9596c36bb3554ec012d7c72ca"
+    },
+    {
+      "id": "partition_index_review",
+      "path": "G1/reviews/g0-partition-index-43cb-independent.md",
+      "role": "independent source-bookkeeping review",
+      "sha256": "6e5e95e01ceae0cc903575f9136e86c83249847ba412f4945210f000ed720b92"
+    },
+    {
+      "id": "raw_manifest",
+      "path": "G0/g0-run-metadata-capture-20260920T065449Z/raw-manifest.json",
+      "role": "frozen raw request/body/http/stderr manifest",
+      "sha256": "6cc98c2886ad23a72bd17cf72f0fb5cea9038da8f01090579360affe62d53637"
+    },
+    {
+      "id": "raw_review",
+      "path": "G1/reviews/g0-run-metadata-capture-6cc98-independent.md",
+      "role": "independent raw-capture review",
+      "sha256": "5b5545de1b398e3f263da87937ccbd823b8fb28b1ccff026aeb439dd82f43609"
+    },
+    {
+      "id": "identity_before",
+      "path": "G0/g0-run-metadata-capture-20260920T065449Z/identity/before.normalized.json",
+      "role": "32 opening identities",
+      "sha256": "d42f9da3030f4b5a9aa67209ea7f9e4359fad58c6f75eaa257f35d322639a2c9"
+    },
+    {
+      "id": "identity_after",
+      "path": "G0/g0-run-metadata-capture-20260920T065449Z/identity/after.normalized.json",
+      "role": "32 closing identities",
+      "sha256": "1416e6a49b57371029ad8e4f83d1c1a5166989924612c7ee3df474e744aa65d2"
+    },
+    {
+      "id": "reconciliation",
+      "path": "G0/g0-run-metadata-capture-20260920T065449Z/identity/reconciliation.json",
+      "role": "opening/closing identity comparison",
+      "sha256": "f3180f3398640e94f7dc5dcca3638148d823a72e13cafefbe748c4a661ec1405"
+    },
+    {
+      "id": "workflow_seeds",
+      "path": "G0/g0-run-metadata-capture-20260920T065449Z/seeds/workflow-sources.json",
+      "role": "source seed rows; bytes not complete raw objects",
+      "sha256": "21e04a8f461e1d13b0a81bfe3e0d2db2de0a56b928572eb92bb4bf6be90a16a5"
+    },
+    {
+      "id": "workflow_legacy_sample",
+      "path": "G0/fleet/g0-current-workflow-ruleset-raw-capture-20260920T051900Z/workflow-sources.ndjson",
+      "role": "older six-row sample; source bodies are directory-listing contamination",
+      "sha256": "baedd793d9225814d6d1f914aa0ad0058ac62d30c892a350734689531db46f01"
+    },
+    {
+      "id": "check_seeds",
+      "path": "G0/g0-run-metadata-capture-20260920T065449Z/seeds/check-targets.json",
+      "role": "172 check target seeds",
+      "sha256": "a7fba3d8c3a44e6f4d05fefd1a76579a0c0cc274ce04ab58132fc86bf10e08b5"
+    },
+    {
+      "id": "runs",
+      "path": "G0/g0-run-metadata-capture-20260920T065449Z/summary/run-observations.json",
+      "role": "392 historical run observations",
+      "sha256": "abb83e32b70ac00e16ab4b48d0f84165113d4811822433327b6ef06f30101359"
+    },
+    {
+      "id": "jobs",
+      "path": "G0/g0-run-metadata-capture-20260920T065449Z/summary/job-observations.json",
+      "role": "3882 historical job observations",
+      "sha256": "ed44e5833d7c9c18d9905d682a9cd0931d6558f394d463cb983fc1bc5df018e7"
+    },
+    {
+      "id": "attempts",
+      "path": "G0/g0-run-metadata-capture-20260920T065449Z/summary/attempt-observations.json",
+      "role": "392 run attempts; all observed attempt 1",
+      "sha256": "458b0f606bc93aab2a5a903fbe1f448b068710a56d0387f93f5dca507acafd8f"
+    },
+    {
+      "id": "child_graph",
+      "path": "G0/g0-run-metadata-capture-20260920T065449Z/summary/child-graph.json",
+      "role": "392 child graph observations",
+      "sha256": "0e8ba80815a2906899e468c53272e00f69f136b54a28e4c53e9f0b78f10f91ed"
+    },
+    {
+      "id": "artifacts",
+      "path": "G0/g0-run-metadata-capture-20260920T065449Z/summary/artifact-observations.json",
+      "role": "162 run-scoped artifact observations",
+      "sha256": "cf768b229ff1907c4c8fb6bd11ac07af81c8bbb8dbe958ac3477a4e9ed36a0cb"
+    },
+    {
+      "id": "model_metadata",
+      "path": "session.json",
+      "role": "session metadata; not typed model.session raw object",
+      "sha256": "11a07b8f3cd21aecc7731398409585b663047f5710090831046a40dd6440ab0b"
+    },
+    {
+      "id": "checker_ref",
+      "path": "dual-lane-checker:101aa26b849d507d6bdc702d55619bb830c65706",
+      "role": "reviewed checker interface commit",
+      "sha256": null
+    },
+    {
+      "id": "checker_head",
+      "path": "dual-lane-checker:2b042d26365ac8befb269fe264a5c1143baf66e0",
+      "role": "current checker worktree HEAD at audit",
+      "sha256": null
+    },
+    {
+      "id": "checker_contract",
+      "path": "dual-lane-checker/crates/velnor-tools/src/g0_contract.rs",
+      "role": "typed collector envelope",
+      "sha256": null
+    },
+    {
+      "id": "checker_evidence",
+      "path": "dual-lane-checker/crates/velnor-tools/src/evidence_check.rs",
+      "role": "ManifestDocument/SnapshotDocument types",
+      "sha256": null
+    },
+    {
+      "id": "mapper_ref",
+      "path": "g3-combined2:5c2877dd80c825a8cfa9438a004f0f5e141537c5",
+      "role": "reviewed mapper interface commit",
+      "sha256": null
+    },
+    {
+      "id": "mapper_head",
+      "path": "g3-combined2:6dd5cd28ddee3d8d3ecc87678eb421eb9ab2f9f0",
+      "role": "current mapper worktree HEAD at audit",
+      "sha256": null
+    },
+    {
+      "id": "mapper_source",
+      "path": "g3-combined2/crates/velnor-tools/src/g0_live_mapping.rs",
+      "role": "fail-closed mapping seam",
+      "sha256": null
+    },
+    {
+      "id": "mapper_review",
+      "path": "G0/runtime/live-collector-5c43daa48-review.md",
+      "role": "independent mapper review",
+      "sha256": "39dc8ecbf09530466267de8b4a6cd1f264821546adb6d8556bd30f38e3d12f74"
+    }
+  ],
+  "fields": [
+    {
+      "authoritative_evidence_refs": [
+        "partition_index",
+        "identity_before"
+      ],
+      "contract": "ManifestRepository",
+      "field": "repositories[].repository",
+      "join_key": "repository exact string in accepted 32-row set",
+      "status": "ready_source_fact"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "partition_index"
+      ],
+      "contract": "ManifestRepository",
+      "detail": "Partition categories are bookkeeping labels; do not cast them to checker roles.",
+      "field": "repositories[].repository_role",
+      "join_key": "partition_id/category \u2192 repository_role is not a canonical role mapping",
+      "missing_producer_task": "manifest-static-32",
+      "status": "partial_partition_only"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "identity_before"
+      ],
+      "contract": "ManifestRepository",
+      "detail": "All 32 normalized opening branches are main.",
+      "field": "repositories[].default_branch",
+      "join_key": "repository",
+      "missing_producer_task": "manifest-static-32",
+      "status": "ready_raw_observation"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "partition_index",
+        "identity_before",
+        "identity_after",
+        "reconciliation"
+      ],
+      "contract": "ManifestRepository",
+      "detail": "31/32 accepted SHAs equal opening raw SHA; tailrocks/velnor accepted d20d4d1 has no exact raw identity (opening 89f82dd, closing 58b5c812).",
+      "field": "repositories[].default_branch_sha",
+      "join_key": "repository + accepted SHA + opening/closing revision",
+      "missing_producer_task": "snapshot-identity-close",
+      "status": "blocked_join"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "partition_index"
+      ],
+      "contract": "ManifestRepository",
+      "detail": "194 IDs are source obligations only; actual_jobs stays null.",
+      "field": "repositories[].expected_workload_ids",
+      "join_key": "repository + partition source revision",
+      "missing_producer_task": "manifest-static-32",
+      "status": "ready_source_fact"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "partition_index",
+        "check_seeds"
+      ],
+      "contract": "ManifestRepository",
+      "detail": "No all-32 ruleset/detail/App-ID ledger in the frozen capture.",
+      "field": "repositories[].required_check_contexts_and_apps",
+      "join_key": "repository + ruleset revision + context + App ID",
+      "missing_producer_task": "ruleset-policy",
+      "status": "missing"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "partition_index"
+      ],
+      "contract": "ManifestRepository",
+      "detail": "Skills/Jackin artifacts provide partial typed plans; native/Rust/distribution are not one canonical machine shape.",
+      "field": "repositories[].workload_platform_architecture",
+      "join_key": "repository + workload ID",
+      "missing_producer_task": "manifest-static-32",
+      "status": "partial_partition_only"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "partition_index"
+      ],
+      "contract": "ManifestRepository",
+      "detail": "Skills 8 and Jackin 6 artifacts carry source-plan jobs; other partitions do not; none are observed jobs.",
+      "field": "repositories[].expected_jobs",
+      "join_key": "repository + workload ID + job ID",
+      "missing_producer_task": "manifest-static-32",
+      "status": "partial_partition_only"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "partition_index"
+      ],
+      "contract": "ManifestRepository",
+      "detail": "No canonical 32-row generator-plan digest.",
+      "field": "repositories[].generated_plan_digest",
+      "join_key": "repository + generator input revision",
+      "missing_producer_task": "manifest-static-32",
+      "status": "missing"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "workflow_seeds",
+        "workflow_legacy_sample",
+        "raw_manifest"
+      ],
+      "contract": "ManifestRepository",
+      "detail": "155 accepted-revision seed rows exist, but 0 valid immutable default workflow source bodies are retained in the reviewed raw capture.",
+      "field": "repositories[].workflow_path/revision",
+      "join_key": "repository + accepted revision + workflow path + immutable source bytes",
+      "missing_producer_task": "workflow-source-bytes",
+      "status": "blocked_join"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "partition_index"
+      ],
+      "contract": "ManifestRepository",
+      "detail": "Source contracts preserve eligibility language, not one checker-typed 32-row projection.",
+      "field": "repositories[].provider_eligibility",
+      "join_key": "repository + workload ID + provider",
+      "missing_producer_task": "manifest-static-32",
+      "status": "partial_partition_only"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "partition_index"
+      ],
+      "contract": "ManifestRepository",
+      "detail": "No canonical runner-kind/required/forbidden label rows.",
+      "field": "repositories[].host_contracts",
+      "join_key": "repository + provider + workload ID",
+      "missing_producer_task": "manifest-static-32",
+      "status": "missing"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "partition_index"
+      ],
+      "contract": "ManifestRepository",
+      "detail": "Distribution source rows describe obligations; no typed checker field across 32.",
+      "field": "repositories[].release_applicability",
+      "join_key": "repository + workload ID",
+      "missing_producer_task": "manifest-static-32",
+      "status": "partial_partition_only"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "partition_index"
+      ],
+      "contract": "ManifestRepository",
+      "detail": "No source contract supplies a complete generator revision for every repository.",
+      "field": "repositories[].generator_revision",
+      "join_key": "repository + generator epoch",
+      "missing_producer_task": "manifest-static-32",
+      "status": "missing"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "partition_index"
+      ],
+      "contract": "ManifestRepository",
+      "detail": "No product identity projection.",
+      "field": "repositories[].runtime_product_id",
+      "join_key": "repository + product namespace",
+      "missing_producer_task": "manifest-static-32",
+      "status": "missing"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "partition_index"
+      ],
+      "contract": "ManifestRepository",
+      "detail": "No immutable generator artifact digest for all rows.",
+      "field": "repositories[].generator_artifact_digest",
+      "join_key": "repository + generator artifact",
+      "missing_producer_task": "manifest-static-32",
+      "status": "missing"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "partition_index"
+      ],
+      "contract": "ManifestRepository",
+      "detail": "Partition facts contain selected source blobs but not canonical config digests for all rows.",
+      "field": "repositories[].configuration_digest",
+      "join_key": "repository + config path/blob",
+      "missing_producer_task": "manifest-static-32",
+      "status": "missing"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "partition_index"
+      ],
+      "contract": "ManifestRepository",
+      "detail": "No generated-tree digest across 32.",
+      "field": "repositories[].generated_tree_digest",
+      "join_key": "repository + accepted revision",
+      "missing_producer_task": "manifest-static-32",
+      "status": "missing"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "partition_index"
+      ],
+      "contract": "ManifestRepository",
+      "detail": "No scanner-state digest.",
+      "field": "repositories[].scan_state_digest",
+      "join_key": "repository + scan state",
+      "missing_producer_task": "manifest-static-32",
+      "status": "missing"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "partition_index"
+      ],
+      "contract": "ManifestRepository",
+      "detail": "No typed runtime release version.",
+      "field": "repositories[].runtime_release_version",
+      "join_key": "repository + runtime product",
+      "missing_producer_task": "manifest-static-32",
+      "status": "missing"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "partition_index"
+      ],
+      "contract": "ManifestRepository",
+      "detail": "No typed runtime source SHA.",
+      "field": "repositories[].runtime_source_sha",
+      "join_key": "repository + runtime source",
+      "missing_producer_task": "manifest-static-32",
+      "status": "missing"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "partition_index"
+      ],
+      "contract": "ManifestRepository",
+      "detail": "No canonical image digest.",
+      "field": "repositories[].job_image_digest",
+      "join_key": "repository + workload/job image",
+      "missing_producer_task": "manifest-static-32",
+      "status": "missing"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "identity_before"
+      ],
+      "contract": "SnapshotRepository",
+      "detail": "32 IDs are present in raw repository bodies; no typed G0 raw-object/CAS bindings yet.",
+      "field": "repositories[].repository_id",
+      "join_key": "repository + raw repository body",
+      "missing_producer_task": "raw-object-binding",
+      "status": "ready_raw_observation"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "check_seeds",
+        "raw_manifest"
+      ],
+      "contract": "SnapshotRepository",
+      "detail": "Current full capture has no ruleset phase; adjacent older sample is not all-32.",
+      "field": "repositories[].ruleset",
+      "join_key": "repository + ruleset ID + raw list/detail bodies",
+      "missing_producer_task": "ruleset-policy",
+      "status": "missing"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "workflow_seeds",
+        "workflow_legacy_sample",
+        "raw_manifest"
+      ],
+      "contract": "SnapshotRepository",
+      "detail": "Seed metadata is not an immutable workflow source object; directory-body contamination must be rejected.",
+      "field": "repositories[].workflows",
+      "join_key": "repository + accepted revision + path + source bytes + raw refs",
+      "missing_producer_task": "workflow-source-bytes",
+      "status": "blocked_join"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "runs",
+        "attempts",
+        "child_graph"
+      ],
+      "contract": "SnapshotRepository",
+      "detail": "185 historical run observations at accepted head span 20 repos; no all-32 current-main proof or actual checkout SHA.",
+      "field": "repositories[].main_executions",
+      "join_key": "repository + event + accepted source SHA + run attempt + checkout proof",
+      "missing_producer_task": "run-role-and-checkout-proof",
+      "status": "partial_raw_only"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "identity_before",
+        "identity_after"
+      ],
+      "contract": "SnapshotRepository",
+      "detail": "Normalized 32-row identity has basic PR refs; typed full PR/trust/workflow/check bindings are absent.",
+      "field": "repositories[].open_prs",
+      "join_key": "repository + PR number + head/base/merge + trust/applicability",
+      "missing_producer_task": "open-pr-typed",
+      "status": "partial_raw_only"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "jobs",
+        "runs",
+        "child_graph"
+      ],
+      "contract": "SnapshotRepository",
+      "detail": "3882 historical jobs/checks are not current typed main executions.",
+      "field": "repositories[].main_executions[].jobs/checks",
+      "join_key": "run ID + attempt + job/check ID + provider + source/checkout SHA",
+      "missing_producer_task": "check-app-association",
+      "status": "partial_raw_only"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "artifacts",
+        "runs"
+      ],
+      "contract": "G0RepositoryInventory",
+      "detail": "162 rows have run-scoped metadata; API list does not provide attempt identity; mapper rejects unknown attempt.",
+      "field": "repositories[].artifacts",
+      "join_key": "artifact ID + run ID + run attempt + exact archive raw object",
+      "missing_producer_task": "artifact-attempt-binding",
+      "status": "blocked_join"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "check_seeds",
+        "runs",
+        "jobs"
+      ],
+      "contract": "G0CheckProducer",
+      "detail": "Fresh check pages exist for 31 accepted revisions; they are not mapped to typed provider/check-out evidence.",
+      "field": "main_checks / PR required_check_producers",
+      "join_key": "context + App ID + suite/run/job + event + source SHA + checkout SHA",
+      "missing_producer_task": "check-app-association",
+      "status": "partial_raw_only"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "identity_before",
+        "identity_after",
+        "reconciliation"
+      ],
+      "contract": "G0RevisionReconciliation",
+      "detail": "same_identity=false; default heads changed for homebrew-tap and Velnor, with PR churn.",
+      "field": "reconciliation.pre_state/post_state/invalidated",
+      "join_key": "repository + default SHA + complete PR set before/after",
+      "missing_producer_task": "snapshot-identity-close",
+      "status": "blocked_join"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "partition_index"
+      ],
+      "contract": "G0DependencyGraph",
+      "detail": "Skills/Jackin edge IDs exist; distribution has 14 edge rows without IDs; native/Rust lack machine per-repo graph rows.",
+      "field": "dependency_graph.nodes/edges",
+      "join_key": "node/edge ID + source/target revision + raw source refs",
+      "missing_producer_task": "dependency-graph-canonicalization",
+      "status": "partial_partition_only"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "model_metadata"
+      ],
+      "contract": "G0ModelSession",
+      "detail": "session.json proves Astra/low and Luna/max metadata; mapper accepts only a bound model.session raw object.",
+      "field": "model_session",
+      "join_key": "typed model.session raw ID + safe bytes + raw binding",
+      "missing_producer_task": "model-session-raw-object",
+      "status": "metadata_only"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "partition_index"
+      ],
+      "contract": "G0ArtifactReference",
+      "detail": "Partition source contract files are not collector-bound workload.artifact objects.",
+      "field": "workload_artifact",
+      "join_key": "typed workload.artifact raw ID + immutable CAS bytes",
+      "missing_producer_task": "workload-artifact-cas",
+      "status": "partial_partition_only"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "raw_manifest",
+        "identity_before"
+      ],
+      "contract": "G0AccessObservation/G0RateLimitObservation",
+      "detail": "Raw auth/request material exists; no typed collector envelope with complete access/rate-limit refs.",
+      "field": "access/rate_limit",
+      "join_key": "auth viewer/scopes/rate-limit object + raw refs",
+      "missing_producer_task": "access-rate-limit-typed",
+      "status": "partial_raw_only"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "raw_manifest",
+        "raw_review"
+      ],
+      "contract": "G0RequestRecord/G0RawObjectRef",
+      "detail": "Manifest proves 2335 triplets and hashes, but no G0 typed snapshot/CAS object bindings.",
+      "field": "requests/raw_objects",
+      "join_key": "request ID + exact query/variables + response/original bytes + immutable storage refs",
+      "missing_producer_task": "raw-object-cas-binding",
+      "status": "partial_raw_only"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "raw_manifest"
+      ],
+      "contract": "G0InventoryEvidence",
+      "detail": "No collector-owned canonical G0 snapshot bytes or CAS storage ref.",
+      "field": "collector_snapshot_bytes/storage_ref",
+      "join_key": "canonical snapshot bytes digest + content-addressed storage ref",
+      "missing_producer_task": "canonical-snapshot-cas",
+      "status": "missing"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "workflow_seeds",
+        "workflow_legacy_sample",
+        "raw_manifest"
+      ],
+      "contract": "G0WorkflowSource",
+      "detail": "No accepted-source default closure with recursively bound reusable/action/scanner bytes.",
+      "field": "workflow source/dependencies",
+      "join_key": "repository/path/revision/source SHA + exact bytes/raw refs",
+      "missing_producer_task": "workflow-source-closure",
+      "status": "missing"
+    },
+    {
+      "authoritative_evidence_refs": [
+        "runs",
+        "jobs",
+        "child_graph"
+      ],
+      "contract": "ExecutionObservation",
+      "detail": "Capture has API heads and runner labels in historical rows but no checkout attestation; API head is not accepted as proof.",
+      "field": "runner_identity/actual_checkout_sha",
+      "join_key": "run/job ID + proof raw refs + actual checkout SHA",
+      "missing_producer_task": "checkout-proof",
+      "status": "missing"
+    }
+  ],
+  "gate_use": "not_gate_input",
+  "join_assertions": [
+    {
+      "detail": "32 exact unique repositories; five disjoint partitions (8/6/6/7/5).",
+      "join": "accepted index \u2194 goal fixed manifest",
+      "refs": [
+        "partition_index",
+        "partition_index_review"
+      ],
+      "result": "pass"
+    },
+    {
+      "detail": "194 expected workload IDs; 32/32 actual_jobs are null.",
+      "join": "accepted index \u2194 source workload totals",
+      "refs": [
+        "partition_index",
+        "partition_index_review"
+      ],
+      "result": "pass_source_only"
+    },
+    {
+      "detail": "31 accepted default SHAs equal identity-before; Velnor is d20d4d1 vs raw opening 89f82dd.",
+      "join": "accepted index \u2194 opening raw identities",
+      "refs": [
+        "partition_index",
+        "identity_before"
+      ],
+      "result": "31_of_32_exact"
+    },
+    {
+      "detail": "32 rows each; same_identity=false; default head changes homebrew-tap and Velnor; PR churn also present.",
+      "join": "opening \u2194 closing identity",
+      "refs": [
+        "identity_before",
+        "identity_after",
+        "reconciliation"
+      ],
+      "result": "blocked_churn"
+    },
+    {
+      "detail": "31 accepted source revisions have check target/body seed; Velnor only has raw-before 89f82dd target.",
+      "join": "accepted index \u2194 default check target",
+      "refs": [
+        "partition_index",
+        "check_seeds",
+        "raw_manifest"
+      ],
+      "result": "31_of_32_exact"
+    },
+    {
+      "detail": "155 seed rows at accepted revisions; no valid immutable default workflow bodies retained. Six older sample bodies are directory listings, not YAML source.",
+      "join": "accepted default workflow seed \u2194 immutable source bytes",
+      "refs": [
+        "workflow_seeds",
+        "workflow_legacy_sample",
+        "raw_manifest"
+      ],
+      "result": "0_verified_bytes"
+    },
+    {
+      "detail": "185 historical run observations at accepted head across 20 repos; not current-main or checkout proof.",
+      "join": "accepted source SHA \u2194 run observations",
+      "refs": [
+        "runs",
+        "attempts",
+        "child_graph"
+      ],
+      "result": "20_of_32_raw_head_observed"
+    },
+    {
+      "detail": "Skills/Jackin have typed source-plan subsets; native/Rust narrative and distribution edge/schema gaps prevent all-32 canonical rows.",
+      "join": "partition artifact \u2194 checker Manifest/Snapshot schema",
+      "refs": [
+        "partition_index",
+        "partition_index_review"
+      ],
+      "result": "partial_only"
+    },
+    {
+      "detail": "Astra/low and Luna/max are recorded, but no collector-owned model.session raw object.",
+      "join": "session metadata \u2194 mapper model seam",
+      "refs": [
+        "model_metadata",
+        "mapper_source"
+      ],
+      "result": "metadata_only"
+    },
+    {
+      "detail": "No canonical snapshot bytes/CAS, exact source closure, rulesets/App IDs, attempt-bound artifacts, or checkout proof.",
+      "join": "raw capture \u2194 checker/mapper authoritative envelope",
+      "refs": [
+        "raw_manifest",
+        "checker_contract",
+        "mapper_source"
+      ],
+      "result": "blocked"
+    }
+  ],
+  "missing_producer_tasks": [
+    {
+      "blocker": "current same_identity=false and Velnor accepted SHA mismatch",
+      "id": "snapshot-identity-close",
+      "output": "fresh 32-row opening/closing identity with stable accepted revisions and typed reconciliation",
+      "owner": "G0 collector/fleet"
+    },
+    {
+      "blocker": "155 seeds; 0 valid retained immutable default bodies",
+      "id": "workflow-source-bytes",
+      "output": "exact default workflow directory and source bodies at each accepted SHA, including typed 404s",
+      "owner": "G0 raw collector"
+    },
+    {
+      "blocker": "checker G0WorkflowSource requires exact bytes and raw refs",
+      "id": "workflow-source-closure",
+      "output": "recursive reusable workflow/action/scanner source bytes with revision/raw bindings",
+      "owner": "G0 raw collector"
+    },
+    {
+      "blocker": "no all-32 ruleset phase in frozen capture",
+      "id": "ruleset-policy",
+      "output": "all-32 ruleset list/detail pages, required contexts, App IDs, complete pagination",
+      "owner": "G0 raw collector"
+    },
+    {
+      "blocker": "partition schemas only partial; no canonical generator/runtime/config/image fields",
+      "id": "manifest-static-32",
+      "output": "one typed ManifestDocument with all 32 rows and explicit unknown/not-applicable states",
+      "owner": "mapper/checker"
+    },
+    {
+      "blocker": "historical run heads are not checkout attestations",
+      "id": "run-role-and-checkout-proof",
+      "output": "current-main event/run/attempt rows with actual checkout proof and runner identity",
+      "owner": "G0 run collector"
+    },
+    {
+      "blocker": "fresh check pages are raw pages, not typed producer rows",
+      "id": "check-app-association",
+      "output": "typed check producers bound to App/suite/run/job/event/source+checkout SHA",
+      "owner": "G0 run collector/checker"
+    },
+    {
+      "blocker": "run-scoped API rows lack attempt identity; mapper rejects unknown",
+      "id": "artifact-attempt-binding",
+      "output": "artifact member selection plus run-attempt/archive raw refs",
+      "owner": "G0 run collector"
+    },
+    {
+      "blocker": "native/Rust no machine per-repo rows; distribution 14 edge rows lack IDs",
+      "id": "dependency-graph-canonicalization",
+      "output": "all-32 machine graph nodes/edges with stable IDs and source/target refs",
+      "owner": "partition owners/mapper"
+    },
+    {
+      "blocker": "session.json is metadata evidence only",
+      "id": "model-session-raw-object",
+      "output": "typed model.session raw object bound to immutable bytes",
+      "owner": "session collector"
+    },
+    {
+      "blocker": "partition contract files are not collector raw objects",
+      "id": "workload-artifact-cas",
+      "output": "typed workload.artifact raw object and immutable CAS binding",
+      "owner": "partition owners/mapper"
+    },
+    {
+      "blocker": "raw material not assembled into G0 envelope",
+      "id": "access-rate-limit-typed",
+      "output": "typed auth/access/rate-limit records with raw refs",
+      "owner": "G0 raw collector"
+    },
+    {
+      "blocker": "manifest hashes do not provide G0 raw-object bindings",
+      "id": "raw-object-cas-binding",
+      "output": "typed request/raw object ledger with safe/original bytes and CAS refs",
+      "owner": "G0 raw collector"
+    },
+    {
+      "blocker": "no collector-owned canonical snapshot object",
+      "id": "canonical-snapshot-cas",
+      "output": "canonical G0 snapshot bytes, digest, and content-addressed storage ref",
+      "owner": "G0 collector/mapper"
+    }
+  ],
+  "scope": {
+    "actual_jobs": "null_for_all_32",
+    "expected_workload_id_count": 194,
+    "partition_count": 5,
+    "repository_count": 32
+  },
+  "status": "source_snapshot_gap_audit_not_gate"
+}

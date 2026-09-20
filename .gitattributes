@@ -11,3 +11,6 @@ evidence/github-first-dual-lane/updates/**/reports/G0/g0-run-metadata-capture-*/
 # The bounded fixture supplement and PR snapshot retain raw HTTP/API bytes.
 evidence/github-first-dual-lane/updates/**/reports/G0/real-api-fixture-supplement-*/raw/** -text -filter
 evidence/github-first-dual-lane/updates/**/reports/G0/fleet/20260920T093002Z/** -text -filter
+# This checkpoint preserves the complete immutable workflow/API inventory and
+# all selected report bytes exactly; disable text conversion for every member.
+evidence/github-first-dual-lane/updates/20260920T110300Z/reports/** -text -filter

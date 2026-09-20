@@ -1,0 +1,52 @@
+{
+  "schema": "dual-lane/dependency-graph-delta/v1",
+  "captured_at_utc": "2026-09-20T10:29:57Z",
+  "delta_only": true,
+  "parent_graph": {
+    "path": "G1/dependency-graph-refresh-20260920T085949Z/dependency-graph.json",
+    "sha256": "7e4c671318e7dc8708653546447f5fee06ac12ddc29af08e7c9a069ebfb7024e"
+  },
+  "previous_delta": {
+    "path": "G1/dependency-graph-refresh-20260920T085949Z/delta-20260920T102040Z.json",
+    "sha256": "dd18bf0c60c4cee1c47f8e5fdb4048c84c9ac3f70d846459192bf88e5807087e"
+  },
+  "change": {
+    "kind": "authoritative_remote_main_refresh",
+    "repository": "tailrocks/velnor",
+    "remote_main_sha": "9e5c0eb215d4169578d6f064806e89fe4c793e85",
+    "generator_contract": 54,
+    "generator_pin": "4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d",
+    "generator_pin_subject": "fix(workflow): make generated sccache env shellcheck-clean",
+    "evidence": {
+      "path": "G1/integration/source-integration-readiness-f6-vs-main-20260920.json",
+      "sha256": "dcdfb99cf9a076ac9cf53c71ace73bae82ae144a7c4f9565e95c7fdf8224b09d"
+    },
+    "observation": "g0_fleet read-only refresh; no fetch, merge, push, dispatch, release, authority, or source mutation"
+  },
+  "historical_correction": {
+    "old_generator_pin": "0dc79895ff1c5e88be7c3822c437e1c5b5282e12",
+    "status": "historical_only",
+    "reason": "The prior 0dc immutable-deadlock diagnosis is not the current-main generator baseline. Do not infer that the new pin is valid for publication or adoption without measured product, attestation, closure, policy, and current-CI proof."
+  },
+  "dependency_effect": {
+    "validator_admission_probe": "active_pending",
+    "required_measurements": [
+      "published runtime/product identity and immutable closure",
+      "attestation and raw artifact binding",
+      "policy acceptance of current xcode-27/native matrix",
+      "current-main CI and required-child terminal census"
+    ],
+    "integration": "Local main merge may preserve the current pin only after owner coordination and exact-tree review; no PR merge or authority mutation was performed.",
+    "gates": {
+      "G0": "not_passed",
+      "G1": "not_passed",
+      "G2": "not_passed",
+      "G3": "not_passed",
+      "G4": "not_passed",
+      "G5": "not_passed",
+      "G6": "not_passed",
+      "G7": "not_passed"
+    }
+  },
+  "claim_boundary": "This delta corrects the current-main baseline only. It is not admission, publication, package verification, fleet verification, authority approval, or completion evidence."
+}

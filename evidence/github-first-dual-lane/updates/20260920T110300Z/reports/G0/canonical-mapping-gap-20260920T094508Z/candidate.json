@@ -1,0 +1,65 @@
+{
+  "$schema": "g0-source-snapshot-candidate.v1",
+  "artifact_kind": "g0_actual32_source_snapshot_candidate",
+  "created_at_utc": "2026-09-20T09:45:08Z",
+  "status": "blocked_no_checker_candidate",
+  "schema_match": false,
+  "gate_use": "not_gate_input",
+  "candidate_for_checker": null,
+  "scope": {
+    "repository_count": 32,
+    "partition_count": 5,
+    "expected_workload_id_count": 194,
+    "actual_jobs": null,
+    "actual_checks": null
+  },
+  "ready_rows": {
+    "path": "ready-rows.ndjson",
+    "count": 32,
+    "schema": "g0-source-row.v1",
+    "semantics": "source and raw-observation joins only; not ManifestDocument, SnapshotDocument, or G0CollectorSnapshot"
+  },
+  "ready_field_set": [
+    "repository",
+    "partition_id",
+    "category",
+    "default_branch",
+    "accepted_default_branch_sha",
+    "repository_id",
+    "expected_workload_ids",
+    "source_tree_entry_count_when_partition_supplied",
+    "source_tree_listing_sha256_when_partition_supplied",
+    "actual_jobs:null"
+  ],
+  "join_results": {
+    "accepted_index_to_opening_identity": "31/32_exact",
+    "accepted_index_to_default_check_target": "31/32_exact",
+    "opening_to_closing_identity": "blocked_same_identity_false",
+    "accepted_default_workflow_source_bytes": "0_verified",
+    "accepted_head_raw_run_observations": "20/32_repositories; historical_raw_only"
+  },
+  "blocked_schema_contracts": [
+    {
+      "contract": "ManifestDocument",
+      "reason": "all-32 required contexts/apps, expected_jobs, provider/host/release/runtime/digest fields are not canonically joined"
+    },
+    {
+      "contract": "SnapshotDocument",
+      "reason": "rulesets, immutable accepted-source workflows, typed current executions/checks, and checkout proof are incomplete"
+    },
+    {
+      "contract": "G0CollectorSnapshot",
+      "reason": "no typed canonical snapshot/CAS, model.session raw object, workload.artifact raw object, artifact attempt binding, or stable reconciliation"
+    }
+  ],
+  "explicit_non_claims": [
+    "Partition expected workload IDs are not actual jobs.",
+    "Raw check page item counts are not typed check producers.",
+    "Historical run/job/check rows are not current-main execution success.",
+    "API head SHA is not actual checkout proof.",
+    "No workflow body is synthesized from a directory listing or a seed row.",
+    "No unknown, absent, 404, churn, or unproven state is converted to success."
+  ],
+  "field_ledger": "field-join-ledger.json",
+  "producer_tasks": "field-join-ledger.json#/missing_producer_tasks"
+}

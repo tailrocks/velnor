@@ -1,0 +1,285 @@
+{
+  "schema": "g1/source-integration-readiness/v1",
+  "observed_at_utc": "2026-09-20T10:21:40Z",
+  "claim_boundary": "Read-only comparison. No merge, rebase, push, generated-tree adoption, workflow dispatch, pin change, or source mutation occurred.",
+  "authority_boundary": {
+    "old_checker": "unchanged; no checker authority or gate contract was modified or evaluated as passed",
+    "generated_tree": "current main only; f6 generated/draft output excluded",
+    "gate_claim": "none"
+  },
+  "comparison": {
+    "repository": "tailrocks/velnor",
+    "main_ref": "refs/remotes/origin/main",
+    "main_sha_start": "9e5c0eb215d4169578d6f064806e89fe4c793e85",
+    "main_sha_end": "9e5c0eb215d4169578d6f064806e89fe4c793e85",
+    "main_moved_during_comparison": false,
+    "source_integration_ref": "refs/remotes/origin/codex/github-first-source-integration",
+    "source_integration_sha": "f6cb27c4606103d0c879bbc60a6a060911ce7b91",
+    "source_integration_remote_sha": "f6cb27c4606103d0c879bbc60a6a060911ce7b91",
+    "merge_base": "89f82dd8b287f46a3cf4c0920f341f6ca6c736db",
+    "status": "diverged",
+    "main_ahead_from_merge_base_commits": 5,
+    "source_integration_ahead_from_merge_base_commits": 28,
+    "main_changed_paths_from_merge_base": 54,
+    "source_integration_changed_paths_from_merge_base": 35,
+    "shared_changed_paths": 10,
+    "source_integration_only_paths": 25,
+    "main_only_paths": 44,
+    "historical_boundary": "All statements are bounded to main 9e5c0eb and source-integration f6cb27c. A new main or source head invalidates this map. Merge base 89f82dd is the common historical boundary."
+  },
+  "method": {
+    "live_refresh": "git ls-remote origin refs/heads/main and refs/heads/codex/github-first-source-integration",
+    "access": {
+      "origin_main_read": "success",
+      "source_integration_read": "success",
+      "temporary_compare_read": "success",
+      "access_blocker": null
+    },
+    "canonical_source_worktree": {
+      "path": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-source-integration",
+      "status": "clean",
+      "branch": "codex/github-first-source-integration"
+    },
+    "temporary_compare_repo": "/private/tmp/g1-main-compare.OjkTO3",
+    "temporary_refs": [
+      "refs/remotes/origin/main",
+      "refs/remotes/origin/codex/github-first-source-integration"
+    ],
+    "merge_tree_sha": "c6dbb8dace01b9a84ec169ad9142d9fe6995a40e2",
+    "merge_tree_result": "Auto-merged; no textual conflict records. This is a disposable merge-tree result, not an integration commit or approval."
+  },
+  "current_main_commits_not_in_f6": [
+    {
+      "sha": "58b5c8122bb7aa2c0431dfea64bd7daf50c55624",
+      "subject": "fix(workflow): close package publication transactions"
+    },
+    {
+      "sha": "e717de39b97558117e7e4f55c20216c8a4e4b1fc",
+      "subject": "fix(ci): avoid Mr. Boxington import quota failures"
+    },
+    {
+      "sha": "9307861d2668424d27012c3c736d48ab47f9012e",
+      "subject": "fix(workflow): scope package-release shell fragments"
+    },
+    {
+      "sha": "4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d",
+      "subject": "fix(workflow): make generated sccache env shellcheck-clean"
+    },
+    {
+      "sha": "9e5c0eb215d4169578d6f064806e89fe4c793e85",
+      "subject": "chore(ci): promote generated tree after #970/#971 (#972)"
+    }
+  ],
+  "f6_commits_not_patch_equivalent_to_current_main": [
+    {"sha": "d5a709ff73e253215579b13345f5d15af019cfe8", "subject": "fix(audit): bind estate scope to fixed fleet"},
+    {"sha": "9a45fb2a6ba28c0535fc82aee1ea12e9424f9df4", "subject": "fix(audit): bind auxiliary concern contract"},
+    {"sha": "3e1f14f47d788f9b5838efadb5f54ec152dd2591", "subject": "fix(audit): reject unknown estate fields"},
+    {"sha": "1b820d792e900a86ca3d50f1e34e3985e7551f0e", "subject": "fix(audit): separate fixed scope from auxiliary metadata"},
+    {"sha": "448cfec9c408598d42f47ee40d44067c088b3f8d", "subject": "test(audit): cover accepted concern execution"},
+    {"sha": "cee1b5c77e67f41538c91abe98108b86359d3be9", "subject": "fix(audit): bind estate concerns to accepted plan"},
+    {"sha": "3c7a732f26c77fa5c3e9cc58a2233c52440ce469", "subject": "fix(audit): reject duplicate estate JSON keys"},
+    {"sha": "b38d67bfebf7e9c2f29201d23ebaad435013e9bb", "subject": "fix(workflow): scan static Rust include paths"},
+    {"sha": "6785804c9b48fe57bb96ec81c9aad4277c210827", "subject": "fix(workflow): parse Rust includes structurally"},
+    {"sha": "643cca9dc66b79d0e7ad975e69158e2d187a2ae1", "subject": "fix(workflow): harden Rust include boundaries"},
+    {"sha": "eb86ad2cf0706efc44738d98a504782acac65910", "subject": "fix(workflow): detect field include macros"},
+    {"sha": "4ee8ab4b454fd674558d892511f38cf5365aba47", "subject": "docs: require current pinned toolchain policy"},
+    {"sha": "22716b09d3b9e092dcafb72fab76915d1d454d5f", "subject": "fix(scan): route Apple-bound Swift packages natively"},
+    {"sha": "14a71912354c180c06575d160fec51ad190ab6ac", "subject": "feat(native): add typed hosted Apple contract (WIP)"},
+    {"sha": "baaab42789805318246c6d36778a24f6ce81d750", "subject": "fix(native): harden typed Apple contract and Swift scan"},
+    {"sha": "f557d070df2c1f94856cc70063f6489c1a7b9b59", "subject": "test(native): verify preflight and native fixture contracts"},
+    {"sha": "9fd7c39485bb03757f095638bbb3de136b12a2a2", "subject": "test(native): align verified Apple routing contracts"},
+    {"sha": "de3b52a97bdd6747e32f8e8fe828ecfd7cccc1b1", "subject": "fix(native): reject stale Apple facts and SDK collapse"},
+    {"sha": "00dea2a34b3eebf2476f423c87146d49664bdc7c", "subject": "feat(native): route verified latest Apple host"},
+    {"sha": "8bd5cc52583537ba8d6ef6a3b5b2e3b8f0acfe41", "subject": "test(native): align latest Apple runner fixtures"},
+    {"sha": "a76ab99f520bc8b029d177052e1349c75552065d", "subject": "chore(native): satisfy strict policy lint"},
+    {"sha": "7a3a1bb9799df7acb703b3d54a0aa12b84ad7a68", "subject": "test(native): use central Apple runner selector"},
+    {"sha": "49901c472dc629e1dae2bf864f627a393295f812", "subject": "fix(native): enforce latest Apple host contract"},
+    {"sha": "471cf1d9ce4df581833187918aac13cbc7a130ed", "subject": "fix(native): resolve scanner module overlap"},
+    {"sha": "ad1037e05ead5c21ab667245688fe76da7877b3c", "subject": "test(native): align latest Apple selector assertions"},
+    {"sha": "24e62277fafe0a2b63885d1bafed60f2e756daf", "subject": "style(native): format selector resolution"},
+    {"sha": "04b51d761c5a08ebd9626fe74bb2c6c3e66370e8", "subject": "fix(native): route legacy runtime products through Apple authority"},
+    {"sha": "f6cb27c4606103d0c879bbc60a6a060911ce7b91", "subject": "test(native): pin current runtime product render"}
+  ],
+  "generator_boundary": {
+    "current_main_generator_pin": "4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d",
+    "current_main_generator_contract": "54",
+    "f6_generator_pin": "0dc79895ff1c5e88be7c3822c437e1c5b5282e12",
+    "f6_generator_contract": "53",
+    "rule": "Current main's generated tree, .github-gen pin, and contract 54 remain authoritative for this comparison. Do not copy f6 generated output, adopt its pin, or hand-edit generated files. Any render/pin/publication transition is a separate generator-owner task."
+  },
+  "path_units": {
+    "estate": {
+      "status": "source-only unique to f6; no path overlap with current main",
+      "paths": [
+        "config/estate-repositories.json",
+        "crates/velnor-tools/src/audit_ci.rs",
+        "crates/velnor-tools/tests/estate_concern_authority_cli.rs"
+      ],
+      "commits": ["d5a709ff73e253215579b13345f5d15af019cfe8", "9a45fb2a6ba28c0535fc82aee1ea12e9424f9df4", "3e1f14f47d788f9b5838efadb5f54ec152dd2591", "1b820d792e900a86ca3d50f1e34e3985e7551f0e", "448cfec9c408598d42f47ee40d44067c088b3f8d", "cee1b5c77e67f41538c91abe98108b86359d3be9", "3c7a732f26c77fa5c3e9cc58a2233c52440ce469"],
+      "reuse": "Carry the reviewed exact-32 fixed-scope and accepted-concern-plan source unit. Preserve old checker authority; re-run CLI and source tests on current main."
+    },
+    "rust_scanner": {
+      "status": "source-only unique to f6; no path overlap with current main",
+      "paths": [
+        "crates/velnor-workflow/src/rust_include.rs",
+        "crates/velnor-workflow/src/scan/mod.rs",
+        "crates/velnor-workflow/src/scan/rust.rs",
+        "crates/velnor-workflow/src/s2/scan/mod.rs",
+        "crates/velnor-workflow/src/s2/scan/rust.rs"
+      ],
+      "commits": ["b38d67bfebf7e9c2f29201d23ebaad435013e9bb", "6785804c9b48fe57bb96ec81c9aad4277c210827", "643cca9dc66b79d0e7ad975e69158e2d187a2ae1", "eb86ad2cf0706efc44738d98a504782acac65910"],
+      "reuse": "Carry structural Rust include parsing and boundary checks. Re-run scanner, symlink/closure, and relevant workspace tests against main's current runtime/closure changes."
+    },
+    "apple_native": {
+      "status": "source-only direct paths are unique to f6; shared workflow paths require semantic reconciliation; native review was changes-required",
+      "paths": [
+        "crates/velnor-workflow/src/native_contract.rs",
+        "crates/velnor-workflow/src/platform.rs",
+        "crates/velnor-workflow/src/s2/platform.rs",
+        "crates/velnor-workflow/src/s2/provider.rs",
+        "crates/velnor-workflow/src/s2/primitives/check_profiles.rs",
+        "crates/velnor-workflow/src/scan/swift.rs",
+        "crates/velnor-workflow/src/s2/scan/swift.rs",
+        "crates/velnor-workflow/src/swift_capability.rs",
+        "crates/velnor-workflow/src/primitives/runtime_products.rs",
+        "crates/velnor-workflow/src/s2/tui/view.rs",
+        "crates/velnor-workflow/src/tui/view.rs"
+      ],
+      "commits": ["22716b09d3b9e092dcafb72fab76915d1d454d5f", "14a71912354c180c06575d160fec51ad190ab6ac", "baaab42789805318246c6d36778a24f6ce81d750", "f557d070df2c1f94856cc70063f6489c1a7b9b59", "9fd7c39485bb03757f095638bbb3de136b12a2a2", "de3b52a97bdd6747e32f8e8fe828ecfd7cccc1b1", "00dea2a34b3eebf2476f423c87146d49664bdc7c", "8bd5cc52583537ba8d6ef6a3b5b2e3b8f0acfe41", "a76ab99f520bc8b029d177052e1349c75552065d", "7a3a1bb9799df7acb703b3d54a0aa12b84ad7a68", "49901c472dc629e1dae2bf864f627a393295f812", "471cf1d9ce4df581833187918aac13cbc7a130ed", "ad1037e05ead5c21ab667245688fe76da7877b3c", "24e62277fafe0a2b63885d1bafed60f2e756daf", "04b51d761c5a08ebd9626fe74bb2c6c3e66370e8", "f6cb27c4606103d0c879bbc60a6a060911ce7b91"],
+      "reuse": "Retain current main's package/publication, sccache, unique-suffix, and generator-contract changes in shared files; carry f6's typed Apple authority and legacy runtime mapping only after focused native review. Do not treat generated drift or the old f6 pin as native approval."
+    },
+    "root_agents": {
+      "status": "source-only unique to f6",
+      "paths": ["AGENTS.md"],
+      "commit": "4ee8ab4b454fd674558d892511f38cf5365aba47",
+      "reuse": "Carry the two concise latest-version and highest-actual-macOS-major policy paragraphs; preserve existing project rules and do not copy generated AGENTS files."
+    },
+    "supporting_f6_only": {
+      "paths": [
+        "Cargo.lock",
+        "Cargo.toml",
+        "crates/velnor-workflow/Cargo.toml",
+        "crates/velnor-workflow/src/config/mod.rs",
+        "crates/velnor-workflow/tests/platform_prerequisites.rs"
+      ],
+      "note": "Carry only where required by the reviewed source units; re-resolve dependency lock/config changes from current main."
+    }
+  },
+  "shared_path_conflict_owners": [
+    {
+      "path": "crates/velnor-workflow/src/lib.rs",
+      "main_changes": "Generator contract 54 and current main generator/runtime constants; current main e717 ancestry also carries current CI action pins.",
+      "f6_changes": "Apple native module declarations and selector authority; f6 still records contract 53.",
+      "resolution": "Main contract 54 and main constants win; retain f6 native declarations/exports. Re-run native and generator-contract tests."
+    },
+    {
+      "path": "crates/velnor-workflow/src/primitives/ir.rs",
+      "main_changes": "4fa sccache environment shellcheck-safe grouping.",
+      "f6_changes": "Native-chain fixture/render additions.",
+      "resolution": "Keep main sccache grouping; preserve f6 native fixture behavior."
+    },
+    {
+      "path": "crates/velnor-workflow/src/s2/primitives/ir.rs",
+      "main_changes": "4fa sccache environment shellcheck-safe grouping.",
+      "f6_changes": "Latest Apple selector/render fixture additions.",
+      "resolution": "Keep main sccache grouping; re-run S2 native render tests."
+    },
+    {
+      "path": "crates/velnor-workflow/src/primitives/release.rs",
+      "main_changes": "Current main package-release transaction and release-side fixes.",
+      "f6_changes": "Native runtime-product/release fixture path.",
+      "resolution": "Preserve main release transaction semantics and carry only typed native mapping."
+    },
+    {
+      "path": "crates/velnor-workflow/src/s2/primitives/release.rs",
+      "main_changes": "Current main package-release transaction and release-side fixes.",
+      "f6_changes": "Native selector/release fixture updates.",
+      "resolution": "Preserve main transaction semantics; validate native selector output after source merge."
+    },
+    {
+      "path": "crates/velnor-workflow/src/s2/config/mod.rs",
+      "main_changes": "Package-publication/config changes and current unique-suffix call site.",
+      "f6_changes": "Typed Apple routing/config additions.",
+      "resolution": "Keep main publication/config behavior; retain f6 routing only where it does not bypass current config contracts."
+    },
+    {
+      "path": "crates/velnor-workflow/src/s2/mod.rs",
+      "main_changes": "Publication transaction handling, unique_suffix centralization, and current MBX/generator behavior.",
+      "f6_changes": "Native routing/module integration and tests.",
+      "resolution": "Main transaction/unique_suffix behavior wins; manually verify f6 native module integration and all related tests."
+    },
+    {
+      "path": "crates/velnor-workflow/src/s2/primitives/runtime_products.rs",
+      "main_changes": "Current unique_suffix test/helper changes.",
+      "f6_changes": "Current rendered Apple runtime-product fixture expectation.",
+      "resolution": "Retain main helper and f6 source-derived fixture only if central latest-host policy assertion passes; no opaque hash-only update."
+    },
+    {
+      "path": "crates/velnor-workflow/src/s2/tui/mod.rs",
+      "main_changes": "Current unique_suffix temporary nonce behavior.",
+      "f6_changes": "Native-chain test/use-site changes.",
+      "resolution": "Keep main nonce behavior; re-run TUI/native tests for source compatibility."
+    },
+    {
+      "path": "crates/velnor-workflow/src/tui/mod.rs",
+      "main_changes": "Current unique_suffix temporary nonce behavior.",
+      "f6_changes": "Native-chain test/use-site changes.",
+      "resolution": "Keep main nonce behavior; re-run TUI/native tests."
+    }
+  ],
+  "review_evidence": {
+    "estate_source_review": {
+      "path": "G0/estate-scope-review/review-1d7a6459108a4f5e55cf153622892e1086639c2d.md",
+      "sha256": "58528f6310872e3e5aff345cd4d5b63c7404ed5193c99b0aee9beb80fb09c3c0",
+      "state": "approved source delta; still requires current-main re-test"
+    },
+    "scanner_and_agents_source_review": {
+      "path": "G0/rust-scan-review/review-4ee8ab4b454fd674558d892511f38cf5365aba47.md",
+      "sha256": "4ced3d90a5953c1a2455b7aff3f0ad8664ce97fb26e58b8a54a46fc9c9c7387d",
+      "state": "approved source-only scanner/root-AGENTS delta; still requires current-main re-test"
+    },
+    "native_review": {
+      "path": "G0/native-review/review-24e62277fafe0a2b63885d1bafed60f2e756daf.md",
+      "sha256": "90a1a64094e58aec9a5eab762157218487e49d871f54bf76187bf130ae7d83c9",
+      "state": "changes-required; native source mapping was subsequently corrected in f6, but this does not grant integration approval"
+    },
+    "f6_render_evidence": {
+      "path": "G1/integration/review-disposable-render-f6cb27c4606103d0c879bbc60a6a060911ce7b91.md",
+      "sha256": "bd0f0f16856243fb3212484bbfede5812e612a15771d8870337f0f63a334f522",
+      "state": "disposable draft render evidence only; canonical generated adoption remains out of scope"
+    }
+  },
+  "integration_plan": {
+    "base": "Create a fresh disposable integration worktree at current origin/main 9e5c0eb. Do not rebase or mutate the clean f6 worktree.",
+    "ordered_source_units": [
+      "1. Retain all five current-main commits and current generated tree/pin (contract 54, pin 4fa7a3a); do not transplant f6 generated files.",
+      "2. Apply the estate fixed-scope/accepted-plan/strict-JSON unit (d5a709ff through 3c7a732f) and run its direct CLI/source tests.",
+      "3. Apply the structural Rust scanner include unit (b38d67bf through eb86ad2c) and run scanner, closure, symlink, and relevant workspace tests.",
+      "4. Apply the typed Apple/native source unit (22716b09 through 24e62277, then 04b51d76 and f6cb27c4) only as a reviewed source diff; manually preserve all ten current-main overlap semantics and run native/runtime-product tests.",
+      "5. Apply the root AGENTS policy addition from 4ee8ab4 only as a minimal instruction change; do not copy generated AGENTS output.",
+      "6. Render in a disposable candidate root using current main's generator authority; compare deterministic output and actionlint. Canonical generated promotion, pin/publication, and hosted checks are separate follow-up work."
+    ],
+    "minimal_pending_units": [
+      "Current-main semantic reconciliation for the ten shared workflow paths.",
+      "Native review re-check after 04b51d76/f6cb27c4; prior native review was changes-required.",
+      "Current-main source and generated-output verification with contract 54/pin 4fa7a3a.",
+      "No generated pin adoption, canonical generated-tree rewrite, old-checker authority change, merge, or release in this bounded task."
+    ],
+    "required_verification": [
+      "cargo fmt --all -- --check",
+      "cargo test -p velnor-tools --test estate_concern_authority_cli",
+      "cargo test -p velnor-workflow --lib with scanner/native/runtime-product focused filters as applicable",
+      "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+      "cargo test --workspace and relevant package-release/native/scanner integration suites",
+      "Disposable generator render twice with byte-identical output, current pin/contract validation, actionlint, and an explicit generated-path diff; do not promote output here",
+      "Final clean-tree/status check and confirmation that old checker authority and current-main generated pin remain unchanged"
+    ]
+  },
+  "blockers": [
+    "The branches are diverged; simulated merge has no textual conflicts but cannot prove semantic compatibility.",
+    "f6 records generator contract 53/pin 0dc79895, while current main records contract 54/pin 4fa7a3a. The current main generator/published tree must remain authoritative.",
+    "Native review was changes-required; generated drift and source mapping correctness require a fresh independent review after source reconciliation.",
+    "Current main may move after this snapshot; re-run the two live ref checks before any future integration operation."
+  ],
+  "gate": "NO_INTEGRATION_OR_G1_APPROVAL_CLAIM"
+}

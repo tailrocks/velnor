@@ -1,0 +1,124 @@
+{
+  "schema": "g1/source-integration-merge-checkpoint/v1",
+  "observed_at_utc": "2026-09-20T10:40:14Z",
+  "claim_boundary": "Reviewed-source integration checkpoint only. No PR merge, release, workflow dispatch, generated-tree promotion, pin adoption, or gate approval.",
+  "refs": {
+    "live_main": "9e5c0eb215d4169578d6f064806e89fe4c793e85",
+    "source_parent": "f6cb27c4606103d0c879bbc60a6a060911ce7b91",
+    "merge_commit": "7df0481e3f38f9f662d25cd963c99d24bc32357b",
+    "merge_commit_tree": "c6dbb8dace01b9a84ec169ad9142d9fe6995a40e2",
+    "merge_parents": [
+      "f6cb27c4606103d0c879bbc60a6a060911ce7b91",
+      "9e5c0eb215d4169578d6f064806e89fe4c793e85"
+    ],
+    "branch": "codex/github-first-source-integration",
+    "local_sha": "7df0481e3f38f9f662d25cd963c99d24bc32357b",
+    "remote_sha": "7df0481e3f38f9f662d25cd963c99d24bc32357b",
+    "worktree": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-source-integration",
+    "worktree_state": "clean",
+    "push": "normal fast-forward from f6cb27c4; no force push"
+  },
+  "merge_proof": {
+    "operation": "git fetch --no-tags origin main; git merge --no-ff --no-commit refs/remotes/origin/main; focused verification; git commit -s; git push origin HEAD:codex/github-first-source-integration",
+    "textual_conflicts": 0,
+    "generated_paths_equal_live_main": true,
+    "generated_paths_checked": [
+      ".github-gen",
+      ".github/ci",
+      ".github/workflows"
+    ],
+    "source_delta_vs_main_paths": 35,
+    "source_units": [
+      "estate fixed scope, accepted concern plan, strict duplicate-key admission",
+      "structural Rust include scanner and boundary checks",
+      "typed Apple/native routing and legacy runtime-product authority",
+      "root AGENTS current-version/macOS policy"
+    ],
+    "old_checker_authority": "unchanged",
+    "active_generator_pin": "4fa7a3a85f141a6bb95bc9bdf0eef9e3ddde165d",
+    "active_generator_contract": "54",
+    "old_pin_active_config_occurrences": 0,
+    "historical_old_pin_fixture": "Current main retains 0dc79895 in an explicit PUBLISHED_BASE_REVISION test fixture only; it is not active .github-gen, generated workflow, or generator source configuration."
+  },
+  "verification": {
+    "cargo_test_estate_cli": {
+      "command": "cargo test -p velnor-tools --test estate_concern_authority_cli",
+      "result": "pass",
+      "counts": "5 passed"
+    },
+    "cargo_test_scanner_rust": {
+      "command": "cargo test -p velnor-workflow --lib scan::rust::tests",
+      "result": "pass",
+      "counts": "18 passed; 1814 filtered"
+    },
+    "cargo_test_scanner_rust_s2": {
+      "command": "cargo test -p velnor-workflow --lib s2::scan::rust::tests",
+      "result": "pass",
+      "counts": "9 passed; 1823 filtered"
+    },
+    "cargo_test_swift_capability": {
+      "command": "cargo test -p velnor-workflow --lib swift_capability::tests",
+      "result": "pass",
+      "counts": "9 passed; 1823 filtered"
+    },
+    "cargo_test_native_contract": {
+      "command": "cargo test -p velnor-workflow --lib native_contract::tests",
+      "result": "pass",
+      "counts": "5 passed; 1827 filtered"
+    },
+    "cargo_test_runtime_products": {
+      "command": "cargo test -p velnor-workflow --lib primitives::runtime_products::tests",
+      "result": "pass",
+      "counts": "55 passed; 1777 filtered"
+    },
+    "cargo_test_runtime_products_s2": {
+      "command": "cargo test -p velnor-workflow --lib s2::primitives::runtime_products::tests",
+      "result": "pass",
+      "counts": "24 passed; 1808 filtered"
+    },
+    "cargo_fmt": {
+      "command": "cargo fmt --all -- --check",
+      "result": "pass"
+    },
+    "cargo_clippy": {
+      "command": "cargo clippy --workspace --all-targets -- -D warnings",
+      "result": "pass; no issues found"
+    },
+    "cargo_test_workflow_full": {
+      "command": "cargo test -p velnor-workflow --lib -- --test-threads=1",
+      "result": "incomplete due one known generated fixed-point mismatch",
+      "counts": "1831 passed, 1 failed, 0 ignored, 1831 filtered out in failing test",
+      "failure": "s2::tests::checked_in_workflows_match_the_generator_byte_for_byte"
+    }
+  },
+  "residual_generated_drift": {
+    "path": ".github/workflows/ci-runtime-products.yml",
+    "checked_in_value": "runner: macos-26",
+    "source_render_value": "runner: xcode-27",
+    "classification": "generator/source authority mismatch; not fixed by changing expected bytes here",
+    "required_followup": "generator-owner review and authoritative render/publish transition; do not hand-edit or claim full generated pass"
+  },
+  "pin_feasibility_context": {
+    "current_main_probe": {
+      "path": "G1/bootstrap-transition/BOOTSTRAP-PATH-FEASIBILITY-DELTA-9E5-PIN-2026-09-20.md",
+      "sha256": "43b5013a44442dae787592e403f9bf5ae8e82f270c0464515876a7c8a65dfbe4",
+      "finding": "Generic pin-4fa admission measured positive on main; no typed validator B or native xcode-27 authority transition."
+    },
+    "historical_old_validator_probe": {
+      "path": "G1/bootstrap-transition/VALIDATOR-ADMISSION-PROBE-2026-09-20.json",
+      "sha256": "2609e9cfc2f50e34c4dc02d9b31b46f9d70a441420c1989538d959ba0a51469b",
+      "finding": "Old 0dc checker rejects unknown [policy.validator]; static_files sidecar is transport-only. No approval."
+    },
+    "boundary": "Probes constrain authority and admission; they do not authorize unpublished closure, native transition, generated adoption, or merge acceptance."
+  },
+  "next_review": {
+    "owner": "g0_reviewer",
+    "inputs": [
+      "7df0481e3f38f9f662d25cd963c99d24bc32357b",
+      "current main 9e5c0eb215d4169578d6f064806e89fe4c793e85",
+      "one generated ci-runtime-products.yml drift",
+      "native review previously changes-required"
+    ],
+    "no_gate_claim": true
+  }
+}

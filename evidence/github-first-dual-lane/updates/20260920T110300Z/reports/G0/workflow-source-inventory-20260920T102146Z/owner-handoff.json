@@ -1,0 +1,42 @@
+{
+  "schema": "g0-workflow-source-mapper-seam.v1",
+  "created_at_utc": "2026-09-20T10:21:46Z",
+  "owner": "g3_skills_adapter",
+  "recipient": "g3_distribution_consumers",
+  "status": "durable_handoff_no_direct_message_capability",
+  "scope": {
+    "repository_count": 32,
+    "source_revisions": "accepted partition-index exact SHA",
+    "artifact_manifest": "manifest.json"
+  },
+  "join_key": [
+    "repository",
+    "source_sha",
+    "path",
+    "git_blob_sha"
+  ],
+  "workflow_source_fields": [
+    "repository",
+    "source_revision",
+    "path",
+    "git_blob_sha",
+    "raw_sha256",
+    "byte_length",
+    "body_source_kind",
+    "body_source_locator",
+    "workflow_call_declared",
+    "references",
+    "recursive_workflow_identities",
+    "cycle_ids"
+  ],
+  "body_rules": [
+    "local git_object locator exact commit:path; use git cat-file, never dirty working-tree bytes",
+    "github_blob_api locator exact blob SHA endpoint; read preserved UTF-8 content from referenced api-body object and verify raw_sha256",
+    "unresolved/access/cycle states are data, not success"
+  ],
+  "consumer_contract": {
+    "map_workflow_source": "join only source objects; do not derive expected jobs",
+    "map_dependency_graph": "consume resolved reusable-workflow edges and preserve unresolved external refs",
+    "map_reconciliation": "do not assert run/check presence from source objects"
+  }
+}
