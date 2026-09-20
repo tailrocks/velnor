@@ -706,21 +706,6 @@ fn candidate_namespace_script_body() -> String {
         .join("\n")
 }
 
-fn namespace_workflow_archive_with_action(
-    root: &Path,
-    name: &str,
-    workflow: &str,
-    action_script: &str,
-) -> PathBuf {
-    namespace_workflow_archive_with_action_and_dependency(
-        root,
-        name,
-        workflow,
-        action_script,
-        action_script,
-    )
-}
-
 fn namespace_workflow_archive_with_action_and_dependency(
     root: &Path,
     name: &str,
@@ -866,12 +851,6 @@ fn candidate_namespace_scan_rejects_unnamed_external_and_shell_publishers() {
         accepted.status.success(),
         "recursive local action contract escaped: {accepted:?}"
     );
-    let generic_local_action = local_action.replace("./.github/actions/setup", "./actions/setup");
-    let accepted = run_namespace_scanner(&root, &generic_local_action, &generic_local_action);
-    assert!(
-        accepted.status.success(),
-        "repository-root local action resolution escaped: {accepted:?}"
-    );
     let rejected = run_namespace_scanner_with_action(
         &root,
         &local_action,
@@ -883,20 +862,6 @@ fn candidate_namespace_scan_rejects_unnamed_external_and_shell_publishers() {
         !rejected.status.success(),
         "local action implementation drift escaped source closure comparison: {rejected:?}"
     );
-    let rejected = run_namespace_scanner_with_action_and_dependency(
-        &root,
-        &local_action,
-        &local_action,
-        "#!/bin/sh\necho stable action\n",
-        "#!/bin/sh\necho stable action\n",
-        "#!/bin/sh\necho base dependency\n",
-        "#!/bin/sh\necho head dependency\n",
-    );
-    assert!(
-        !rejected.status.success(),
-        "composite action dependency drift escaped trusted .github source closure: {rejected:?}"
-    );
-
     let changed_top_level = fixed.replace("jobs:\n", "env:\n  CANDIDATE_FEATURE: changed\njobs:\n");
     let rejected = run_namespace_scanner(&root, fixed, &changed_top_level);
     assert!(
@@ -952,6 +917,48 @@ fn candidate_namespace_scan_rejects_unnamed_external_and_shell_publishers() {
     assert!(
         !rejected.status.success(),
         "opaque third-party publisher escaped: {rejected:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn candidate_namespace_scan_covers_generic_actions_and_composite_dependencies() {
+    let root = temporary_directory("namespace-source-closure");
+    let fixed = r"jobs:
+  candidate_producer:
+    steps:
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        id: candidate_upload
+        with:
+          name: velnor-workflow-candidate-linux-x64
+          path: candidate
+";
+    let generic_local_action = fixed.replace(
+        "      - uses: actions/upload-artifact@",
+        "      - uses: ./actions/setup\n      - uses: actions/upload-artifact@",
+    );
+    let accepted = run_namespace_scanner(&root, &generic_local_action, &generic_local_action);
+    assert!(
+        accepted.status.success(),
+        "repository-root local action resolution escaped: {accepted:?}"
+    );
+
+    let local_action = fixed.replace(
+        "      - uses: actions/upload-artifact@",
+        "      - uses: ./.github/actions/setup\n      - uses: actions/upload-artifact@",
+    );
+    let rejected = run_namespace_scanner_with_action_and_dependency(
+        &root,
+        &local_action,
+        &local_action,
+        "#!/bin/sh\necho stable action\n",
+        "#!/bin/sh\necho stable action\n",
+        "#!/bin/sh\necho base dependency\n",
+        "#!/bin/sh\necho head dependency\n",
+    );
+    assert!(
+        !rejected.status.success(),
+        "composite action dependency drift escaped trusted .github source closure: {rejected:?}"
     );
     let _ = fs::remove_dir_all(root);
 }
@@ -1395,7 +1402,7 @@ fn policy_sibling_setup_action_is_a_reviewed_local_path() {
         "the sibling checkout carries no reusable workflows"
     );
 }
-fn assert_candidate_transport_acquisition(job: &str) {
+fn assert_candidate_transport_roles(job: &str) {
     assert!(job.contains("policy_acquire:\n"), "{job}");
     assert!(job.contains("candidate_execute:\n"), "{job}");
     assert!(job.contains("  policy:\n"), "{job}");
@@ -1417,6 +1424,10 @@ fn assert_candidate_transport_acquisition(job: &str) {
         job.contains("name: velnor-workflow-candidate-result"),
         "{job}"
     );
+}
+
+fn assert_candidate_transport_acquisition(job: &str) {
+    assert_candidate_transport_roles(job);
     assert!(
         job.contains("actions/runs/$run_id/jobs?per_page=100"),
         "{job}"
