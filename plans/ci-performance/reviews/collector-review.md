@@ -41,11 +41,90 @@ workflow SHA is promoted to a top-level merge SHA.
 
 ## Scoped verification
 
-`rtk cargo test -p unit-collector --test workflow` — 16 passed.
+`rtk cargo test --locked -p unit-collector --test workflow` — 18 passed.
+
+## Source-identity defect and bounded fix (2026-09-20)
+
+**Prior HOLD.** Before this bounded fix, `parse_run` assigned
+`source_sha = pull_requests[0].head.sha` for a `pull_request` run. The run
+endpoint's embedded pull-request object is a live PR projection; after a PR
+advances, replaying an old run can report the new PR head. That makes saved
+historical timing rows claim a source commit that did not create the run. The
+current recent rows happened to have equal heads, but older rows using
+`source_sha_basis=pull_requests.head.sha` require audit.
+
+`run.head_sha` is the raw, immutable run-head field in the API response. It is
+not proof of the effective checkout commit: a PR run can expose one SHA while
+the checkout step records a synthetic merge commit. A direct
+`refs/pull/<number>/merge` ref is retained as `merge_ref`, but the run API alone
+must leave `merge_sha` unknown until immutable checkout or event evidence is
+supplied. A referenced-workflow SHA is never such evidence.
+
+For a PR run, `source_sha` stays unknown unless the run event/ref itself proves
+the source context. The embedded PR head is retained separately as
+`observed_pull_request_head_sha`; it is a live API projection and never becomes
+historical identity. For push, dispatch, and schedule runs, a valid
+`run.head_sha` is retained as `source_sha` with an event-specific basis. Invalid
+or unrecognized event/SHA combinations remain explicit unknowns.
+
+Minimal regression fixture:
+
+```json
+{
+  "id": 99,
+  "run_attempt": 1,
+  "event": "pull_request",
+  "ref": "refs/pull/7/merge",
+  "head_sha": "merge-created-for-old-head",
+  "pull_requests": [{"number": 7, "head": {"sha": "head-after-run"}}]
+}
+```
+
+Expected normalized identity: the raw `head_sha` is retained, `merge_ref` is
+retained when directly present, `merge_sha=null`, and `source_sha=null` with a
+clearly marked unknown basis; `head-after-run` is retained only as current API
+evidence. The regression fixture uses the actual replay where run head
+`e1357dd...` was paired with live PR head `29279ab...`; output must not claim
+`29279ab...` as historical source. Push, `pull_request_target`, invalid-SHA,
+and unrecognized-event fixtures pin the event-aware fail-closed behavior. Do
+not use `run.updated_at` or the live PR object to recover a historical source
+SHA.
+
+### Fix delivered
+
+`parse_run` now retains the raw API `head_sha` and the embedded PR head in
+separate fields. The latter is evidence only. It accepts a source SHA only for
+the explicitly supported executed-ref events (`push`, `workflow_dispatch`,
+and `schedule`) or an explicit `refs/pull/N/head` ref; it validates derived
+SHA values as 40-character hexadecimal strings. `pull_request_target` and
+unrecognized events remain unknown. A merge ref is retained, but `merge_sha`
+stays unknown because this input has no immutable checkout proof.
+
+The exact replay fixture from run `35487077663` now emits
+`head_sha=e1357dd...`, `source_sha=unknown`, and
+`observed_pull_request_head_sha=29279ab...`; the mutable `29279ab...` value is
+not emitted as historical source. Focused fixtures cover invalid SHA, valid
+push, `pull_request_target`, and unrecognized events. Regenerate affected raw
+derived rows only after independent review of this boundary.
 
 `rtk cargo fmt -p unit-collector -- --check` — passed.
 
-`rtk cargo clippy -p unit-collector --all-targets -- -D warnings` — passed.
+`rtk cargo clippy --locked -p unit-collector --all-targets -- -D warnings` — passed.
+
+### Independent identity verification
+
+The parent independently reviewed the source boundary, ran all 44 collector
+tests, and exercised 12 event/ref/SHA combinations through the actual CLI.
+These covered matching and mismatched PR head refs, merge refs, push, schedule,
+manual dispatch, PR target, missing/unknown events and malformed SHA values.
+Raw run heads stayed intact; no merge SHA or mutable PR source was invented.
+The explicit matching/mismatched-ref regression is retained in the test suite.
+All-target Clippy passed. This is a correctness repair, not a speedup claim.
+
+Seven existing JSONL/CSV observation pairs contain the previous derived source
+basis and require regeneration from their saved raw responses. Git history
+retains the original erroneous derivations; they must not be used for cohort
+comparisons while that audit is pending.
 
 ## Independent bounded review (2026-09-20)
 
@@ -60,4 +139,4 @@ returned. Malformed `referenced_workflows` members remain attached to every
 emitted run/job row with member index, reason, and raw JSON; valid members are
 kept separately. A malformed top-level non-array field returns an input error,
 which is fail-closed rather than silently discarded. Independent command:
-`rtk cargo test -p unit-collector --test workflow` — 16 passed.
+`rtk cargo test --locked -p unit-collector --test workflow` — 18 passed.

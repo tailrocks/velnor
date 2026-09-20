@@ -5,7 +5,7 @@
     reason = "fixture assertions intentionally fail loudly"
 )]
 
-use unit_collector::{collect_workflow, WorkflowCollectOptions};
+use unit_collector::{collect_workflow, parse_run_documents, WorkflowCollectOptions};
 
 fn run_json(id: u64, attempt: u64, status: &str, ref_name: &str) -> String {
     format!(
@@ -49,6 +49,142 @@ fn job(
           "steps": [{{"number": 1, "name": "check", "status": "completed", "conclusion": "success", "started_at": "{start}", "completed_at": "{end}"}}]
         }}"#
     )
+}
+
+#[test]
+fn replay_keeps_raw_run_head_and_live_pr_head_separate() {
+    let runs = parse_run_documents(&[(
+        "historical-run.json".to_owned(),
+        r#"{
+          "id": 35487077663,
+          "run_attempt": 1,
+          "event": "pull_request",
+          "ref": null,
+          "head_sha": "e1357dd620fe4bc18c9fa6e0d7b0c636a0f9175d",
+          "pull_requests": [{
+            "number": 968,
+            "head": {"sha": "29279ab2bbf39d23bff052246c488dafdc6146c0"}
+          }]
+        }"#
+        .to_owned(),
+    )])
+    .expect("historical run parses");
+
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].head_sha.as_deref(),
+        Some("e1357dd620fe4bc18c9fa6e0d7b0c636a0f9175d")
+    );
+    assert_eq!(runs[0].source_sha, None);
+    assert_eq!(
+        runs[0].source_sha_basis.as_deref(),
+        Some("unknown.pull_request_source_not_proven")
+    );
+    assert_eq!(
+        runs[0].observed_pull_request_head_sha.as_deref(),
+        Some("29279ab2bbf39d23bff052246c488dafdc6146c0")
+    );
+    assert_eq!(runs[0].merge_sha, None);
+}
+
+#[test]
+fn explicit_pull_refs_do_not_turn_api_heads_into_checkout_evidence() {
+    for (reference, number, head, source) in [
+        ("refs/pull/968/merge", 968, "1".repeat(40), None),
+        (
+            "refs/pull/968/head",
+            968,
+            "2".repeat(40),
+            Some("2".repeat(40)),
+        ),
+        ("refs/pull/969/head", 968, "3".repeat(40), None),
+        ("refs/pull/968/head", 968, "invalid".to_owned(), None),
+    ] {
+        let raw = serde_json::json!({
+            "id": 1,
+            "event": "pull_request",
+            "ref": reference,
+            "head_sha": head,
+            "pull_requests": [{"number": number, "head": {"sha": "b".repeat(40)}}]
+        });
+        let runs = parse_run_documents(&[("pull-ref.json".to_owned(), raw.to_string())])
+            .expect("explicit pull ref parses");
+        assert_eq!(runs[0].source_sha, source);
+        assert_eq!(runs[0].merge_sha, None);
+        assert_eq!(runs[0].head_sha.as_deref(), Some(head.as_str()));
+    }
+}
+
+#[test]
+fn invalid_or_unrecognized_run_identity_fails_closed() {
+    let runs = parse_run_documents(&[
+        (
+            "invalid-push.json".to_owned(),
+            r#"{
+              "id": 1,
+              "event": "push",
+              "ref": "refs/heads/main",
+              "head_sha": "not-a-sha"
+            }"#
+            .to_owned(),
+        ),
+        (
+            "unknown-event.json".to_owned(),
+            r#"{
+              "id": 2,
+              "event": "workflow_run",
+              "ref": "refs/heads/main",
+              "head_sha": "1111111111111111111111111111111111111111"
+            }"#
+            .to_owned(),
+        ),
+        (
+            "valid-push.json".to_owned(),
+            r#"{
+              "id": 3,
+              "event": "push",
+              "ref": "refs/heads/main",
+              "head_sha": "2222222222222222222222222222222222222222"
+            }"#
+            .to_owned(),
+        ),
+        (
+            "pull-request-target.json".to_owned(),
+            r#"{
+              "id": 4,
+              "event": "pull_request_target",
+              "ref": "refs/heads/main",
+              "head_sha": "3333333333333333333333333333333333333333"
+            }"#
+            .to_owned(),
+        ),
+    ])
+    .expect("identity fixtures parse");
+
+    assert_eq!(runs[0].head_sha.as_deref(), Some("not-a-sha"));
+    assert_eq!(runs[0].source_sha, None);
+    assert_eq!(
+        runs[0].source_sha_basis.as_deref(),
+        Some("unknown.invalid_run_head_sha")
+    );
+    assert_eq!(runs[1].source_sha, None);
+    assert_eq!(
+        runs[1].source_sha_basis.as_deref(),
+        Some("unknown.event_semantics:workflow_run")
+    );
+    assert_eq!(
+        runs[2].source_sha.as_deref(),
+        Some("2222222222222222222222222222222222222222")
+    );
+    assert_eq!(
+        runs[2].source_sha_basis.as_deref(),
+        Some("run.head_sha.event=push")
+    );
+    assert_eq!(runs[3].source_sha, None);
+    assert_eq!(
+        runs[3].source_sha_basis.as_deref(),
+        Some("unknown.pull_request_target_source_not_proven")
+    );
 }
 
 #[test]
@@ -103,10 +239,13 @@ fn parallel_jobs_rank_by_raw_timestamps_and_keep_gate_separate() {
     );
     assert_eq!(records[0].required_gate_state, "observed");
     assert_eq!(records[0].critical_path_ms, None);
-    assert_eq!(records[0].merge_sha.as_deref(), Some("merge-10"));
+    assert_eq!(records[0].merge_sha, None);
+    assert_eq!(records[0].merge_ref.as_deref(), Some("refs/pull/7/merge"));
+    assert_eq!(records[0].merge_sha_basis, None);
+    assert_eq!(records[0].source_sha, None);
     assert_eq!(
-        records[0].merge_sha_basis.as_deref(),
-        Some("run.ref_and_run.head_sha")
+        records[0].observed_pull_request_head_sha.as_deref(),
+        Some("source-10")
     );
     assert_eq!(records[0].pre_start_ms, Some(5_000));
     assert_eq!(records[0].pre_start_state, "unclassified");

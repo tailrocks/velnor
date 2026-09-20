@@ -71,17 +71,21 @@ pub struct WorkflowRunInput {
     pub head_branch: Option<String>,
     /// Ref supplied by the raw response, when present.
     pub ref_name: Option<String>,
-    /// Run execution SHA from the API.
+    /// Raw `head_sha` returned by the run API. This is run-record metadata,
+    /// not proof of the effective checkout commit.
     pub head_sha: Option<String>,
-    /// Pull-request source SHA, only when the response includes it.
+    /// Immutable pull-request source SHA, only when the run event/ref proves it.
     pub source_sha: Option<String>,
     /// Evidence used for the source SHA.
     pub source_sha_basis: Option<String>,
-    /// Merge SHA, only when a pull-request merge ref proves it.
+    /// The first pull request head SHA in the current API projection. This is
+    /// retained as evidence only; it is never used as historical identity.
+    pub observed_pull_request_head_sha: Option<String>,
+    /// Checkout-proven merge SHA. The run API alone cannot populate this.
     pub merge_sha: Option<String>,
-    /// Merge ref, only when a pull-request merge ref proves it.
+    /// Pull-request merge ref observed in the run response.
     pub merge_ref: Option<String>,
-    /// Evidence used for the merge SHA.
+    /// Evidence used for a checkout-proven merge SHA.
     pub merge_sha_basis: Option<String>,
     /// Workflow configuration revisions from `referenced_workflows`.
     pub referenced_workflows: Vec<ReferencedWorkflow>,
@@ -205,6 +209,7 @@ pub struct WorkflowJobRecord {
     pub head_sha: Option<String>,
     pub source_sha: Option<String>,
     pub source_sha_basis: Option<String>,
+    pub observed_pull_request_head_sha: Option<String>,
     pub merge_sha: Option<String>,
     pub merge_ref: Option<String>,
     pub merge_sha_basis: Option<String>,
@@ -354,6 +359,7 @@ pub fn write_workflow_csv<W: Write>(
         "head_sha",
         "source_sha",
         "source_sha_basis",
+        "observed_pull_request_head_sha",
         "merge_sha",
         "merge_ref",
         "merge_sha_basis",
@@ -431,6 +437,7 @@ pub fn write_workflow_csv<W: Write>(
             display_opt(&record.head_sha),
             display_opt(&record.source_sha),
             display_opt(&record.source_sha_basis),
+            display_opt(&record.observed_pull_request_head_sha),
             display_opt(&record.merge_sha),
             display_opt(&record.merge_ref),
             display_opt(&record.merge_sha_basis),
@@ -850,42 +857,57 @@ fn parse_run(
         .and_then(|pull| number(pull.get("number")));
     let ref_name = string(object.get("ref"));
     let head_sha = string(object.get("head_sha"));
+    let event = string(object.get("event"));
     let (referenced_workflows, referenced_workflow_evidence_issues) =
         parse_referenced_workflows(object, source_name)?;
-    let source_sha_basis;
-    let source_sha = if object.get("event").and_then(Value::as_str) == Some("pull_request") {
-        if source_sha_from_pull.is_some() {
-            source_sha_basis = Some("pull_requests.head.sha".to_owned());
-            source_sha_from_pull
-        } else {
-            source_sha_basis = Some("run.head_sha_pull_request_fallback".to_owned());
-            head_sha.clone()
-        }
-    } else {
-        source_sha_basis = head_sha
-            .as_ref()
-            .map(|_| "run.head_sha_non_pull_request".to_owned());
-        head_sha.clone()
-    };
     let merge_ref = direct_merge_ref(ref_name.as_deref(), pull_number);
-    let merge_sha = if object.get("event").and_then(Value::as_str) == Some("pull_request")
-        && merge_ref.is_some()
-        && head_sha.is_some()
-        && source_sha.as_deref() != head_sha.as_deref()
-    {
-        head_sha.clone()
-    } else {
-        None
+    let source_ref = direct_pull_head_ref(ref_name.as_deref(), pull_number);
+    let valid_head_sha = valid_sha(head_sha.as_deref());
+    let (source_sha, source_sha_basis) = match event.as_deref() {
+        // A pull-request run normally executes a synthetic merge ref. Only an
+        // explicit refs/pull/N/head ref proves that run.head_sha is the PR
+        // source. The embedded PR object is a live projection and cannot
+        // establish historical identity.
+        Some("pull_request") if source_ref.is_some() => {
+            let basis = if valid_head_sha.is_some() {
+                "run.ref_pull_head_and_run.head_sha"
+            } else {
+                "unknown.invalid_run_head_sha"
+            };
+            (valid_head_sha.clone(), Some(basis.to_owned()))
+        }
+        Some("pull_request") => (
+            None,
+            Some("unknown.pull_request_source_not_proven".to_owned()),
+        ),
+        // pull_request_target executes the base repository context; its run
+        // SHA is not the untrusted PR source SHA.
+        Some("pull_request_target") => (
+            None,
+            Some("unknown.pull_request_target_source_not_proven".to_owned()),
+        ),
+        Some(event) if matches!(event, "push" | "workflow_dispatch" | "schedule") => {
+            let basis = if valid_head_sha.is_some() {
+                format!("run.head_sha.event={event}")
+            } else {
+                "unknown.invalid_run_head_sha".to_owned()
+            };
+            (valid_head_sha.clone(), Some(basis))
+        }
+        Some(event) => (None, Some(format!("unknown.event_semantics:{event}"))),
+        None => (None, Some("unknown.event_missing".to_owned())),
     };
-    let merge_sha_basis = merge_sha
-        .as_ref()
-        .map(|_| "run.ref_and_run.head_sha".to_owned());
+    // A PR merge ref identifies the ref requested by the run, but the REST
+    // run head is not checkout evidence. Keep the merge SHA unknown until a
+    // caller supplies immutable checkout/event evidence.
+    let merge_sha = None;
+    let merge_sha_basis = None;
     Ok(Some(WorkflowRunInput {
         run_id: number(object.get("id").or_else(|| object.get("run_id"))),
         run_number: number(object.get("run_number")),
         run_attempt: number(object.get("run_attempt")),
         name: string(object.get("name")),
-        event: string(object.get("event")),
+        event,
         status: string(object.get("status")),
         conclusion: string(object.get("conclusion")),
         head_branch: string(object.get("head_branch")),
@@ -893,6 +915,7 @@ fn parse_run(
         head_sha: head_sha.clone(),
         source_sha,
         source_sha_basis,
+        observed_pull_request_head_sha: source_sha_from_pull,
         merge_sha,
         merge_ref,
         merge_sha_basis,
@@ -1044,10 +1067,35 @@ fn parse_step(value: &Value) -> WorkflowStepRecord {
 }
 
 fn direct_merge_ref(ref_name: Option<&str>, pull_number: Option<u64>) -> Option<String> {
+    direct_pull_ref(ref_name, pull_number, "merge")
+}
+
+fn direct_pull_head_ref(ref_name: Option<&str>, pull_number: Option<u64>) -> Option<String> {
+    direct_pull_ref(ref_name, pull_number, "head")
+}
+
+fn direct_pull_ref(
+    ref_name: Option<&str>,
+    pull_number: Option<u64>,
+    expected_tail: &str,
+) -> Option<String> {
     let reference = ref_name?;
     let suffix = reference.strip_prefix("refs/pull/")?;
     let (number, tail) = suffix.split_once('/')?;
-    (tail == "merge" && number.parse::<u64>().ok()? == pull_number?).then(|| reference.to_owned())
+    if tail != expected_tail {
+        return None;
+    }
+    let number = number.parse::<u64>().ok()?;
+    if pull_number.is_some_and(|expected| expected != number) {
+        return None;
+    }
+    Some(reference.to_owned())
+}
+
+fn valid_sha(value: Option<&str>) -> Option<String> {
+    value
+        .filter(|value| value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(ToOwned::to_owned)
 }
 
 fn number(value: Option<&Value>) -> Option<u64> {
@@ -1513,6 +1561,7 @@ impl BaseRecord<'_> {
             head_sha: self.run.head_sha.clone(),
             source_sha: self.run.source_sha.clone(),
             source_sha_basis: self.run.source_sha_basis.clone(),
+            observed_pull_request_head_sha: self.run.observed_pull_request_head_sha.clone(),
             merge_sha: self.run.merge_sha.clone(),
             merge_ref: self.run.merge_ref.clone(),
             merge_sha_basis: self.run.merge_sha_basis.clone(),

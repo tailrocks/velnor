@@ -10,9 +10,13 @@ repeated on the row. A run with no jobs still emits a run row carrying unknown
 job fields. Rows retain run ID, attempt, event, status/conclusion, head/source/
 merge/workflow SHAs, referenced workflow SHAs, raw job timestamps, runner
 identity, and nested raw step timestamps/statuses. Source SHA provenance is
-explicit. A merge SHA is emitted only when the direct run response is a pull
-request, its direct `ref` is `refs/pull/N/merge` for the reported pull number,
-and its direct `head_sha` differs from the source SHA.
+explicit. The raw API `head_sha` is run metadata, not checkout proof. An
+embedded PR head may advance after the run and is retained separately as
+`observed_pull_request_head_sha`. PR source identity stays unknown unless an
+explicit matching `refs/pull/N/head` ref proves it. Push, dispatch and scheduled
+run heads have event-specific source bases; derived SHAs must be full hex.
+The direct merge ref is retained, but merge SHA stays unknown without immutable
+checkout evidence. A run head and a checkout merge commit can differ.
 `referenced_workflows[].sha` identifies workflow configuration only; it never
 proves a merge SHA. No timestamp is synthesized from `updated_at` or log
 markers.
