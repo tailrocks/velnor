@@ -1105,7 +1105,7 @@ fn map_pull_request(
 
 fn map_check(
     check: &LiveCheck,
-    _workflows: &[LiveWorkflow],
+    workflows: &[LiveWorkflow],
     executions: Option<&[LiveExecution]>,
 ) -> Result<G0CheckProducer> {
     let app_id = check
@@ -1127,15 +1127,48 @@ fn map_check(
             check.context
         );
     }
-    let job_id = check
-        .job_id
-        .ok_or_else(|| anyhow!("check {} lacks concrete job identity", check.context))?;
-    if !execution.jobs.iter().any(|job| job.job_id == job_id) {
+    let workflow = workflows
+        .iter()
+        .find(|workflow| {
+            workflow.path == execution.workflow_path
+                && workflow.revision == execution.workflow_revision
+                && workflow.source_sha == execution.source_sha
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "check {} workflow source/revision is not bound to inventory",
+                check.context
+            )
+        })?;
+    if !workflow.events.contains(&execution.event) {
         bail!(
-            "check {} job is not bound to workflow execution",
+            "check {} event {} is not declared by workflow {}",
+            check.context,
+            execution.event,
+            workflow.path
+        );
+    }
+    let job = execution
+        .jobs
+        .iter()
+        .find(|job| job.check_run_id == check.check_run_id)
+        .ok_or_else(|| {
+            anyhow!(
+                "check {} lacks a job whose API check_run_url binds check {}",
+                check.context,
+                check.check_run_id
+            )
+        })?;
+    if job.run_id != execution.run_id
+        || job.run_attempt != execution.run_attempt
+        || job.source_sha.as_deref() != Some(check.source_sha.as_str())
+    {
+        bail!(
+            "check {} job identity is not bound to workflow execution",
             check.context
         );
     }
+    let job_id = job.job_id;
     let actual_checkout_sha = check
         .actual_checkout_sha
         .clone()
