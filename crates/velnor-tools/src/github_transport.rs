@@ -10,7 +10,7 @@ use super::{
     TransportFailure,
 };
 use anyhow::{bail, Context, Result};
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, LOCATION, USER_AGENT};
 use reqwest::redirect::Policy;
 use std::fmt;
 use std::process::Command;
@@ -204,32 +204,103 @@ impl AcquisitionTransport for GithubHttpTransport {
             }
             let response = builder.send().await.map_err(classify_reqwest_error)?;
             let status = response.status().as_u16();
-            // A redirect is not evidence.  Policy::none keeps the original
-            // URL, and this explicit rejection prevents a redirect response
-            // from being interpreted as a successful page.
-            if (300..400).contains(&status) {
-                return Err(TransportFailure::Other);
-            }
-            if response
-                .content_length()
-                .is_some_and(|length| length > self.max_body_bytes as u64)
-            {
-                return Err(TransportFailure::Other);
-            }
-            let effective_endpoint = response.url().to_string();
-            let headers = safe_response_headers(response.headers());
-            let body = response.bytes().await.map_err(classify_reqwest_error)?;
-            if body.len() > self.max_body_bytes {
-                return Err(TransportFailure::Other);
-            }
+            let (status, headers, body) = if (300..400).contains(&status) {
+                // GitHub's artifact archive endpoint intentionally returns a
+                // short-lived signed URL.  Only this exact route may follow
+                // one redirect, and the bearer credential is never sent to
+                // the archive host.  Every other redirect remains rejected.
+                if status != 302 || !is_artifact_archive_url(&url) {
+                    return Err(TransportFailure::Other);
+                }
+                let location = response
+                    .headers()
+                    .get(LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                    .ok_or(TransportFailure::Other)?;
+                let redirect_url = Url::parse(location).map_err(|_| TransportFailure::Other)?;
+                if !is_allowed_artifact_redirect(&redirect_url) {
+                    return Err(TransportFailure::Other);
+                }
+                let archive_response = self
+                    .client
+                    .get(redirect_url)
+                    .header(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE))
+                    .send()
+                    .await
+                    .map_err(classify_reqwest_error)?;
+                let archive_status = archive_response.status().as_u16();
+                if (300..400).contains(&archive_status)
+                    || archive_response
+                        .content_length()
+                        .is_some_and(|length| length > self.max_body_bytes as u64)
+                {
+                    return Err(TransportFailure::Other);
+                }
+                let archive_headers = safe_response_headers(archive_response.headers());
+                let archive_body = archive_response
+                    .bytes()
+                    .await
+                    .map_err(classify_reqwest_error)?;
+                if archive_body.len() > self.max_body_bytes {
+                    return Err(TransportFailure::Other);
+                }
+                (archive_status, archive_headers, archive_body)
+            } else {
+                if response
+                    .content_length()
+                    .is_some_and(|length| length > self.max_body_bytes as u64)
+                {
+                    return Err(TransportFailure::Other);
+                }
+                let headers = safe_response_headers(response.headers());
+                let body = response.bytes().await.map_err(classify_reqwest_error)?;
+                if body.len() > self.max_body_bytes {
+                    return Err(TransportFailure::Other);
+                }
+                (status, headers, body)
+            };
             Ok(super::TransportResponse {
                 status,
                 headers,
                 body: body.to_vec(),
-                effective_endpoint,
+                // Keep provenance bound to the authenticated GitHub API
+                // route; the signed redirect URL is credential-bearing and
+                // is intentionally not persisted or exposed in diagnostics.
+                effective_endpoint: url.to_string(),
             })
         })
     }
+}
+
+fn is_artifact_archive_url(url: &Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str() == Some("api.github.com")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.path_segments().is_some_and(|segments| {
+            let segments = segments.collect::<Vec<_>>();
+            segments.len() == 7
+                && segments[0] == "repos"
+                && !segments[1].is_empty()
+                && !segments[2].is_empty()
+                && segments[3] == "actions"
+                && segments[4] == "artifacts"
+                && segments[5].parse::<u64>().is_ok_and(|id| id > 0)
+                && segments[6] == "zip"
+        })
+}
+
+fn is_allowed_artifact_redirect(url: &Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str() == Some("pipelines.actions.githubusercontent.com")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url.path() != "/"
+        && url.fragment().is_none()
 }
 
 fn classify_reqwest_error(error: reqwest::Error) -> TransportFailure {
@@ -263,4 +334,50 @@ fn safe_response_headers(headers: &HeaderMap) -> std::collections::BTreeMap<Stri
         }
     }
     safe
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_allowed_artifact_redirect, is_artifact_archive_url};
+    use url::Url;
+
+    #[test]
+    fn only_exact_artifact_route_can_follow_a_redirect() {
+        assert!(is_artifact_archive_url(
+            &Url::parse("https://api.github.com/repos/acme/project/actions/artifacts/7/zip")
+                .unwrap()
+        ));
+        assert!(!is_artifact_archive_url(
+            &Url::parse(
+                "https://api.github.com/repos/acme/project/actions/artifacts/7/zip?token=x"
+            )
+            .unwrap()
+        ));
+        assert!(!is_artifact_archive_url(
+            &Url::parse("https://api.github.com/repos/acme/project/actions/artifacts/7/delete")
+                .unwrap()
+        ));
+    }
+
+    #[test]
+    fn archive_redirect_requires_exact_github_pipeline_host_without_userinfo() {
+        assert!(is_allowed_artifact_redirect(
+            &Url::parse(
+                "https://pipelines.actions.githubusercontent.com/signed/archive?token=opaque"
+            )
+            .unwrap()
+        ));
+        assert!(!is_allowed_artifact_redirect(
+            &Url::parse(
+                "https://pipelines.actions.githubusercontent.com.evil/signed/archive?token=opaque"
+            )
+            .unwrap()
+        ));
+        assert!(!is_allowed_artifact_redirect(
+            &Url::parse(
+                "https://user@pipelines.actions.githubusercontent.com/signed/archive?token=opaque"
+            )
+            .unwrap()
+        ));
+    }
 }
