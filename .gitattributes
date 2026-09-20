@@ -14,3 +14,6 @@ evidence/github-first-dual-lane/updates/**/reports/G0/fleet/20260920T093002Z/** 
 # This checkpoint preserves the complete immutable workflow/API inventory and
 # all selected report bytes exactly; disable text conversion for every member.
 evidence/github-first-dual-lane/updates/20260920T110300Z/reports/** -text -filter
+# This checkpoint preserves the corrected runner matrix's raw API bodies and
+# all selected recovery/review records byte-for-byte.
+evidence/github-first-dual-lane/updates/20260920T115000Z/reports/** -text -filter

@@ -1,0 +1,27 @@
+{
+  "successor_utc": "2026-09-20T11:20:21Z",
+  "predecessor_directory": "../runner-matrix-20260920T110534Z",
+  "predecessor_matrix_sha256": "84c5f34980c62cf874f3135b0cf01ff388d1dada923fad464583e365d11f723c",
+  "independent_review_id": "23ec799d7577e92992b0aff003ffafa4567325c4caea0fd0da0512310caef324",
+  "source_repository": "actions/runner-images",
+  "source_commit": "9d7eec51794bb688d6c7ce00550cda5a134c88a3",
+  "source_root_readme_git_blob_sha": "8de90fd8b3b5bf9aeec88151e87a3469973bbecd",
+  "mapping_count": 29,
+  "explicit_preview_labels": ["ubuntu-26.04", "ubuntu-26.04-arm", "xcode-27", "xcode-27-xlarge"],
+  "corrected_mapping": {
+    "label": "windows-2025-vs2026",
+    "architecture": "x64",
+    "image_doc": "images/windows/Windows2025-VS2026-Readme.md",
+    "image_version": "20260907.229.1",
+    "image_doc_git_blob_sha": "f1b4942a764bc63f489c8ddfcd3ed43ed5baebf8",
+    "image_doc_sha256": "eb5c9f5f43b41def440059077ef5354c5732c5a5f682c963105d4904e6752c1f",
+    "public_preview": false
+  },
+  "predecessor_incorrect_mapping": {
+    "image_doc": "images/windows/Windows2025-Readme.md",
+    "image_version": "20260913.261.1"
+  },
+  "entitlement_inference": false,
+  "source_or_workflow_changes": false,
+  "dispatches_performed": false
+}

@@ -1,0 +1,35 @@
+{
+  "captured_utc": "2026-09-20T11:05:34Z",
+  "runner_images": {
+    "repository": "actions/runner-images",
+    "source_commit": "9d7eec51794bb688d6c7ce00550cda5a134c88a3",
+    "readme_blob_sha": "8de90fd8b3b5bf9aeec88151e87a3469973bbecd",
+    "images": [
+      {"platform":"ubuntu","os":"26.04","architecture":"x64","labels":["ubuntu-26.04"],"image_version":"20260907.131.1","public_preview":true,"image_doc":"images/ubuntu/Ubuntu2604-Readme.md"},
+      {"platform":"ubuntu","os":"26.04","architecture":"arm64","labels":["ubuntu-26.04-arm"],"image_version":"20260907.118.1","public_preview":true,"image_doc":"images/ubuntu/Ubuntu2604-Arm64-Readme.md"},
+      {"platform":"ubuntu","os":"24.04","architecture":"x64","labels":["ubuntu-latest","ubuntu-24.04"],"image_version":"20260907.300.1","public_preview":false,"image_doc":"images/ubuntu/Ubuntu2404-Readme.md"},
+      {"platform":"ubuntu","os":"24.04","architecture":"arm64","labels":["ubuntu-24.04-arm"],"image_version":"20260907.118.1","public_preview":false,"image_doc":"images/ubuntu/Ubuntu2404-Arm64-Readme.md"},
+      {"platform":"ubuntu","os":"22.04","architecture":"x64","labels":["ubuntu-22.04"],"image_version":"20260907.292.1","public_preview":false,"image_doc":"images/ubuntu/Ubuntu2204-Readme.md","deprecation_announced":true},
+      {"platform":"ubuntu","os":"22.04","architecture":"arm64","labels":["ubuntu-22.04-arm"],"image_version":"20260907.126.1","public_preview":false,"image_doc":"images/ubuntu/Ubuntu2204-Arm64-Readme.md","deprecation_announced":true},
+      {"platform":"ubuntu","os":"slim","architecture":"x64","labels":["ubuntu-slim"],"public_preview":false,"image_doc":null},
+      {"platform":"macos","os":"27 (Xcode image)","architecture":"arm64","labels":["xcode-27","xcode-27-xlarge"],"image_version":"20260912.0186.1","public_preview":true,"image_doc":"images/macos/xcode-27-arm64-Readme.md","macos_27_label_observed":false},
+      {"platform":"macos","os":"26","architecture":"x64","labels":["macos-latest-large","macos-26-intel","macos-26-large"],"image_version":"20260824.0517.1","public_preview":false,"image_doc":"images/macos/macos-26-Readme.md"},
+      {"platform":"macos","os":"26","architecture":"arm64","labels":["macos-latest","macos-26","macos-26-xlarge"],"image_version":"20260907.0351.1","public_preview":false,"image_doc":"images/macos/macos-26-arm64-Readme.md"},
+      {"platform":"macos","os":"15","architecture":"x64","labels":["macos-15-large","macos-15-intel"],"image_version":"20260824.0482.1","public_preview":false,"image_doc":"images/macos/macos-15-Readme.md"},
+      {"platform":"macos","os":"15","architecture":"arm64","labels":["macos-15","macos-15-xlarge"],"image_version":"20260907.0337.1","public_preview":false,"image_doc":"images/macos/macos-15-arm64-Readme.md"},
+      {"platform":"macos","os":"14","architecture":"x64","labels":["macos-14-large"],"image_version":"20260629.0276.1","public_preview":false,"deprecated":true,"image_doc":"images/macos/macos-14-Readme.md"},
+      {"platform":"macos","os":"14","architecture":"arm64","labels":["macos-14","macos-14-xlarge"],"image_version":"20260831.0302.1","public_preview":false,"deprecated":true,"image_doc":"images/macos/macos-14-arm64-Readme.md"},
+      {"platform":"windows","os":"Server 2025","architecture":"x64","labels":["windows-latest","windows-2025","windows-2025-vs2026"],"image_version":"20260913.261.1","public_preview":false,"image_doc":"images/windows/Windows2025-Readme.md"},
+      {"platform":"windows","os":"Server 2022","architecture":"x64","labels":["windows-2022"],"image_version":"20260907.297.1","public_preview":false,"image_doc":"images/windows/Windows2022-Readme.md"},
+      {"platform":"windows","os":"11","architecture":"arm64","labels":["windows-11-arm"],"image_version":"20260914.169.1","public_preview":false,"image_doc":"images/windows/Windows11-Arm64-Readme.md","generally_available":true},
+      {"platform":"windows","os":"11 with Visual Studio 2026","architecture":"arm64","labels":["windows-11-vs2026-arm"],"image_version":"20260914.159.1","public_preview":false,"image_doc":"images/windows/Windows11-VS2026-Arm64-Readme.md","generally_available":true}
+    ]
+  },
+  "runner_software": {
+    "repository": "actions/runner",
+    "latest_release": "v2.337.0",
+    "release_published_utc": "2026-08-26T14:33:29Z",
+    "release_source_commit": "397b032cbf865e9c3ddfab89d533ec19325e1273",
+    "readme_blob_sha": "0279d839ea5015e63a7136ae5116a1b52e66c97c"
+  }
+}

@@ -1,0 +1,31 @@
+HTTP/2.0 200 OK
+Access-Control-Allow-Origin: *
+Access-Control-Expose-Headers: ETag, Link, Location, Retry-After, X-GitHub-OTP, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Used, X-RateLimit-Resource, X-RateLimit-Reset, X-OAuth-Scopes, X-Accepted-OAuth-Scopes, X-Poll-Interval, X-GitHub-Media-Type, X-GitHub-SSO, X-GitHub-Request-Id, Deprecation, Sunset, Warning
+Cache-Control: private, max-age=60, s-maxage=60
+Content-Security-Policy: default-src 'none'
+Content-Type: application/json; charset=utf-8
+Date: Sun, 20 Sep 2026 11:09:26 GMT
+Etag: W/"78522640529bebcf5bfa5b421856810afef0d729b5f9736f68c3fe5a8b1e0aa8"
+Last-Modified: Sun, 20 Sep 2026 01:03:23 GMT
+Referrer-Policy: origin-when-cross-origin, strict-origin-when-cross-origin
+Server: github.com
+Strict-Transport-Security: max-age=31536000; includeSubdomains; preload
+Vary: Accept, Authorization, Cookie, X-GitHub-OTP,Accept-Encoding, Accept, X-Requested-With
+X-Accepted-Oauth-Scopes: repo
+X-Content-Type-Options: nosniff
+X-Frame-Options: deny
+X-Github-Api-Version-Selected: 2022-11-28
+X-Github-Edge-Region: southeastasia
+X-Github-Media-Type: github.v3; format=json
+X-Github-Request-Id: 19B5:289E6F:20C2126:22730C4:6AAFBEE6
+X-Oauth-Client-Id: 178c6fc778ccc68e1d6a
+X-Oauth-Scopes: admin:org, delete_repo, gist, repo, workflow
+X-Poll-Interval: 300
+X-Ratelimit-Limit: 5000
+X-Ratelimit-Remaining: 3824
+X-Ratelimit-Reset: 1789902627
+X-Ratelimit-Resource: core
+X-Ratelimit-Used: 1176
+X-Xss-Protection: 0
+
+{"ref":"refs/tags/v2.337.0","node_id":"MDM6UmVmMTg0Mjg2ODc1OnJlZnMvdGFncy92Mi4zMzcuMA==","url":"https://api.github.com/repos/actions/runner/git/refs/tags/v2.337.0","object":{"sha":"397b032cbf865e9c3ddfab89d533ec19325e1273","type":"commit","url":"https://api.github.com/repos/actions/runner/git/commits/397b032cbf865e9c3ddfab89d533ec19325e1273"}}

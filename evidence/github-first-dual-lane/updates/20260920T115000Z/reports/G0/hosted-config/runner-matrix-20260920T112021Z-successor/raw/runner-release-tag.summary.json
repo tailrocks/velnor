@@ -1,0 +1,8 @@
+{
+  "ref": "refs/tags/v2.337.0",
+  "object": {
+    "sha": "397b032cbf865e9c3ddfab89d533ec19325e1273",
+    "type": "commit",
+    "url": "https://api.github.com/repos/actions/runner/git/commits/397b032cbf865e9c3ddfab89d533ec19325e1273"
+  }
+}

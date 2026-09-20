@@ -1,0 +1,38 @@
+{
+  "schema": "dual-lane/stable-external-evidence-checkpoint/v1",
+  "capture_cutoff_utc": "2026-09-20T11:50:00Z",
+  "parent_checkpoint": "31cdf59d45cc975ebf7244d1e1d111974f2f62b1",
+  "update_path": "evidence/github-first-dual-lane/updates/20260920T115000Z",
+  "source_root": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence",
+  "counts": {"regular_non_symlink_files": 158, "source_bytes": 2235918, "g0_files": 146, "g0_bytes": 2128457, "g1_files": 12, "g1_bytes": 107461},
+  "stability": {"source_two_read_snapshot_equal": true, "destination_matches_source_inventory": true, "cutoff_enforced": true, "runner_source_manifest_verified": true, "symlinks_selected": 0},
+  "recovered_report": {"path": "G1/reviews/bootstrap-artifact-binding-repair-final-independent-review-20260920.md", "sha256": "8fd6a3d0da3e9715cc31d4b43a915ba7ef900c56a42dc64c66780935fe824d07", "original_location": "/Users/donbeave/Projects/tailrocks/dual-lane-evidence/G1/reviews/bootstrap-artifact-binding-repair-final-independent-review-20260920.md", "canonical_location": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G1/reviews/bootstrap-artifact-binding-repair-final-independent-review-20260920.md", "bytes": 15522, "byte_compare": "identical"},
+  "included": [
+    {"id": "runner-matrix-successor", "path": "G0/hosted-config/runner-matrix-20260920T112021Z-successor/", "files": 139, "bytes": 2089501, "manifest_sha256": "eaeaf361842c3317218193f06888f082be7c939e02f8392bd3cbfafd913c324a", "review": "G0/distribution-review/hosted-runner-matrix-20260920T112021Z-successor-review.md", "review_sha256": "8f96159e1b6026921be0ba29bf21178bdf925969cede8e2b3409024fab573e60", "status": "bounded_source_matrix_only"},
+    {"id": "runner-matrix-predecessor-review", "path": "G0/distribution-review/hosted-runner-matrix-20260920T110534Z-review.md", "sha256": "23ec799d7577e92992b0aff003ffafa4567325c4caea0fd0da0512310caef324", "status": "chronology_only"},
+    {"id": "workflow-inventory-review", "path": "G0/distribution-review/workflow-source-inventory-20260920T102146Z-review.md", "sha256": "48f14c76280fc9bb5c7620a09f89a74396f5cbebeeb2beda7fc59b5977810bc7", "status": "source_only"},
+    {"id": "apt-consumer-4cb", "path": "G0/distribution-review/apt-consumer-4cb7490-exact-review.md", "sha256": "b79cdcbc28017d1cce09a340f9c29c3fa54ea2691655d72acc4fcd08e4af8766", "status": "integration_rejected"},
+    {"id": "checker-efd", "path": "G0/checker-v2-review/efdccb5d12a075c8adebd24e6da4ae895aab56e4-g3-checker-review.md", "sha256": "82ccff4164185c69536b99bfbaa5422c178cd588fcffe19688cbb5146cdf6738", "status": "bounded_source_review"},
+    {"id": "packaging-review-31cdf", "path": "G0/evidence-checkpoint-review/31cdf59d45cc975ebf7244d1e1d111974f2f62b1-packaging-review.md", "sha256": "6af6031067a13db28b3a3e7c965a0542bad57e6f9c1e8c646bbfdc2635e9f296", "status": "packaging_only"},
+    {"id": "docs-409", "path": "G0/docs-review/review-409668e2a0f988938ed507455b77d91bea5cd00f.md", "sha256": "376a949ee591873b84f6efddf3e1241c1fe4dd21943276eccc70b629ad063d2b", "status": "docs_only"},
+    {"id": "native-signer-642ba", "path": "G1/reviews/native-signer-contract-61cb7fdf-independent.md", "sha256": "642ba39bb48dad69ee6b5f8275ef1bed6fbf0cf8818d74dd6e1a581beedd3141", "status": "not_approved"},
+    {"id": "native-signer-scope-5ca", "path": "G1/reviews/native-signer-contract-61cb7fdf-independent-scope-correction.md", "sha256": "5ca0698841a992313c3c670a20f4d534fa5fe446508d19050700d0e5d7f03f9c", "status": "separate_scope_correction"},
+    {"id": "native-reconciliation", "path": "G1/reviews/native-id-9908296d-reconciliation.md", "sha256": "d31052a65c0d3326aaefa1616755fe43f20b42a0dc61c87bff6e2a5f2b85db4d", "status": "read_only_reconciliation"},
+    {"id": "homebrew-86bc", "path": "G1/reviews/homebrew-86bc621-independent.md", "sha256": "c759150d4ae9b8db88d6b73a6f760dcf0e4665ab4f40afddd5a4452245675a76", "status": "blocked_isolation"},
+    {"id": "homebrew-predecessor", "path": "G1/reviews/homebrew-257e7fc-independent.md", "sha256": "3407be839d8982bc7673add926592a42d9e99fa899062b2b5a6e57658779225e", "status": "chronology_only"},
+    {"id": "prefetch-prototype-b249", "path": "G1/bootstrap/bootstrap-prefetch-prototype-proposal-20260920.md", "sha256": "33fbfa6d62012fcf3bbb242f85f446a0f6c15d497d319e6c67ba141d3fa54f23", "status": "proposal_only"},
+    {"id": "prefetch-review-3d87", "path": "G1/bootstrap/bootstrap-prefetch-prototype-review-b24989d3.md", "sha256": "3d87c13f1f339f2dc19ef8785c676dec6533dd986fa0ca5c19d1f3935d9435a4", "status": "changes_required"},
+    {"id": "isolation-followup-review", "path": "G1/reviews/bootstrap-artifact-binding-run-isolation-followup-independent-review-20260920.md", "sha256": "ecbf65c91d44ce6abcb0bc1053acc35d81653eb97105e317684c112c902692a7", "status": "read_only_design"},
+    {"id": "isolation-canary-validity", "path": "G1/reviews/bootstrap-artifact-binding-canary-validity-20260920.md", "sha256": "1946681a5ed28d81b8721e913a5b9e1faab537f1d8a607acb24c95f9c88e737b", "status": "no_live_canary"},
+    {"id": "bootstrap-80ce", "path": "G1/bootstrap/source-review-80ceab4b4a9f15f88e2ce016c6c3864d2de5a3e0.md", "sha256": "a17ceb67f4d44c7e9d116724620c9e6e49e46b406228b8ae280bcf3c8d39970b", "status": "changes_required"},
+    {"id": "source-integration-7df-review", "path": "G1/integration/review-7df0481e3f38f9f662d25cd963c99d24bc32357b.md", "sha256": "bab4d4d23a3599cec5d0144e7f2d9bc29884d03467c08b002bb89198c54eed44", "status": "changes_required"}
+  ],
+  "excluded": {
+    "active_roots": ["G0/live-collector-20260920T095716Z-05e", "G0/live-collector-20260920T101603Z-8d3", "G0/live-collector-20260920T103455Z-413", "G0/external-action-gap-20260920T105300Z", "G0/external-action-gap-20260920T114755Z", "G0/hosted-config/report.md"],
+    "mutable_supersession": [{"path": "G1/integration/source-integration-merge-checkpoint-20260920.json", "prior_frozen_sha256": "4bc3ecd88d587d9f5e83be6d5fbf0b82bd4cffb0db7b63680a0a2100962c9e6d", "current_excluded_sha256": "9109595eae5c46254413407f9f399e8c67f8168bda982d85cdcd0363719edcd2"}],
+    "other": ["moving owner ledgers/WIP", "raw logs", "builds/targets", "clones/source archives", "credentials/secrets"]
+  },
+  "mutations": {"source": false, "github": false, "dispatch": false, "merge": false, "release": false, "authority": false},
+  "attestation": "none",
+  "gate_status": "not-evaluated"
+}

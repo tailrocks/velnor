@@ -1,0 +1,33 @@
+{
+  "captured_utc": "2026-09-20T11:05:34Z",
+  "source_http_dates_utc": {
+    "runner_images_repo": "2026-09-20T11:05:54Z",
+    "runner_images_main_ref": "2026-09-20T11:05:54Z",
+    "runner_images_tree": "2026-09-20T11:06:18Z",
+    "runner_images_readme": "2026-09-20T11:06:50Z",
+    "runner_images_image_docs": "2026-09-20T11:07:54Z-2026-09-20T11:07:55Z",
+    "runner_repo": "2026-09-20T11:05:54Z",
+    "runner_main_ref": "2026-09-20T11:05:54Z",
+    "runner_latest_release": "2026-09-20T11:09:07Z",
+    "runner_release_tag": "2026-09-20T11:09:26Z",
+    "runner_release_readme": "2026-09-20T11:09:46Z"
+  },
+  "repositories": {
+    "actions/runner-images": {
+      "branch": "main",
+      "commit": "9d7eec51794bb688d6c7ce00550cda5a134c88a3"
+    },
+    "actions/runner": {
+      "branch": "main",
+      "main_commit": "80bb1fb827fa44d489263061e71ef4adba7ad8cd",
+      "latest_release_tag": "v2.337.0",
+      "latest_release_commit": "397b032cbf865e9c3ddfab89d533ec19325e1273"
+    }
+  },
+  "api_errors": [],
+  "read_only": true,
+  "credentials_saved": false,
+  "workflow_source_changes": false,
+  "dispatches_performed": false,
+  "checks_or_logs_fetched": false
+}
