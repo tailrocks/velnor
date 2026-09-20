@@ -2154,6 +2154,7 @@ fn check_g0_request_provenance(collector: &G0CollectorSnapshot, findings: &mut V
             );
         }
     }
+    check_g0_paginated_response_streams(collector, &pages, findings);
     for raw in &collector.raw_objects {
         let decoded = BASE64.decode(&raw.bytes_base64);
         if !raw_ids.insert(raw.raw_id.clone())
@@ -2249,6 +2250,123 @@ fn check_g0_request_provenance(collector: &G0CollectorSnapshot, findings: &mut V
         &raw_ids,
         findings,
     );
+}
+
+fn g0_page_members(value: &Value, response_schema: G0RawResponseSchema) -> Option<(u64, &[Value])> {
+    let envelope_key = match response_schema {
+        G0RawResponseSchema::CheckRunsPage => "check_runs",
+        G0RawResponseSchema::CheckSuitesPage => "check_suites",
+        G0RawResponseSchema::JobsPage => "jobs",
+        G0RawResponseSchema::Singular => return None,
+    };
+    let total_count = value.get("total_count")?.as_u64()?;
+    let members = value.get(envelope_key)?.as_array()?;
+    Some((total_count, members.as_slice()))
+}
+
+fn check_g0_paginated_response_streams(
+    collector: &G0CollectorSnapshot,
+    pages: &BTreeMap<(G0ApiKind, String, String, String), Vec<&G0RequestRecord>>,
+    findings: &mut Vec<Finding>,
+) {
+    for page_set in pages.values() {
+        let mut expected_total = None;
+        let mut observed_items = 0u64;
+        let mut member_ids = BTreeSet::new();
+        let mut list_stream = false;
+        for request in page_set {
+            let Some(raw) = collector.raw_objects.iter().find(|raw| {
+                raw.raw_id == request.response_raw_ref && raw.request_id == request.request_id
+            }) else {
+                continue;
+            };
+            let Some(response_schema) =
+                g0_raw_response_schema(&raw.object_kind, &request.endpoint_or_operation)
+            else {
+                continue;
+            };
+            let is_list = !matches!(response_schema, G0RawResponseSchema::Singular);
+            if !is_list {
+                continue;
+            }
+            list_stream = true;
+            let body_valid = BASE64
+                .decode(&raw.bytes_base64)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .and_then(|value| {
+                    let (total, members) = g0_page_members(&value, response_schema)?;
+                    Some((total, members.to_vec()))
+                });
+            let Some((total, members)) = body_valid else {
+                finding(
+                    findings,
+                    "g0-response-envelope",
+                    "",
+                    "evidence.g0_inventory.collector_snapshot.raw_objects",
+                    "paginated REST responses must use their exact typed envelope",
+                );
+                continue;
+            };
+            if expected_total.is_some_and(|expected| expected != total) {
+                finding(
+                    findings,
+                    "g0-pagination-total",
+                    "",
+                    "evidence.g0_inventory.collector_snapshot.requests.page",
+                    "every page in one response stream must report the same total_count",
+                );
+            } else {
+                expected_total = Some(total);
+            }
+            if members.len() as u32 != request.page.items_returned {
+                finding(
+                    findings,
+                    "g0-pagination-count",
+                    "",
+                    "evidence.g0_inventory.collector_snapshot.requests.page.items_returned",
+                    "page.items_returned must equal the exact envelope member count",
+                );
+            }
+            observed_items = observed_items.saturating_add(members.len() as u64);
+            for member in members {
+                let Some(id) = g0_json_u64(&member, &["id"]) else {
+                    finding(
+                        findings,
+                        "g0-pagination-member",
+                        "",
+                        "evidence.g0_inventory.collector_snapshot.raw_objects",
+                        "every paginated member must expose a numeric immutable id",
+                    );
+                    continue;
+                };
+                if !member_ids.insert(id) {
+                    finding(
+                        findings,
+                        "g0-pagination-duplicate",
+                        "",
+                        "evidence.g0_inventory.collector_snapshot.raw_objects",
+                        "a paginated response stream cannot repeat a member id",
+                    );
+                }
+            }
+        }
+        if list_stream
+            && let Some(total) = expected_total
+            && page_set
+                .last()
+                .is_some_and(|request| !request.page.has_next_page)
+            && observed_items != total
+        {
+            finding(
+                findings,
+                "g0-pagination-total",
+                "",
+                "evidence.g0_inventory.collector_snapshot.requests.page",
+                "the final captured page must account for total_count items",
+            );
+        }
+    }
 }
 
 fn check_g0_raw_ref(
@@ -3859,6 +3977,95 @@ fn g0_check_run_identity_valid(value: &Value, check: &G0CheckProducer, app_id: u
         && g0_json_string(value, &["app", "slug"]) == Some(check.app_slug.as_str())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum G0RawResponseSchema {
+    Singular,
+    CheckRunsPage,
+    CheckSuitesPage,
+    JobsPage,
+}
+
+/// Map each retained raw object to the one REST response shape allowed for
+/// its exact endpoint.  A page endpoint never falls back to the singular
+/// object shape: doing so lets a truncated or malformed response masquerade
+/// as a complete relationship.
+fn g0_raw_response_schema(object_kind: &str, endpoint: &str) -> Option<G0RawResponseSchema> {
+    let parts = endpoint.strip_prefix('/')?.split('/').collect::<Vec<_>>();
+    match object_kind {
+        "check_run"
+            if parts.len() == 6
+                && parts[0] == "repos"
+                && !parts[1].is_empty()
+                && !parts[2].is_empty()
+                && parts[3] == "commits"
+                && valid_sha(parts[4])
+                && parts[5] == "check-runs" =>
+        {
+            Some(G0RawResponseSchema::CheckRunsPage)
+        }
+        "check_run"
+            if parts.len() == 5
+                && parts[0] == "repos"
+                && !parts[1].is_empty()
+                && !parts[2].is_empty()
+                && parts[3] == "check-runs"
+                && parts[4].parse::<u64>().is_ok_and(|id| id > 0) =>
+        {
+            Some(G0RawResponseSchema::Singular)
+        }
+        "check_suite"
+            if parts.len() == 6
+                && parts[0] == "repos"
+                && !parts[1].is_empty()
+                && !parts[2].is_empty()
+                && parts[3] == "commits"
+                && valid_sha(parts[4])
+                && parts[5] == "check-suites" =>
+        {
+            Some(G0RawResponseSchema::CheckSuitesPage)
+        }
+        "check_suite"
+            if parts.len() == 5
+                && parts[0] == "repos"
+                && !parts[1].is_empty()
+                && !parts[2].is_empty()
+                && parts[3] == "check-suites"
+                && parts[4].parse::<u64>().is_ok_and(|id| id > 0) =>
+        {
+            Some(G0RawResponseSchema::Singular)
+        }
+        "job"
+            if parts.len() == 9
+                && parts[0] == "repos"
+                && !parts[1].is_empty()
+                && !parts[2].is_empty()
+                && parts[3] == "actions"
+                && parts[4] == "runs"
+                && parts[5].parse::<u64>().is_ok_and(|id| id > 0)
+                && parts[6] == "attempts"
+                && parts[7].parse::<u32>().is_ok_and(|attempt| attempt > 0)
+                && parts[8] == "jobs" =>
+        {
+            Some(G0RawResponseSchema::JobsPage)
+        }
+        "workflow_run"
+            if parts.len() == 6
+                && parts[0] == "repos"
+                && !parts[1].is_empty()
+                && !parts[2].is_empty()
+                && parts[3] == "actions"
+                && parts[4] == "runs"
+                && parts[5].parse::<u64>().is_ok_and(|id| id > 0) =>
+        {
+            Some(G0RawResponseSchema::Singular)
+        }
+        "app" if parts.len() == 2 && parts[0] == "apps" && !parts[1].is_empty() => {
+            Some(G0RawResponseSchema::Singular)
+        }
+        _ => None,
+    }
+}
+
 fn g0_capture_raw_json(
     raw_refs: &[String],
     object_kind: &str,
@@ -3891,6 +4098,7 @@ fn g0_capture_raw_json(
     {
         return None;
     }
+    let response_schema = g0_raw_response_schema(object_kind, &request.endpoint_or_operation)?;
     let bytes = BASE64.decode(&raw.bytes_base64).ok()?;
     if raw.byte_length != bytes.len() as u64
         || digest_bytes(&bytes) != raw.sha256
@@ -3899,7 +4107,7 @@ fn g0_capture_raw_json(
         return None;
     }
     let value = serde_json::from_slice::<Value>(&bytes).ok()?;
-    g0_select_raw_member(value, object_kind, member_id, request)
+    g0_select_raw_member(value, response_schema, member_id, request)
 }
 
 /// Select one object from the exact GitHub page envelope retained by the
@@ -3911,22 +4119,28 @@ fn g0_capture_raw_json(
 /// item in `total_count`; duplicate IDs are rejected.
 fn g0_select_raw_member(
     value: Value,
-    object_kind: &str,
+    response_schema: G0RawResponseSchema,
     member_id: u64,
     request: &G0RequestRecord,
 ) -> Option<Value> {
-    let envelope_key = match object_kind {
-        "check_run" => Some("check_runs"),
-        "job" => Some("jobs"),
-        _ => None,
+    let envelope_key = match response_schema {
+        G0RawResponseSchema::CheckRunsPage => "check_runs",
+        G0RawResponseSchema::CheckSuitesPage => "check_suites",
+        G0RawResponseSchema::JobsPage => "jobs",
+        G0RawResponseSchema::Singular => {
+            return (g0_json_u64(&value, &["id"]) == Some(member_id)
+                && request.page.items_returned == 1
+                && !request.page.has_next_page
+                && value.get("check_runs").is_none()
+                && value.get("check_suites").is_none()
+                && value.get("jobs").is_none())
+            .then_some(value);
+        }
     };
-    if let Some(envelope_key) = envelope_key
-        && value.get(envelope_key).is_some()
     {
         let total_count = value.get("total_count")?.as_u64()?;
         let members = value.get(envelope_key)?.as_array()?;
         if members.len() as u32 != request.page.items_returned
-            || members.is_empty()
             || (!request.page.has_next_page && total_count != members.len() as u64)
             || (request.page.has_next_page && total_count < members.len() as u64)
         {
@@ -3936,9 +4150,8 @@ fn g0_select_raw_member(
             .iter()
             .filter(|member| g0_json_u64(member, &["id"]) == Some(member_id))
             .collect::<Vec<_>>();
-        return (matches.len() == 1).then(|| matches[0].clone());
+        (matches.len() == 1).then(|| matches[0].clone())
     }
-    (g0_json_u64(&value, &["id"]) == Some(member_id)).then_some(value)
 }
 
 fn g0_api_path_is(value: &Value, path: &str) -> bool {
@@ -8174,6 +8387,11 @@ mod tests {
             } else {
                 format!("request-{prefix}-{kind}")
             };
+            let body = if kind == "job" {
+                json!({"total_count": 1, "jobs": [body]})
+            } else {
+                body
+            };
             let bytes = canonical_json(&body).into_bytes();
             let digest = digest_bytes(&bytes);
             let storage_ref = format!("sha256://{}", digest.strip_prefix("sha256:").unwrap());
@@ -10487,6 +10705,106 @@ mod tests {
     }
 
     #[test]
+    fn paginated_selector_rejects_bare_objects_and_requires_check_suites_envelope() {
+        let endpoint = format!("/repos/tailrocks/velnor/commits/{}/check-suites", sha('a'));
+        let request = captured_page_request(&endpoint, "page=1", 1);
+        let bare = json!({"id": 42});
+        assert!(
+            g0_select_raw_member(bare, G0RawResponseSchema::CheckSuitesPage, 42, &request)
+                .is_none()
+        );
+
+        let envelope = json!({
+            "total_count": 1,
+            "check_suites": [{"id": 42}]
+        });
+        let selected =
+            g0_select_raw_member(envelope, G0RawResponseSchema::CheckSuitesPage, 42, &request)
+                .expect("check-suites member must come from its exact envelope");
+        assert_eq!(g0_json_u64(&selected, &["id"]), Some(42));
+
+        let wrong_envelope = json!({
+            "total_count": 1,
+            "check_runs": [{"id": 42}]
+        });
+        assert!(g0_select_raw_member(
+            wrong_envelope,
+            G0RawResponseSchema::CheckSuitesPage,
+            42,
+            &request
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn paginated_stream_rejects_omitted_duplicate_and_cross_scope_pages() {
+        let mut collector = minimal_g0_collector();
+        let endpoint = format!("/repos/tailrocks/velnor/commits/{}/check-runs", sha('a'));
+        let mut first = captured_page_request(&endpoint, "page=1", 1);
+        first.request_id = "checks-page-1".to_owned();
+        first.response_raw_ref = "checks-raw-1".to_owned();
+        first.page.has_next_page = true;
+        first.page.link_next = Some(format!("https://api.github.com{endpoint}?page=2"));
+        let mut second = captured_page_request(&endpoint, "page=2", 1);
+        second.request_id = "checks-page-2".to_owned();
+        second.response_raw_ref = "checks-raw-2".to_owned();
+        second.page.number = 2;
+        let first_bytes = br#"{"total_count":2,"check_runs":[{"id":1}]}"#;
+        let second_bytes = br#"{"total_count":2,"check_runs":[{"id":2}]}"#;
+        collector.requests.extend([first.clone(), second.clone()]);
+        collector.raw_objects.extend([
+            captured_raw_reference("checks-raw-1", "checks-page-1", "check_run", first_bytes),
+            captured_raw_reference("checks-raw-2", "checks-page-2", "check_run", second_bytes),
+        ]);
+        let mut findings = Vec::new();
+        check_g0_request_provenance(&collector, &mut findings);
+        assert!(!findings.iter().any(|finding| {
+            matches!(
+                finding.code.as_str(),
+                "g0-response-envelope"
+                    | "g0-pagination-count"
+                    | "g0-pagination-total"
+                    | "g0-pagination-duplicate"
+            )
+        }));
+
+        let duplicate_bytes = br#"{"total_count":2,"check_runs":[{"id":1}]}"#;
+        collector.raw_objects[1] = captured_raw_reference(
+            "checks-raw-2",
+            "checks-page-2",
+            "check_run",
+            duplicate_bytes,
+        );
+        findings.clear();
+        check_g0_request_provenance(&collector, &mut findings);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "g0-pagination-duplicate"));
+
+        collector.raw_objects[1] =
+            captured_raw_reference("checks-raw-2", "checks-page-2", "check_run", second_bytes);
+        collector.requests[0].page.link_next = Some(
+            "https://api.github.com/repos/other/repo/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs?page=2"
+                .to_owned(),
+        );
+        findings.clear();
+        check_g0_request_provenance(&collector, &mut findings);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "g0-pagination"));
+
+        collector.requests[0].page.link_next =
+            Some(format!("https://api.github.com{endpoint}?page=2"));
+        collector.requests.pop();
+        collector.raw_objects.pop();
+        findings.clear();
+        check_g0_request_provenance(&collector, &mut findings);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "g0-pagination"));
+    }
+
+    #[test]
     fn actual_captured_jobs_page_binds_job_to_attempt_and_check_url() {
         let body_base64 = include_str!(
             "testdata/g0/raw-capture-20260920-065449/runs/tailrocks_holla-apt/run-35079189599/attempt-1/jobs/page-0001.body.base64"
@@ -10652,7 +10970,7 @@ mod tests {
         );
         let selected_job = g0_select_raw_member(
             jobs,
-            "job",
+            G0RawResponseSchema::JobsPage,
             job_ids.iter().next().copied().expect("first job id"),
             &job_request,
         )
@@ -10707,9 +11025,13 @@ mod tests {
             "per_page=100&filter=all&page=1",
             70,
         );
-        let selected_dco =
-            g0_select_raw_member(checks, "check_run", 106_031_458_188, &checks_request)
-                .expect("DCO must be selected from the complete checks page");
+        let selected_dco = g0_select_raw_member(
+            checks.clone(),
+            G0RawResponseSchema::CheckRunsPage,
+            106_031_458_188,
+            &checks_request,
+        )
+        .expect("DCO must be selected from the complete checks page");
         assert_eq!(g0_json_u64(&selected_dco, &["app", "id"]), Some(974_774));
 
         let dco_check = G0CheckProducer {
@@ -10757,6 +11079,66 @@ mod tests {
             "check_run",
             &checks_bytes,
         );
+        let mut wrong_app_page = checks.clone();
+        let wrong_app_member = wrong_app_page["check_runs"]
+            .as_array_mut()
+            .expect("captured check-runs array")
+            .iter_mut()
+            .find(|value| g0_json_u64(value, &["id"]) == Some(dco_check.check_run_id))
+            .expect("captured DCO member");
+        wrong_app_member["app"]["id"] = json!(12_526);
+        wrong_app_member["app"]["slug"] = json!("sonarqubecloud");
+        let wrong_app_bytes = canonical_json(&wrong_app_page).into_bytes();
+        let wrong_app_raw = captured_raw_reference(
+            "real-checks-raw",
+            "real-checks-request",
+            "check_run",
+            &wrong_app_bytes,
+        );
+        let wrong_app_selected = g0_capture_raw_json(
+            &["real-checks-raw".to_owned()],
+            "check_run",
+            dco_check.check_run_id,
+            std::slice::from_ref(&checks_request.endpoint_or_operation),
+            std::slice::from_ref(&valid_request),
+            std::slice::from_ref(&wrong_app_raw),
+        )
+        .expect("rehashed wrong-app page still has a typed member");
+        assert!(!g0_check_run_identity_valid(
+            &wrong_app_selected,
+            &dco_check,
+            974_774
+        ));
+
+        let mut wrong_suite_page = checks.clone();
+        let wrong_suite_member = wrong_suite_page["check_runs"]
+            .as_array_mut()
+            .expect("captured check-runs array")
+            .iter_mut()
+            .find(|value| g0_json_u64(value, &["id"]) == Some(dco_check.check_run_id))
+            .expect("captured DCO member");
+        wrong_suite_member["check_suite"]["id"] = json!(96_108_224_766u64);
+        let wrong_suite_bytes = canonical_json(&wrong_suite_page).into_bytes();
+        let wrong_suite_raw = captured_raw_reference(
+            "real-checks-raw",
+            "real-checks-request",
+            "check_run",
+            &wrong_suite_bytes,
+        );
+        let wrong_suite_selected = g0_capture_raw_json(
+            &["real-checks-raw".to_owned()],
+            "check_run",
+            dco_check.check_run_id,
+            std::slice::from_ref(&checks_request.endpoint_or_operation),
+            std::slice::from_ref(&valid_request),
+            std::slice::from_ref(&wrong_suite_raw),
+        )
+        .expect("rehashed wrong-suite page still has a typed member");
+        assert!(!g0_check_run_identity_valid(
+            &wrong_suite_selected,
+            &dco_check,
+            974_774
+        ));
         assert!(g0_capture_raw_json(
             &["real-checks-raw".to_owned()],
             "check_run",
@@ -10988,7 +11370,7 @@ mod tests {
             .unwrap();
         let mut actions_body: Value =
             serde_json::from_slice(&BASE64.decode(&actions_raw.bytes_base64).unwrap()).unwrap();
-        actions_body["run_attempt"] = json!(2);
+        actions_body["jobs"][0]["run_attempt"] = json!(2);
         let actions_bytes = canonical_json(&actions_body).into_bytes();
         actions_raw.bytes_base64 = BASE64.encode(&actions_bytes);
         let actions_digest = digest_bytes(&actions_bytes);
