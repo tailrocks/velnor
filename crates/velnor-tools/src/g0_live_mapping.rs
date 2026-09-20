@@ -416,6 +416,9 @@ fn map_raw_object(raw: &RawObjectRef) -> Result<G0RawObjectRef> {
         bytes_base64: raw.bytes_base64.clone(),
         media_type: raw.media_type.clone(),
         storage_ref: raw.storage_ref.clone(),
+        original_sha256: raw.original_sha256.clone(),
+        original_byte_length: raw.original_byte_length,
+        original_storage_ref: raw.original_storage_ref.clone(),
     })
 }
 
