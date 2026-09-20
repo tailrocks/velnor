@@ -936,11 +936,23 @@ pub async fn check_paths_live(input: &EvidenceCheckInput) -> Result<CheckReport>
             input,
         ))
         .await?;
-    let (manifest, snapshot, evidence, release, raw_store) = capture.into_parts();
-    if let Some(inventory) = evidence.g0_inventory.as_ref() {
+    let (manifest, snapshot, mut evidence, release, raw_store) = capture.into_parts();
+    if let Some(inventory) = evidence.g0_inventory.as_mut() {
         raw_store
             .verify_g0(inventory)
             .context("verify producer raw-store binding")?;
+        for raw in &mut inventory.collector_snapshot.raw_objects {
+            let bytes = raw_store
+                .read_g0_raw(raw)
+                .with_context(|| format!("reopen producer raw object {}", raw.raw_id))?;
+            if bytes.len() as u64 != raw.byte_length || digest_bytes(&bytes) != raw.sha256 {
+                bail!(
+                    "producer raw object {} failed reopened-byte digest/length binding",
+                    raw.raw_id
+                );
+            }
+            raw.bytes_base64 = BASE64.encode(bytes);
+        }
     }
     Ok(check_documents(
         stage,
@@ -10446,8 +10458,8 @@ mod tests {
             "check_run",
             check.check_run_id,
             &["/repos/jackin-project/jackin-agent-smith/commits/b9db5b149cc46baba9c49549432307c29e3972b0/check-runs".to_owned()],
-            &[request.clone()],
-            &[raw.clone()],
+            std::slice::from_ref(&request),
+            std::slice::from_ref(&raw),
         )
         .expect("DCO member must be selected from the complete check-runs page");
         assert_eq!(
@@ -10745,9 +10757,9 @@ mod tests {
             &["real-checks-raw".to_owned()],
             "check_run",
             dco_check.check_run_id,
-            &[checks_request.endpoint_or_operation.clone()],
-            &[valid_request.clone()],
-            &[valid_raw.clone()],
+            std::slice::from_ref(&checks_request.endpoint_or_operation),
+            std::slice::from_ref(&valid_request),
+            std::slice::from_ref(&valid_raw),
         )
         .is_some());
         let mut wrong_endpoint = valid_request.clone();
@@ -10757,18 +10769,18 @@ mod tests {
             &["real-checks-raw".to_owned()],
             "check_run",
             dco_check.check_run_id,
-            &[checks_request.endpoint_or_operation.clone()],
+            std::slice::from_ref(&checks_request.endpoint_or_operation),
             &[wrong_endpoint],
-            &[valid_raw.clone()],
+            std::slice::from_ref(&valid_raw),
         )
         .is_none());
         assert!(g0_capture_raw_json(
             &["real-checks-raw".to_owned()],
             "check_run",
             dco_check.check_run_id + 1,
-            &[checks_request.endpoint_or_operation.clone()],
-            &[valid_request.clone()],
-            &[valid_raw.clone()],
+            std::slice::from_ref(&checks_request.endpoint_or_operation),
+            std::slice::from_ref(&valid_request),
+            std::slice::from_ref(&valid_raw),
         )
         .is_none());
         let mut rehashed_page = checks_bytes.clone();
