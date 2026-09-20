@@ -727,9 +727,9 @@ fn namespace_workflow_archive(root: &Path, name: &str, workflow: &str) -> PathBu
     archive
 }
 
-fn run_namespace_scanner(root: &Path, workflow: &str) -> Output {
-    let base = namespace_workflow_archive(root, "base", workflow);
-    let head = namespace_workflow_archive(root, "head", workflow);
+fn run_namespace_scanner(root: &Path, base_workflow: &str, head_workflow: &str) -> Output {
+    let base = namespace_workflow_archive(root, "base", base_workflow);
+    let head = namespace_workflow_archive(root, "head", head_workflow);
     let mut child = must(
         Command::new("python3")
             .arg("-")
@@ -761,7 +761,7 @@ fn candidate_namespace_scan_rejects_unnamed_external_and_shell_publishers() {
           name: velnor-workflow-candidate-linux-x64
           path: candidate
 ";
-    let accepted = run_namespace_scanner(&root, fixed);
+    let accepted = run_namespace_scanner(&root, fixed, fixed);
     assert!(
         accepted.status.success(),
         "fixed publisher at {}: {accepted:?}",
@@ -772,7 +772,7 @@ fn candidate_namespace_scan_rejects_unnamed_external_and_shell_publishers() {
         "          path: candidate\n",
         "          path: candidate\n  other:\n    steps:\n      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a\n        with:\n          name: velnor-workflow-candidate-linux-x64\n          path: other\n",
     );
-    let rejected = run_namespace_scanner(&root, &unnamed);
+    let rejected = run_namespace_scanner(&root, fixed, &unnamed);
     assert!(
         !rejected.status.success(),
         "unnamed publisher escaped: {rejected:?}"
@@ -782,7 +782,7 @@ fn candidate_namespace_scan_rejects_unnamed_external_and_shell_publishers() {
         "jobs:\n",
         "jobs:\n  external:\n    uses: attacker/repo/.github/workflows/publish.yml@0123456789012345678901234567890123456789\n",
     );
-    let rejected = run_namespace_scanner(&root, &external);
+    let rejected = run_namespace_scanner(&root, fixed, &external);
     assert!(
         !rejected.status.success(),
         "external publisher escaped: {rejected:?}"
@@ -792,10 +792,30 @@ fn candidate_namespace_scan_rejects_unnamed_external_and_shell_publishers() {
         "jobs:\n",
         "jobs:\n  shell_publish:\n    steps:\n      - run: |\n          curl -X POST \"$ACTIONS_RUNTIME_URL\"\n",
     );
-    let rejected = run_namespace_scanner(&root, &shell);
+    let rejected = run_namespace_scanner(&root, fixed, &shell);
     assert!(
         !rejected.status.success(),
         "shell publisher escaped: {rejected:?}"
+    );
+
+    let python = fixed.replace(
+        "jobs:\n",
+        "jobs:\n  python_publish:\n    steps:\n      - run: |\n          import os\n          import urllib.request\n          urllib.request.urlopen(urllib.request.Request(os.environ[\"ACTIONS_RUNTIME_URL\"], method=\"POST\"))\n",
+    );
+    let rejected = run_namespace_scanner(&root, fixed, &python);
+    assert!(
+        !rejected.status.success(),
+        "Python artifact-service publisher escaped: {rejected:?}"
+    );
+
+    let opaque = fixed.replace(
+        "jobs:\n",
+        "jobs:\n  opaque_publish:\n    steps:\n      - uses: attacker/publisher@0123456789012345678901234567890123456789\n",
+    );
+    let rejected = run_namespace_scanner(&root, fixed, &opaque);
+    assert!(
+        !rejected.status.success(),
+        "opaque third-party publisher escaped: {rejected:?}"
     );
     let _ = fs::remove_dir_all(root);
 }

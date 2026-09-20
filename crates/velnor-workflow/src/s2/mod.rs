@@ -4672,6 +4672,8 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
           direct_uploads = []
           external_reusable_workflows = []
           local_workflow_edges = {}
+          workflow_lines = {}
+          pinned_action_pattern = re.compile(r"^[^./][^ ]+@[0-9a-f]{40}$")
 
           def uses_value(line):
               text = line.strip()
@@ -4697,6 +4699,7 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
 
           for archive_name in sys.argv[1:]:
               archive_edges = {}
+              archive_workflows = {}
               with tarfile.open(archive_name, "r:") as archive:
                   for member in archive.getmembers():
                       if not member.isfile() or not member.name.endswith((".yml", ".yaml")):
@@ -4705,6 +4708,7 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                       if stream is None:
                           raise SystemExit("workflow archive member is unreadable")
                       lines = stream.read().decode("utf-8").splitlines()
+                      archive_workflows[member.name] = lines
                       archive_edges[member.name] = [
                           match.group(1)
                           for line in lines
@@ -4715,6 +4719,8 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                       ]
                       for line in lines:
                           value = uses_value(line)
+                          if value is not None and not value.startswith("./") and not pinned_action_pattern.fullmatch(value):
+                              raise SystemExit(f"{member.name}: action reference is not a pinned base-owned action: {value}")
                           if value is not None and external_workflow_pattern.match(value):
                               external_reusable_workflows.append((member.name, value))
                       job = None
@@ -4754,11 +4760,62 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                           step_id = ids[0] if len(ids) == 1 else ""
                           uploads.append((archive_name, member.name, job, step_id, name))
               local_workflow_edges[archive_name] = archive_edges
+              workflow_lines[archive_name] = archive_workflows
 
           for path, value in external_reusable_workflows:
               raise SystemExit(f"{path}: external reusable workflow is outside the closed artifact publisher contract: {value}")
           for path, reason in direct_uploads:
               raise SystemExit(f"{path}: {reason}; use one fixed upload-artifact action contract")
+
+          def reachable_workflows(edges):
+              reachable = {".github/workflows/ci-pr.yml"}
+              pending = list(reachable)
+              while pending:
+                  workflow = pending.pop()
+                  for dependency in edges.get(workflow, []):
+                      if dependency not in reachable:
+                          reachable.add(dependency)
+                          pending.append(dependency)
+              return reachable
+
+          def normalized_capability_contract(lines):
+              contract = []
+              in_jobs = False
+              for line in lines:
+                  if line.strip() == "jobs:":
+                      in_jobs = True
+                  if not in_jobs:
+                      continue
+                  stripped = line.strip()
+                  if not stripped or stripped.startswith('#'):
+                      continue
+                  indent = len(line) - len(line.lstrip())
+                  contract.append((indent, " ".join(stripped.split())))
+              return contract
+
+          base_archive, head_archive = sys.argv[1:3]
+          base_reachable = reachable_workflows(local_workflow_edges[base_archive])
+          head_reachable = reachable_workflows(local_workflow_edges[head_archive])
+          root_workflow = ".github/workflows/ci-pr.yml"
+          if root_workflow not in workflow_lines[base_archive] or root_workflow not in workflow_lines[head_archive]:
+              raise SystemExit("candidate workflow graph has no base-owned ci-pr entrypoint")
+          if base_reachable != head_reachable:
+              raise SystemExit(
+                  "candidate workflow graph differs from the base-owned closed producer contract"
+              )
+          for path in sorted(base_reachable):
+              base_lines = workflow_lines[base_archive].get(path)
+              head_lines = workflow_lines[head_archive].get(path)
+              if base_lines is None and head_lines is None:
+                  continue
+              if base_lines is None or head_lines is None:
+                  raise SystemExit(
+                      f"{path}: reachable workflow is missing from the base-owned closed producer contract"
+                  )
+              if normalized_capability_contract(base_lines) != normalized_capability_contract(head_lines):
+                  raise SystemExit(
+                      f"{path}: reachable workflow capability contract differs from the base-owned closed producer contract"
+                  )
 
           for archive_name in sys.argv[1:]:
               reachable = {".github/workflows/ci-pr.yml"}
