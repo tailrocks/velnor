@@ -18,6 +18,7 @@ use super::{
     MUTABLE_MOUNT_HOST_DIR,
 };
 use crate::reuse::REQUIRED_CHECK;
+use crate::step_block::prefix_step_block_with_if;
 use crate::{
     config_rust_toolchain, github_expression, hosted_cargo_bin_toolchain_restore,
     hosted_cargo_bin_toolchain_save, hosted_cargo_bin_toolchain_verify, hosted_mold_setup,
@@ -30,6 +31,12 @@ use crate::{
     ProjectConfig, RunnerMode, RustToolchain, SelectionFieldSources, Unit, UnitKind,
     VelnorRustNeeds, GENERATED_HEADER, MR_BOXINGTON_VERSION, OPEN_TOFU_VERSION,
 };
+
+fn compose_step_block(block: &str, guard: Option<&str>) -> Result<String, GeneratorError> {
+    prefix_step_block_with_if(block, guard).map_err(|error| {
+        GeneratorError::usage(format!("invalid generated workflow step block: {error}"))
+    })
+}
 
 /// GitHub rejects reusable workflow files above this size.
 pub(crate) const GITHUB_WORKFLOW_BYTE_LIMIT: usize = 500_000;
@@ -74,9 +81,9 @@ mod tests {
 
     use super::{
         automatic_event_selects_lane, dispatch_choice_selects_lane, dispatch_lane_expression,
-        lane_input, unit_owns_workflow_crate, AutomaticEvent, DispatchChoice::*, GraphNode,
-        LaneAdmission, Pins, RunnerMode, Unit, UnitKind, VelnorPullRequest, VelnorRustNeeds,
-        WorkflowIr, WorkflowKind,
+        lane_input, unit_owns_workflow_crate, AutomaticEvent, CachePurpose, CacheSpec,
+        DispatchChoice::*, GraphNode, LaneAdmission, Pins, RunnerMode, Unit, UnitKind,
+        VelnorPullRequest, VelnorRustNeeds, WorkflowIr, WorkflowKind,
     };
     use crate::{
         nested_unit_workflow_file, sidebar_group_name, stack_group_job_id,
@@ -673,6 +680,48 @@ mod tests {
         assert!(
             !rust_workflow.contains("runs-on: macos-15"),
             "{rust_workflow}"
+        );
+    }
+
+    #[test]
+    fn collapsed_swift_partial_cache_composes_one_save_condition() {
+        let mut cached = rust_unit("swift-cached", "native/cached");
+        cached.kind = UnitKind::Swift;
+        cached.label = "Swift package (cached)".to_owned();
+        cached.platform = crate::platform::PlatformRequirement::apple_xcode();
+        cached.cache = Some(CacheSpec {
+            key_files: vec!["native/cached/Package.swift".to_owned()],
+            paths: vec!["~/.swiftpm".to_owned()],
+            purpose: CachePurpose::Generic,
+            mbx_output_cache_justification: None,
+            mutable_mount_seed: false,
+        });
+        let mut uncached = rust_unit("swift-uncached", "native/uncached");
+        uncached.kind = UnitKind::Swift;
+        uncached.label = "Swift package (uncached)".to_owned();
+        uncached.platform = crate::platform::PlatformRequirement::apple_xcode();
+        let ir = owner_test_ir("example/fixture", vec![cached, uncached]);
+        let workflow = must_some(
+            must_ok(
+                ir.render_kind_unit_workflow(UnitKind::Swift, None),
+                "swift partial-cache reusable renders",
+            ),
+            "swift partial-cache reusable exists",
+        )
+        .1;
+        let save = must_some(
+            workflow.find("      - name: Save unit cache"),
+            "swift save step renders",
+        );
+        let save = &workflow[save..];
+        let end = save[1..]
+            .find("      - name: ")
+            .map_or(save.len(), |offset| offset + 1);
+        let save = &save[..end];
+        assert_eq!(save.matches("        if:").count(), 1, "{save}");
+        assert!(
+            save.contains("(inputs.cache_key_files != '') && (always() &&"),
+            "{save}"
         );
     }
 
@@ -2026,15 +2075,16 @@ fn render_collapsed_sccache_env_step(
     output: &mut String,
     sccache: FeatureCoverage,
     mbx_input: &str,
-) {
+) -> Result<(), GeneratorError> {
     if !sccache.any {
-        return;
+        return Ok(());
     }
     let block = "      - name: Configure sccache environment\n        run: |\n          {\n            echo 'CARGO_INCREMENTAL=0'\n            echo 'RUSTC_WRAPPER=sccache'\n            echo 'SCCACHE_GHA_ENABLED=true'\n          } >> \"$GITHUB_ENV\"\n";
-    output.push_str(&prefix_step_block_with_if(
+    output.push_str(&compose_step_block(
         block,
         sccache.absent_gate(mbx_input).as_deref(),
-    ));
+    )?);
+    Ok(())
 }
 
 fn cargo_offline_run_prelude(members: &[&Unit]) -> String {
@@ -2623,55 +2673,6 @@ fn append_unique_needs(needs: &mut Vec<String>, additional: impl IntoIterator<It
             needs.push(need);
         }
     }
-}
-
-fn prefix_step_block_with_if(block: &str, guard: Option<&str>) -> String {
-    let Some(guard) = guard else {
-        return block.to_owned();
-    };
-    let mut out = String::new();
-    let mut pending_name: Option<String> = None;
-    let mut pending_if: Option<String> = None;
-
-    let flush_step = |out: &mut String, name: &str, if_expr: Option<&str>| {
-        out.push_str(name);
-        out.push('\n');
-        let combined = if let Some(existing) = if_expr {
-            format!("        if: ${{{{ {guard} && ({existing}) }}}}\n")
-        } else {
-            format!("        if: ${{{{ {guard} }}}}\n")
-        };
-        out.push_str(&combined);
-    };
-
-    for line in block.lines() {
-        if line.starts_with("      - name:") {
-            if let Some(name) = pending_name.take() {
-                flush_step(&mut out, &name, pending_if.as_deref());
-                pending_if = None;
-            }
-            pending_name = Some(line.to_owned());
-        } else if pending_name.is_some() && line.trim().starts_with("if:") {
-            let expr = line.trim().strip_prefix("if:").unwrap_or("").trim();
-            pending_if = Some(
-                expr.strip_prefix("${{ ")
-                    .and_then(|value| value.strip_suffix(" }}"))
-                    .unwrap_or(expr)
-                    .to_owned(),
-            );
-        } else {
-            if let Some(name) = pending_name.take() {
-                flush_step(&mut out, &name, pending_if.as_deref());
-                pending_if = None;
-            }
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-    if let Some(name) = pending_name.take() {
-        flush_step(&mut out, &name, pending_if.as_deref());
-    }
-    out
 }
 
 fn cargo_fetch_roots(members: &[&Unit]) -> Vec<String> {
@@ -5009,13 +5010,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         output: &mut String,
         members: &[&Unit],
         facts: &[LaneStepFacts],
-    ) {
+    ) -> Result<(), GeneratorError> {
         let member_records: Vec<BTreeSet<String>> = facts
             .iter()
             .map(|facts| facts.prepared_tools.iter().cloned().collect())
             .collect();
         if member_records.iter().all(BTreeSet::is_empty) {
-            return;
+            return Ok(());
         }
         let mut union: BTreeMap<String, &Unit> = BTreeMap::new();
         for (unit, records) in members.iter().zip(&member_records) {
@@ -5042,8 +5043,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 self.pins.cache_restore,
                 std::slice::from_ref(need),
             );
-            output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
+            output.push_str(&compose_step_block(&block, gate.as_deref())?);
         }
+        Ok(())
     }
 
     /// The single step block of a collapsed lane job. Every unit-specific
@@ -5134,8 +5136,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             }
             per_member.into_iter().next().unwrap_or_default()
         };
-        let gated = |block: String, coverage: FeatureCoverage, input: &str| -> String {
-            prefix_step_block_with_if(&block, coverage.gate(input).as_deref())
+        let gated = |block: String, coverage: FeatureCoverage, input: &str| {
+            compose_step_block(&block, coverage.gate(input).as_deref())
         };
 
         // The pinned policy runtime for units that run the generator's own
@@ -5147,7 +5149,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 crate::workflow_pinned_policy_runtime_velnor("${{ github.workspace }}"),
                 policy_runtime,
                 lane_input::POLICY_RUNTIME,
-            ));
+            )?);
         }
 
         // Tool provisioning, in the literal lane job's order.
@@ -5155,7 +5157,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         if !github_lane && mise_tools.any {
             let mut block = String::new();
             render_velnor_mise_install_from_input(&mut block);
-            output.push_str(&gated(block, mise_tools, lane_input::MISE_TOOLS));
+            output.push_str(&gated(block, mise_tools, lane_input::MISE_TOOLS)?);
         }
         if !velnor_skips_pinned_rust_toolchain(lane)
             && let Some(toolchain) = &toolchain
@@ -5171,7 +5173,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 self.pins.mise,
                 lane_input::expression(lane_input::MISE_TOOLS)
             );
-            output.push_str(&gated(block, mise_tools, lane_input::MISE_TOOLS));
+            output.push_str(&gated(block, mise_tools, lane_input::MISE_TOOLS)?);
         }
         let mise_runner = FeatureCoverage::over(&facts, |facts| facts.mise_runner);
         if github_lane && mise_runner.any {
@@ -5181,7 +5183,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 "      - name: Set up Mise\n        uses: {}\n        with:\n          install: false",
                 self.pins.mise
             );
-            output.push_str(&gated(block, mise_runner, lane_input::MISE_RUNNER));
+            output.push_str(&gated(block, mise_runner, lane_input::MISE_RUNNER)?);
         }
         let mbx = FeatureCoverage::over(&facts, |facts| facts.mbx_enabled);
         if mbx.any {
@@ -5197,7 +5199,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             } else {
                 self.render_mbx_local_step(&mut block);
             }
-            output.push_str(&gated(block, mbx, lane_input::MBX_ENABLED));
+            output.push_str(&gated(block, mbx, lane_input::MBX_ENABLED)?);
         }
         let sccache =
             FeatureCoverage::over(&facts, |facts| kind == UnitKind::Rust && !facts.mbx_enabled);
@@ -5205,11 +5207,11 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             let mut block = String::new();
             let sccache_tools = BTreeSet::from([ToolRequirement::Sccache]);
             self.render_kind_level_tool_steps(&mut block, lane, &sccache_tools, cache_save);
-            output.push_str(&prefix_step_block_with_if(
+            output.push_str(&compose_step_block(
                 &block,
                 sccache.absent_gate(lane_input::MBX_ENABLED).as_deref(),
-            ));
-            render_collapsed_sccache_env_step(output, sccache, lane_input::MBX_ENABLED);
+            )?);
+            render_collapsed_sccache_env_step(output, sccache, lane_input::MBX_ENABLED)?;
         }
         if github_lane && kind_tools.contains(&ToolRequirement::Bun) {
             let versioned = FeatureCoverage::over(&facts, |facts| facts.tool_version.is_some());
@@ -5221,7 +5223,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                     self.pins.bun,
                     lane_input::expression(lane_input::TOOL_VERSION)
                 );
-                output.push_str(&gated(block, versioned, lane_input::TOOL_VERSION));
+                output.push_str(&gated(block, versioned, lane_input::TOOL_VERSION)?);
             }
             if !versioned.all {
                 let gate = versioned
@@ -5231,7 +5233,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                     "      - name: Set up Bun\n        uses: {}\n",
                     self.pins.bun
                 );
-                output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
+                output.push_str(&compose_step_block(&block, gate.as_deref())?);
             }
         }
         if github_lane && kind_tools.contains(&ToolRequirement::Node) {
@@ -5249,7 +5251,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                     block,
                     cached,
                     lane_input::NODE_CACHE_DEPENDENCY_PATH,
-                ));
+                )?);
             }
             if !cached.all {
                 let gate = cached
@@ -5257,7 +5259,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                     .then(|| format!("inputs.{} == ''", lane_input::NODE_CACHE_DEPENDENCY_PATH));
                 let mut block = String::new();
                 self.render_node_step(&mut block, None);
-                output.push_str(&prefix_step_block_with_if(&block, gate.as_deref()));
+                output.push_str(&compose_step_block(&block, gate.as_deref())?);
             }
         }
         let cargo_bin = FeatureCoverage::over(&facts, |facts| !facts.cargo_bin_tools.is_empty());
@@ -5268,9 +5270,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 &lane_input::expression(lane_input::CARGO_BIN_TOOLS),
                 cache_save,
             );
-            output.push_str(&gated(block, cargo_bin, lane_input::CARGO_BIN_TOOLS));
+            output.push_str(&gated(block, cargo_bin, lane_input::CARGO_BIN_TOOLS)?);
         }
-        self.render_collapsed_prepared_tool_steps(output, members, &facts);
+        self.render_collapsed_prepared_tool_steps(output, members, &facts)?;
         self.render_kind_level_tool_steps(output, lane, &kind_tools, cache_save);
         render_ci_tool_bootstrap_end_marker(output);
 
@@ -5282,7 +5284,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         if seed.any {
             let mut block = String::new();
             render_mutable_mount_seed_restore_from_input(&mut block, self, &checks_env);
-            output.push_str(&gated(block, seed, lane_input::SEED_COMPAT));
+            output.push_str(&gated(block, seed, lane_input::SEED_COMPAT)?);
         }
         if bundle.any {
             for unit in members {
@@ -5301,7 +5303,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 self.pins.cache_restore,
                 lane_input::expression(lane_input::CACHE_PATHS),
             );
-            output.push_str(&gated(block, bundle, lane_input::CACHE_KEY_FILES));
+            output.push_str(&gated(block, bundle, lane_input::CACHE_KEY_FILES)?);
         }
         render_ci_cache_prep_end_marker(output);
 
@@ -5371,7 +5373,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 "Mark candidate phase end",
                 candidate_event_complete_gate,
             );
-            output.push_str(&gated(block, candidate, lane_input::CANDIDATE_PUBLISH));
+            output.push_str(&gated(block, candidate, lane_input::CANDIDATE_PUBLISH)?);
         }
 
         // Cache collection.
@@ -5384,7 +5386,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 &checks_env,
                 cache_save,
             );
-            output.push_str(&gated(block, seed, lane_input::SEED_COMPAT));
+            output.push_str(&gated(block, seed, lane_input::SEED_COMPAT)?);
         }
         if cache_save_bundle {
             let (cache_key, _) = format_cargo_bundle_cache_key(
@@ -5401,7 +5403,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 lane_input::expression(lane_input::CACHE_PATHS),
             );
             render_cache_save_end_marker(&mut block, "BUNDLE", &save_gate, "unit_cache_save");
-            output.push_str(&gated(block, bundle, lane_input::CACHE_KEY_FILES));
+            output.push_str(&gated(block, bundle, lane_input::CACHE_KEY_FILES)?);
         }
         let report = members
             .iter()

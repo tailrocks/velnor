@@ -35,6 +35,7 @@ mod runners;
 pub(crate) mod runtime;
 pub(crate) mod s2;
 mod scan;
+mod step_block;
 mod template_memory;
 #[cfg(feature = "tui")]
 mod tui;
