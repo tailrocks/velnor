@@ -13,6 +13,7 @@ use std::fs;
 use std::io::{self, IsTerminal, Read as _, Write as _};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+#[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
@@ -94,6 +95,12 @@ pub(crate) const VELNOR_WORKFLOW_LOCAL_SETUP_ACTION: &str =
 /// `policy-setup-action/` and runs the composite from there.
 pub(crate) const VELNOR_WORKFLOW_POLICY_SETUP_ACTION: &str =
     "./policy-setup-action/.github/actions/setup-velnor-workflow";
+/// The owner package-release publisher checks the candidate source out under
+/// `source/` before running repository-owned verification tasks. Its local
+/// setup action is therefore resolved from that exact checkout, not from the
+/// publisher workspace root.
+pub(crate) const VELNOR_WORKFLOW_SOURCE_SETUP_ACTION: &str =
+    "./source/.github/actions/setup-velnor-workflow";
 pub(crate) const VELNOR_CI_REPORT_ACTION: &str =
     "tailrocks/velnor/.github/actions/report-velnor-ci-outcomes";
 pub(crate) const VELNOR_CI_LOCAL_REPORT_ACTION: &str =
@@ -2910,19 +2917,19 @@ fn parse_mise_task_names(root: &Path) -> Result<Vec<String>, GeneratorError> {
     }
     let contents = fs::read_to_string(&path)
         .map_err(|error| GeneratorError::io("read mise.toml", &path, &error))?;
-    let mut names = Vec::new();
-    for line in contents.lines() {
-        let trimmed = line.trim();
-        if let Some(header) = trimmed.strip_prefix("[tasks.") {
-            let name = header
-                .strip_suffix(']')
-                .unwrap_or(header)
-                .trim()
-                .trim_matches('"')
-                .to_owned();
-            names.push(name);
-        }
-    }
+    let document = toml::from_str::<toml::Value>(&contents).map_err(|error| {
+        GeneratorError::usage(format!("parse mise.toml {}: {error}", path.display()))
+    })?;
+    let Some(tasks) = document.get("tasks") else {
+        return Ok(Vec::new());
+    };
+    let tasks = tasks.as_table().ok_or_else(|| {
+        GeneratorError::usage(format!(
+            "parse mise.toml {}: `tasks` must be a table",
+            path.display()
+        ))
+    })?;
+    let mut names = tasks.keys().cloned().collect::<Vec<_>>();
     names.sort();
     names.dedup();
     Ok(names)
@@ -5130,12 +5137,48 @@ fn workflow_runtime_setup(
     workflow_runtime_setup_with_install_rev(provider, repository, revision, revision)
 }
 
+/// Hosted runtime setup when the owner's composite action is inside a
+/// checkout at `checkout_path`. Consumers still resolve the immutable remote
+/// action; only the owner-local action path is rooted at the named checkout.
+pub(crate) fn workflow_runtime_setup_at_checkout_path(
+    provider: provider::ProviderId,
+    repository: &str,
+    revision: &str,
+    checkout_path: &str,
+) -> String {
+    workflow_runtime_setup_with_install_rev_at_checkout_path(
+        provider,
+        repository,
+        revision,
+        revision,
+        Some(checkout_path),
+    )
+}
+
 /// The `uses:` reference for `setup-velnor-workflow`: the owner's checkout
 /// (`./…`, no version) for the repository that ships the action, the
 /// published `revision` pin for every consumer.
 pub(crate) fn workflow_setup_action_uses(repository: &str, revision: &str) -> String {
+    workflow_setup_action_uses_at_checkout_path(repository, revision, None)
+}
+
+fn workflow_setup_action_uses_at_checkout_path(
+    repository: &str,
+    revision: &str,
+    checkout_path: Option<&str>,
+) -> String {
     if !repository.is_empty() && repository == workflow_setup_action_repository() {
-        VELNOR_WORKFLOW_LOCAL_SETUP_ACTION.to_owned()
+        checkout_path.map_or_else(
+            || VELNOR_WORKFLOW_LOCAL_SETUP_ACTION.to_owned(),
+            |path| {
+                format!(
+                    "./{path}/{}",
+                    VELNOR_WORKFLOW_LOCAL_SETUP_ACTION
+                        .strip_prefix("./")
+                        .unwrap_or(VELNOR_WORKFLOW_LOCAL_SETUP_ACTION)
+                )
+            },
+        )
     } else {
         format!("{VELNOR_WORKFLOW_SETUP_ACTION}@{revision}")
     }
@@ -5186,12 +5229,28 @@ fn workflow_runtime_setup_with_install_rev(
     revision: &str,
     install_rev: &str,
 ) -> String {
+    workflow_runtime_setup_with_install_rev_at_checkout_path(
+        provider,
+        repository,
+        revision,
+        install_rev,
+        None,
+    )
+}
+
+fn workflow_runtime_setup_with_install_rev_at_checkout_path(
+    provider: provider::ProviderId,
+    repository: &str,
+    revision: &str,
+    install_rev: &str,
+    checkout_path: Option<&str>,
+) -> String {
     if provider != provider::ProviderId::GithubHosted {
         return String::new();
     }
     format!(
         "      - name: Set up Velnor workflow runtime\n        id: runtime\n        uses: {}\n        with:\n          rev: {install_rev}\n      - name: Set trusted workflow policy revision\n        run: echo \"{VELNOR_POLICY_REVISION_ENV}={revision}\" >> \"$GITHUB_ENV\"\n",
-        workflow_setup_action_uses(repository, revision)
+        workflow_setup_action_uses_at_checkout_path(repository, revision, checkout_path)
     )
 }
 
@@ -7334,7 +7393,7 @@ fn stage_generated_file(path: &Path, content: &str) -> Result<PathBuf, Generator
         let staged = parent.join(format!(
             ".{filename}.stage-{}-{}-{attempt}",
             std::process::id(),
-            unique_suffix()
+            crate::unique_suffix()
         ));
         match fs::OpenOptions::new()
             .write(true)
@@ -7377,7 +7436,7 @@ fn reserve_backup_path(path: &Path) -> Result<(PathBuf, PathBuf), GeneratorError
         let directory = parent.join(format!(
             ".velnor-workflow-backup-{}-{}-{attempt}",
             std::process::id(),
-            unique_suffix()
+            crate::unique_suffix()
         ));
         match fs::create_dir(&directory) {
             Ok(()) => return Ok((directory.clone(), directory.join(filename))),
@@ -7420,22 +7479,6 @@ fn preimage_changed(relative: &Path) -> GeneratorError {
         "generated file changed after preflight: {}; review again",
         relative.display()
     ))
-}
-
-/// Uniqueness must never depend on clock resolution: parallel tests that
-/// start in the same instant previously collided on one temporary root and
-/// spuriously failed generation with "another generation is in progress".
-/// The atomic sequence guarantees in-process uniqueness; the process id
-/// separates concurrent test binaries; the timestamp keeps names legible.
-pub(crate) fn unique_suffix() -> u128 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    (nanos << 64)
-        | (u128::from(std::process::id()) << 32)
-        | u128::from(SEQUENCE.fetch_add(1, Ordering::Relaxed))
 }
 
 enum RepositorySource {
@@ -7748,7 +7791,7 @@ impl Checkout {
     fn clone_github(owner: &str, repository: &str) -> Result<Self, GeneratorError> {
         let mut target = env::temp_dir().join(format!(
             "velnor-workflow-{owner}-{repository}-{}",
-            unique_suffix()
+            crate::unique_suffix()
         ));
         let mut attempts = 0;
         loop {
@@ -7763,7 +7806,7 @@ impl Checkout {
                     }
                     target = env::temp_dir().join(format!(
                         "velnor-workflow-{owner}-{repository}-{}",
-                        unique_suffix()
+                        crate::unique_suffix()
                     ));
                 }
                 Err(error) => {
@@ -8014,7 +8057,10 @@ mod tests {
     }
 
     fn temporary_repository(name: &str) -> PathBuf {
-        let root = env::temp_dir().join(format!("velnor-workflow-test-{name}-{}", unique_suffix()));
+        let root = env::temp_dir().join(format!(
+            "velnor-workflow-test-{name}-{}",
+            crate::unique_suffix()
+        ));
         must(fs::create_dir_all(&root), "create test repository");
         // A Rust repository must pin its toolchain for the scan to accept it,
         // and most tests add Rust packages. The pin is inert where no Rust
@@ -8032,9 +8078,22 @@ mod tests {
     /// An empty scratch directory: for assertions that a refused write left a
     /// location untouched, which a scan-ready repository would fail.
     fn temporary_directory(name: &str) -> PathBuf {
-        let root = env::temp_dir().join(format!("velnor-workflow-test-{name}-{}", unique_suffix()));
+        let root = env::temp_dir().join(format!(
+            "velnor-workflow-test-{name}-{}",
+            crate::unique_suffix()
+        ));
         must(fs::create_dir_all(&root), "create test directory");
         root
+    }
+
+    #[test]
+    fn legacy_and_schema_two_fixture_paths_are_distinct() {
+        let legacy = crate::runtime::tests::digest_fixture("cross-module");
+        let schema_two = crate::s2::runtime::tests::digest_fixture("cross-module");
+
+        assert_ne!(legacy, schema_two);
+        let _ = fs::remove_dir_all(legacy);
+        let _ = fs::remove_dir_all(schema_two);
     }
 
     #[expect(
@@ -8254,6 +8313,53 @@ mod tests {
         assert!(kind.contains("${{ runner.os }}-${{ runner.arch }}"));
         assert!(kind.contains("manifest.json"));
         assert!(!kind.contains("cargo install --locked --git"));
+    }
+
+    #[test]
+    fn premerge_generator_changes_bootstrap_from_published_base_runtime() {
+        const PUBLISHED_BASE_REVISION: &str = "0dc79895ff1c5e88be7c3822c437e1c5b5282e12";
+        let mut config = scanned_fixture(provider_set([ProviderId::GithubHosted]));
+        config.repository = workflow_setup_action_repository().to_owned();
+        config.workflow_revision = PUBLISHED_BASE_REVISION.to_owned();
+        assert_ne!(
+            SOURCE_REVISION, PUBLISHED_BASE_REVISION,
+            "the test must model an unpublished generator revision"
+        );
+
+        let workflow = WorkflowIr::from_config(&config);
+        let pull_request = generated_ci_pr(&workflow);
+        assert!(
+            pull_request.contains(&format!("rev: {PUBLISHED_BASE_REVISION}")),
+            "PR planning must use the published base runtime: {pull_request}"
+        );
+        assert!(
+            !pull_request.contains(SOURCE_REVISION),
+            "PR planning must not bootstrap an unpublished generator revision: {pull_request}"
+        );
+
+        let policy = generated_ci_policy(&config);
+        assert!(
+            policy.contains(&format!("rev: {PUBLISHED_BASE_REVISION}")),
+            "policy must use the published base runtime: {policy}"
+        );
+        assert!(
+            policy.contains(&format!("BASE_PIN: {PUBLISHED_BASE_REVISION}")),
+            "candidate acquisition must compare against the published base runtime: {policy}"
+        );
+        assert!(
+            !policy.contains(SOURCE_REVISION),
+            "policy must not acquire an unpublished Stage-0 runtime: {policy}"
+        );
+        assert!(
+            policy.contains("name: Acquire candidate generator product"),
+            "policy must retain the candidate acquisition path: {policy}"
+        );
+        assert!(
+            policy.contains(
+                "head_candidate=\"$(velnor-workflow closure --rev=\"$HEAD_SHA\" --candidate)\""
+            ),
+            "candidate verification must remain anchored to the audited head: {policy}"
+        );
     }
 
     #[test]
@@ -12594,6 +12700,47 @@ lockfile = true
             generated_files(&scanned_fixture(all_providers())),
             "render fixture files",
         )
+    }
+
+    #[test]
+    fn generated_rust_surface_declares_and_passes_mbx_input() {
+        let config = scanned_fixture(all_providers());
+        let files = must(generated_files(&config), "render fixture files");
+        let rust = must_some(
+            files.get(&PathBuf::from(".github/workflows/ci-unit-rust.yml")),
+            "generated Rust reusable",
+        );
+        assert!(
+            rust.contains(
+                "      mbx_enabled:\n        required: false\n        type: boolean\n        default: false"
+            ),
+            "the Rust reusable declares the typed MBX input: {rust}"
+        );
+
+        let mut caller_count = 0;
+        for aggregate in ["ci-pr.yml", "ci-main.yml"] {
+            let workflow = must_some(
+                files.get(&PathBuf::from(".github/workflows").join(aggregate)),
+                aggregate,
+            );
+            for (_, block) in static_workflow_job_blocks(workflow) {
+                if !block.contains("uses: ./.github/workflows/ci-unit-rust.yml")
+                    || !(block.contains("provider: github-hosted")
+                        || block.contains("provider: velnor"))
+                {
+                    continue;
+                }
+                caller_count += 1;
+                assert!(
+                    block.contains("      mbx_enabled: true\n"),
+                    "{aggregate} Rust caller passes the typed MBX value: {block}"
+                );
+            }
+        }
+        assert!(
+            caller_count > 0,
+            "generated aggregate workflows contain Rust provider callers"
+        );
     }
 
     /// The fixture configuration with two cargo-restricted Rust units: the
@@ -20298,7 +20445,7 @@ lockfile = true
 
     #[test]
     fn check_fails_when_generator_revision_changes_but_output_does_not() {
-        const PREVIOUS_GENERATOR_REVISION: &str = "52";
+        const PREVIOUS_GENERATOR_REVISION: &str = "53";
 
         assert_ne!(
             GENERATOR_REVISION, PREVIOUS_GENERATOR_REVISION,

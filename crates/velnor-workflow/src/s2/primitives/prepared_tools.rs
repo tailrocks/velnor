@@ -1972,7 +1972,7 @@ mod tests {
             .iter()
             .any(|(path, _, executable)| { *path == "bin/test-runner" && *executable }));
         let root =
-            std::env::temp_dir().join(format!("velnor-prepared-tool-{}", std::process::id()));
+            std::env::temp_dir().join(format!("velnor-prepared-tool-{}", crate::unique_suffix()));
         let _ = std::fs::remove_dir_all(&root);
         must(std::fs::create_dir_all(&root), "fixture root");
         let destination = root.join("tool");
@@ -2637,7 +2637,7 @@ mod tests {
     fn prepared_tool_fixture(name: &str, declare: &str) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!(
             "velnor-prepared-tool-e2e-{name}-{}",
-            crate::s2::unique_suffix()
+            crate::unique_suffix()
         ));
         let _ = std::fs::remove_dir_all(&root);
         must(std::fs::create_dir_all(&root), "create fixture repository");

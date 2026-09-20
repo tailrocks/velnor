@@ -33,7 +33,7 @@ fn must_fail<T, E>(result: Result<T, E>, context: &str) -> E {
 fn temporary_directory(name: &str) -> PathBuf {
     let root = env::temp_dir().join(format!(
         "velnor-workflow-policy-{name}-{}",
-        crate::s2::unique_suffix()
+        crate::unique_suffix()
     ));
     must(fs::create_dir_all(&root), "create test directory");
     root
@@ -1438,5 +1438,17 @@ fn policy_sibling_setup_action_is_a_reviewed_local_path() {
     assert!(
         !is_approved_local_action("./policy-setup-action/.github/workflows/ci-pr.yml"),
         "the sibling checkout carries no reusable workflows"
+    );
+    assert!(
+        is_approved_local_action(crate::s2::VELNOR_WORKFLOW_SOURCE_SETUP_ACTION),
+        "the owner package publisher resolves setup from its exact source checkout"
+    );
+    assert!(
+        !is_approved_local_action("./source/.github/actions/anything-else"),
+        "the source checkout allowance is the exact setup composite"
+    );
+    assert!(
+        !is_approved_local_action("./other-source/.github/actions/setup-velnor-workflow"),
+        "other checkout paths are not implicitly trusted"
     );
 }

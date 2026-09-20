@@ -304,6 +304,7 @@ jobs:
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      mbx_enabled: true
       mbx_compat: fe8982552e68
       mbx_dependency_files: |
         .cargo/**
@@ -343,6 +344,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:EmbarkStudios/cargo-deny"
+      mbx_enabled: true
       host_warm_layers: "rustup,mold,mbx,cargo"
       unit_platform: linux-x64
       unit_trust: untrusted-ok
@@ -363,6 +365,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_enabled: true
       mbx_compat: "877491872343"
       mbx_dependency_files: |
         .cargo/**
@@ -408,6 +411,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_enabled: true
       cargo_net_offline: true
       host_warm_layers: "rustup,mold,mbx,cargo"
       unit_platform: linux-x64
@@ -429,6 +433,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_enabled: true
       mbx_compat: "5b4a6ae1e5aa"
       mbx_dependency_files: |
         .cargo/**
@@ -527,6 +532,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_enabled: true
       cargo_net_offline: true
       host_warm_layers: "rustup,mold,mbx,cargo"
       unit_platform: linux-x64
@@ -549,6 +555,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_enabled: true
       mbx_compat: "701ca1f39aa3"
       mbx_dependency_files: |
         .cargo/**
@@ -599,6 +606,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_enabled: true
       cargo_net_offline: true
       host_warm_layers: "rustup,mold,mbx,cargo"
       unit_platform: linux-x64
@@ -621,6 +629,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_enabled: true
       mbx_compat: "3ea4cac963f4"
       mbx_dependency_files: |
         .cargo/**
@@ -671,6 +680,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_enabled: true
       cargo_net_offline: true
       host_warm_layers: "rustup,mold,mbx,cargo"
       unit_platform: linux-x64
@@ -693,6 +703,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_enabled: true
       mbx_compat: "4f1bcff55c5e"
       mbx_dependency_files: |
         .cargo/**
@@ -737,6 +748,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_enabled: true
       cargo_net_offline: true
       host_warm_layers: "rustup,mold,mbx,cargo"
       unit_platform: linux-x64
@@ -758,6 +770,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_enabled: true
       mbx_compat: a86708708123
       mbx_dependency_files: |
         .cargo/**
@@ -808,6 +821,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_enabled: true
       cargo_net_offline: true
       host_warm_layers: "rustup,mold,mbx,cargo"
       unit_platform: linux-x64
@@ -830,6 +844,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_enabled: true
       mbx_compat: "7a4d74b185e3"
       mbx_dependency_files: |
         .cargo/**
@@ -923,6 +938,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_enabled: true
       cargo_net_offline: true
       host_warm_layers: "rustup,mold,mbx,cargo"
       unit_platform: linux-x64
@@ -945,6 +961,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_enabled: true
       mbx_compat: ed56b5dcf3d7
       mbx_dependency_files: |
         .cargo/**
@@ -1002,6 +1019,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_enabled: true
       cargo_net_offline: true
       host_warm_layers: "rustup,mold,mbx,cargo"
       unit_platform: linux-x64
@@ -1024,6 +1042,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_enabled: true
       mbx_compat: "13a355ab0f86"
       mbx_dependency_files: |
         .cargo/**
@@ -1131,6 +1150,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_enabled: true
       cargo_net_offline: true
       host_warm_layers: "rustup,mold,mbx,cargo"
       policy_runtime: true
@@ -1154,6 +1174,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_enabled: true
       mbx_compat: "6af73ff64799"
       mbx_dependency_files: |
         .cargo/**
@@ -1197,6 +1218,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_enabled: true
       cargo_net_offline: true
       host_warm_layers: "rustup,mold,mbx,cargo"
       unit_platform: linux-x64
@@ -1218,6 +1240,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_enabled: true
       mbx_compat: bda00faa9a52
       mbx_dependency_files: |
         .cargo/**
@@ -1327,6 +1350,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_tools: "aqua:nextest-rs/nextest/cargo-nextest"
+      mbx_enabled: true
       cargo_net_offline: true
       host_warm_layers: "rustup,mold,mbx,cargo"
       unit_platform: linux-x64
@@ -1349,6 +1373,7 @@ jobs:
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
       mise_runner: true
+      mbx_enabled: true
       mbx_compat: "4f81dcee4c93"
       mbx_dependency_files: |
         Cargo.lock
@@ -1387,6 +1412,7 @@ jobs:
       plan_digest: ${{ needs.plan.outputs.plan_digest }}
       base_sha: ${{ needs.plan.outputs.base_sha }}
       head_sha: ${{ needs.plan.outputs.head_sha }}
+      mbx_enabled: true
       cargo_net_offline: true
       host_warm_layers: "rustup,mold,mbx,cargo"
       unit_platform: linux-x64

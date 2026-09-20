@@ -2857,6 +2857,22 @@ mod tests {
                 .field,
             "ref"
         );
+
+        let retired_error = validate_resolved_action(
+            "cache",
+            "jdx/mr-boxington-action",
+            "7234d3dd1a6ca8f6c381eea8e4dfb03f18fcf777",
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            retired_error
+                .downcast_ref::<CapabilityViolation>()
+                .unwrap()
+                .field,
+            "ref"
+        );
         assert!(crate::action::native_action_adapter("jdx/mr-boxington-action").is_none());
     }
 
