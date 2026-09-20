@@ -24,4 +24,4 @@ Excluded deliberately: live `G0/g0-run-metadata-capture-*` trees and writer scri
 
 The exact included set is the inventory, not a directory snapshot. No source admission, authority transition, workflow dispatch, release, publication, gate, or merge occurred.
 
-Validation metadata: 73 JSON files and 1 NDJSON file parse; high-confidence secret-pattern scan finds no matches; source/destination hashes reconcile; and a fresh clone at commit `4b327fef78f31ac4d5e59c6e7f434b8dafa9b501` verifies the new `SHA256SUMS`, `INVENTORY.tsv` destination hashes, parent raw SHA256SUMS, and `.gitattributes` attributes. Attestation: **none**. Gate status: **not-evaluated**.
+Validation metadata: 73 JSON files and 1 NDJSON file parse; high-confidence secret-pattern scan finds no matches; source/destination hashes reconcile; and a fresh clone of the committed batch verifies the new `SHA256SUMS`, `INVENTORY.tsv` destination hashes, parent raw SHA256SUMS, and `.gitattributes` attributes. The final commit SHA is reported with the remote verification. Attestation: **none**. Gate status: **not-evaluated**.

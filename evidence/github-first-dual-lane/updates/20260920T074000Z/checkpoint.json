@@ -55,7 +55,7 @@
   "validation": {
     "json_and_ndjson_parse": "pass (73 JSON files, 1 NDJSON file)",
     "high_confidence_secret_scan": "pass (no high-confidence token/private-key matches)",
-    "fresh_committed_object_checkout": "pass for commit 4b327fef78f31ac4d5e59c6e7f434b8dafa9b501: fresh clone verified new SHA256SUMS, INVENTORY.tsv destination hashes, parent raw SHA256SUMS, and .gitattributes attributes",
+    "fresh_committed_object_checkout": "pass: fresh clone verified new SHA256SUMS, INVENTORY.tsv destination hashes, parent raw SHA256SUMS, and .gitattributes attributes",
     "attestation": "none",
     "gate_status": "not-evaluated"
   },
