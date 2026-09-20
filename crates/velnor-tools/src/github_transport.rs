@@ -346,6 +346,10 @@ fn safe_response_headers(headers: &HeaderMap) -> std::collections::BTreeMap<Stri
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "URL literals in transport boundary tests are compile-time-valid fixtures"
+)]
 mod tests {
     use super::{is_allowed_artifact_redirect, is_artifact_archive_url};
     use url::Url;

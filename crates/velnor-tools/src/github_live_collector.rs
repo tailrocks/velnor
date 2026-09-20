@@ -643,6 +643,10 @@ where
 /// Fetch a contents endpoint in GitHub's raw media representation.  The
 /// metadata request and this raw request are both retained; callers compare
 /// their bytes before treating the source as immutable YAML evidence.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "source acquisition keeps transport, storage, auth, ledger, and source identity explicit"
+)]
 async fn collect_raw_source<T, S>(
     transport: &T,
     store: &mut S,
@@ -2558,9 +2562,7 @@ fn validate_dependency_tree(value: &Value, repository: &str, path: &str) -> Resu
         candidates.push(format!("{requested}/action.yaml"));
     }
     let found = tree.iter().find_map(|entry| {
-        let Some(entry_path) = entry.get("path").and_then(Value::as_str) else {
-            return None;
-        };
+        let entry_path = entry.get("path").and_then(Value::as_str)?;
         candidates
             .iter()
             .find(|candidate| {
