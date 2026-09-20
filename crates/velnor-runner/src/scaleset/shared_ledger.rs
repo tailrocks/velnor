@@ -198,18 +198,14 @@ impl CapacityLedger for SharedLedger {
         first_seen_unix: u64,
         observed_unix: u64,
     ) -> Result<(), Self::Error> {
-        self.inner.observe_demand(
-            holder,
-            to_control_lane(lane),
-            scope,
-            first_seen_unix,
-            observed_unix,
-        )?;
-        Ok(())
+        // Delegate to the inherent method: one forwarding truth, and the
+        // generic lane only needs success, not the demand record.
+        SharedLedger::observe_demand(self, holder, lane, scope, first_seen_unix, observed_unix)
+            .map(|_| ())
     }
 
     fn cancel_demand(&mut self, holder: &str) -> Result<bool, Self::Error> {
-        self.inner.cancel_demand(holder)
+        SharedLedger::cancel_demand(self, holder)
     }
 
     fn acquire(
@@ -243,15 +239,15 @@ impl CapacityLedger for SharedLedger {
     }
 
     fn release_to_eligible(&mut self, holder: &str) -> Result<bool, Self::Error> {
-        self.inner.release_to_eligible(holder)
+        SharedLedger::release_to_eligible(self, holder)
     }
 
     fn release_cancelled(&mut self, holder: &str) -> Result<bool, Self::Error> {
-        self.inner.release_cancelled(holder)
+        SharedLedger::release_cancelled(self, holder)
     }
 
     fn retain_uncertain(&mut self, holder: &str, generation: u64) -> Result<(), Self::Error> {
-        self.inner.retain_uncertain(holder, generation)
+        SharedLedger::retain_uncertain(self, holder, generation)
     }
 
     fn reconcile(
