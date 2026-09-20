@@ -226,3 +226,21 @@ release preflight parity, supported feature/provider coverage, matched cold
 and warm measurements, review feedback, small protected PR merges, and
 resulting main/preview/release-path verification. No PR is merged for this
 task yet. First-attempt/retry reliability denominators remain pending.
+
+## Stable package channel identity
+
+The package-record emitter compared two distinct vocabularies as raw strings:
+release binaries embed `release`, while their package records declare `stable`.
+That rejected every otherwise valid stable record. A private typed conversion
+now maps release builds to stable packages and preview builds to previews at
+the emitter boundary. Source, version, binary digest, development-build and
+cross-channel rejection remain enforced. This is source-proven; no retained
+historical failure is attributed to it without a matching log.
+
+Independent source review passed. `cargo fmt --all --check`, strict
+`cargo clippy -p velnor-runner --all-targets --locked --features test-support -- -D warnings`,
+and `cargo test -p velnor-runner --locked --features test-support release::tests::emit_package_record`
+passed (five tests). Regression cases cover both package architectures, both
+valid channels, every cross-channel pairing, and invalid embedded identities.
+These checks establish the emitter repair; native hosted packaging and required
+pre-merge packaging remain separate outstanding verification.
