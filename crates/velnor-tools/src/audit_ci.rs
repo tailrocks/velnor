@@ -2,10 +2,12 @@
 
 use anyhow::{bail, Context, Result};
 use clap::Args;
+use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
@@ -248,6 +250,132 @@ struct EstateRepository {
     concerns: BTreeMap<String, ConcernContract>,
 }
 
+struct StrictJsonValue;
+
+impl<'de> DeserializeSeed<'de> for StrictJsonValue {
+    type Value = serde_json::Value;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(StrictJsonValueVisitor)
+    }
+}
+
+struct StrictJsonValueVisitor;
+
+impl<'de> Visitor<'de> for StrictJsonValueVisitor {
+    type Value = serde_json::Value;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(serde_json::Value::Bool(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(serde_json::Value::Number(value.into()))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(serde_json::Value::Number(value.into()))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        serde_json::Number::from_f64(value)
+            .map(serde_json::Value::Number)
+            .ok_or_else(|| E::custom("non-finite JSON number"))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(serde_json::Value::String(value.to_owned()))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(serde_json::Value::String(value))
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(serde_json::Value::Null)
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(serde_json::Value::Null)
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        StrictJsonValue.deserialize(deserializer)
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut values = Vec::new();
+        while let Some(value) = sequence.next_element_seed(StrictJsonValue)? {
+            values.push(value);
+        }
+        Ok(serde_json::Value::Array(values))
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut object = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if object.contains_key(&key) {
+                return Err(serde::de::Error::custom(format!(
+                    "duplicate JSON object key {key:?}"
+                )));
+            }
+            object.insert(key, map.next_value_seed(StrictJsonValue)?);
+        }
+        Ok(serde_json::Value::Object(object))
+    }
+}
+
+fn parse_estate_manifest(text: &str, context: impl fmt::Display) -> Result<EstateManifest> {
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    let value = StrictJsonValue
+        .deserialize(&mut deserializer)
+        .with_context(|| format!("parse estate manifest {context}"))?;
+    deserializer
+        .end()
+        .with_context(|| format!("parse estate manifest {context}"))?;
+    serde_json::from_value(value).with_context(|| format!("decode estate manifest {context}"))
+}
+
 /// Concern metadata selected only from the reviewed auxiliary source.
 ///
 /// The caller estate supplies identities and checkout paths.  It must never
@@ -411,8 +539,7 @@ fn canonical_auxiliary_manifest(root: &Path) -> Result<EstateManifest> {
     let path = root.join(ESTATE_MANIFEST_FILE);
     let text = fs::read_to_string(&path)
         .with_context(|| format!("read estate manifest {}", path.display()))?;
-    let manifest: EstateManifest = serde_json::from_str(&text)
-        .with_context(|| format!("parse estate manifest {}", path.display()))?;
+    let manifest = parse_estate_manifest(&text, path.display())?;
     validate_estate_scope_metadata(&manifest.scope)?;
     validate_auxiliary_repository_scope(&manifest.repositories)?;
     validate_accepted_auxiliary_contract(&manifest, "canonical estate manifest")?;
@@ -807,10 +934,7 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
     let estate = if let Some(estate) = &args.estate {
         let text = fs::read_to_string(estate)
             .with_context(|| format!("read estate file {}", estate.display()))?;
-        Some(
-            serde_json::from_str::<EstateManifest>(&text)
-                .with_context(|| format!("parse estate manifest {}", estate.display()))?,
-        )
+        Some(parse_estate_manifest(&text, estate.display())?)
     } else {
         None
     };
