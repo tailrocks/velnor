@@ -419,12 +419,54 @@ impl SignerCallInputs {
         if !safe_basename(artifact_name) || !safe_basename(subject_path) {
             return Err("signer input artifact/subject must be basenames".to_owned());
         }
-        Ok(Self {
+        Ok(Self::admitted_unchecked_subject(
+            artifact_name,
+            subject_path,
+        ))
+    }
+
+    /// Render a matrix-cell subject path.  The static portion remains a
+    /// basename; the only dynamic token accepted is a GitHub expression in
+    /// the basename itself.  Callers cannot smuggle a path or a second source
+    /// authority through this escape hatch.
+    pub(crate) fn admitted_expression(
+        artifact_name: &str,
+        subject_path: &str,
+    ) -> Result<Self, String> {
+        let normalized = subject_path
+            .replace("${{ matrix.arch }}", "arch")
+            .replace("${{ needs.verify.outputs.version }}", "version")
+            .replace("${{ needs.identity.outputs.version }}", "version");
+        if !safe_basename(artifact_name)
+            || !safe_basename(&normalized)
+            || subject_path.is_empty()
+            || subject_path.contains('/')
+            || subject_path.contains('\\')
+            || subject_path.matches("${{ matrix.arch }}").count() > 1
+            || subject_path
+                .matches("${{ needs.verify.outputs.version }}")
+                .count()
+                > 1
+            || subject_path
+                .matches("${{ needs.identity.outputs.version }}")
+                .count()
+                > 1
+        {
+            return Err("signer input artifact/subject must be safe basenames".to_owned());
+        }
+        Ok(Self::admitted_unchecked_subject(
+            artifact_name,
+            subject_path,
+        ))
+    }
+
+    fn admitted_unchecked_subject(artifact_name: &str, subject_path: &str) -> Self {
+        Self {
             artifact_name: artifact_name.to_owned(),
             subject_path: subject_path.to_owned(),
             source_ref: "${{ needs.admit-product-release.outputs.source_ref }}".to_owned(),
             source_digest: "${{ needs.admit-product-release.outputs.source_commit }}".to_owned(),
-        })
+        }
     }
 
     pub(crate) fn render_yaml(&self) -> String {
@@ -822,5 +864,17 @@ mod tests {
             });
         assert!(rendered.is_ok());
         assert!(SignerCallInputs::admitted("native/product", "record.json").is_err());
+
+        let matrix = SignerCallInputs::admitted_expression(
+            "debian-packages",
+            "runner-v1.2.3-${{ matrix.arch }}.deb",
+        )
+        .expect("matrix subject remains a basename expression");
+        assert!(matrix
+            .render_yaml()
+            .contains("subject-path: runner-v1.2.3-${{ matrix.arch }}.deb"));
+        assert!(
+            SignerCallInputs::admitted_expression("debian-packages", "nested/runner.deb").is_err()
+        );
     }
 }

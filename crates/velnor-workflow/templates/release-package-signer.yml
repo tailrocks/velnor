@@ -17,6 +17,9 @@ on:
       source-ref:
         required: true
         type: string
+      source-digest:
+        required: true
+        type: string
 
 permissions: {}
 
@@ -34,11 +37,28 @@ jobs:
           ARTIFACT_NAME: ${{ inputs.artifact-name }}
           SUBJECT_PATH: ${{ inputs.subject-path }}
           SOURCE_REF: ${{ inputs.source-ref }}
+          SOURCE_DIGEST: ${{ inputs.source-digest }}
         run: |
           set -euo pipefail
           [[ "$SOURCE_REF" == refs/tags/v* || "$SOURCE_REF" == refs/heads/main ]]
+          [[ "$SOURCE_DIGEST" =~ ^[0-9a-f]{40}$ ]]
           [[ "$ARTIFACT_NAME" != */* && "$ARTIFACT_NAME" != *..* && -n "$ARTIFACT_NAME" ]]
           [[ "$SUBJECT_PATH" != /* && "$SUBJECT_PATH" != *..* && -n "$SUBJECT_PATH" ]]
+
+      - name: Checkout admitted source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.source-ref }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify admitted source digest
+        env:
+          SOURCE_DIGEST: ${{ inputs.source-digest }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          [[ "$actual" = "$SOURCE_DIGEST" ]]
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:

@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::Path;
 
+use super::signer_contract::SignerCallInputs;
 use super::{
     checks_env, docker_build_token_env_for_members, render_cargo_source_preparation,
     render_pinned_toolchain_steps, render_retained_output_cache_note, Args, CacheBackend,
@@ -1675,17 +1676,16 @@ fn render_sign_deb_job(
     for (arch, _) in &arches {
         let _ = writeln!(matrix, "          - arch: {arch}");
     }
-    let (name, needs, gate, stem, version, source_ref) = if preview {
+    let (name, needs, gate, stem, version) = if preview {
         (
             "Sign ${{ matrix.arch }} preview deb",
-            "    needs: [identity, debian]\n",
+            "    needs: [admit-product-release, identity, debian]\n",
             format!(
                 "    if: ${{{{ github.ref == 'refs/heads/{}' }}}}\n",
                 config.default_branch
             ),
             format!("{}-preview", release.package),
             "${{ needs.identity.outputs.version }}",
-            format!("refs/heads/{}", config.default_branch),
         )
     } else {
         // Provenance signing is publish-only: drilled modes build and
@@ -1697,15 +1697,19 @@ fn render_sign_deb_job(
         };
         (
             "Sign ${{ matrix.arch }} Debian package",
-            "    needs: [verify, debian]\n",
+            "    needs: [admit-product-release, verify, debian]\n",
             gate,
             release.package.clone(),
             "${{ needs.verify.outputs.version }}",
-            "refs/tags/${{ github.ref_name }}".to_owned(),
         )
     };
+    let subject_path = format!("{stem}-{version}-${{{{ matrix.arch }}}}.deb");
+    let signer_inputs = SignerCallInputs::admitted_expression("debian-packages", &subject_path)
+        .ok()?
+        .render_yaml()
+        .replace('\n', "\n      ");
     Some(format!(
-        "  sign-deb:\n    name: {name}\n{needs}{gate}    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    permissions:\n      attestations: write\n      contents: read\n      id-token: write\n    uses: ./.github/workflows/ci-release-package-signer.yml\n    with:\n      artifact-name: debian-packages\n      subject-path: {stem}-{version}-${{{{ matrix.arch }}}}.deb\n      source-ref: {source_ref}\n"
+        "  sign-deb:\n    name: {name}\n{needs}{gate}    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    permissions:\n      attestations: write\n      contents: read\n      id-token: write\n    uses: ./.github/workflows/ci-release-package-signer.yml\n    with:\n      {signer_inputs}"
     ))
 }
 
@@ -1980,7 +1984,7 @@ fn render_native_product_preview_publish_job(
     let download = ActionPin::DownloadArtifact.reference();
     let checkout = ActionPin::Checkout.reference();
     let attest = ActionPin::Attest.reference();
-    let mut needs = vec!["identity", "debian"];
+    let mut needs = vec!["identity", "admit-product-release", "debian"];
     if sign {
         needs.push("sign-deb");
     }
@@ -2451,7 +2455,7 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
     );
     output = output.replace(
         "          [ \"$source_repository\" = \"$GITHUB_REPOSITORY\" ] || { echo '::error::product source repository differs from publisher repository' >&2; exit 1; }\n",
-        "          [ \"$source_repository\" = \"$GITHUB_REPOSITORY\" ] || { echo '::error::product source repository differs from publisher repository' >&2; exit 1; }\n          [ \"$source_ref\" = \"$GITHUB_REF\" ] || { echo '::error::product source ref differs from publisher ref' >&2; exit 1; }\n",
+        "          [ \"$source_repository\" = \"$GITHUB_REPOSITORY\" ] || { echo '::error::product source repository differs from publisher repository' >&2; exit 1; }\n          [ \"$source_ref\" = \"$SOURCE_REF\" ] || { echo '::error::product source ref differs from admitted source ref' >&2; exit 1; }\n          [ \"$source_commit\" = \"$SOURCE_COMMIT\" ] || { echo '::error::product source commit differs from admitted source commit' >&2; exit 1; }\n",
     );
     output = output
         .replace("${{#contracts[@]}}", "${#contracts[@]}")
@@ -2475,15 +2479,14 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
           if [ "$release_status" -eq 0 ]; then
             release_json="$(awk 'body { print; next } /^\r?$/ { body=1 }' "$release_response")"
           elif [ "$release_http" = 404 ]; then
-            release_json=""
+            echo '::error::admitted provider release disappeared before product assembly' >&2
+            exit 1
           else
             cat "$release_error" >&2
             echo "::error::provider release lookup failed (HTTP ${release_http:-unknown}); refusing to create or publish" >&2
             exit 1
           fi
-          if [ -z "$release_json" ]; then
-            release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases" -f tag_name="$tag" -f target_commitish="$COMMIT" -f name="$tag" -F draft=true -F prerelease=false)"
-          fi
+          [ -n "$release_json" ] || { echo '::error::admitted provider release response is empty' >&2; exit 1; }
 "#,
     );
     output = output.replace(
@@ -2635,6 +2638,10 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
             ($source[0].components | map({name,crate,binary,feature,identity,targets}) | sort_by(.name))
           ' "$contract" >/dev/null || { echo '::error::downloaded native product contract differs from source contract' >&2; exit 1; }
 "#,
+        );
+        output = output.replace(
+            "            PRODUCT_RELEASE_ID=\"${{ steps.product-release.outputs.release_id }}\"\n",
+            "            PRODUCT_RELEASE_ID=\"${PRODUCT_RELEASE_ID:?}\"\n",
         );
     }
     output = output.replace(
@@ -3058,6 +3065,15 @@ fn render_native_publish_job(
             "      packages: read\n    env:",
             "      packages: read\n      id-token: write\n      attestations: write\n    env:",
         );
+        output = output
+            .replace(
+                "      SOURCE_REF: ${{ github.ref }}\n",
+                "      SOURCE_REF: ${{ needs.admit-product-release.outputs.source_ref }}\n",
+            )
+            .replace(
+                "      SOURCE_COMMIT: ${{ github.sha }}\n      COMMIT: ${{ github.sha }}\n",
+                "      SOURCE_COMMIT: ${{ needs.admit-product-release.outputs.source_commit }}\n      COMMIT: ${{ needs.admit-product-release.outputs.source_commit }}\n      PRODUCT_RELEASE_ID: ${{ needs.admit-product-release.outputs.release_id }}\n      PRODUCT_RELEASE_TAG: ${{ needs.admit-product-release.outputs.release_tag }}\n",
+            );
     }
     output = output.replace(
         "          jq -S -n --arg schema \"$manifest_schema\" --arg product_id",
@@ -3285,6 +3301,8 @@ fn inject_preview_triggers(output: &str, config: &ProjectConfig, release: &Relea
 /// rolling release halfway replaced.
 fn render_native_preview(config: &ProjectConfig, release: &ReleaseSpec) -> String {
     let mut jobs = render_preview_identity_job(config, release);
+    jobs.push('\n');
+    jobs.push_str(&render_admit_product_release_job(config, release, true));
     jobs.push('\n');
     let native_product = native_product_preview_workflow_file(config);
     if let Some(file) = native_product {
@@ -5193,14 +5211,63 @@ fn native_product_preview_workflow_file(config: &ProjectConfig) -> Option<&str> 
 
 fn render_native_product_build_job(file: &str) -> String {
     format!(
-        "  native-product-build:\n    name: Build source-bound native product\n    needs: [admit-provider, verify, build]\n    uses: ./.github/workflows/{file}\n    permissions:\n      contents: read\n"
+        "  native-product-build:\n    name: Build source-bound native product\n    needs: [admit-product-release, verify]\n    if: ${{{{ always() && needs.admit-product-release.result == 'success' && needs.admit-product-release.outputs.phase == 'draft' }}}}\n    uses: ./.github/workflows/{file}\n    permissions:\n      contents: read\n    with:\n      product-version: ${{{{ needs.verify.outputs.version }}}}\n      product-source-ref: ${{{{ needs.admit-product-release.outputs.source_ref }}}}\n      product-source-commit: ${{{{ needs.admit-product-release.outputs.source_commit }}}}\n      product-release-tag: ${{{{ needs.admit-product-release.outputs.release_tag }}}}\n"
     )
 }
 
-fn render_native_product_preview_build_job(config: &ProjectConfig, file: &str) -> String {
-    let default_branch = yaml_scalar(&config.default_branch);
+fn render_native_product_preview_build_job(_config: &ProjectConfig, file: &str) -> String {
     format!(
-        "  native-product-build:\n    name: Build source-bound native preview product\n    needs: [identity]\n    uses: ./.github/workflows/{file}\n    permissions:\n      contents: read\n    with:\n      product-version: ${{{{ needs.identity.outputs.crate_version }}}}-preview.${{{{ github.run_number }}}}+${{{{ needs.identity.outputs.short_commit }}}}\n      product-source-ref: refs/heads/{default_branch}\n      product-release-tag: preview-${{{{ needs.identity.outputs.commit }}}}\n"
+        "  native-product-build:\n    name: Build source-bound native preview product\n    needs: [admit-product-release, identity]\n    if: ${{{{ always() && needs.admit-product-release.result == 'success' && needs.admit-product-release.outputs.phase == 'draft' }}}}\n    uses: ./.github/workflows/{file}\n    permissions:\n      contents: read\n    with:\n      product-version: ${{{{ needs.identity.outputs.crate_version }}}}-preview.${{{{ github.run_number }}}}+${{{{ needs.identity.outputs.short_commit }}}}\n      product-source-ref: ${{{{ needs.admit-product-release.outputs.source_ref }}}}\n      product-source-commit: ${{{{ needs.admit-product-release.outputs.source_commit }}}}\n      product-release-tag: ${{{{ needs.admit-product-release.outputs.release_tag }}}}\n"
+    )
+}
+
+/// Admit one provider release identity before any product bytes are built.
+/// This is an identity reservation/read boundary only: it creates at most one
+/// empty draft on a classified 404 and never uploads, flips, deletes, or
+/// attests assets. All downstream jobs consume these string job outputs.
+fn render_admit_product_release_job(
+    config: &ProjectConfig,
+    release: &ReleaseSpec,
+    preview: bool,
+) -> String {
+    let (needs, source_ref, source_commit, release_tag, version, name, prerelease) = if preview {
+        (
+            "[identity]",
+            format!("refs/heads/{}", config.default_branch),
+            "${{ needs.identity.outputs.commit }}".to_owned(),
+            "preview-${{ needs.identity.outputs.commit }}".to_owned(),
+            "${{ needs.identity.outputs.version }}".to_owned(),
+            "Preview ${{ needs.identity.outputs.version }}".to_owned(),
+            "true",
+        )
+    } else {
+        (
+            "[admit-provider, verify]",
+            "${{ github.ref }}".to_owned(),
+            "${{ github.sha }}".to_owned(),
+            "${{ github.ref_name }}".to_owned(),
+            "${{ needs.verify.outputs.version }}".to_owned(),
+            "${{ github.ref_name }}".to_owned(),
+            "false",
+        )
+    };
+    let channel = if preview { "preview" } else { "stable" };
+    let source_ref = shell_quote(&source_ref);
+    let source_commit = shell_quote(&source_commit);
+    let release_tag = shell_quote(&release_tag);
+    let version = shell_quote(&version);
+    let name = shell_quote(&name);
+    let source_repository = shell_quote(&release.source_repository);
+    format!(
+        "  admit-product-release:\n    name: Admit immutable product release\n    needs: {needs}\n    if: ${{{{ always() && {need_results} }}}}\n    runs-on: {runner}\n    timeout-minutes: 10\n    permissions:\n      contents: write\n    outputs:\n      provider_repository_id: ${{{{ steps.admission.outputs.provider_repository_id }}}}\n      source_repository: ${{{{ steps.admission.outputs.source_repository }}}}\n      release_id: ${{{{ steps.admission.outputs.release_id }}}}\n      release_tag: ${{{{ steps.admission.outputs.release_tag }}}}\n      source_ref: ${{{{ steps.admission.outputs.source_ref }}}}\n      source_commit: ${{{{ steps.admission.outputs.source_commit }}}}\n      target_commitish: ${{{{ steps.admission.outputs.target_commitish }}}}\n      release_url: ${{{{ steps.admission.outputs.release_url }}}}\n      assets_url: ${{{{ steps.admission.outputs.assets_url }}}}\n      phase: ${{{{ steps.admission.outputs.phase }}}}\n    steps:\n      - name: Resolve provider repository identity and reserve release\n        id: admission\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          EXPECTED_REPOSITORY: {source_repository}\n          CHANNEL: {channel}\n          SOURCE_REF: {source_ref}\n          SOURCE_COMMIT: {source_commit}\n          RELEASE_TAG: {release_tag}\n          RELEASE_VERSION: {version}\n          RELEASE_NAME: {name}\n          PRERELEASE: {prerelease}\n        run: |\n          set -euo pipefail\n          case \"$SOURCE_COMMIT\" in ''|*[!0-9a-f]*) echo '::error::admitted source commit is not lowercase 40-hex' >&2; exit 1 ;; esac\n          [ \"${{#SOURCE_COMMIT}}\" -eq 40 ] || {{ echo '::error::admitted source commit is not 40-hex' >&2; exit 1; }}\n          case \"$SOURCE_REF\" in refs/tags/*|refs/heads/*) ;; *) echo '::error::admitted source ref is unsafe' >&2; exit 1 ;; esac\n          case \"$RELEASE_TAG\" in ''|*[!a-zA-Z0-9._-]*) echo '::error::release tag is unsafe' >&2; exit 1 ;; esac\n          repository_json=\"$(gh api \"repos/$EXPECTED_REPOSITORY\")\"\n          repository_name=\"$(jq -er '.full_name | strings' <<<\"$repository_json\")\"\n          [ \"$repository_name\" = \"$EXPECTED_REPOSITORY\" ] || {{ echo '::error::provider repository full_name mismatch' >&2; exit 1; }}\n          provider_repository_id=\"$(jq -er '.id | numbers | select(. > 0 and floor == .) | tostring' <<<\"$repository_json\")\"\n          [[ \"$provider_repository_id\" =~ ^[1-9][0-9]*$ ]] || {{ echo '::error::provider repository id is not canonical' >&2; exit 1; }}\n          response=\"$(mktemp)\"\n          error_file=\"$response.error\"\n          status=0\n          gh api -i \"repos/$EXPECTED_REPOSITORY/releases/tags/$RELEASE_TAG\" >\"$response\" 2>\"$error_file\" || status=$?\n          http=\"$(awk 'toupper($1) ~ /^HTTP\\// {{ code=$2 }} END {{ gsub(/\\r/, \"\", code); print code }}' \"$response\")\"\n          if [ \"$status\" -eq 0 ]; then\n            release_json=\"$(awk 'body {{ print; next }} /^\\r?$/ {{ body=1 }}' \"$response\")\"\n          elif [ \"$http\" = 404 ]; then\n            release_json=\"$(gh api \"repos/$EXPECTED_REPOSITORY/releases\" -f tag_name=\"$RELEASE_TAG\" -f target_commitish=\"$SOURCE_COMMIT\" -f name=\"$RELEASE_NAME\" -F draft=true -F prerelease=\"$PRERELEASE\")\"\n          else\n            cat \"$error_file\" >&2\n            echo \"::error::provider release lookup failed (HTTP ${{http:-unknown}})\" >&2\n            exit 1\n          fi\n          jq -e --arg tag \"$RELEASE_TAG\" --arg commit \"$SOURCE_COMMIT\" --arg name \"$RELEASE_NAME\" --argjson prerelease \"$PRERELEASE\" '(.tag_name | strings) == $tag and (.target_commitish | strings) == $commit and (.name | strings) == $name and (.prerelease == $prerelease) and (.draft | type == \"boolean\")' <<<\"$release_json\" >/dev/null || {{ echo '::error::provider release identity is not exact' >&2; exit 1; }}\n          tag_ref=\"$(gh api \"repos/$EXPECTED_REPOSITORY/git/ref/tags/$RELEASE_TAG\")\"\n          jq -e --arg commit \"$SOURCE_COMMIT\" '.object.type == \"commit\" and .object.sha == $commit' <<<\"$tag_ref\" >/dev/null || {{ echo '::error::provider tag does not resolve to admitted source commit' >&2; exit 1; }}\n          release_id=\"$(jq -er '.id | numbers | select(. > 0 and floor == .) | tostring' <<<\"$release_json\")\"\n          release_url=\"$(jq -er '.html_url | strings' <<<\"$release_json\")\"\n          assets_url=\"$(jq -er '.assets_url | strings' <<<\"$release_json\")\"\n          target_commitish=\"$(jq -er '.target_commitish | strings' <<<\"$release_json\")\"\n          phase=\"$(jq -er 'if .draft == true then \"draft\" elif .draft == false then \"published\" else empty end' <<<\"$release_json\")\"\n          [ \"$release_url\" = \"https://github.com/$EXPECTED_REPOSITORY/releases/tag/$RELEASE_TAG\" ] || {{ echo '::error::provider release URL is not canonical' >&2; exit 1; }}\n          {{\n            printf 'provider_repository_id=%s\\n' \"$provider_repository_id\"\n            printf 'source_repository=%s\\n' \"$EXPECTED_REPOSITORY\"\n            printf 'release_id=%s\\n' \"$release_id\"\n            printf 'release_tag=%s\\n' \"$RELEASE_TAG\"\n            printf 'source_ref=%s\\n' \"$SOURCE_REF\"\n            printf 'source_commit=%s\\n' \"$SOURCE_COMMIT\"\n            printf 'target_commitish=%s\\n' \"$target_commitish\"\n            printf 'release_url=%s\\n' \"$release_url\"\n            printf 'assets_url=%s\\n' \"$assets_url\"\n            printf 'phase=%s\\n' \"$phase\"\n          }} >> \"$GITHUB_OUTPUT\"\n",
+        needs = needs,
+        need_results = if preview {
+            "needs.identity.result == 'success'"
+        } else {
+            "needs.admit-provider.result == 'success' && needs.verify.result == 'success'"
+        },
+        runner = hosted_selector_runs_on(config),
+        channel = shell_quote(channel),
     )
 }
 
@@ -5221,7 +5288,11 @@ fn render_native_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
     let admit = format!(
         "  admit-provider:\n    name: Control / Admit release\n    runs-on: {hosted_runner}\n    timeout-minutes: 5\n    steps:\n      - name: Reject Velnor-only native release\n        if: ${{{{ github.event_name == 'workflow_dispatch' && github.event.inputs.providers != '' && !contains(format(',{{0}},', github.event.inputs.providers), ',github-hosted,') }}}}\n        run: |\n          echo 'native release publishes from GitHub only; Velnor-only dispatch is unsupported' >&2\n          exit 1\n      - name: Reject local providers on tag dispatch\n        if: ${{{{ github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && (contains(format(',{{0}},', github.event.inputs.providers), ',velnor,') || contains(format(',{{0}},', github.event.inputs.providers), ',github-self-hosted,')) }}}}\n        run: |\n          echo 'tag dispatch publishes github-hosted only; use a tag push for full provider scope' >&2\n          exit 1\n      - name: Declare release provider scope\n        if: ${{{{ github.event_name == 'workflow_dispatch' }}}}\n        env:\n          PROVIDERS: ${{{{ github.event.inputs.providers }}}}\n        run: |\n          set -euo pipefail\n          scope=\"${{PROVIDERS:-github-hosted}}\"\n          echo \"release provider scope: $scope\"\n          case \",$scope,\" in\n            *,velnor,*|*,github-self-hosted,*) echo 'full provider scope includes local lanes' ;;\n            *) echo '::notice::BOOTSTRAP release scope: github-hosted only (local qualification deferred)' ;;\n          esac\n"
     );
-    output = output.replace("jobs:\n  verify:", &format!("jobs:\n{admit}\n  verify:"));
+    let product_admission = render_admit_product_release_job(config, release, false);
+    output = output.replace(
+        "jobs:\n  verify:",
+        &format!("jobs:\n{admit}\n{product_admission}\n  verify:"),
+    );
     output = output.replace(
         "    needs: [verify, build]\n",
         "    needs: [admit-provider, verify, build]\n",
@@ -5229,6 +5300,7 @@ fn render_native_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
     let mut extra = String::new();
     let mut publish_needs = vec![
         "admit-provider".to_owned(),
+        "admit-product-release".to_owned(),
         "verify".to_owned(),
         "build".to_owned(),
     ];
@@ -7258,7 +7330,19 @@ mod tests {
             "{product_build}"
         );
         assert!(
-            product_build.contains("needs: [admit-provider, verify, build]"),
+            product_build.contains("needs: [admit-product-release, verify]"),
+            "{product_build}"
+        );
+        assert!(
+            product_build.contains(
+                "product-source-ref: ${{ needs.admit-product-release.outputs.source_ref }}"
+            ),
+            "{product_build}"
+        );
+        assert!(
+            product_build.contains(
+                "product-source-commit: ${{ needs.admit-product-release.outputs.source_commit }}"
+            ),
             "{product_build}"
         );
         // The metadata job exports the acyclic identity files once.
@@ -7302,7 +7386,17 @@ mod tests {
             ),
             "{sign}"
         );
-        assert!(sign.contains("source-ref: refs/tags/"), "{sign}");
+        assert!(
+            sign.contains("source-ref: ${{ needs.admit-product-release.outputs.source_ref }}"),
+            "{sign}"
+        );
+        assert!(
+            sign.contains(
+                "source-digest: ${{ needs.admit-product-release.outputs.source_commit }}"
+            ),
+            "{sign}"
+        );
+        assert!(workflow.contains("admit-product-release:"), "{workflow}");
         assert!(!debian.contains("Attest Debian packages"), "{debian}");
         // Publish attaches both lanes plus the consumer manifest.
         let publish = yaml_job(&workflow, "publish");
@@ -7399,7 +7493,7 @@ mod tests {
         );
         assert!(
             publish.contains(
-                "needs: [admit-provider, verify, build, native-product-build, image, metadata, debian, sign-deb]"
+                "needs: [admit-provider, admit-product-release, verify, build, native-product-build, image, metadata, debian, sign-deb]"
             ),
             "{publish}"
         );

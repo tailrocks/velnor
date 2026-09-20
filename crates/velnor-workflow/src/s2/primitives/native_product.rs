@@ -465,16 +465,9 @@ fn render_workflow(
     let blocked_targets_json_q = shell_quote(&blocked_targets_json);
     let components_json_q = shell_quote(&components_json);
     let default_branch_q = shell_quote(&ctx.config.default_branch);
-    let workflow_call_inputs = if channel == "preview" {
-        "    inputs:\n      product-version:\n        required: true\n        type: string\n      product-source-ref:\n        required: true\n        type: string\n      product-release-tag:\n        required: true\n        type: string\n"
-    } else {
-        ""
-    };
-    let preview_identity_env = if channel == "preview" {
-        "      PRODUCT_VERSION_INPUT: ${{ inputs.product-version }}\n      PRODUCT_SOURCE_REF_INPUT: ${{ inputs.product-source-ref }}\n      PRODUCT_RELEASE_TAG_INPUT: ${{ inputs.product-release-tag }}\n"
-    } else {
-        ""
-    };
+    let workflow_call_inputs = "    inputs:\n      product-version:\n        required: true\n        type: string\n      product-source-ref:\n        required: true\n        type: string\n      product-source-commit:\n        required: true\n        type: string\n      product-release-tag:\n        required: true\n        type: string\n";
+    let product_identity_env =
+        "      PRODUCT_VERSION_INPUT: ${{ inputs.product-version }}\n      PRODUCT_SOURCE_REF_INPUT: ${{ inputs.product-source-ref }}\n      PRODUCT_SOURCE_COMMIT_INPUT: ${{ inputs.product-source-commit }}\n      PRODUCT_RELEASE_TAG_INPUT: ${{ inputs.product-release-tag }}\n";
 
     let mut output = format!(
         "{GENERATED_HEADER}# Build-only producer. release.yml is the sole provider publisher.\nname: Native product build\nrun-name: Native product build · ${{{{ github.ref_name }}}}\n\non:\n  workflow_call:\n\nconcurrency:\n  group: native-product-build-${{{{ github.workflow }}}}-${{{{ github.run_id }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n{blocked_jobs}  build:\n    name: Build product / ${{{{ matrix.target }}}}\n    runs-on: ${{{{ matrix.runner }}}}\n    timeout-minutes: 90\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n{matrix}    permissions:\n      contents: read\n    env:\n      TARGET: ${{{{ matrix.target }}}}\n      PRODUCT_ID: {product_id_q}\n      CHANNEL: {channel_q}\n      SOURCE_REPOSITORY: {source_repository_q}\n      MANIFEST_SCHEMA: {manifest_schema_q}\n      ARCHIVE_COMPONENT: {archive_component_q}\n      ARCHIVE_IDENTITY_SCHEMA: {archive_identity_schema_q}\n      ARCHIVE_MANIFEST_SCHEMA: {archive_manifest_schema_q}\n      DEFAULT_BRANCH: {default_branch_q}\n      TARGETS_JSON: {targets_json_q}\n      BLOCKED_TARGETS_JSON: {blocked_targets_json_q}\n      COMPONENTS_JSON: {components_json_q}\n    steps:\n      - name: Checkout exact source\n        uses: {checkout}\n        with:\n          ref: ${{{{ github.sha }}}}\n          fetch-depth: 0\n          persist-credentials: false\n      - name: Prove exact source identity\n        run: |\n          set -euo pipefail\n          actual=\"$(git rev-parse HEAD)\"\n          case \"$actual\" in ''|*[!0-9a-f]*) echo '::error::checkout is not a lowercase 40-hex commit' >&2; exit 1 ;; esac\n          [ \"${{{{#actual}}}}\" -eq 40 ] && [ \"$actual\" = \"$GITHUB_SHA\" ] || {{ echo '::error::checkout source differs from event source' >&2; exit 1; }}\n          test -z \"$(git status --porcelain)\" || {{ echo '::error::native product checkout is dirty' >&2; exit 1; }}\n      - name: Add Rust target\n        run: rustup target add \"$TARGET\"\n      - name: Read Cargo component metadata\n        run: cargo metadata --locked --no-deps --format-version 1 > cargo-metadata.json\n      - name: Build and verify typed sibling inventory\n        run: |\n          set -euo pipefail\n          if [ \"$CHANNEL\" = stable ]; then\n            PRODUCT_VERSION=\"${{{{ github.ref_name }}}}\"\n            PRODUCT_VERSION=\"${{PRODUCT_VERSION#v}}\"\n            [[ \"$PRODUCT_VERSION\" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]] || {{ echo '::error::stable product source tag is not SemVer' >&2; exit 1; }}\n          else\n            PRODUCT_VERSION=\"0.0.0-preview.${{{{ github.run_number }}}}+$(printf '%s' \"$GITHUB_SHA\" | cut -c1-7)\"\n          fi\n          SOURCE_COMMIT=\"$GITHUB_SHA\"\n          SOURCE_REF=\"$GITHUB_REF\"\n          RELEASE_TAG=\"$GITHUB_REF_NAME\"\n          export PRODUCT_VERSION SOURCE_COMMIT SOURCE_REF RELEASE_TAG\n          mkdir -p \"dist/$TARGET/package\"\n          : > \"dist/$TARGET/artifacts-$TARGET.jsonl\"\n          : > \"dist/$TARGET/components-$TARGET.jsonl\"\n{build_steps}          jq -S -n --arg schema \"$MANIFEST_SCHEMA\" --arg product_id \"$PRODUCT_ID\" --arg channel \"$CHANNEL\" --arg source_repository \"$SOURCE_REPOSITORY\" --arg source_ref \"$SOURCE_REF\" --arg source_commit \"$SOURCE_COMMIT\" --arg release_tag \"$RELEASE_TAG\" --arg version \"$PRODUCT_VERSION\" --arg archive_component \"$ARCHIVE_COMPONENT\" --arg archive_identity_schema \"$ARCHIVE_IDENTITY_SCHEMA\" --arg archive_manifest_schema \"$ARCHIVE_MANIFEST_SCHEMA\" --argjson targets \"$TARGETS_JSON\" --argjson blocked_targets \"$BLOCKED_TARGETS_JSON\" --argjson components \"$COMPONENTS_JSON\" '{{schema:$schema,product_id:$product_id,channel:$channel,source_repository:$source_repository,source_ref:$source_ref,source_commit:$source_commit,release_tag:$release_tag,version:$version,archive_component:$archive_component,archive_identity_schema:$archive_identity_schema,archive_manifest_schema:$archive_manifest_schema,targets:$targets,blocked_targets:$blocked_targets,components:$components}}' > \"dist/$TARGET/product-contract-$TARGET.json\"\n          test \"$(jq -s 'map(.name) | unique | sort | length' \"dist/$TARGET/components-$TARGET.jsonl\")\" -eq {component_count}\n          test \"$(jq -s 'map(.target) | unique | sort | length' \"dist/$TARGET/components-$TARGET.jsonl\")\" -eq 1\n      - name: Upload source-bound product build\n        uses: {upload}\n        with:\n          name: native-product-${{{{ matrix.target }}}}\n          path: dist/${{{{ matrix.target }}}}\n          if-no-files-found: error\n          retention-days: 2\n\n# The stable release workflow downloads these build artifacts, asks the provider\n# for its numeric release id, then writes {PRODUCT_MANIFEST_FILE}; this file\n# never calls gh release create/upload and cannot publish a competing product.\n",
@@ -493,9 +486,44 @@ fn render_workflow(
         "never mutates provider releases or publishes a competing product.",
     );
     let build_env_marker = format!("      COMPONENTS_JSON: {components_json_q}\n    steps:\n");
-    let build_env_with_preview =
-        format!("      COMPONENTS_JSON: {components_json_q}\n{preview_identity_env}    steps:\n");
-    output = output.replace(&build_env_marker, &build_env_with_preview);
+    let build_env_with_inputs =
+        format!("      COMPONENTS_JSON: {components_json_q}\n{product_identity_env}    steps:\n");
+    output = output.replace(&build_env_marker, &build_env_with_inputs);
+    output = output
+        .replace(
+            "          ref: ${{ github.sha }}\n",
+            "          ref: ${{ inputs.product-source-commit }}\n",
+        )
+        .replace(
+            "      - name: Prove exact source identity\n        run: |\n",
+            &"      - name: Prove exact source identity\n        env:\n          EXPECTED_SOURCE_REPOSITORY: {source_repository}\n          EXPECTED_SOURCE_REF: ${{ inputs.product-source-ref }}\n          EXPECTED_SOURCE_COMMIT: ${{ inputs.product-source-commit }}\n        run: |\n"
+                .replace("{source_repository}", source_repository),
+        )
+        .replace(
+            "[ \"${#actual}\" -eq 40 ] && [ \"$actual\" = \"$GITHUB_SHA\" ] || { echo '::error::checkout source differs from event source' >&2; exit 1; }",
+            "[ \"${#actual}\" -eq 40 ] && [ \"$actual\" = \"$EXPECTED_SOURCE_COMMIT\" ] || { echo '::error::checkout source differs from admitted source commit' >&2; exit 1; }\n          case \"$EXPECTED_SOURCE_REF\" in refs/tags/*|refs/heads/*) ;; *) echo '::error::admitted source ref is unsafe' >&2; exit 1 ;; esac\n          [ \"$EXPECTED_SOURCE_REPOSITORY\" = \"$GITHUB_REPOSITORY\" ] || { echo '::error::admitted source repository differs from caller repository' >&2; exit 1; }",
+        )
+        .replace(
+            r#"          if [ "$CHANNEL" = stable ]; then
+            PRODUCT_VERSION="${{ github.ref_name }}"
+            PRODUCT_VERSION="${PRODUCT_VERSION#v}"
+            [[ "$PRODUCT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo '::error::stable product source tag is not SemVer' >&2; exit 1; }
+          else
+            PRODUCT_VERSION="0.0.0-preview.${{ github.run_number }}+$(printf '%s' "$GITHUB_SHA" | cut -c1-7)"
+          fi
+          SOURCE_COMMIT="$GITHUB_SHA"
+          SOURCE_REF="$GITHUB_REF"
+          RELEASE_TAG="$GITHUB_REF_NAME"
+"#,
+            r#"          PRODUCT_VERSION="$PRODUCT_VERSION_INPUT"
+          SOURCE_COMMIT="$PRODUCT_SOURCE_COMMIT_INPUT"
+          SOURCE_REF="$PRODUCT_SOURCE_REF_INPUT"
+          RELEASE_TAG="$PRODUCT_RELEASE_TAG_INPUT"
+          case "$PRODUCT_VERSION" in ''|*['/ ']*) echo '::error::product version is unsafe' >&2; exit 1 ;; esac
+          case "$SOURCE_REF" in refs/tags/*|refs/heads/*) ;; *) echo '::error::product source ref is unsafe' >&2; exit 1 ;; esac
+          case "$RELEASE_TAG" in ''|*[!a-zA-Z0-9._-]*) echo '::error::product release tag is unsafe' >&2; exit 1 ;; esac
+"#,
+        );
     output = output.replace(
         "      - name: Build and verify typed sibling inventory\n",
         "      - name: Materialize independent component contract\n        run: |\n          set -euo pipefail\n          COMPONENTS_JSON=\"$(jq -cS --slurpfile metadata cargo-metadata.json --argjson targets \"$TARGETS_JSON\" '[.[] as $component | ($metadata[0].packages | map(select(.name == $component.crate))) as $packages | if ($packages | length) != 1 then error(\"component crate is not unique\") else $component + {version:$packages[0].version,targets:$targets} end]' <<<\"$COMPONENTS_JSON\")\"\n          jq -e 'all(.[]; (keys | sort) == [\"binary\",\"crate\",\"feature\",\"identity\",\"name\",\"targets\",\"version\"] and (.version | type == \"string\") and (.targets | type == \"array\"))' <<<\"$COMPONENTS_JSON\" >/dev/null\n          printf 'COMPONENTS_JSON=%s\\n' \"$COMPONENTS_JSON\" >> \"$GITHUB_ENV\"\n          printf '%s\\n' \"$COMPONENTS_JSON\" > components.json\n      - name: Build and verify typed sibling inventory\n",
