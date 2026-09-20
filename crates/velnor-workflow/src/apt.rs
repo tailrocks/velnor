@@ -1463,8 +1463,21 @@ fn materialize_verified_file(path: &Path) -> Result<(PathBuf, PathBuf), Generato
 fn materialize_verified_bytes(bytes: &[u8]) -> Result<(PathBuf, PathBuf), GeneratorError> {
     let scratch = scratch_dir("verified-input")?;
     let materialized = scratch.join("input");
-    if let Err(error) = create_new_regular_file(&materialized, bytes, "materialize verified input")
-    {
+    #[cfg(unix)]
+    let result = open_directory_nofollow(&scratch)
+        .map_err(|error| GeneratorError::io("open materialization directory", &scratch, &error))
+        .and_then(|directory| {
+            create_new_regular_file_at(
+                &directory,
+                "input",
+                bytes,
+                "materialize verified input",
+                &materialized,
+            )
+        });
+    #[cfg(not(unix))]
+    let result = create_new_regular_file(&materialized, bytes, "materialize verified input");
+    if let Err(error) = result {
         let _ = std::fs::remove_dir_all(&scratch);
         return Err(error);
     }
