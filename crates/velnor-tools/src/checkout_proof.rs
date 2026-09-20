@@ -650,6 +650,7 @@ fn census_archive(
     }
     let archive_sha256 = Sha256Hex::from_bytes(archive_bytes);
     let archive_byte_length = archive_bytes.len() as u64;
+    validate_zip_central_directory(archive_bytes)?;
     let mut archive = ZipArchive::new(Cursor::new(archive_bytes))
         .map_err(|_| CheckoutProofError::ArchiveInvalid)?;
     if archive.len() > MAX_ARCHIVE_MEMBERS {
@@ -662,7 +663,11 @@ fn census_archive(
         let mut file = archive
             .by_index(index)
             .map_err(|_| CheckoutProofError::ArchiveInvalid)?;
-        let name = SnapshotMemberName::parse(file.name().to_owned())?;
+        if file.is_symlink() {
+            return Err(CheckoutProofError::ArchiveInvalid);
+        }
+        let raw_name = file.name().to_owned();
+        let name = SnapshotMemberName::parse(raw_name.trim_end_matches('/').to_owned())?;
         insert_member_name(&mut names, &name)?;
         let byte_length = file.size();
         if byte_length > MAX_ARCHIVE_MEMBER_BYTES {
@@ -702,6 +707,132 @@ fn census_archive(
         members,
         target,
     })
+}
+
+fn validate_zip_central_directory(bytes: &[u8]) -> Result<(), CheckoutProofError> {
+    const EOCD_SIGNATURE: u32 = 0x0605_4b50;
+    const CENTRAL_SIGNATURE: u32 = 0x0201_4b50;
+    const LOCAL_SIGNATURE: u32 = 0x0403_4b50;
+    if bytes.len() < 22 {
+        return Err(CheckoutProofError::ArchiveInvalid);
+    }
+    let search_start = bytes.len().saturating_sub(65_557);
+    let eocd = (search_start..=bytes.len() - 22)
+        .rev()
+        .find(|offset| read_u32(bytes, *offset) == Some(EOCD_SIGNATURE))
+        .ok_or(CheckoutProofError::ArchiveInvalid)?;
+    let comment_length =
+        usize::from(read_u16(bytes, eocd + 20).ok_or(CheckoutProofError::ArchiveInvalid)?);
+    let eocd_end = eocd
+        .checked_add(22)
+        .and_then(|value| value.checked_add(comment_length))
+        .ok_or(CheckoutProofError::ArchiveInvalid)?;
+    if eocd_end != bytes.len()
+        || read_u16(bytes, eocd + 4) != Some(0)
+        || read_u16(bytes, eocd + 6) != Some(0)
+    {
+        return Err(CheckoutProofError::ArchiveInvalid);
+    }
+    let entries_on_disk =
+        usize::from(read_u16(bytes, eocd + 8).ok_or(CheckoutProofError::ArchiveInvalid)?);
+    let entries =
+        usize::from(read_u16(bytes, eocd + 10).ok_or(CheckoutProofError::ArchiveInvalid)?);
+    if entries_on_disk != entries || entries > MAX_ARCHIVE_MEMBERS {
+        return Err(CheckoutProofError::ArchiveMemberLimit);
+    }
+    let central_size =
+        usize::try_from(read_u32(bytes, eocd + 12).ok_or(CheckoutProofError::ArchiveInvalid)?)
+            .map_err(|_| CheckoutProofError::ArchiveInvalid)?;
+    let central_offset =
+        usize::try_from(read_u32(bytes, eocd + 16).ok_or(CheckoutProofError::ArchiveInvalid)?)
+            .map_err(|_| CheckoutProofError::ArchiveInvalid)?;
+    if central_offset
+        .checked_add(central_size)
+        .ok_or(CheckoutProofError::ArchiveInvalid)?
+        != eocd
+    {
+        return Err(CheckoutProofError::ArchiveInvalid);
+    }
+
+    let mut cursor = central_offset;
+    let mut names = BTreeSet::new();
+    for _ in 0..entries {
+        if read_u32(bytes, cursor) != Some(CENTRAL_SIGNATURE) {
+            return Err(CheckoutProofError::ArchiveInvalid);
+        }
+        let header_end = cursor
+            .checked_add(46)
+            .ok_or(CheckoutProofError::ArchiveInvalid)?;
+        if header_end > eocd {
+            return Err(CheckoutProofError::ArchiveInvalid);
+        }
+        let name_length =
+            usize::from(read_u16(bytes, cursor + 28).ok_or(CheckoutProofError::ArchiveInvalid)?);
+        let extra_length =
+            usize::from(read_u16(bytes, cursor + 30).ok_or(CheckoutProofError::ArchiveInvalid)?);
+        let comment_length =
+            usize::from(read_u16(bytes, cursor + 32).ok_or(CheckoutProofError::ArchiveInvalid)?);
+        let name_start = header_end;
+        let name_end = name_start
+            .checked_add(name_length)
+            .ok_or(CheckoutProofError::ArchiveInvalid)?;
+        let record_end = name_end
+            .checked_add(extra_length)
+            .and_then(|value| value.checked_add(comment_length))
+            .ok_or(CheckoutProofError::ArchiveInvalid)?;
+        if record_end > eocd {
+            return Err(CheckoutProofError::ArchiveInvalid);
+        }
+        let raw_name = std::str::from_utf8(&bytes[name_start..name_end])
+            .map_err(|_| CheckoutProofError::InvalidMemberName)?;
+        let name = SnapshotMemberName::parse(raw_name.trim_end_matches('/').to_owned())?;
+        insert_member_name(&mut names, &name)?;
+
+        let local_offset = usize::try_from(
+            read_u32(bytes, cursor + 42).ok_or(CheckoutProofError::ArchiveInvalid)?,
+        )
+        .map_err(|_| CheckoutProofError::ArchiveInvalid)?;
+        if read_u32(bytes, local_offset) != Some(LOCAL_SIGNATURE) {
+            return Err(CheckoutProofError::ArchiveInvalid);
+        }
+        let local_name_length = usize::from(
+            read_u16(bytes, local_offset + 26).ok_or(CheckoutProofError::ArchiveInvalid)?,
+        );
+        let local_extra_length = usize::from(
+            read_u16(bytes, local_offset + 28).ok_or(CheckoutProofError::ArchiveInvalid)?,
+        );
+        let local_name_start = local_offset
+            .checked_add(30)
+            .ok_or(CheckoutProofError::ArchiveInvalid)?;
+        let local_name_end = local_name_start
+            .checked_add(local_name_length)
+            .ok_or(CheckoutProofError::ArchiveInvalid)?;
+        if local_name_end
+            .checked_add(local_extra_length)
+            .ok_or(CheckoutProofError::ArchiveInvalid)?
+            > central_offset
+        {
+            return Err(CheckoutProofError::ArchiveInvalid);
+        }
+        if bytes.get(local_name_start..local_name_end) != Some(&bytes[name_start..name_end]) {
+            return Err(CheckoutProofError::ArchiveInvalid);
+        }
+        cursor = record_end;
+    }
+    if cursor != eocd {
+        return Err(CheckoutProofError::ArchiveInvalid);
+    }
+    Ok(())
+}
+
+fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+    let end = offset.checked_add(2)?;
+    Some(u16::from_le_bytes(bytes.get(offset..end)?.try_into().ok()?))
+}
+
+fn read_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+    let end = offset.checked_add(4)?;
+    Some(u32::from_le_bytes(bytes.get(offset..end)?.try_into().ok()?))
 }
 
 fn insert_member_name(
