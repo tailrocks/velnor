@@ -2423,7 +2423,9 @@ fn request_digest(endpoint_or_operation: &str, query_or_document: &str) -> Strin
     sha256_digest(canonical.as_bytes())
 }
 
-fn content_addressed_storage_ref(digest: &str) -> String {
+/// Build the one canonical URI used by both the producer store and checker
+/// contract.  The digest itself must already come from measured bytes.
+pub(crate) fn content_addressed_storage_ref(digest: &str) -> String {
     let digest = digest.strip_prefix("sha256:").unwrap_or(digest);
     format!("sha256://{digest}")
 }
