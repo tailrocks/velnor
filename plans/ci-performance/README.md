@@ -43,27 +43,46 @@ hypothesis → implementation → focused checks → controlled CI → independe
 results review → commit/push → rerank. Independent research runs concurrently;
 timing experiments must account for shared runner contention.
 
-Current bounded queue (2026-09-20, after `e1357dd6`):
+Current bounded queue (2026-09-20, after `df9fb272`):
 
-- Parent integrates scanner-input preservation first, then locked tool
-  installation. Each unit receives a separate reviewed commit and regeneration.
-- Velnor agent owns Bun/Docker watch implementation and independently challenges
-  source identity. Jackin agent independently reviews Bun, preserves identity
-  reproduction evidence, and inspects updated PR heads #966/#963.
-- Parallax agent independently challenges source identity, isolates the locked
-  installer patch, then reviews Docker closure parsing.
-- Policy slot separation depends on source identity repair; local self-issued
-  manifests currently misidentify dirty compiled code as clean HEAD. Hold it.
-- Auto-install disabling depends on inferred transitive task-tool requirements;
-  explicit root tool versions must not become a request to install every tool.
-- PR cancellation guards, Rust fail-fast ordering, early candidate production,
-  consumer runtime distribution, selected-but-unadmitted gate rejection, and
-  immutable historical source attribution remain queued. They are not completed
-  by the bounded units above.
+- Locked installation is published as `057ed827`; PR cancellation is published
+  as `35a07a59`. The CI-discovered fixture repair is published as `bb94bac9`,
+  and Rust ordering as `95432856`. Collector identity is published as
+  `21799655`; its independently audited historical replay as `df9fb272`. Each gets
+  focused checks, source-driven regeneration, and a small signed-off commit.
+- Jackin agent owns the generic transitive Mise task/tool model and typed leaf
+  declarations. Its worktree-identity patch is under Parallax independent review.
+  Policy role separation depends on that structural identity repair.
+- Velnor agent owns an executable bootstrap compatibility experiment using the
+  trusted old validator and current candidate rendering. A pin-only unregenerated
+  change is insufficient; the actual existing candidate route must be tested.
+- Collector identity repair passes 45 tests and independent CLI scenarios.
+  Seven historical JSONL/CSV pairs are regenerated from saved raw responses;
+  all timing fields are unchanged across 476 rows. Three previous datasets
+  attributed source to later PR heads. Independent audit passed; original raw
+  evidence remains unchanged.
+- Disabling Mise task auto-install remains dependent on inferred transitive tool
+  requirements. Explicit root tool versions must not request every tool.
+- Early candidate production, immutable consumer runtime distribution, typed
+  visible validation stages, selected-but-unadmitted gate rejection, cache
+  telemetry, desktop product reuse, and Docker input closure remain open.
+- Dispatcher child-result and provider-policy design is tracked in
+  [V-DISPATCH-001](experiments/V-DISPATCH-001.md). The current API returns an exact
+  child run ID; local CLI authentication failure does not exhaust alternatives.
 
-Latest pushed PR coverage passed; separate policy failed. See
-[e135 evidence](observations/velnor-e135-validation.md). No accepted speedup or
-completed plateau follows from that single run.
+Latest exact pushed PR run `35493166478` (`df9fb272`) passed, with 68 recorded
+jobs: 614 seconds trigger to final completion, 2,813 seconds aggregate execution.
+Largest job: generator, 574 seconds. Separate policy run `35493165389` failed.
+The previous `21799655` PR run `35492702575` passed in 596 seconds, with 3,018
+seconds aggregate execution; its separate policy run also failed.
+
+The Rust-order candidate run `35492230871` passed in 604 seconds (aggregate
+2,734 seconds), versus the prior fixture run `35491248265` at 592 seconds
+(aggregate 2,705 seconds). These single observations are not matched repeated
+measurements. The collector check interval rose from roughly 14 to 21 seconds;
+this remains an unresolved possible regression. All figures use raw job
+completion timestamps, never workflow `updated_at`. None establishes a
+speedup or a completed plateau.
 
 ## Initial revisions and access
 
@@ -131,3 +150,7 @@ jobs passed. Documentation repaired in `724ee71`. Separate policy run
 `35484349032` timed out after 15 minutes awaiting its candidate artifact. This
 is distinct from the earlier candidate/pin closure failure. Both remain evidence;
 neither failed run is a successful speed baseline.
+
+Publication currently uses the authenticated Git-object API after SSH signing
+failed. Exact tree/parent checks, non-force ref updates, and preserved local
+commits keep this reviewable; see [access evidence](access-limitations.md).

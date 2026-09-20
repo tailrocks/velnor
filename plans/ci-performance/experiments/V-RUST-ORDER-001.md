@@ -110,3 +110,27 @@ Its green-path replay measured 1.373 versus 1.440 seconds on a tiny direct-Cargo
 fixture; its lint-failure replay measured 1.447 versus 0.325 seconds. These are
 mechanism observations with host-load confounding, not Velnor or MBX performance
 acceptance. Real successful-work and failure-feedback comparisons remain open.
+
+## First real CI observations
+
+Candidate `95432856`, run `35492230871`, passed, with 68 recorded jobs in
+604 seconds from trigger to last completion, with 2,734 seconds aggregate
+execution. Prior fixture revision `bb94bac9`, run `35491248265`, passed in
+592 seconds, with 2,705 seconds aggregate execution. Both independent policy
+runs failed the existing candidate/pin identity path. These are single,
+non-alternated observations, not an accepted improvement.
+
+The collector check interval was approximately 14 seconds before and
+21 seconds after. Its actual compiler archive lookup reported no MBX cache;
+Cargo/tool layers were warm. The candidate's reporter nevertheless labeled
+MBX as `prefix`, a separate defect tracked in V-MBX-TELEMETRY-001. Both runs
+reported 104 operations not looked up, one hit, zero misses and five bypasses
+across their command summaries. A zero-miss count does not prove reuse.
+
+Exact timestamped excerpts are retained as
+`velnor-35491248265-collector-order-cache.txt` and
+`velnor-35492230871-collector-order-cache.txt` in the observations directory.
+The apparent regression requires controlled repeated observations, including
+command intervals and cache state. Planning-job rerun feasibility is tracked
+in V-RERUN-MEASUREMENT-001. Neither unrelated subsequent commits nor repeated
+same-SHA runs can alone establish normal source-edit performance.
