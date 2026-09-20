@@ -10225,18 +10225,30 @@ mod tests {
             "{default_surface}"
         );
         config.macos_runner = "macos-26-intel".to_owned();
-        let custom =
-            WorkflowIr::from_config(&config).render_nested_unit(&xcode, WorkflowKind::Main);
-        assert!(custom.contains("runs-on: macos-26-intel"), "{custom}");
-        assert!(!custom.contains("runs-on: macos-26\n"), "{custom}");
+        let error = must_fail(
+            crate::platform::validate_native_host_contract(&mut config),
+            "an Intel macOS 26 label must not reach the renderer",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("latest verified hosted label xcode-27"),
+            "{error}"
+        );
+        assert!(error.to_string().contains("macos-26-intel"), "{error}");
         assert!(
             !config.toml().contains("macos_runner"),
             "pinned Planning runtimes reject unknown fields: {}",
             config.toml()
         );
-        assert!(report_unit_runners(&config, &xcode).contains("macos-26-intel"));
-        let actionlint = render_actionlint_config(&config);
-        assert!(actionlint.contains("macos-26-intel"), "{actionlint}");
+        let default_report = report_unit_runners(
+            &ProjectConfig {
+                macos_runner: "xcode-27".to_owned(),
+                ..config.clone()
+            },
+            &xcode,
+        );
+        assert!(default_report.contains("xcode-27"));
         let _ = fs::remove_dir_all(root);
     }
 

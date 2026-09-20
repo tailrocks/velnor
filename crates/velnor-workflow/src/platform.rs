@@ -19,8 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 
 use crate::native_contract::{
-    latest_hosted_apple_offer, offer_mismatches, AppleArch, AppleNativeContract,
-    LATEST_HOSTED_APPLE_RUNNER,
+    offer_mismatches, select_hosted_apple_offer, AppleArch, AppleNativeContract,
 };
 use crate::{GeneratorError, ProjectConfig, RunnerMode, Unit, UnitKind};
 
@@ -285,11 +284,7 @@ pub(crate) fn validate_native_host_contract(
     config: &mut ProjectConfig,
 ) -> Result<(), GeneratorError> {
     let macos_runner = config.macos_runner.clone();
-    if macos_runner != LATEST_HOSTED_APPLE_RUNNER {
-        return Err(GeneratorError::usage(format!(
-            "native Apple jobs require the latest verified hosted label {LATEST_HOSTED_APPLE_RUNNER}; selected {macos_runner} is an older or unverified fallback and cannot be used"
-        )));
-    }
+    let offer = select_hosted_apple_offer(&macos_runner).map_err(GeneratorError::usage)?;
     let native_units = config
         .units
         .iter_mut()
@@ -323,11 +318,10 @@ pub(crate) fn validate_native_host_contract(
             )));
         }
         unit.platform.arch = required_arch;
-        let offer = latest_hosted_apple_offer();
         let mismatches = offer_mismatches(contract, offer);
         if !mismatches.is_empty() {
             return Err(GeneratorError::usage(format!(
-                "unit {} requires {} but hosted label {} cannot satisfy it: {}; choose a compatible hosted macOS label or strengthen the source/config contract",
+                "unit {} requires {} but the latest verified hosted label {} cannot satisfy it: {}; no older hosted fallback is permitted; update the source/config contract for a supported native capability or stop generation",
                 unit.id,
                 contract.describe(),
                 offer.label,
