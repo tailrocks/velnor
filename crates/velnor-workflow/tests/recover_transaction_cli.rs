@@ -5,11 +5,6 @@
     clippy::expect_used,
     reason = "fixture setup and subprocess launch must fail loudly"
 )]
-#![expect(
-    clippy::unwrap_used,
-    reason = "fixture setup and subprocess assertions must fail loudly"
-)]
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
