@@ -72,10 +72,12 @@ fn snapshot_dependency_inputs(members: &[&Unit]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::process::Command;
 
     use super::{
         provider_input, unit_owns_workflow_crate, GraphNode, Pins, ProviderAdmission, ProviderId,
-        ProviderSet, RustNeeds, Unit, UnitKind, WorkflowIr, WorkflowKind,
+        ProviderSet, RequiredCaller, RustNeeds, Unit, UnitKind, WorkflowIr, WorkflowKind,
+        REQUIRED_CHECK,
     };
     use crate::s2::{
         nested_unit_workflow_file, sidebar_group_name, stack_group_job_id,
@@ -390,6 +392,148 @@ mod tests {
             "rust kind reusable renders",
         );
         must_some(rendered, "rust kind has members").1
+    }
+
+    fn required_gate_script(ir: &WorkflowIr, nodes: &[GraphNode], include_policy: bool) -> String {
+        let mut rendered = String::new();
+        ir.render_nodes_required(
+            nodes,
+            None,
+            &mut rendered,
+            include_policy,
+            REQUIRED_CHECK,
+            false,
+        );
+        let script = must_some(
+            rendered
+                .split_once("        run: |\n")
+                .map(|(_, body)| body.split("\n  required:\n").next().unwrap_or(body)),
+            "required gate script",
+        );
+        script
+            .lines()
+            .map(|line| line.strip_prefix("          ").unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn run_required_gate(
+        script: &str,
+        policy_result: Option<&str>,
+        selected_units: &str,
+        callers: &[RequiredCaller],
+        nonempty_selection: bool,
+    ) -> bool {
+        let mut needs = serde_json::Map::new();
+        needs.insert("plan".to_owned(), serde_json::json!({"result": "success"}));
+        if let Some(result) = policy_result {
+            needs.insert("policy".to_owned(), serde_json::json!({"result": result}));
+        }
+        for caller in callers {
+            let result = if nonempty_selection
+                && !caller.prerequisite
+                && caller.provider == ProviderId::GithubHosted
+            {
+                "success"
+            } else {
+                "skipped"
+            };
+            needs.insert(caller.job_id.clone(), serde_json::json!({"result": result}));
+        }
+        let output = must_ok(
+            Command::new("bash")
+                .args(["-euo", "pipefail", "-c", script])
+                .env("NEEDS_JSON", serde_json::Value::Object(needs).to_string())
+                .env("SELECTED_UNITS", selected_units)
+                .env("PLAN_DIGEST", "synthetic-plan-digest")
+                .env("EXCLUDED", "[]")
+                .env(
+                    "EXPECTED_CALLERS",
+                    super::required_execution_contract(callers),
+                )
+                .env("PROVIDER_ADMITTED_GITHUB_HOSTED", "true")
+                .env("PROVIDER_ADMITTED_GITHUB_SELF_HOSTED", "true")
+                .env("PROVIDER_ADMITTED_VELNOR", "true")
+                .env("PROVIDER_ADMITTED_GITHUB_HOSTED_TRUSTED", "true")
+                .env("PROVIDER_ADMITTED_GITHUB_SELF_HOSTED_TRUSTED", "true")
+                .env("PROVIDER_ADMITTED_VELNOR_TRUSTED", "true")
+                .env("PROVIDER_ADMITTED_ANY_LOCAL_TRUSTED", "true")
+                .output(),
+            "bash and jq execute the rendered gate",
+        );
+        output.status.success()
+    }
+
+    #[test]
+    fn required_controls_drive_needs_and_strict_policy_verdicts() {
+        let unit = rust_unit("rust", "crates/rust");
+        let ir = owner_test_ir("example/required-controls", vec![unit.clone()]);
+        let nodes = vec![GraphNode::Unit {
+            unit_id: unit.id.clone(),
+            job_id: stack_group_job_id(unit.kind),
+            name: sidebar_group_name(&unit),
+            file: nested_unit_workflow_file(&unit),
+        }];
+        let callers = ir.required_callers(&nodes, None);
+        let script = required_gate_script(&ir, &nodes, true);
+        assert!(script.contains("result=\"$(result_for_job plan)\""));
+        assert!(script.contains("result=\"$(result_for_job policy)\""));
+
+        for (nonempty_selection, selected_units) in [
+            (false, "[]"),
+            (
+                true,
+                r#"[{"unit_id":"rust","providers":["github-hosted"]}]"#,
+            ),
+        ] {
+            assert!(
+                run_required_gate(
+                    &script,
+                    Some("success"),
+                    selected_units,
+                    &callers,
+                    nonempty_selection,
+                ),
+                "successful policy must pass for {selected_units}"
+            );
+            for result in ["failure", "cancelled", "skipped"] {
+                assert!(
+                    !run_required_gate(
+                        &script,
+                        Some(result),
+                        selected_units,
+                        &callers,
+                        nonempty_selection,
+                    ),
+                    "policy {result} must fail for {selected_units}"
+                );
+            }
+            assert!(
+                !run_required_gate(&script, None, selected_units, &callers, nonempty_selection,),
+                "missing policy must fail for {selected_units}"
+            );
+        }
+        assert!(
+            !run_required_gate(&script, Some("success"), "{malformed-plan", &callers, false,),
+            "malformed selected-unit plan must fail closed"
+        );
+
+        for selected_units in [
+            r#"[{"unit_id":"unknown","providers":["github-hosted"]}]"#,
+            r#"[{"unit_id":"rust","providers":["unknown"]}]"#,
+            r#"[{"unit_id":"rust","providers":[]}]"#,
+            r#"[{"unit_id":"rust","providers":["github-hosted","github-hosted"]}]"#,
+            r#"[{"unit_id":"rust","providers":["github-hosted"]},{"unit_id":"rust","providers":["github-hosted"]}]"#,
+            r#"[{"unit_id":"rust","providers":[1]}]"#,
+        ] {
+            assert!(
+                !run_required_gate(&script, Some("success"), selected_units, &callers, true,),
+                "unmapped or duplicate selected obligation must fail closed: {selected_units}"
+            );
+        }
+
+        let pull_request_script = required_gate_script(&ir, &nodes, false);
+        assert!(!pull_request_script.contains("result_for_job policy"));
     }
 
     /// One job's body from a rendered workflow. Job bodies indent past two
@@ -2815,6 +2959,24 @@ pub(crate) struct RequiredCaller {
     pub(crate) prerequisite: bool,
 }
 
+/// A control-plane job the aggregate required check must both depend on and
+/// verify. Keep this list separate from unit callers: a control obligation is
+/// selected by workflow construction (for example, `policy` exists on main
+/// and nightly but not pull requests), while a unit obligation is selected by
+/// the affected plan and provider admission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RequiredControl {
+    job_id: &'static str,
+}
+
+fn required_controls(include_policy: bool) -> Vec<RequiredControl> {
+    let mut controls = vec![RequiredControl { job_id: "plan" }];
+    if include_policy {
+        controls.push(RequiredControl { job_id: "policy" });
+    }
+    controls
+}
+
 /// The plan-JSON needle both the aggregate callers and the kind reusables
 /// match with `contains(...)`: bare quotes, exactly as the plan output spells
 /// the `unit_id` member. One spelling shared by both emitters so they cannot
@@ -3378,6 +3540,29 @@ fn render_required_admission_env(workflow: &WorkflowIr, callers: &[RequiredCalle
     output
 }
 
+/// The canonical execution obligations the aggregate check may validate. The
+/// plan is untrusted workflow output, so the gate must reject a unit/provider
+/// pair that the renderer did not emit a caller for instead of silently
+/// ignoring it. Keep this contract derived from the same callers used for the
+/// needs list and the per-caller verdicts.
+fn required_execution_contract(callers: &[RequiredCaller]) -> String {
+    let obligations = callers
+        .iter()
+        .filter(|caller| !caller.prerequisite)
+        .map(|caller| {
+            serde_json::json!({
+                "unit_id": caller.unit_id,
+                "provider": caller.provider.as_str(),
+                "job_id": caller.job_id,
+            })
+        })
+        .collect::<Vec<_>>();
+    match serde_json::to_string(&obligations) {
+        Ok(contract) => contract,
+        Err(_) => "null".to_owned(),
+    }
+}
+
 /// The per-caller verdict block of the required check: strict expected-set
 /// comparison against the frozen plan.
 ///
@@ -3896,11 +4081,12 @@ impl WorkflowIr {
         check_name: &str,
         simulate_failure: bool,
     ) {
+        let controls = required_controls(include_policy);
         let callers = self.required_callers(nodes, contracts);
-        let mut needs = vec!["plan".to_owned()];
-        if include_policy {
-            needs.push("policy".to_owned());
-        }
+        let mut needs = controls
+            .iter()
+            .map(|control| control.job_id.to_owned())
+            .collect::<Vec<_>>();
         needs.extend(callers.iter().map(|caller| caller.job_id.clone()));
         let display_name = match check_name {
             REQUIRED_CHECK => yaml_scalar(REQUIRED_CHECK),
@@ -3911,11 +4097,13 @@ impl WorkflowIr {
         let selected_units = github_expression("needs.plan.outputs.units");
         let plan_digest = github_expression("needs.plan.outputs.plan_digest");
         let excluded = github_expression("needs.plan.outputs.excluded");
+        let expected_callers = required_execution_contract(&callers);
         let _ = write!(
             output,
-            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ always() }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n          PLAN_DIGEST: {plan_digest}\n          EXCLUDED: {excluded}\n{}",
+            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ always() }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n          PLAN_DIGEST: {plan_digest}\n          EXCLUDED: {excluded}\n          EXPECTED_CALLERS: {}\n{}",
             needs.join(", "),
             self.runs_on_yaml(CONTROL_PLANE_PROVIDER),
+            yaml_scalar(&expected_callers),
             render_required_admission_env(self, &callers),
         );
         if simulate_failure {
@@ -3930,6 +4118,9 @@ impl WorkflowIr {
         }
         output.push_str(
             "          if [[ -z \"$PLAN_DIGEST\" ]]; then\n            echo \"plan did not freeze a plan digest: the expected set has no identity\" >&2\n            exit 1\n          fi\n          echo \"verdict binds plan digest $PLAN_DIGEST\"\n          result_for_job() {\n            jq -r --arg job \"$1\" '.[$job].result // empty' <<<\"$NEEDS_JSON\"\n          }\n          plan_expects() {\n            [[ \"$(jq -r --arg unit \"$1\" --arg provider \"$2\" '[.[] | select(.unit_id == $unit) | .providers[] | select(. == $provider)] | length' <<<\"$SELECTED_UNITS\")\" -gt 0 ]]\n          }\n",
+        );
+        output.push_str(
+            "          if ! jq -e --argjson expected \"$EXPECTED_CALLERS\" '($expected | type == \"array\") and all($expected[]; type == \"object\" and (.unit_id | type) == \"string\" and (.provider | type) == \"string\" and (.job_id | type) == \"string\")' -n; then\n            echo \"generated required-caller contract is malformed\" >&2\n            exit 1\n          fi\n          if ! jq -e --argjson expected \"$EXPECTED_CALLERS\" 'type == \"array\" and (map(.unit_id) | unique | length) == length and all(.[]; . as $entry | ($entry | type) == \"object\" and ($entry.unit_id | type) == \"string\" and ($entry.unit_id | length) > 0 and ($entry.providers | type) == \"array\" and ($entry.providers | length) > 0 and (($entry.providers | map(type == \"string\" and length > 0) | all)) and (($entry.providers | unique | length) == ($entry.providers | length)) and all($entry.providers[]; . as $provider | any($expected[]; .unit_id == $entry.unit_id and .provider == $provider)))' <<<\"$SELECTED_UNITS\" >/dev/null; then\n            echo \"plan selected-unit output contains an unknown, duplicate, empty, or unmapped obligation\" >&2\n            exit 1\n          fi\n          if ! jq -e 'type == \"object\"' <<<\"$NEEDS_JSON\" >/dev/null; then\n            echo \"workflow needs output is malformed\" >&2\n            exit 1\n          fi\n",
         );
         // The prerequisite trigger: the unit is expected on any local
         // provider, whose stores the prerequisite warms. The local set is
@@ -3949,10 +4140,8 @@ impl WorkflowIr {
                 "          plan_expects_local() {{\n            [[ \"$(jq -r --arg unit \"$1\" '[.[] | select(.unit_id == $unit) | .providers[] | select({local_alternation})] | length' <<<\"$SELECTED_UNITS\")\" -gt 0 ]]\n          }}",
             );
         }
-        for job in needs
-            .iter()
-            .filter(|job| matches!(job.as_str(), "plan" | "policy"))
-        {
+        for control in &controls {
+            let job = control.job_id;
             let _ = writeln!(
                 output,
                 "          result=\"$(result_for_job {job})\"\n          if [[ \"$result\" != success ]]; then\n            echo \"required CI prerequisite {job} did not pass: $result\" >&2\n            exit 1\n          fi"
