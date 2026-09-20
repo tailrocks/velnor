@@ -9913,6 +9913,11 @@ mod tests {
             block.contains("if [[ \"$PROVIDER_ADMITTED_VELNOR_TRUSTED\" == true ]]; then"),
             "the trust-gated caller is judged by the trusted class's admission: {block}"
         );
+        assert!(
+            block.contains("contradicts provider admission (PROVIDER_ADMITTED_VELNOR_TRUSTED=")
+                && block.contains("exit 1"),
+            "a selected obligation cannot be erased by failed trusted admission: {block}"
+        );
         // Selection freezes an obligation. A later admission disagreement cannot
         // turn that obligation into a successful skipped check. Execute the
         // rendered verdict so this fixture checks behavior, not diagnostic text.

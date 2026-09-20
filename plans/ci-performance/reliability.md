@@ -165,8 +165,21 @@ are repaired and verified.
 Independent hook replay in the integration checkout passed all 31 fixtures and
 118 assertions in 69.63 seconds. This is regression-suite duration, not the
 latency of validating Velnor's full workspace. The implementation is queued for
-its own increment after the bootstrap repair; Linux CI and full-workspace hook
-latency remain unverified.
+its own increment after the bootstrap repair; actual workspace measurements
+follow below.
+
+Actual full-workspace hook validation subsequently passed in a disposable clone
+of `39b67ecd` plus the ten hook files. `mise trust`, pinned `mise install`, and
+`mise run bootstrap` installed the hook; a normal signed-off Git commit invoked
+it successfully and left the clone clean. Empty isolated Cargo caches took
+198.0 seconds (one sample; pinned tools already installed). Three warm runs
+passed in 8.765, 8.531, and 8.528 seconds with HTTP(S)/ALL proxies pointed at a
+closed loopback port. This is prepared offline-transport evidence, not an OS
+network sandbox or an optimization comparison. An earlier 99.7-second cold
+trial overlapped another compilation and is excluded from controlled comparison.
+Team builds were paused for the second cold/warm trials; host-wide exclusivity
+was not continuously established. Linux CI and package-specific feature-policy
+correspondence remain outstanding.
 
 Additional observed work: adding evidence paths changed only the generated
 ownership state's `scan` digest, forcing a correction push and superseding the
@@ -183,6 +196,14 @@ drift: the planner trims whitespace but workflow admission matches raw inputs;
 explicit empty input also differs. Strict verdicts now expose this contradiction
 instead of passing skipped validation. Normalize selection consistently next.
 Legacy schema gate semantics require a separate applicability audit.
+
+The next hosted run, `35525244762` at `39b67ecd`, exposed one older test
+(`trust_gated_velnor_docker_is_judged_by_the_trusted_class`) that still asserted
+the removed selected-skip behavior. Its expectation now matches the strict
+contract; the emitted-shell regression also covers every non-prerequisite
+provider caller. Independent review passed. The full generator suite then
+passed all 1,959 tests (42.03 seconds), and strict crate Clippy passed. This
+failure remains part of first-attempt evidence; it was not retried away.
 
 A retained artifact-upload failure exposed test HTTP servers that closed before
 draining request bodies. A shared framed reader repairs 13 mocks; actual runner
