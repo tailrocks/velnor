@@ -4614,11 +4614,19 @@ fn policy_candidate_step(revision: &str) -> String {
           base_commit_api="$(gh api "repos/$GITHUB_REPOSITORY/commits/$BASE_SHA")"
           jq -e --arg base "$BASE_SHA" '.sha == $base and (.commit.tree.sha | strings | test("^[0-9a-f]{{40}}$"))' <<<"$base_commit_api" >/dev/null
           base_tree_sha="$(jq -er '.commit.tree.sha' <<<"$base_commit_api")"
-          test "$(git rev-parse "$HEAD_SHA^{{tree}}")" = "$head_tree_sha"
-          test "$(git rev-parse "$BASE_SHA^{{tree}}")" = "$base_tree_sha"
+          source_repo="$RUNNER_TEMP/target-source.git"
+          source_home="$RUNNER_TEMP/target-source-home"
+          rm -rf "$source_repo" "$source_home"
+          mkdir -m 0700 "$source_home"
+          GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -c init.templateDir=/dev/null init --bare "$source_repo" >/dev/null
+          for source_sha in "$HEAD_SHA" "$BASE_SHA"; do
+            GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" -c core.hooksPath=/dev/null fetch --no-tags --depth=1 "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$source_sha"
+          done
+          test "$(GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" show -s --format=%T "$HEAD_SHA")" = "$head_tree_sha"
+          test "$(GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" show -s --format=%T "$BASE_SHA")" = "$base_tree_sha"
 
           contract="$RUNNER_TEMP/ci-pr-contract.yml"
-          git show "$BASE_SHA:.github/workflows/ci-pr.yml" > "$contract"
+          GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" show "$BASE_SHA:.github/workflows/ci-pr.yml" > "$contract"
           candidate_block="$(awk '/^  candidate_producer:/{{seen=1}} seen && /^  [A-Za-z0-9_-]+:/ && $0 !~ /^  candidate_producer:/{{exit}} seen{{print}}' "$contract")"
           test "$candidate_block" != ""
           grep -Fqx "  candidate_producer:" <<<"$candidate_block"
@@ -4631,7 +4639,7 @@ fn policy_candidate_step(revision: &str) -> String {
           grep -Fq 'test -z "${{ACTIONS_RUNTIME_URL:-}}"' <<<"$candidate_block"
           grep -Fq 'env -i' <<<"$candidate_block"
           head_contract="$RUNNER_TEMP/ci-pr-head.yml"
-          git show "$HEAD_SHA:.github/workflows/ci-pr.yml" > "$head_contract"
+          GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" show "$HEAD_SHA:.github/workflows/ci-pr.yml" > "$head_contract"
           head_candidate_block="$(awk '/^  candidate_producer:/{{seen=1}} seen && /^  [A-Za-z0-9_-]+:/ && $0 !~ /^  candidate_producer:/{{exit}} seen{{print}}' "$head_contract")"
           test "$head_candidate_block" = "$candidate_block" || {{ echo "::error::PR workflow changed the trusted candidate producer contract" >&2; exit 1; }}
           test "$(grep -Fxc "          name: {artifact}" <<<"$candidate_block")" = 1
@@ -4728,12 +4736,12 @@ fn policy_candidate_step(revision: &str) -> String {
           mkdir -p "$handoff"
           install -m 0555 "$binary" "$handoff/velnor-workflow"
           install -m 0444 "$manifest" "$handoff/candidate-manifest.json"
-          git archive --format=tar "$HEAD_SHA" > "$handoff/source.tar"
+          GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" archive --format=tar "$HEAD_SHA" > "$handoff/source.tar"
           source_archive_sha256="$(sha256sum "$handoff/source.tar" | awk '{{print $1}}')"
           source_size="$(stat -c '%s' "$handoff/source.tar")"
           test "$source_size" -le 536870912
           closure_input="$RUNNER_TEMP/candidate-closure"
-          git ls-tree -r "$HEAD_SHA" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo \
+          GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" ls-tree -r "$HEAD_SHA" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo \
             | LC_ALL=C sort > "$closure_input"
           printf 'closure-version:1\\nfeatures:tui\\nprofile:debug\\n' >> "$closure_input"
           candidate_closure="$(sha256sum "$closure_input" | awk '{{print $1}}')"
@@ -4815,19 +4823,6 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
           path: policy-checkout
           fetch-depth: 0
           persist-credentials: false
-      - name: Materialize audited head as data
-        working-directory: policy-checkout
-        env:
-          HEAD_SHA: ${{{{ github.event.pull_request.head.sha }}}}
-          HEAD_REPOSITORY: ${{{{ github.event.pull_request.head.repo.full_name }}}}
-        run: |
-          set -euo pipefail
-          test -n "$HEAD_SHA"
-          test "$HEAD_REPOSITORY" = "$GITHUB_REPOSITORY"
-          if ! git cat-file -e "$HEAD_SHA^{{commit}}" 2>/dev/null; then
-            git fetch --no-tags "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$HEAD_SHA"
-          fi
-          git checkout --quiet --detach "$HEAD_SHA"
 {acquire}
   candidate_execute:
     name: candidate_execute
@@ -5356,6 +5351,16 @@ fn policy_candidate_result_verification_step() -> String {
           base_commit_api="$(gh api "repos/$GITHUB_REPOSITORY/commits/$BASE_SHA")"
           jq -e --arg base "$BASE_SHA" '.sha == $base and (.commit.tree.sha | strings | test("^[0-9a-f]{{40}}$"))' <<<"$base_commit_api" >/dev/null
           base_tree_sha="$(jq -er '.commit.tree.sha' <<<"$base_commit_api")"
+          verifier_source_repo="$RUNNER_TEMP/verifier-source.git"
+          verifier_source_home="$RUNNER_TEMP/verifier-source-home"
+          rm -rf "$verifier_source_repo" "$verifier_source_home"
+          mkdir -m 0700 "$verifier_source_home"
+          GIT_CONFIG_NOSYSTEM=1 HOME="$verifier_source_home" git -c init.templateDir=/dev/null init --bare "$verifier_source_repo" >/dev/null
+          for source_sha in "$HEAD_SHA" "$BASE_SHA"; do
+            GIT_CONFIG_NOSYSTEM=1 HOME="$verifier_source_home" git -C "$verifier_source_repo" -c core.hooksPath=/dev/null fetch --no-tags --depth=1 "$GITHUB_SERVER_URL/$HEAD_REPOSITORY" "$source_sha"
+          done
+          test "$(GIT_CONFIG_NOSYSTEM=1 HOME="$verifier_source_home" git -C "$verifier_source_repo" show -s --format=%T "$HEAD_SHA")" = "$head_tree_sha"
+          test "$(GIT_CONFIG_NOSYSTEM=1 HOME="$verifier_source_home" git -C "$verifier_source_repo" show -s --format=%T "$BASE_SHA")" = "$base_tree_sha"
           workflow_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci-pr.yml")"
           jq -e --argjson id "$(jq -er .workflow_id "$handoff_json")" '.path == ".github/workflows/ci-pr.yml" and .id == $id' <<<"$workflow_api" >/dev/null
           run_id="$(jq -er .run_id "$handoff_json")"
@@ -5374,13 +5379,11 @@ fn policy_candidate_result_verification_step() -> String {
             .id == $id and .run_id == $run_id and .name == "candidate_producer" and .head_sha == $head and
             .status == "completed" and .conclusion == "success"
           ' <<<"$job_api" >/dev/null
-          test "$(git rev-parse "$HEAD_SHA^{{tree}}")" = "$head_tree_sha"
-          test "$(git rev-parse "$BASE_SHA^{{tree}}")" = "$base_tree_sha"
           test "$head_tree_sha" = "$(jq -er .head_tree_sha "$handoff_json")"
           test "$base_tree_sha" = "$(jq -er .base_tree_sha "$handoff_json")"
-          test "$(git show "$BASE_SHA:.github/workflows/ci-pr.yml" | sha256sum | awk '{{print $1}}')" = "$(jq -er .contract_sha256 "$handoff_json")"
+          test "$(GIT_CONFIG_NOSYSTEM=1 HOME="$verifier_source_home" git -C "$verifier_source_repo" show "$BASE_SHA:.github/workflows/ci-pr.yml" | sha256sum | awk '{{print $1}}')" = "$(jq -er .contract_sha256 "$handoff_json")"
           closure_file="$RUNNER_TEMP/verifier-closure"
-          git ls-tree -r "$HEAD_SHA" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo | LC_ALL=C sort > "$closure_file"
+          GIT_CONFIG_NOSYSTEM=1 HOME="$verifier_source_home" git -C "$verifier_source_repo" ls-tree -r "$HEAD_SHA" -- crates/velnor-workflow Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo | LC_ALL=C sort > "$closure_file"
           printf 'closure-version:1\\nfeatures:tui\\nprofile:debug\\n' >> "$closure_file"
           test "$(sha256sum "$closure_file" | awk '{{print $1}}')" = "$(jq -er .candidate_closure "$handoff_json")"
           render_sha256="$(cd "$result_dir/render" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{{print $1}}')"

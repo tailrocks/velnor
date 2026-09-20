@@ -620,6 +620,26 @@ fn owner_entrypoint_renders_the_isolated_candidate_transport() {
     assert!(job.contains("actions/artifacts/$artifact_id/zip"), "{job}");
     assert!(job.contains("/commits/$HEAD_SHA"), "{job}");
     assert!(job.contains(".commit.tree.sha"), "{job}");
+    assert!(
+        job.contains("git -c init.templateDir=/dev/null init --bare"),
+        "{job}"
+    );
+    assert!(
+        job.contains("fetch --no-tags --depth=1 \"$GITHUB_SERVER_URL/$HEAD_REPOSITORY\""),
+        "{job}"
+    );
+    assert!(
+        job.contains("git -C \"$source_repo\" archive --format=tar \"$HEAD_SHA\""),
+        "{job}"
+    );
+    assert!(
+        job.contains("git -C \"$verifier_source_repo\" ls-tree -r \"$HEAD_SHA\""),
+        "{job}"
+    );
+    assert!(
+        !job.contains("git rev-parse \"$HEAD_SHA^{{tree}}\""),
+        "{job}"
+    );
     assert!(job.contains("repository_api"), "{job}");
     assert!(job.contains("artifact_raw_zip_sha256"), "{job}");
     assert!(
