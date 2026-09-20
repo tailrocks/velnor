@@ -613,7 +613,11 @@ fn step_run(workflow: &str, name: &str) -> String {
     let document = parse_workflow(workflow);
     let jobs = document["jobs"].as_mapping().expect("jobs map");
     for job in jobs.values() {
-        let Some(steps) = job["steps"].as_sequence() else {
+        let Some(job) = job.as_mapping() else {
+            // Reusable-workflow jobs have `uses` without an inline `steps` map.
+            continue;
+        };
+        let Some(steps) = job.get("steps").and_then(YamlValue::as_sequence) else {
             continue;
         };
         for step in steps {
@@ -622,14 +626,17 @@ fn step_run(workflow: &str, name: &str) -> String {
             }
         }
     }
-    std::process::abort()
+    panic!("workflow step {name:?} not found")
 }
 
 fn step_with(workflow: &str, step_name: &str, key: &str) -> String {
     let document = parse_workflow(workflow);
     let jobs = document["jobs"].as_mapping().expect("jobs map");
     for job in jobs.values() {
-        let Some(steps) = job["steps"].as_sequence() else {
+        let Some(job) = job.as_mapping() else {
+            continue;
+        };
+        let Some(steps) = job.get("steps").and_then(YamlValue::as_sequence) else {
             continue;
         };
         for step in steps {
@@ -638,14 +645,17 @@ fn step_with(workflow: &str, step_name: &str, key: &str) -> String {
             }
         }
     }
-    std::process::abort()
+    panic!("workflow step {step_name:?} not found")
 }
 
 fn step_env(workflow: &str, step_name: &str, key: &str) -> Option<String> {
     let document = parse_workflow(workflow);
     let jobs = document["jobs"].as_mapping().expect("jobs map");
     for job in jobs.values() {
-        let Some(steps) = job["steps"].as_sequence() else {
+        let Some(job) = job.as_mapping() else {
+            continue;
+        };
+        let Some(steps) = job.get("steps").and_then(YamlValue::as_sequence) else {
             continue;
         };
         for step in steps {
