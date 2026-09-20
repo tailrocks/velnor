@@ -14,13 +14,15 @@ use std::path::Path;
 use super::{Args, Primitive, RenderCtx, Rendered, PACKAGE_RELEASE};
 use crate::s2::provider::ProviderId;
 use crate::s2::{
-    github_expression, selector_runs_on_yaml, shell_quote, workflow_runtime_setup, ActionPin,
-    GeneratorError, ProjectConfig, GENERATED_HEADER,
+    github_expression, selector_runs_on_yaml, shell_quote, workflow_runtime_setup,
+    workflow_runtime_setup_at_checkout_path, ActionPin, GeneratorError, ProjectConfig,
+    GENERATED_HEADER,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PackageReleaseSpec {
     build_tasks: Vec<String>,
+    verify_tasks: Vec<String>,
     package_dir: String,
     manifest_schema: String,
     source_repository: String,
@@ -50,6 +52,7 @@ impl Primitive for PackageRelease {
     fn schema(&self) -> &'static [&'static str] {
         &[
             "build_tasks",
+            "verify_tasks",
             "channel",
             "concurrency_group",
             "consumer_branch",
@@ -72,6 +75,7 @@ impl Primitive for PackageRelease {
 
     fn render(&self, ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<Rendered, GeneratorError> {
         let spec = parse_spec(args)?;
+        validate_mise_tasks(ctx.root, "verify_tasks", &spec.verify_tasks)?;
         if !ctx.config.providers.contains(&ProviderId::GithubHosted) {
             return Err(GeneratorError::usage(
                 "package-release requires the github-hosted provider for GitHub release and attestation APIs",
@@ -214,6 +218,21 @@ fn validate_workflow_file(file: Option<&str>) -> Result<String, GeneratorError> 
     Ok(file.to_owned())
 }
 
+fn validate_mise_tasks(root: &Path, key: &str, tasks: &[String]) -> Result<(), GeneratorError> {
+    if tasks.is_empty() {
+        return Ok(());
+    }
+    let declared = crate::s2::parse_mise_task_names(root)?;
+    for task in tasks {
+        if !declared.iter().any(|candidate| candidate == task) {
+            return Err(GeneratorError::usage(format!(
+                "package-release {key} entry {task} is not declared by mise.toml"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 fn valid_channel_version(value: &str, channel: &str) -> bool {
     let Some((base, source_suffix)) = value.split_once('+') else {
@@ -258,6 +277,21 @@ fn parse_spec(args: &Args<'_>) -> Result<PackageReleaseSpec, GeneratorError> {
         if !crate::s2::config::valid_check_profile_task(task) {
             return Err(GeneratorError::usage(format!(
                 "package-release build_tasks entry {task} is not a plain mise task"
+            )));
+        }
+    }
+
+    let verify_tasks_value = args.strings("verify_tasks")?;
+    let verify_tasks = verify_tasks_value.clone().unwrap_or_default();
+    if verify_tasks_value.is_some() && verify_tasks.is_empty() {
+        return Err(GeneratorError::usage(
+            "package-release verify_tasks must contain at least one mise task when declared",
+        ));
+    }
+    for task in &verify_tasks {
+        if !crate::s2::config::valid_check_profile_task(task) {
+            return Err(GeneratorError::usage(format!(
+                "package-release verify_tasks entry {task} is not a plain mise task"
             )));
         }
     }
@@ -386,6 +420,7 @@ fn parse_spec(args: &Args<'_>) -> Result<PackageReleaseSpec, GeneratorError> {
 
     Ok(PackageReleaseSpec {
         build_tasks,
+        verify_tasks,
         package_dir,
         manifest_schema,
         source_repository,
@@ -435,6 +470,35 @@ fn indent_script(script: &str, spaces: usize) -> String {
         }
     }
     indented
+}
+
+fn verification_task_script(tasks: &[String]) -> String {
+    let mut script = String::from(
+        r#"set -euo pipefail
+cd "$VELNOR_SOURCE_CHECKOUT_DIR"
+"#,
+    );
+    for task in tasks {
+        let _ = writeln!(script, "mise run {}", shell_quote(task));
+    }
+    script
+}
+
+fn render_verification_task_step(
+    name: &str,
+    tasks: &[String],
+    verified_package_dir: Option<&str>,
+) -> String {
+    if tasks.is_empty() {
+        return String::new();
+    }
+    let environment = verified_package_dir.map_or_else(String::new, |directory| {
+        format!("        env:\n          VELNOR_VERIFIED_PACKAGE_DIR: {directory}\n")
+    });
+    format!(
+        "      - name: {name}\n{environment}        run: |\n{}",
+        indent_script(&verification_task_script(tasks), 10)
+    )
 }
 
 /// The verified-directory boundary shared by the producer and publisher jobs.
@@ -725,6 +789,16 @@ fn render_workflow(
     } else {
         String::new()
     };
+    let publish_runtime_setup = if provider == ProviderId::GithubHosted {
+        workflow_runtime_setup_at_checkout_path(
+            ProviderId::GithubHosted,
+            &config.repository,
+            &config.workflow_revision,
+            "source",
+        )
+    } else {
+        String::new()
+    };
     let checkout = ActionPin::Checkout.reference();
     let upload = ActionPin::UploadArtifact.reference();
     let download = ActionPin::DownloadArtifact.reference();
@@ -735,6 +809,11 @@ fn render_workflow(
     let workspace_expr = github_expression("github.workspace");
     let build_verify = indent_script(&verification_script(spec), 10);
     let publish_verify = indent_script(&verification_script(spec), 10);
+    let build_verify_tasks = render_verification_task_step(
+        "Run repository package verification tasks",
+        &spec.verify_tasks,
+        None,
+    );
     let updater_token_expr = github_expression(&format!("secrets.{}", spec.updater_token_secret));
     let github_token_expr = github_expression("github.token");
     let build_if = github_expression(&format!(
@@ -820,7 +899,7 @@ fn render_workflow(
     );
     let _ = writeln!(
         output,
-        "    steps:\n      - name: Checkout source\n        uses: {checkout}\n        with:\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false\n      - name: Install locked build tools\n        run: mise --yes install --locked --include-task-tools\n      - name: Enforce workflow policy\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Build verified package directory\n        env:\n          VELNOR_SOURCE_COMMIT: {source_commit_expr}\n          VELNOR_SOURCE_REF: {source_shell}\n        run: |\n          set -euo pipefail\n          mkdir -p \"$VELNOR_VERIFIED_PACKAGE_DIR\"\n{tasks}      - name: Verify manifest, identity, checksums, and exact file set\n        id: verify\n        run: |\n{build_verify}      - name: Attest declared package assets\n        uses: {attest}\n        with:\n          subject-path: |\n{attestation_subjects}      - name: Upload verified package handoff\n        uses: {upload}\n        with:\n          name: package-release\n          path: {package_path_yaml}\n          if-no-files-found: error\n          retention-days: 2\n",
+        "    steps:\n      - name: Checkout source\n        uses: {checkout}\n        with:\n          ref: {source_commit_expr}\n          fetch-depth: 0\n          persist-credentials: false\n{runtime_setup}      - name: Set up Mise\n        uses: {mise}\n        with:\n          install: false\n      - name: Install locked build tools\n        run: mise --yes install --locked --include-task-tools\n      - name: Enforce workflow policy\n        run: velnor-workflow policy --workflow-root \"$GITHUB_WORKSPACE\"\n      - name: Build verified package directory\n        env:\n          VELNOR_SOURCE_COMMIT: {source_commit_expr}\n          VELNOR_SOURCE_REF: {source_shell}\n        run: |\n          set -euo pipefail\n          mkdir -p \"$VELNOR_VERIFIED_PACKAGE_DIR\"\n{tasks}      - name: Verify manifest, identity, checksums, and exact file set\n        id: verify\n        run: |\n{build_verify}{build_verify_tasks}      - name: Attest declared package assets\n        uses: {attest}\n        with:\n          subject-path: |\n{attestation_subjects}      - name: Upload verified package handoff\n        uses: {upload}\n        with:\n          name: package-release\n          path: {package_path_yaml}\n          if-no-files-found: error\n          retention-days: 2\n",
     );
     output.push('\n');
     output.push_str(&render_publish_job(
@@ -829,6 +908,9 @@ fn render_workflow(
         checkout,
         download,
         &publish_verify,
+        &publish_runtime_setup,
+        mise,
+        &spec.verify_tasks,
         &publish_attestation_targets,
         &attestation_flags,
         &workspace_expr,
@@ -1478,6 +1560,9 @@ fn render_publish_job(
     checkout: &str,
     download: &str,
     publish_verify: &str,
+    runtime_setup: &str,
+    mise: &str,
+    verify_tasks: &[String],
     publish_attestation_targets: &str,
     attestation_flags: &str,
     workspace_expr: &str,
@@ -1607,6 +1692,13 @@ fn render_publish_job(
     output.push_str(publish_source_commit_expr);
     output.push_str("\n          fetch-depth: 0\n          path: source\n          persist-credentials: false\n");
 
+    output.push_str(runtime_setup);
+    output.push_str("      - name: Set up Mise\n        uses: ");
+    output.push_str(mise);
+    output.push_str(
+        "\n        with:\n          install: false\n      - name: Install locked package verification tools\n        working-directory: source\n        run: mise --yes install --locked --include-task-tools\n",
+    );
+
     output.push_str("      - name: Download verified package handoff\n        uses: ");
     output.push_str(download);
     output.push_str("\n        with:\n          name: package-release\n          path: package\n          merge-multiple: true\n");
@@ -1614,6 +1706,11 @@ fn render_publish_job(
         "      - name: Re-verify downloaded handoff\n        id: verify\n        run: |\n",
     );
     output.push_str(publish_verify);
+    output.push_str(&render_verification_task_step(
+        "Run handoff package verification tasks",
+        verify_tasks,
+        None,
+    ));
 
     output.push_str("      - name: Verify build attestations\n        env:\n          GH_TOKEN: ");
     output.push_str(github_token_expr);
@@ -1637,6 +1734,11 @@ fn render_publish_job(
         "\n        run: |\n          set -euo pipefail\n          rm -rf published-package\n          mkdir -p published-package\n          gh release download \"$RELEASE_ASSET_TAG\" --repo \"$GITHUB_REPOSITORY\" --dir published-package\n          export VELNOR_VERIFIED_PACKAGE_DIR=\"$GITHUB_WORKSPACE/published-package\"\n",
     );
     output.push_str(publish_verify);
+    output.push_str(&render_verification_task_step(
+        "Run published package verification tasks",
+        verify_tasks,
+        Some(&format!("{workspace_expr}/published-package")),
+    ));
 
     output.push_str(
         "      - name: Verify published release attestations\n        env:\n          GH_TOKEN: ",
@@ -1730,6 +1832,7 @@ mod tests {
         toml::from_str(
             r#"
 build_tasks = ["release-preview-package"]
+verify_tasks = ["verify-preview-package"]
 package_dir = "dist"
 manifest_schema = "example.consumer-manifest-v1"
 source_repository = "example/project"
@@ -1777,6 +1880,7 @@ file = "preview.yml"
 
 [declare.args]
 build_tasks = ["release-preview-package"]
+verify_tasks = ["verify-preview-package"]
 package_dir = "dist/package"
 manifest_schema = "example.consumer-manifest-v1"
 source_repository = "example/project"
@@ -1804,6 +1908,7 @@ concurrency_group = "package-release-preview"
         let spec = parse_spec(&Args(row.args())).expect("complete package contract");
         assert_eq!(spec.package_dir, "dist/package");
         assert_eq!(spec.payloads.len(), 6);
+        assert_eq!(spec.verify_tasks, ["verify-preview-package"]);
         assert_eq!(spec.github_release_type, "prerelease");
         assert_eq!(spec.publish_environment, "github-preview");
         assert_eq!(spec.release_title_prefix, "Preview");
@@ -1978,6 +2083,49 @@ concurrency_group = "package-release-preview"
     }
 
     #[test]
+    fn package_release_rejects_empty_verification_tasks() {
+        let mut values = args();
+        values.insert("verify_tasks".to_owned(), toml::Value::Array(Vec::new()));
+        let error = parse_spec(&Args(&values)).expect_err("empty verification tasks must fail");
+        assert!(error.to_string().contains("verify_tasks"));
+    }
+
+    #[test]
+    fn package_release_rejects_non_task_verification_names() {
+        let mut values = args();
+        values.insert(
+            "verify_tasks".to_owned(),
+            toml::Value::Array(vec![toml::Value::String("mise run verify".to_owned())]),
+        );
+        let error = parse_spec(&Args(&values)).expect_err("command arrays must fail");
+        assert!(error.to_string().contains("plain mise task"));
+    }
+
+    #[test]
+    fn package_release_verification_tasks_must_exist_in_mise() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-package-release-mise-{}",
+            crate::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create mise fixture");
+        std::fs::write(
+            root.join("mise.toml"),
+            "[tasks]\nverify-preview-package = \"echo verify\"\n\n[tasks.header-task]\nrun = \"echo header\"\n",
+        )
+        .expect("write mise fixture");
+        let tasks = vec![
+            "verify-preview-package".to_owned(),
+            "header-task".to_owned(),
+        ];
+        validate_mise_tasks(&root, "verify_tasks", &tasks).expect("declared task validates");
+        let missing = vec!["missing-task".to_owned()];
+        let error = validate_mise_tasks(&root, "verify_tasks", &missing)
+            .expect_err("missing task must fail closed");
+        assert!(error.to_string().contains("missing-task"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn package_release_rejects_payload_support_collision() {
         let mut values = args();
         values.insert(
@@ -2100,6 +2248,48 @@ concurrency_group = "package-release-preview"
                 "capsule-manifest.json"
             ]
         );
+    }
+
+    #[test]
+    fn rendered_workflow_runs_repository_verification_tasks_at_all_boundaries() {
+        let spec = parse_spec(&Args(&args())).expect("valid fixture");
+        let workflow = render_workflow(&render_config(), &spec, "preview.yml");
+        assert_eq!(
+            workflow
+                .matches("mise run 'verify-preview-package'")
+                .count(),
+            3
+        );
+        let producer = workflow
+            .find("Build verified package directory")
+            .expect("producer step");
+        let producer_verify = workflow
+            .find("Run repository package verification tasks")
+            .expect("producer verification task step");
+        let handoff = workflow
+            .find("Re-verify downloaded handoff")
+            .expect("handoff step");
+        let handoff_verify = workflow
+            .find("Run handoff package verification tasks")
+            .expect("handoff verification task step");
+        let immutable = workflow
+            .find("Download and re-verify published release")
+            .expect("immutable download step");
+        let immutable_verify = workflow
+            .find("Run published package verification tasks")
+            .expect("immutable verification task step");
+        let rolling = workflow
+            .find("Refresh rolling preview release")
+            .expect("rolling update step");
+        assert!(producer < producer_verify);
+        assert!(producer_verify < handoff);
+        assert!(handoff < handoff_verify);
+        assert!(handoff_verify < immutable);
+        assert!(immutable < immutable_verify);
+        assert!(immutable_verify < rolling);
+        assert!(workflow
+            .contains("VELNOR_VERIFIED_PACKAGE_DIR: ${{ github.workspace }}/published-package"));
+        assert!(!workflow.contains("verify-preview-package --"));
     }
 
     #[test]
@@ -2347,8 +2537,7 @@ concurrency_group = "package-release-preview"
         );
         assert!(
             diagnostics.contains("trailing whitespace"),
-            "cached whitespace check did not identify trailing whitespace: {}",
-            diagnostics
+            "cached whitespace check did not identify trailing whitespace: {diagnostics}"
         );
     }
 
