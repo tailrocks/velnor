@@ -1287,18 +1287,15 @@ mod tests {
             "report step renders",
         );
         let candidate = &hosted[start..end];
-        assert_eq!(
-            hosted
-                .matches(
-                    "if: ${{ inputs.candidate_publish && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}"
-                )
-                .count(),
-            1,
+        assert!(
+            hosted.contains(
+                "if: ${{ inputs.candidate_publish && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}"
+            ),
             "the prepare step carries the input gate merged with the pull-request same-repo gate: {hosted}"
         );
         assert!(
             hosted.contains(
-                "if: ${{ inputs.candidate_publish && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true') }}"
+                "if: ${{ inputs.candidate_publish && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true' && steps.candidate.outcome == 'success') }}"
             ),
             "the publish step additionally gates on the prepare step's skip output: {hosted}"
         );
@@ -1484,15 +1481,15 @@ mod tests {
             solo_content
                 .matches("if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository\n")
                 .count(),
-            1,
-            "the prepare step keeps the bare pull-request same-repo gate: {solo_content}"
+            3,
+            "phase start and prepare keep the bare pull-request same-repo gate: {solo_content}"
         );
         assert_eq!(
             solo_content
-                .matches("if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true'\n")
+                .matches("if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true' && steps.candidate.outcome == 'success'\n")
                 .count(),
-            1,
-            "the publish step adds the skip gate: {solo_content}"
+            2,
+            "phase start and publish add the skip gate: {solo_content}"
         );
         assert!(
             !solo_content.contains("inputs.candidate_publish &&"),
@@ -1510,8 +1507,31 @@ mod tests {
             "the prepare gate is the pull-request same-repo gate: {steps}"
         );
         assert!(
-            steps.contains("      - name: Publish candidate generator product\n        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true'\n"),
+            steps.contains("      - name: Publish candidate generator product\n        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true' && steps.candidate.outcome == 'success'\n"),
             "the publish gate adds the skip output: {steps}"
+        );
+        for marker in [
+            "Mark candidate preparation start",
+            "Mark candidate preparation end",
+            "Mark candidate publication start",
+            "Mark candidate publication end",
+        ] {
+            assert!(
+                steps.contains(marker),
+                "candidate phase marker missing: {marker}: {steps}"
+            );
+        }
+        assert!(steps.contains("id: candidate_publication"));
+        assert!(steps.contains(
+            "Mark candidate preparation end\n        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outcome == 'success'",
+        ));
+        assert!(steps.contains(
+            "Mark candidate publication end\n        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true' && steps.candidate_publication.outcome == 'success'",
+        ));
+        assert!(
+            !steps.contains("Mark candidate preparation start\n        if: always()")
+                && !steps.contains("Mark candidate publication start\n        if: always()"),
+            "failed checks cannot start candidate timing markers: {steps}"
         );
     }
 
@@ -1850,11 +1870,54 @@ fn render_epoch_marker_commands(epoch_key: &str, indent: &str) -> String {
 }
 
 /// Append one immutable file marker step for CI phase timing.
-fn render_phase_epoch_marker(output: &mut String, epoch_key: &str, step_name: &str) {
+fn render_phase_epoch_marker_if(
+    output: &mut String,
+    epoch_key: &str,
+    step_name: &str,
+    condition: &str,
+) {
     let marker = render_epoch_marker_commands(epoch_key, "          ");
     let _ = writeln!(
         output,
-        "      - name: {step_name}\n        if: always()\n        run: |\n{marker}"
+        "      - name: {step_name}\n        if: {condition}\n        run: |\n{marker}"
+    );
+}
+
+fn render_phase_epoch_marker(output: &mut String, epoch_key: &str, step_name: &str) {
+    render_phase_epoch_marker_if(output, epoch_key, step_name, "always()");
+}
+
+fn render_phase_epoch_marker_text(epoch_key: &str, step_name: &str, condition: &str) -> String {
+    let mut output = String::new();
+    render_phase_epoch_marker_if(&mut output, epoch_key, step_name, condition);
+    output
+}
+
+fn cache_save_completion_gate(save_gate: &str, step_id: &str) -> String {
+    format!("always() && ({save_gate}) && steps.{step_id}.outcome == 'success'")
+}
+
+fn render_cache_save_start_marker(output: &mut String, kind: &str, save_gate: &str) {
+    render_phase_epoch_marker_if(
+        output,
+        &format!("CACHE_{kind}_SAVE_STARTED"),
+        &format!("Mark {kind} cache-save start"),
+        save_gate,
+    );
+}
+
+fn render_cache_save_end_marker(
+    output: &mut String,
+    kind: &str,
+    save_gate: &str,
+    save_step_id: &str,
+) {
+    let completion_gate = cache_save_completion_gate(save_gate, save_step_id);
+    render_phase_epoch_marker_if(
+        output,
+        &format!("CACHE_{kind}_SAVE_ENDED"),
+        &format!("Mark {kind} cache-save end"),
+        &completion_gate,
     );
 }
 
@@ -1881,10 +1944,6 @@ pub(crate) fn render_ci_cache_prep_end_marker(output: &mut String) {
 
 pub(crate) fn render_ci_cargo_fetch_end_marker(output: &mut String) {
     render_phase_epoch_marker(output, "CARGO_FETCH_ENDED", "Mark cargo fetch end");
-}
-
-pub(crate) fn render_ci_cleanup_end_marker(output: &mut String) {
-    render_phase_epoch_marker(output, "CLEANUP_ENDED", "Mark cleanup end");
 }
 
 /// Emit the post-checks report step shared by both render paths.
@@ -2292,9 +2351,38 @@ fn unit_owns_workflow_crate(unit: &Unit) -> bool {
 /// and the publish step additionally gates on the prepare step's `skip`
 /// output, so the collapsed renderer can add the per-unit input gate without
 /// touching them.
+fn candidate_phase_marker_text() -> (String, String, String, String) {
+    let event_gate =
+        "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository";
+    (
+        render_phase_epoch_marker_text(
+            "CANDIDATE_PREPARATION_STARTED",
+            "Mark candidate preparation start",
+            event_gate,
+        ),
+        render_phase_epoch_marker_text(
+            "CANDIDATE_PREPARATION_ENDED",
+            "Mark candidate preparation end",
+            "always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outcome == 'success'",
+        ),
+        render_phase_epoch_marker_text(
+            "CANDIDATE_PUBLICATION_STARTED",
+            "Mark candidate publication start",
+            "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true' && steps.candidate.outcome == 'success'",
+        ),
+        render_phase_epoch_marker_text(
+            "CANDIDATE_PUBLICATION_ENDED",
+            "Mark candidate publication end",
+            "always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true' && steps.candidate_publication.outcome == 'success'",
+        ),
+    )
+}
+
 fn candidate_publish_steps(upload_artifact_pin: &str) -> String {
+    let (preparation_start, preparation_end, publication_start, publication_end) =
+        candidate_phase_marker_text();
     format!(
-        r#"      - name: Prepare candidate generator product
+        r#"{preparation_start}      - name: Prepare candidate generator product
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         id: candidate
         env:
@@ -2362,15 +2450,16 @@ fn candidate_publish_steps(upload_artifact_pin: &str) -> String {
             trap - EXIT
           fi
           echo "name=velnor-workflow-candidate-${{head_closure:0:16}}-${{RUNNER_OS}}-${{RUNNER_ARCH}}" >> "$GITHUB_OUTPUT"
-      - name: Publish candidate generator product
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true'
+{preparation_end}{publication_start}      - name: Publish candidate generator product
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true' && steps.candidate.outcome == 'success'
+        id: candidate_publication
         uses: {upload_artifact_pin}
         with:
           name: ${{{{ steps.candidate.outputs.name }}}}
           path: ${{{{ runner.temp }}}}/velnor-workflow-candidate
           if-no-files-found: error
           retention-days: 1
-"#,
+{publication_end}"#,
     )
 }
 
@@ -3012,12 +3101,14 @@ fn render_seed_collection_steps(
         MUTABLE_MOUNT_SEED_FILES[MUTABLE_MOUNT_SEED_FILES.len() - 1]
     );
     if let Some((paths, key)) = save {
+        let save_gate = dependency_bundle_cache_save_if(&ir.default_branch);
+        render_cache_save_start_marker(output, "SEED", &save_gate);
         let _ = writeln!(
             output,
-            "      - name: Save Docker build seed\n        if: {}\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {key}",
-            dependency_bundle_cache_save_if(&ir.default_branch),
+            "      - name: Save Docker build seed\n        id: docker_seed_cache_save\n        if: {save_gate}\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {key}",
             ir.pins.cache_save
         );
+        render_cache_save_end_marker(output, "SEED", &save_gate, "docker_seed_cache_save");
     }
 }
 
@@ -5300,14 +5391,29 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         // that event gate themselves), and only on success (no `always()`).
         let candidate = FeatureCoverage::over(&facts, |facts| facts.candidate_publish);
         if hosted && candidate.any {
-            output.push_str(&gated(
-                candidate_publish_steps(self.pins.upload_artifact),
-                candidate,
-                provider_input::CANDIDATE_PUBLISH,
-            ));
+            let mut block = String::new();
+            let candidate_event_gate =
+                "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository";
+            let candidate_event_complete_gate =
+                "always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate_publication.outcome == 'success'";
+            render_phase_epoch_marker_if(
+                &mut block,
+                "CANDIDATE_STARTED",
+                "Mark candidate phase start",
+                candidate_event_gate,
+            );
+            block.push_str(&candidate_publish_steps(self.pins.upload_artifact));
+            render_phase_epoch_marker_if(
+                &mut block,
+                "CANDIDATE_ENDED",
+                "Mark candidate phase end",
+                candidate_event_complete_gate,
+            );
+            output.push_str(&gated(block, candidate, provider_input::CANDIDATE_PUBLISH));
         }
 
         // Cache collection.
+        let cache_save_bundle = cache_save && hosted && bundle.any;
         if seed.any {
             let mut block = String::new();
             render_mutable_mount_seed_collection_from_input(
@@ -5318,7 +5424,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             );
             output.push_str(&gated(block, seed, provider_input::SEED_COMPAT));
         }
-        if cache_save && hosted && bundle.any {
+        if cache_save_bundle {
             let (cache_key, _) = format_cargo_bundle_cache_key(
                 kind.id_prefix(),
                 &format!("inputs.{}", provider_input::CACHE_KEY_FILES),
@@ -5327,16 +5433,17 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 &provider_input::expression(provider_input::UNIT_TRUST),
             );
             let mut block = String::new();
+            let save_gate = dependency_bundle_cache_save_if(&self.default_branch);
+            render_cache_save_start_marker(&mut block, "BUNDLE", &save_gate);
             let _ = writeln!(
                 block,
-                "      - name: Save unit cache\n        if: {}\n        uses: {}\n        with:\n          path: |\n            {}\n          key: {cache_key}",
-                dependency_bundle_cache_save_if(&self.default_branch),
+                "      - name: Save unit cache\n        id: unit_cache_save\n        if: {save_gate}\n        uses: {}\n        with:\n          path: |\n            {}\n          key: {cache_key}",
                 self.pins.cache_save,
                 provider_input::expression(provider_input::CACHE_PATHS),
             );
+            render_cache_save_end_marker(&mut block, "BUNDLE", &save_gate, "unit_cache_save");
             output.push_str(&gated(block, bundle, provider_input::CACHE_KEY_FILES));
         }
-        render_ci_cleanup_end_marker(output);
         let report = members
             .iter()
             .map(|unit| CacheReportFacts::for_unit(provider, unit, self))
