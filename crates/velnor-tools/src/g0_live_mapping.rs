@@ -13,6 +13,7 @@ use crate::evidence_check::{ManifestDocument, ManifestRepository, CANONICAL_REPO
 use crate::g0_contract::*;
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use serde_yaml::Value as YamlValue;
 use std::collections::{BTreeMap, BTreeSet};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use url::Url;
@@ -1894,6 +1895,16 @@ fn map_dependency_graph(
             &format!("dependency graph source {}", manifest_repository.repository),
             &["workflows", "workflow.source"],
         )?;
+        validate_workflow_source_raw_references(
+            &manifest_repository.repository,
+            &workflow.path,
+            &workflow.source_sha,
+            &workflow.source_raw_object_refs,
+            raw_by_id,
+            request_by_id,
+            &format!("dependency graph source {}", manifest_repository.repository),
+            "workflow.source",
+        )?;
         let workloads = bindings
             .workflow_workloads
             .get(&(
@@ -1928,11 +1939,10 @@ fn map_dependency_graph(
             }
             let workload_node_id =
                 format!("workload:{}:{}", manifest_repository.repository, workload);
-            if !nodes
-                .iter()
-                .any(|node: &G0GraphNode| node.id == workload_node_id)
-            {
-                nodes.push(G0GraphNode {
+            append_graph_node(
+                &mut nodes,
+                &mut graph_raw_ids,
+                G0GraphNode {
                     id: workload_node_id.clone(),
                     kind: "workload".to_owned(),
                     repository: manifest_repository.repository.clone(),
@@ -1941,14 +1951,49 @@ fn map_dependency_graph(
                     source_sha: workflow.source_sha.clone(),
                     source_ref: workflow.path.clone(),
                     raw_object_refs: source_raw_refs.clone(),
-                });
-            }
+                },
+            )?;
+            append_required_check_edges(
+                repository,
+                manifest_repository,
+                workflow,
+                &workload,
+                &workload_node_id,
+                &source_raw_refs,
+                raw_by_id,
+                request_by_id,
+                &mut nodes,
+                &mut edges,
+                &mut graph_raw_ids,
+            )?;
+            append_release_package_edges(
+                manifest_repository,
+                workflow,
+                &workload,
+                &workload_node_id,
+                bindings,
+                raw_by_id,
+                &mut nodes,
+                &mut edges,
+                &mut graph_raw_ids,
+            )?;
             for dependency in workflow
                 .reusable_workflows
                 .iter()
                 .chain(workflow.actions.iter())
                 .chain(workflow.scanners.iter())
             {
+                if !matches!(
+                    dependency.kind.as_str(),
+                    "reusable_workflow" | "action" | "scanner"
+                ) {
+                    bail!(
+                        "dependency {}/{} has unsupported typed kind {}",
+                        dependency.repository,
+                        dependency.path,
+                        dependency.kind
+                    );
+                }
                 validate_raw_references(
                     &dependency.raw_object_refs,
                     raw_by_id,
@@ -1969,6 +2014,23 @@ fn map_dependency_graph(
                     ),
                     &["workflow.dependency.source"],
                 )?;
+                let dependency_path = dependency
+                    .resolved_path
+                    .as_deref()
+                    .unwrap_or(&dependency.path);
+                validate_workflow_source_raw_references(
+                    &dependency.repository,
+                    dependency_path,
+                    &dependency.revision,
+                    &dependency.source_raw_object_refs,
+                    raw_by_id,
+                    request_by_id,
+                    &format!(
+                        "dependency graph source {}/{}@{}",
+                        dependency.repository, dependency.path, dependency.revision
+                    ),
+                    "workflow.dependency.source",
+                )?;
                 if !is_sha(&dependency.revision) {
                     bail!(
                         "dependency {}/{} has unresolved revision {}",
@@ -1977,43 +2039,99 @@ fn map_dependency_graph(
                         dependency.revision
                     );
                 }
-                let dependency_node_id = format!(
-                    "dependency:{}:{}@{}",
-                    dependency.repository, dependency.path, dependency.revision
-                );
-                if !nodes
+                let expected_child = manifest_repository
+                    .expected_jobs
                     .iter()
-                    .any(|node: &G0GraphNode| node.id == dependency_node_id)
-                {
-                    nodes.push(G0GraphNode {
+                    .filter(|job| job.workload_id == workload)
+                    .filter_map(|job| job.child_workflow.as_ref())
+                    .find(|child| {
+                        dependency.kind == "reusable_workflow"
+                            && dependency.repository == child.repository
+                            && dependency_path == child.workflow_path
+                    });
+                let (node_kind, edge_kind) = if let Some(child) = expected_child {
+                    if !dependency_source_declares_event(dependency, &child.event)? {
+                        bail!(
+                            "child workflow {}/{} does not declare {}",
+                            dependency.repository,
+                            dependency_path,
+                            child.event
+                        );
+                    }
+                    ("child", "workload-to-child")
+                } else {
+                    ("workflow", "dependency")
+                };
+                let dependency_node_id = format!(
+                    "{}:{}:{}:{}:{}@{}",
+                    node_kind,
+                    graph_component(&manifest_repository.repository),
+                    graph_component(&workload),
+                    graph_component(&dependency.repository),
+                    graph_component(dependency_path),
+                    dependency.revision
+                );
+                let dependency_raw_refs = merge_graph_refs(&[
+                    &dependency.raw_object_refs,
+                    &dependency.source_raw_object_refs,
+                ])?;
+                append_graph_node(
+                    &mut nodes,
+                    &mut graph_raw_ids,
+                    G0GraphNode {
                         id: dependency_node_id.clone(),
-                        kind: dependency.kind.clone(),
+                        kind: node_kind.to_owned(),
                         repository: dependency.repository.clone(),
                         workload_id: workload.clone(),
                         applicability: "required".to_owned(),
                         source_sha: dependency.revision.clone(),
-                        source_ref: dependency
+                        source_ref: dependency_path.to_owned(),
+                        raw_object_refs: dependency_raw_refs.clone(),
+                    },
+                )?;
+                append_graph_edge(
+                    &mut edges,
+                    &mut graph_raw_ids,
+                    G0GraphEdge {
+                        from: workload_node_id.clone(),
+                        to: dependency_node_id,
+                        kind: edge_kind.to_owned(),
+                        required: true,
+                        source_sha: workflow.source_sha.clone(),
+                        source_ref: workflow.path.clone(),
+                        target_source_sha: dependency.revision.clone(),
+                        target_source_ref: dependency_path.to_owned(),
+                        raw_object_refs: merge_graph_refs(&[
+                            &source_raw_refs,
+                            &dependency_raw_refs,
+                        ])?,
+                    },
+                )?;
+            }
+            let expected_children = manifest_repository
+                .expected_jobs
+                .iter()
+                .filter(|job| job.workload_id == workload)
+                .filter_map(|job| job.child_workflow.as_ref())
+                .collect::<Vec<_>>();
+            for child in expected_children {
+                let found = workflow.reusable_workflows.iter().any(|dependency| {
+                    dependency.kind == "reusable_workflow"
+                        && dependency.repository == child.repository
+                        && dependency
                             .resolved_path
-                            .clone()
-                            .unwrap_or_else(|| dependency.path.clone()),
-                        raw_object_refs: dependency.raw_object_refs.clone(),
-                    });
-                }
-                graph_raw_ids.extend(dependency.raw_object_refs.iter().cloned());
-                edges.push(G0GraphEdge {
-                    from: workload_node_id.clone(),
-                    to: dependency_node_id,
-                    kind: dependency.kind.clone(),
-                    required: true,
-                    source_sha: workflow.source_sha.clone(),
-                    source_ref: workflow.path.clone(),
-                    target_source_sha: dependency.revision.clone(),
-                    target_source_ref: dependency
-                        .resolved_path
-                        .clone()
-                        .unwrap_or_else(|| dependency.path.clone()),
-                    raw_object_refs: dependency.raw_object_refs.clone(),
+                            .as_deref()
+                            .unwrap_or(&dependency.path)
+                            == child.workflow_path
                 });
+                if !found {
+                    bail!(
+                        "workload {} lacks source-bound child workflow {}/{}",
+                        workload,
+                        child.repository,
+                        child.workflow_path
+                    );
+                }
             }
         }
     }
@@ -2025,6 +2143,536 @@ fn map_dependency_graph(
         edges,
         raw_object_refs: graph_raw_ids.into_iter().collect(),
     })
+}
+
+fn append_graph_node(
+    nodes: &mut Vec<G0GraphNode>,
+    graph_raw_ids: &mut BTreeSet<String>,
+    node: G0GraphNode,
+) -> Result<()> {
+    if node.id.trim().is_empty()
+        || node.repository.trim().is_empty()
+        || node.workload_id.trim().is_empty()
+        || node.source_ref.trim().is_empty()
+        || !is_sha(&node.source_sha)
+        || !matches!(
+            node.kind.as_str(),
+            "artifact"
+                | "check"
+                | "child"
+                | "package"
+                | "release"
+                | "source"
+                | "workflow"
+                | "workload"
+        )
+    {
+        bail!("graph node {} has an invalid typed identity", node.id);
+    }
+    if node.raw_object_refs.is_empty() {
+        bail!("graph node {} lacks raw source references", node.id);
+    }
+    if nodes.iter().any(|existing| existing.id == node.id) {
+        bail!("graph node {} is duplicated", node.id);
+    }
+    graph_raw_ids.extend(node.raw_object_refs.iter().cloned());
+    nodes.push(node);
+    Ok(())
+}
+
+fn append_graph_edge(
+    edges: &mut Vec<G0GraphEdge>,
+    graph_raw_ids: &mut BTreeSet<String>,
+    edge: G0GraphEdge,
+) -> Result<()> {
+    if edge.from.trim().is_empty()
+        || edge.to.trim().is_empty()
+        || edge.kind.trim().is_empty()
+        || !is_sha(&edge.source_sha)
+        || edge.source_ref.trim().is_empty()
+        || !is_sha(&edge.target_source_sha)
+        || edge.target_source_ref.trim().is_empty()
+        || !matches!(
+            edge.kind.as_str(),
+            "consumes"
+                | "dependency"
+                | "produces"
+                | "requires"
+                | "workload-to-check"
+                | "workload-to-child"
+                | "workload-to-package"
+                | "workload-to-release"
+        )
+    {
+        bail!(
+            "graph edge {} -> {} has an invalid typed identity",
+            edge.from,
+            edge.to
+        );
+    }
+    if edge.raw_object_refs.is_empty() {
+        bail!(
+            "graph edge {} -> {} lacks raw source references",
+            edge.from,
+            edge.to
+        );
+    }
+    let duplicate = edges.iter().any(|existing| {
+        existing.from == edge.from
+            && existing.to == edge.to
+            && existing.kind == edge.kind
+            && existing.required == edge.required
+    });
+    if duplicate {
+        bail!("graph edge {} -> {} is duplicated", edge.from, edge.to);
+    }
+    graph_raw_ids.extend(edge.raw_object_refs.iter().cloned());
+    edges.push(edge);
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "graph mapping keeps source, policy, request, and output bindings explicit"
+)]
+fn append_required_check_edges(
+    repository: &LiveRepository,
+    manifest: &ManifestRepository,
+    workflow: &LiveWorkflow,
+    workload: &str,
+    workload_node_id: &str,
+    source_raw_refs: &[String],
+    raw_by_id: &BTreeMap<String, &RawObjectRef>,
+    request_by_id: &BTreeMap<String, &RequestRecord>,
+    nodes: &mut Vec<G0GraphNode>,
+    edges: &mut Vec<G0GraphEdge>,
+    graph_raw_ids: &mut BTreeSet<String>,
+) -> Result<()> {
+    let expected = manifest
+        .required_check_contexts_and_apps
+        .iter()
+        .map(|required| (required.context.clone(), required.app_id.clone()))
+        .collect::<BTreeSet<_>>();
+    if expected.is_empty() {
+        bail!(
+            "{} workload {} has no source-derived required-check contract",
+            repository.repository,
+            workload
+        );
+    }
+    let mut observed = BTreeSet::new();
+    let mut policies = Vec::new();
+    for ruleset in &repository.rulesets {
+        if !ruleset.complete {
+            bail!(
+                "ruleset {} in {} is incomplete",
+                ruleset.ruleset_id,
+                repository.repository
+            );
+        }
+        validate_nested_raw_references(
+            &ruleset.raw_object_refs,
+            raw_by_id,
+            request_by_id,
+            &format!("graph ruleset {}", ruleset.ruleset_id),
+            &[
+                RawEndpointBinding {
+                    object_kind: "rulesets",
+                    endpoint: format!("/repos/{}/rulesets", repository.repository),
+                },
+                RawEndpointBinding {
+                    object_kind: "ruleset",
+                    endpoint: format!(
+                        "/repos/{}/rulesets/{}",
+                        repository.repository, ruleset.ruleset_id
+                    ),
+                },
+            ],
+        )?;
+        for check in &ruleset.required_checks {
+            let app_id = check.app_id.clone().ok_or_else(|| {
+                anyhow!(
+                    "ruleset {} check {} lacks provider App identity",
+                    ruleset.ruleset_id,
+                    check.context
+                )
+            })?;
+            if check.ruleset_id != ruleset.ruleset_id
+                || check.raw_object_refs != ruleset.raw_object_refs
+            {
+                bail!(
+                    "ruleset {} check {} has an unbound policy identity",
+                    ruleset.ruleset_id,
+                    check.context
+                );
+            }
+            let key = (check.context.clone(), app_id.clone());
+            if !observed.insert((ruleset.ruleset_id, key.0.clone(), key.1.clone())) {
+                bail!(
+                    "ruleset {} repeats required check {}",
+                    ruleset.ruleset_id,
+                    check.context
+                );
+            }
+            policies.push((ruleset.ruleset_id, key, check.raw_object_refs.clone()));
+        }
+    }
+    if expected
+        .iter()
+        .any(|required| !policies.iter().any(|(_, key, _)| key == required))
+    {
+        let missing = expected
+            .iter()
+            .filter(|required| !policies.iter().any(|(_, key, _)| key == *required))
+            .cloned()
+            .collect::<Vec<_>>();
+        bail!(
+            "{} workload {} lacks live ruleset identities for required checks {missing:?}",
+            repository.repository,
+            workload
+        );
+    }
+    for (ruleset_id, (context, app_id), policy_raw_refs) in policies {
+        let required = expected.contains(&(context.clone(), app_id.clone()));
+        let check_node_id = format!(
+            "check:{}:{}:{}:{}",
+            graph_component(&repository.repository),
+            graph_component(workload),
+            ruleset_id,
+            graph_component(&format!("{context}\0{app_id}"))
+        );
+        append_graph_node(
+            nodes,
+            graph_raw_ids,
+            G0GraphNode {
+                id: check_node_id.clone(),
+                kind: "check".to_owned(),
+                repository: repository.repository.clone(),
+                workload_id: workload.to_owned(),
+                applicability: if required {
+                    "required".to_owned()
+                } else {
+                    "applicable".to_owned()
+                },
+                source_sha: workflow.source_sha.clone(),
+                source_ref: workflow.path.clone(),
+                raw_object_refs: policy_raw_refs.clone(),
+            },
+        )?;
+        append_graph_edge(
+            edges,
+            graph_raw_ids,
+            G0GraphEdge {
+                from: workload_node_id.to_owned(),
+                to: check_node_id,
+                kind: "workload-to-check".to_owned(),
+                required,
+                source_sha: workflow.source_sha.clone(),
+                source_ref: workflow.path.clone(),
+                target_source_sha: workflow.source_sha.clone(),
+                target_source_ref: workflow.path.clone(),
+                raw_object_refs: merge_graph_refs(&[source_raw_refs, &policy_raw_refs])?,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "release/package graph mapping keeps reviewed and raw bindings explicit"
+)]
+fn append_release_package_edges(
+    manifest: &ManifestRepository,
+    workflow: &LiveWorkflow,
+    workload: &str,
+    workload_node_id: &str,
+    bindings: &G0MappingBindings,
+    raw_by_id: &BTreeMap<String, &RawObjectRef>,
+    nodes: &mut Vec<G0GraphNode>,
+    edges: &mut Vec<G0GraphEdge>,
+    graph_raw_ids: &mut BTreeSet<String>,
+) -> Result<()> {
+    if !matches!(
+        manifest.release_applicability,
+        crate::evidence_check::Applicability::Required
+            | crate::evidence_check::Applicability::Applicable
+    ) {
+        return Ok(());
+    }
+    if manifest.runtime_product_id.trim().is_empty()
+        || manifest.runtime_release_version.trim().is_empty()
+        || manifest.workflow_path.trim().is_empty()
+    {
+        bail!(
+            "{} workload {} has release/package applicability without immutable identity",
+            manifest.repository,
+            workload
+        );
+    }
+    let source_sha = [
+        manifest.runtime_source_sha.as_str(),
+        manifest.workflow_revision.as_str(),
+        manifest.generator_revision.as_str(),
+    ]
+    .into_iter()
+    .find(|candidate| is_sha(candidate))
+    .map(str::to_owned)
+    .ok_or_else(|| {
+        anyhow!(
+            "{} workload {} has no immutable release/package source revision",
+            manifest.repository,
+            workload
+        )
+    })?;
+    let artifact_raw_refs = bindings.workload_artifact.value().raw_object_refs.clone();
+    validate_local_graph_raw_references(
+        &artifact_raw_refs,
+        raw_by_id,
+        &format!("{} workload artifact", manifest.repository),
+    )?;
+    let source_ref = manifest.workflow_path.clone();
+    let release_node_id = format!(
+        "release:{}:{}:{}:{}",
+        graph_component(&manifest.repository),
+        graph_component(workload),
+        graph_component(&manifest.runtime_product_id),
+        graph_component(&manifest.runtime_release_version)
+    );
+    let package_node_id = format!(
+        "package:{}:{}:{}:{}",
+        graph_component(&manifest.repository),
+        graph_component(workload),
+        graph_component(&manifest.runtime_product_id),
+        graph_component(&manifest.runtime_release_version)
+    );
+    append_graph_node(
+        nodes,
+        graph_raw_ids,
+        G0GraphNode {
+            id: release_node_id.clone(),
+            kind: "release".to_owned(),
+            repository: manifest.repository.clone(),
+            workload_id: workload.to_owned(),
+            applicability: "required".to_owned(),
+            source_sha: source_sha.clone(),
+            source_ref: source_ref.clone(),
+            raw_object_refs: artifact_raw_refs.clone(),
+        },
+    )?;
+    append_graph_node(
+        nodes,
+        graph_raw_ids,
+        G0GraphNode {
+            id: package_node_id.clone(),
+            kind: "package".to_owned(),
+            repository: manifest.repository.clone(),
+            workload_id: workload.to_owned(),
+            applicability: "required".to_owned(),
+            source_sha: source_sha.clone(),
+            source_ref: source_ref.clone(),
+            raw_object_refs: artifact_raw_refs.clone(),
+        },
+    )?;
+    let edge_raw_refs = merge_graph_refs(&[&workflow.source_raw_object_refs, &artifact_raw_refs])?;
+    append_graph_edge(
+        edges,
+        graph_raw_ids,
+        G0GraphEdge {
+            from: workload_node_id.to_owned(),
+            to: release_node_id.clone(),
+            kind: "workload-to-release".to_owned(),
+            required: true,
+            source_sha: workflow.source_sha.clone(),
+            source_ref: workflow.path.clone(),
+            target_source_sha: source_sha.clone(),
+            target_source_ref: source_ref.clone(),
+            raw_object_refs: edge_raw_refs.clone(),
+        },
+    )?;
+    append_graph_edge(
+        edges,
+        graph_raw_ids,
+        G0GraphEdge {
+            from: workload_node_id.to_owned(),
+            to: package_node_id.clone(),
+            kind: "workload-to-package".to_owned(),
+            required: true,
+            source_sha: workflow.source_sha.clone(),
+            source_ref: workflow.path.clone(),
+            target_source_sha: source_sha.clone(),
+            target_source_ref: source_ref.clone(),
+            raw_object_refs: edge_raw_refs.clone(),
+        },
+    )?;
+    // G0 has no public install node. Keep the package's immutable release
+    // prerequisite typed; functional installation remains G2 InstallEvidence.
+    append_graph_edge(
+        edges,
+        graph_raw_ids,
+        G0GraphEdge {
+            from: package_node_id,
+            to: release_node_id,
+            kind: "requires".to_owned(),
+            required: true,
+            source_sha: source_sha.clone(),
+            source_ref: source_ref.clone(),
+            target_source_sha: [
+                manifest.runtime_source_sha.as_str(),
+                manifest.workflow_revision.as_str(),
+                manifest.generator_revision.as_str(),
+            ]
+            .into_iter()
+            .find(|candidate| is_sha(candidate))
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                anyhow!(
+                    "{} workload {} has no immutable release/package source revision",
+                    manifest.repository,
+                    workload
+                )
+            })?,
+            target_source_ref: manifest.workflow_path.clone(),
+            raw_object_refs: edge_raw_refs,
+        },
+    )?;
+    Ok(())
+}
+
+fn validate_local_graph_raw_references(
+    raw_ids: &[String],
+    raw_by_id: &BTreeMap<String, &RawObjectRef>,
+    label: &str,
+) -> Result<()> {
+    if raw_ids.is_empty() {
+        bail!("{label} lacks raw source references");
+    }
+    let mut seen = BTreeSet::new();
+    for raw_id in raw_ids {
+        if !seen.insert(raw_id) {
+            bail!("{label} repeats raw object {raw_id}");
+        }
+        let raw = raw_by_id
+            .get(raw_id)
+            .copied()
+            .ok_or_else(|| anyhow!("{label} references missing raw object {raw_id}"))?;
+        if !matches!(
+            raw.object_kind.as_str(),
+            "workload.source" | "workload.artifact"
+        ) {
+            bail!(
+                "{label} raw object {raw_id} has unexpected kind {}",
+                raw.object_kind
+            );
+        }
+    }
+    Ok(())
+}
+
+fn merge_graph_refs(parts: &[&[String]]) -> Result<Vec<String>> {
+    let mut refs = BTreeSet::new();
+    for part in parts {
+        refs.extend(part.iter().cloned());
+    }
+    if refs.is_empty() {
+        bail!("graph relation lacks raw source references");
+    }
+    Ok(refs.into_iter().collect())
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "source endpoint validation needs every identity and ledger boundary"
+)]
+fn validate_workflow_source_raw_references(
+    repository: &str,
+    path: &str,
+    revision: &str,
+    raw_ids: &[String],
+    raw_by_id: &BTreeMap<String, &RawObjectRef>,
+    request_by_id: &BTreeMap<String, &RequestRecord>,
+    label: &str,
+    object_kind: &str,
+) -> Result<()> {
+    validate_raw_references(raw_ids, raw_by_id, request_by_id, label, &[object_kind])?;
+    let expected = format!(
+        "/repos/{repository}/contents/{}?ref={revision}",
+        encode_graph_api_path(path)
+    );
+    for raw_id in raw_ids {
+        let raw = raw_by_id
+            .get(raw_id)
+            .copied()
+            .ok_or_else(|| anyhow!("{label} references missing raw object {raw_id}"))?;
+        let request = request_by_id
+            .get(&raw.request_id)
+            .copied()
+            .ok_or_else(|| anyhow!("{label} raw object {raw_id} has missing request"))?;
+        if request.api != ApiKind::Rest
+            || request.method != HttpMethod::Get
+            || request.endpoint_or_operation != expected
+        {
+            bail!(
+                "{label} raw object {raw_id} is bound to {} instead of {}",
+                request.endpoint_or_operation,
+                expected
+            );
+        }
+    }
+    Ok(())
+}
+
+fn encode_graph_api_path(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push(HEX[(byte >> 4) as usize] as char);
+            encoded.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+    }
+    encoded
+}
+
+fn dependency_source_declares_event(dependency: &LiveDependency, event: &str) -> Result<bool> {
+    let bytes = BASE64
+        .decode(dependency.source_bytes_base64.as_deref().ok_or_else(|| {
+            anyhow!(
+                "child workflow {}/{} lacks immutable source bytes",
+                dependency.repository,
+                dependency.path
+            )
+        })?)
+        .context("decode child workflow source bytes")?;
+    let value: YamlValue = serde_yaml::from_slice(&bytes).context("parse child workflow source")?;
+    let mapping = value
+        .as_mapping()
+        .ok_or_else(|| anyhow!("child workflow source must be a YAML mapping"))?;
+    let on = mapping
+        .iter()
+        .find_map(|(key, value)| (key == "on").then_some(value))
+        .ok_or_else(|| anyhow!("child workflow source lacks an on declaration"))?;
+    Ok(match on {
+        YamlValue::String(value) => value == event,
+        YamlValue::Sequence(values) => values.iter().any(|value| value.as_str() == Some(event)),
+        YamlValue::Mapping(values) => values.keys().any(|key| key == event),
+        _ => false,
+    })
+}
+
+fn graph_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02x}"));
+        }
+    }
+    encoded
 }
 
 fn map_reconciliation(
@@ -2109,12 +2757,17 @@ fn utc_now() -> String {
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::github_acquisition::live_collector::{LiveRuleset, LiveRulesetCheck, LiveSourceJob};
     use crate::github_acquisition::sha256_digest;
     use base64::engine::general_purpose::STANDARD as BASE64;
 
     fn raw_object(kind: &str, raw_id: &str, value: serde_json::Value) -> RawObjectRef {
         let bytes = serde_json::to_vec(&value).expect("fixture JSON");
-        let digest = sha256_digest(&bytes);
+        raw_bytes(kind, raw_id, &bytes)
+    }
+
+    fn raw_bytes(kind: &str, raw_id: &str, bytes: &[u8]) -> RawObjectRef {
+        let digest = sha256_digest(bytes);
         let digest_hex = digest.strip_prefix("sha256:").expect("digest prefix");
         RawObjectRef {
             raw_id: raw_id.to_owned(),
@@ -2123,7 +2776,7 @@ mod tests {
             canonicalization: "json-utf8".to_owned(),
             sha256: digest.clone(),
             byte_length: bytes.len() as u64,
-            bytes_base64: BASE64.encode(&bytes),
+            bytes_base64: BASE64.encode(bytes),
             media_type: "application/json".to_owned(),
             storage_ref: format!("sha256://{digest_hex}"),
             original_sha256: digest.clone(),
@@ -2330,6 +2983,402 @@ mod tests {
                 stable: true,
             },
         }
+    }
+
+    fn graph_fixture(
+        release_applicability: crate::evidence_check::Applicability,
+        required_child: bool,
+        include_child: bool,
+        include_check: bool,
+        include_artifact_refs: bool,
+    ) -> (
+        ManifestDocument,
+        LiveCollection,
+        G0MappingBindings,
+        Vec<RawObjectRef>,
+        Vec<RequestRecord>,
+    ) {
+        let root_sha = "a".repeat(40);
+        let child_sha = "b".repeat(40);
+        let repository_name = "acme/repo".to_owned();
+        let root_path = ".github/workflows/ci.yml".to_owned();
+        let child_repository = "acme/child".to_owned();
+        let child_path = ".github/workflows/child.yml".to_owned();
+        let root_source = b"on: [push]\njobs:\n  scan:\n    runs-on: ubuntu-24.04\n";
+        let child_source = b"on:\n  workflow_call:\njobs:\n  child:\n    runs-on: ubuntu-24.04\n";
+        let root_raw = raw_bytes("workflow.source", "root-source", root_source);
+        let rules_list = raw_object("rulesets", "rules-list", serde_json::json!([{"id": 7}]));
+        let rules_detail = raw_object(
+            "ruleset",
+            "rules-detail",
+            serde_json::json!({"id": 7, "name": "required-ci"}),
+        );
+        let child_tree = raw_object(
+            "workflow.dependency",
+            "child-tree",
+            serde_json::json!({"tree": [child_path.clone()]}),
+        );
+        let child_raw = raw_bytes("workflow.dependency.source", "child-source", child_source);
+        let model_raw = raw_object(
+            "model.session",
+            "model-local",
+            serde_json::json!({"session": "fixture"}),
+        );
+        let workload_source_raw = raw_object(
+            "workload.source",
+            "workload-source",
+            serde_json::json!({"source": "fixture"}),
+        );
+        let workload_artifact_raw = raw_object(
+            "workload.artifact",
+            "workload-artifact",
+            serde_json::json!({"artifact": "fixture"}),
+        );
+        let mut raw_objects = vec![
+            root_raw.clone(),
+            rules_list.clone(),
+            rules_detail.clone(),
+            child_tree.clone(),
+            child_raw.clone(),
+            model_raw.clone(),
+            workload_source_raw.clone(),
+            workload_artifact_raw.clone(),
+        ];
+        let requests = vec![
+            rest_request(
+                &root_raw,
+                &format!("/repos/{repository_name}/contents/{root_path}?ref={root_sha}"),
+            ),
+            rest_request(&rules_list, &format!("/repos/{repository_name}/rulesets")),
+            rest_request(
+                &rules_detail,
+                &format!("/repos/{repository_name}/rulesets/7"),
+            ),
+            rest_request(
+                &child_tree,
+                &format!("/repos/{child_repository}/git/trees/{child_sha}?recursive=1"),
+            ),
+            rest_request(
+                &child_raw,
+                &format!("/repos/{child_repository}/contents/{child_path}?ref={child_sha}"),
+            ),
+        ];
+        let dependency = LiveDependency {
+            kind: "reusable_workflow".to_owned(),
+            repository: child_repository.clone(),
+            path: child_path.clone(),
+            revision: child_sha.clone(),
+            resolved_path: Some(child_path.clone()),
+            source_url: None,
+            source_bytes_base64: Some(BASE64.encode(child_source)),
+            source_raw_object_refs: vec![child_raw.raw_id.clone()],
+            raw_object_refs: vec![child_tree.raw_id.clone()],
+        };
+        let workflow = LiveWorkflow {
+            path: root_path.clone(),
+            revision: root_sha.clone(),
+            source_sha: root_sha.clone(),
+            source_url: format!("https://github.com/{repository_name}/blob/{root_sha}/{root_path}"),
+            source_bytes_base64: BASE64.encode(root_source),
+            source_raw_object_refs: vec![root_raw.raw_id.clone()],
+            events: vec!["push".to_owned()],
+            source_jobs: vec![LiveSourceJob {
+                job_id: "scan".to_owned(),
+                raw_object_refs: vec![root_raw.raw_id.clone()],
+            }],
+            reusable_workflows: if include_child {
+                vec![dependency]
+            } else {
+                Vec::new()
+            },
+            actions: Vec::new(),
+            scanners: Vec::new(),
+            raw_object_refs: vec![root_raw.raw_id.clone()],
+        };
+        let ruleset = LiveRuleset {
+            ruleset_id: 7,
+            name: "required-ci".to_owned(),
+            source_url: format!("https://api.github.com/repos/{repository_name}/rulesets/7"),
+            complete: true,
+            required_checks: if include_check {
+                vec![LiveRulesetCheck {
+                    context: "ci".to_owned(),
+                    app_id: Some("123".to_owned()),
+                    ruleset_id: 7,
+                    raw_object_refs: vec![rules_list.raw_id.clone(), rules_detail.raw_id.clone()],
+                }]
+            } else {
+                Vec::new()
+            },
+            raw_object_refs: vec![rules_list.raw_id.clone(), rules_detail.raw_id.clone()],
+        };
+        let live_repository = LiveRepository {
+            repository: repository_name.clone(),
+            repository_id: 1,
+            default_branch: "main".to_owned(),
+            default_branch_sha: root_sha.clone(),
+            rulesets: vec![ruleset],
+            workflows: vec![workflow],
+            open_prs: Vec::new(),
+            artifacts: Vec::new(),
+            main_executions: Vec::new(),
+            main_checks: Vec::new(),
+            closing_repository_id: 1,
+            closing_default_branch: "main".to_owned(),
+            closing_default_branch_sha: root_sha.clone(),
+            source_invalidated: false,
+            access_state: "observed".to_owned(),
+            access_gaps: Vec::new(),
+            raw_object_refs: vec![root_raw.raw_id.clone()],
+        };
+        let manifest_repository = ManifestRepository {
+            repository: repository_name.clone(),
+            repository_role: "library".to_owned(),
+            default_branch: "main".to_owned(),
+            expected_workload_ids: vec!["scan".to_owned()],
+            required_check_contexts_and_apps: vec![crate::evidence_check::RequiredContext {
+                context: "ci".to_owned(),
+                app_id: "123".to_owned(),
+            }],
+            workload_platform_architecture: vec![crate::evidence_check::WorkloadPlatform {
+                workload_id: "scan".to_owned(),
+                platform: "linux".to_owned(),
+                architecture: "amd64".to_owned(),
+            }],
+            expected_jobs: vec![crate::evidence_check::ExpectedJobSpec {
+                job_id: "scan".to_owned(),
+                workload_id: "scan".to_owned(),
+                provider: "github".to_owned(),
+                platform: "linux".to_owned(),
+                architecture: "amd64".to_owned(),
+                required: true,
+                child_workflow: required_child.then_some(
+                    crate::evidence_check::ChildWorkflowSpec {
+                        repository: child_repository.clone(),
+                        workflow_path: child_path.clone(),
+                        event: "workflow_call".to_owned(),
+                    },
+                ),
+            }],
+            generated_plan_digest: "sha256:".to_owned() + &"c".repeat(64),
+            workflow_path: root_path,
+            workflow_revision: root_sha.clone(),
+            provider_eligibility: BTreeMap::new(),
+            host_contracts: BTreeMap::new(),
+            release_applicability,
+            generator_revision: root_sha.clone(),
+            runtime_product_id: "velnor".to_owned(),
+            generator_artifact_digest: "sha256:".to_owned() + &"d".repeat(64),
+            configuration_digest: "sha256:".to_owned() + &"e".repeat(64),
+            generated_tree_digest: "sha256:".to_owned() + &"f".repeat(64),
+            scan_state_digest: "sha256:".to_owned() + &"0".repeat(64),
+            runtime_release_version: "1.0.0".to_owned(),
+            runtime_source_sha: root_sha,
+            job_image_digest: "sha256:".to_owned() + &"1".repeat(64),
+        };
+        let manifest = ManifestDocument {
+            schema_version: 2,
+            manifest_id: "manifest".to_owned(),
+            source: crate::evidence_check::SourceIdentity {
+                repository: repository_name,
+                revision: "c".repeat(40),
+                digest: "sha256:".to_owned() + &"2".repeat(64),
+                reviewed_by: "reviewer".to_owned(),
+            },
+            repositories: vec![manifest_repository],
+        };
+        if !include_artifact_refs {
+            raw_objects.retain(|raw| raw.raw_id != workload_source_raw.raw_id);
+        }
+        let artifact_refs = if include_artifact_refs {
+            vec![
+                workload_source_raw.raw_id,
+                workload_artifact_raw.raw_id.clone(),
+            ]
+        } else {
+            Vec::new()
+        };
+        let artifact_digest = sha256_digest(b"workload-artifact");
+        let bindings = G0MappingBindings {
+            collector_name: "fixture".to_owned(),
+            collector_revision: "a".repeat(40),
+            phase: "G0".to_owned(),
+            model_session: CapturedModelSession {
+                value: G0ModelSession {
+                    session_id: "fixture".to_owned(),
+                    effective: true,
+                    orchestrator_model: "gpt-6-astra".to_owned(),
+                    orchestrator_effort: "low".to_owned(),
+                    agents: vec![G0AgentModel {
+                        agent_id: "fixture".to_owned(),
+                        model: "gpt-5.6-luna".to_owned(),
+                        effort: "max".to_owned(),
+                        effective: true,
+                        raw_object_refs: vec![model_raw.raw_id.clone()],
+                    }],
+                    raw_object_refs: vec![model_raw.raw_id.clone()],
+                },
+                raw_object_ref: model_raw.raw_id,
+            },
+            workload_artifact: CapturedWorkloadArtifact {
+                value: G0ArtifactReference {
+                    name: "fixture".to_owned(),
+                    schema: "fixture.v1".to_owned(),
+                    source_url: "https://github.com/acme/repo/tree/a".to_owned(),
+                    sha256: artifact_digest.clone(),
+                    storage_ref: format!(
+                        "sha256://{}",
+                        artifact_digest.strip_prefix("sha256:").expect("digest")
+                    ),
+                    source_revision: "a".repeat(40),
+                    source_digest: artifact_digest,
+                    observed_at_utc: "2026-09-20T00:00:00Z".to_owned(),
+                    raw_object_refs: artifact_refs,
+                },
+                raw_object_ref: workload_artifact_raw.raw_id,
+            },
+            local_raw_objects: Vec::new(),
+            collector_snapshot_storage_ref: "sha256://".to_owned() + &"3".repeat(64),
+            workflow_workloads: BTreeMap::from([(
+                (
+                    "acme/repo".to_owned(),
+                    ".github/workflows/ci.yml".to_owned(),
+                ),
+                vec!["scan".to_owned()],
+            )]),
+        };
+        let live = LiveCollection {
+            schema_version: 1,
+            manifest_id: "manifest".to_owned(),
+            snapshot_id: "snapshot".to_owned(),
+            observed_at_utc: "2026-09-20T00:00:00Z".to_owned(),
+            completed_at_utc: "2026-09-20T00:00:01Z".to_owned(),
+            auth: crate::github_acquisition::AuthIdentity::new(
+                "fixture-auth",
+                "github",
+                Some("1".to_owned()),
+                Some("fixture".to_owned()),
+                BTreeSet::from(["actions:read".to_owned()]),
+            ),
+            requests: requests.clone(),
+            raw_objects: raw_objects.clone(),
+            repositories: vec![live_repository],
+            opening_prs: Vec::new(),
+            closing_prs: Vec::new(),
+            reconciliation: crate::github_acquisition::IdentityReconciliation {
+                opening: Vec::new(),
+                closing: Vec::new(),
+                changes: Vec::new(),
+                duplicate_keys: Vec::new(),
+                stable: true,
+            },
+        };
+        (manifest, live, bindings, raw_objects, requests)
+    }
+
+    #[test]
+    fn dependency_graph_maps_source_bound_check_child_release_package_edges() {
+        let (manifest, live, bindings, raw_objects, requests) = graph_fixture(
+            crate::evidence_check::Applicability::Required,
+            true,
+            true,
+            true,
+            true,
+        );
+        let raw_by_id = raw_objects
+            .iter()
+            .map(|raw| (raw.raw_id.clone(), raw))
+            .collect::<BTreeMap<_, _>>();
+        let request_by_id = requests
+            .iter()
+            .map(|request| (request.request_id.clone(), request))
+            .collect::<BTreeMap<_, _>>();
+        let graph = map_dependency_graph(&live, &manifest, &bindings, &raw_by_id, &request_by_id)
+            .expect("complete source-bound graph fixture");
+        let edge_kinds = graph
+            .edges
+            .iter()
+            .map(|edge| edge.kind.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(edge_kinds.contains("workload-to-check"));
+        assert!(edge_kinds.contains("workload-to-child"));
+        assert!(edge_kinds.contains("workload-to-release"));
+        assert!(edge_kinds.contains("workload-to-package"));
+        assert!(edge_kinds.contains("requires"));
+        assert!(graph.nodes.iter().any(|node| node.kind == "check"));
+        assert!(graph.nodes.iter().any(|node| node.kind == "child"));
+        assert!(graph.nodes.iter().any(|node| node.kind == "release"));
+        assert!(graph.nodes.iter().any(|node| node.kind == "package"));
+        assert!(graph
+            .edges
+            .iter()
+            .all(|edge| !edge.raw_object_refs.is_empty()));
+    }
+
+    #[test]
+    fn dependency_graph_rejects_omitted_required_check_edge() {
+        let (manifest, live, bindings, raw_objects, requests) = graph_fixture(
+            crate::evidence_check::Applicability::NotApplicable,
+            false,
+            false,
+            false,
+            true,
+        );
+        let raw_by_id = raw_objects
+            .iter()
+            .map(|raw| (raw.raw_id.clone(), raw))
+            .collect::<BTreeMap<_, _>>();
+        let request_by_id = requests
+            .iter()
+            .map(|request| (request.request_id.clone(), request))
+            .collect::<BTreeMap<_, _>>();
+        let error = map_dependency_graph(&live, &manifest, &bindings, &raw_by_id, &request_by_id)
+            .expect_err("missing required policy must fail closed");
+        assert!(error.to_string().contains("required checks"));
+    }
+
+    #[test]
+    fn dependency_graph_rejects_omitted_child_edge() {
+        let (manifest, live, bindings, raw_objects, requests) = graph_fixture(
+            crate::evidence_check::Applicability::NotApplicable,
+            true,
+            false,
+            true,
+            true,
+        );
+        let raw_by_id = raw_objects
+            .iter()
+            .map(|raw| (raw.raw_id.clone(), raw))
+            .collect::<BTreeMap<_, _>>();
+        let request_by_id = requests
+            .iter()
+            .map(|request| (request.request_id.clone(), request))
+            .collect::<BTreeMap<_, _>>();
+        let error = map_dependency_graph(&live, &manifest, &bindings, &raw_by_id, &request_by_id)
+            .expect_err("missing child source must fail closed");
+        assert!(error.to_string().contains("child workflow"));
+    }
+
+    #[test]
+    fn dependency_graph_rejects_omitted_release_package_source() {
+        let (manifest, live, bindings, raw_objects, requests) = graph_fixture(
+            crate::evidence_check::Applicability::Required,
+            false,
+            false,
+            true,
+            false,
+        );
+        let raw_by_id = raw_objects
+            .iter()
+            .map(|raw| (raw.raw_id.clone(), raw))
+            .collect::<BTreeMap<_, _>>();
+        let request_by_id = requests
+            .iter()
+            .map(|request| (request.request_id.clone(), request))
+            .collect::<BTreeMap<_, _>>();
+        let error = map_dependency_graph(&live, &manifest, &bindings, &raw_by_id, &request_by_id)
+            .expect_err("missing release/package raw association must fail closed");
+        assert!(error.to_string().contains("workload artifact"));
     }
 
     #[test]
