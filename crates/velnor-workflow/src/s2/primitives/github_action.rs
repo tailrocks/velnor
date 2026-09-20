@@ -18,6 +18,7 @@ use crate::s2::{GeneratorError, UnitKind};
 /// primitive replaces it with the scanned unit root, so the emitted job graph
 /// exercises the real local `uses:` edge instead of a standalone shell file.
 const ACTION_PATH_MARKER: &str = "__VELNOR_ACTION_PATH__";
+const CHECKOUT_ACTION_MARKER: &str = "__VELNOR_CHECKOUT_ACTION__";
 
 pub(crate) struct GithubActionFixtures;
 
@@ -51,7 +52,12 @@ impl Primitive for GithubActionFixtures {
                 )));
             }
             let mut update = (*unit).clone();
-            for fixture in success.iter().chain(&failure).chain(&skip_build) {
+            for fixture in success
+                .iter()
+                .chain(&failure)
+                .chain(&skip_build)
+                .chain(&consumer_workflows)
+            {
                 let path = fixture_path(ctx, fixture)?;
                 if !update.watch.contains(&path) {
                     update.watch.push(path);
@@ -79,15 +85,27 @@ impl Primitive for GithubActionFixtures {
                         "github-action-fixtures consumer workflow `{fixture}` must contain `uses: {ACTION_PATH_MARKER}`"
                     )));
                 }
+                if !consumer_uses_marker_named(&source, CHECKOUT_ACTION_MARKER) {
+                    return Err(GeneratorError::usage(format!(
+                        "github-action-fixtures consumer workflow `{fixture}` must contain a pinned checkout marker `{CHECKOUT_ACTION_MARKER}`"
+                    )));
+                }
                 let action_path = if unit.root == "." {
                     "./".to_owned()
                 } else {
                     format!("./{}", unit.root)
                 };
-                let rendered = source.replace(ACTION_PATH_MARKER, &action_path);
+                let rendered = source
+                    .replace(ACTION_PATH_MARKER, &action_path)
+                    .replace(CHECKOUT_ACTION_MARKER, ctx.pins.checkout);
                 if rendered.contains(ACTION_PATH_MARKER) {
                     return Err(GeneratorError::usage(format!(
                         "github-action-fixtures consumer workflow `{fixture}` contains an unresolved action path marker"
+                    )));
+                }
+                if rendered.contains(CHECKOUT_ACTION_MARKER) {
+                    return Err(GeneratorError::usage(format!(
+                        "github-action-fixtures consumer workflow `{fixture}` contains an unresolved checkout action marker"
                     )));
                 }
                 serde_yaml::from_str::<serde_yaml::Value>(&rendered).map_err(|error| {
@@ -113,11 +131,15 @@ impl Primitive for GithubActionFixtures {
 }
 
 fn consumer_uses_marker(source: &str) -> bool {
+    consumer_uses_marker_named(source, ACTION_PATH_MARKER)
+}
+
+fn consumer_uses_marker_named(source: &str, marker: &str) -> bool {
     source.lines().any(|line| {
         let line = line.trim_start();
         line.strip_prefix("- uses:")
             .or_else(|| line.strip_prefix("uses:"))
-            .is_some_and(|value| value.contains(ACTION_PATH_MARKER))
+            .is_some_and(|value| value.contains(marker))
     })
 }
 
@@ -412,6 +434,10 @@ mod tests {
             .watch
             .iter()
             .any(|path| path == "tests/skip-build.sh"));
+        assert!(update
+            .watch
+            .iter()
+            .any(|path| path == "tests/fixtures/github-action-consumer/workflow.yml"));
         assert_eq!(rendered.files.len(), 1);
         let generated_consumer = rendered
             .files
@@ -419,10 +445,26 @@ mod tests {
             .next()
             .unwrap_or_else(|| panic!("generated consumer workflow missing"));
         assert!(generated_consumer.contains("uses: ./"));
+        assert!(generated_consumer.contains("on:\n  pull_request:\n  push:\n  workflow_dispatch:"));
+        assert!(generated_consumer.contains(&format!("uses: {}", pins.checkout)));
         assert!(generated_consumer.contains("with:"));
         assert!(generated_consumer.contains("env:"));
         assert!(generated_consumer.contains("steps.action.outputs.result"));
         assert!(generated_consumer.contains("steps.action.outcome"));
+        for mode in [
+            "validate-failure",
+            "hadolint-failure",
+            "buildx-failure",
+            "downstream-failure",
+        ] {
+            assert!(
+                generated_consumer.contains(mode),
+                "generated consumer is missing {mode} failure case"
+            );
+        }
+        assert!(generated_consumer.contains("! grep -Fx hadolint action-skip-build.log"));
+        assert!(generated_consumer.contains("! grep -Fx buildx action-skip-build.log"));
+        assert!(generated_consumer.contains("test \"${{ steps.downstream.outcome }}\" = skipped"));
         assert!(!generated_consumer.contains(super::ACTION_PATH_MARKER));
         let surface = must(
             super::super::generate(&root, &shape, &config, Some(&fixture_config)),

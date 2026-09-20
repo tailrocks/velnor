@@ -450,7 +450,6 @@ pub(crate) struct RenderCtx<'a> {
     /// The pinned action references every emitted job uses. A primitive that
     /// spells an action reference itself takes it from here, never from a
     /// literal, so the reviewed pin table stays the single source.
-    #[expect(dead_code, reason = "primitives render pins through the lane context")]
     pub(crate) pins: &'a Pins,
     /// The resolved lane matrix and the toolchain environment behind it.
     pub(crate) providers: &'a providers::ResolvedProviders,
