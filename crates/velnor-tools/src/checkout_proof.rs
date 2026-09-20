@@ -12,7 +12,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fmt;
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Write};
 use url::Url;
 use zip::ZipArchive;
 
@@ -26,7 +26,7 @@ pub const MAX_ARCHIVE_MEMBER_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_ARCHIVE_TOTAL_MEMBER_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CheckoutProofError {
+pub(crate) enum CheckoutProofError {
     InputTooLarge,
     JsonDepthExceeded,
     JsonObjectTooLarge,
@@ -95,7 +95,7 @@ impl std::error::Error for CheckoutProofError {}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
-pub struct DecimalId(String);
+pub(crate) struct DecimalId(String);
 
 impl DecimalId {
     fn parse(value: String) -> Result<Self, CheckoutProofError> {
@@ -109,7 +109,7 @@ impl DecimalId {
         Ok(Self(value))
     }
 
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -125,7 +125,7 @@ impl<'de> Deserialize<'de> for DecimalId {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
-pub struct Sha1Hex(String);
+pub(crate) struct Sha1Hex(String);
 
 impl Sha1Hex {
     fn parse(value: String) -> Result<Self, CheckoutProofError> {
@@ -139,7 +139,7 @@ impl Sha1Hex {
         Ok(Self(value))
     }
 
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -155,7 +155,7 @@ impl<'de> Deserialize<'de> for Sha1Hex {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
-pub struct Sha256Hex(String);
+pub(crate) struct Sha256Hex(String);
 
 impl Sha256Hex {
     fn parse(value: String) -> Result<Self, CheckoutProofError> {
@@ -175,7 +175,7 @@ impl Sha256Hex {
         Self(value)
     }
 
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -191,7 +191,7 @@ impl<'de> Deserialize<'de> for Sha256Hex {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
-pub struct SnapshotMemberName(String);
+pub(crate) struct SnapshotMemberName(String);
 
 impl SnapshotMemberName {
     fn parse(value: String) -> Result<Self, CheckoutProofError> {
@@ -210,7 +210,7 @@ impl SnapshotMemberName {
         Ok(Self(value))
     }
 
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -226,13 +226,13 @@ impl<'de> Deserialize<'de> for SnapshotMemberName {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SnapshotService {
+pub(crate) enum SnapshotService {
     GithubActions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CheckoutEvidenceStatus {
+pub(crate) enum CheckoutEvidenceStatus {
     CheckoutOnly,
     BuiltFrom,
 }
@@ -302,7 +302,7 @@ struct ProofSubjectDto {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SnapshotArtifactDescriptor {
+pub(crate) struct SnapshotArtifactDescriptor {
     service: SnapshotService,
     artifact_id: DecimalId,
     repository: String,
@@ -314,25 +314,25 @@ pub struct SnapshotArtifactDescriptor {
 }
 
 impl SnapshotArtifactDescriptor {
-    pub fn service(&self) -> SnapshotService {
+    pub(crate) fn service(&self) -> SnapshotService {
         self.service
     }
 
-    pub fn artifact_id(&self) -> &DecimalId {
+    pub(crate) fn artifact_id(&self) -> &DecimalId {
         &self.artifact_id
     }
 
-    pub fn archive_sha256(&self) -> &Sha256Hex {
+    pub(crate) fn archive_sha256(&self) -> &Sha256Hex {
         &self.archive_sha256
     }
 
-    pub fn archive_byte_length(&self) -> u64 {
+    pub(crate) fn archive_byte_length(&self) -> u64 {
         self.archive_byte_length
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ArchiveMemberCensus {
+pub(crate) struct ArchiveMemberCensus {
     name: SnapshotMemberName,
     directory: bool,
     byte_length: u64,
@@ -340,25 +340,25 @@ pub struct ArchiveMemberCensus {
 }
 
 impl ArchiveMemberCensus {
-    pub fn name(&self) -> &SnapshotMemberName {
+    pub(crate) fn name(&self) -> &SnapshotMemberName {
         &self.name
     }
 
-    pub fn is_directory(&self) -> bool {
+    pub(crate) fn is_directory(&self) -> bool {
         self.directory
     }
 
-    pub fn byte_length(&self) -> u64 {
+    pub(crate) fn byte_length(&self) -> u64 {
         self.byte_length
     }
 
-    pub fn sha256(&self) -> &Sha256Hex {
+    pub(crate) fn sha256(&self) -> &Sha256Hex {
         &self.sha256
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SnapshotArchiveCensus {
+pub(crate) struct SnapshotArchiveCensus {
     archive_sha256: Sha256Hex,
     archive_byte_length: u64,
     total_member_bytes: u64,
@@ -367,29 +367,29 @@ pub struct SnapshotArchiveCensus {
 }
 
 impl SnapshotArchiveCensus {
-    pub fn archive_sha256(&self) -> &Sha256Hex {
+    pub(crate) fn archive_sha256(&self) -> &Sha256Hex {
         &self.archive_sha256
     }
 
-    pub fn archive_byte_length(&self) -> u64 {
+    pub(crate) fn archive_byte_length(&self) -> u64 {
         self.archive_byte_length
     }
 
-    pub fn total_member_bytes(&self) -> u64 {
+    pub(crate) fn total_member_bytes(&self) -> u64 {
         self.total_member_bytes
     }
 
-    pub fn members(&self) -> &[ArchiveMemberCensus] {
+    pub(crate) fn members(&self) -> &[ArchiveMemberCensus] {
         &self.members
     }
 
-    pub fn target(&self) -> &ArchiveMemberCensus {
+    pub(crate) fn target(&self) -> &ArchiveMemberCensus {
         &self.target
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerifiedCheckoutProof {
+pub(crate) struct CheckoutOnlyFixtureObservation {
     subject_sha256: Sha256Hex,
     subject_byte_length: u64,
     status: CheckoutEvidenceStatus,
@@ -397,24 +397,24 @@ pub struct VerifiedCheckoutProof {
     archive: SnapshotArchiveCensus,
 }
 
-impl VerifiedCheckoutProof {
-    pub fn subject_sha256(&self) -> &Sha256Hex {
+impl CheckoutOnlyFixtureObservation {
+    pub(crate) fn subject_sha256(&self) -> &Sha256Hex {
         &self.subject_sha256
     }
 
-    pub fn subject_byte_length(&self) -> u64 {
+    pub(crate) fn subject_byte_length(&self) -> u64 {
         self.subject_byte_length
     }
 
-    pub fn status(&self) -> CheckoutEvidenceStatus {
+    pub(crate) fn status(&self) -> CheckoutEvidenceStatus {
         self.status
     }
 
-    pub fn snapshot(&self) -> &SnapshotArtifactDescriptor {
+    pub(crate) fn snapshot(&self) -> &SnapshotArtifactDescriptor {
         &self.snapshot
     }
 
-    pub fn archive(&self) -> &SnapshotArchiveCensus {
+    pub(crate) fn archive(&self) -> &SnapshotArchiveCensus {
         &self.archive
     }
 
@@ -436,48 +436,103 @@ impl VerifiedCheckoutProof {
 
 /// A later producer-owned CAS adapter.  The reader returns original bytes;
 /// the verifier computes the digest and length before any JSON parser runs.
-pub trait ImmutableCasReader {
-    fn read_original(&self, storage_ref: &str) -> Result<Vec<u8>, CheckoutProofError>;
+pub(crate) trait ImmutableCasReader {
+    fn open_original<'a>(
+        &'a self,
+        storage_ref: &str,
+    ) -> Result<Box<dyn Read + 'a>, CheckoutProofError>;
 }
 
-pub struct MeasuredOriginalBytes {
+pub(crate) struct MeasuredOriginalBytes {
     digest: Sha256Hex,
     byte_length: u64,
     bytes: Vec<u8>,
 }
 
 impl MeasuredOriginalBytes {
-    pub fn digest(&self) -> &Sha256Hex {
+    pub(crate) fn digest(&self) -> &Sha256Hex {
         &self.digest
     }
 
-    pub fn byte_length(&self) -> u64 {
+    pub(crate) fn byte_length(&self) -> u64 {
         self.byte_length
     }
 
-    pub fn bytes(&self) -> &[u8] {
+    pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
     }
 }
 
 /// Read one canonical original-byte object without wiring a concrete store.
 /// The returned bytes are measured before a caller may parse them.
-pub fn read_original_from_cas<C: ImmutableCasReader>(
+#[derive(Debug, Clone, Copy)]
+enum CasObjectKind {
+    Json,
+    Archive,
+}
+
+impl CasObjectKind {
+    fn max_bytes(self) -> usize {
+        match self {
+            Self::Json => MAX_PROOF_SUBJECT_BYTES,
+            Self::Archive => MAX_SNAPSHOT_ARCHIVE_BYTES,
+        }
+    }
+}
+
+struct BoundedOriginalBytes {
+    limit: usize,
+    bytes: Vec<u8>,
+    exceeded: bool,
+}
+
+impl BoundedOriginalBytes {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            bytes: Vec::new(),
+            exceeded: false,
+        }
+    }
+}
+
+impl Write for BoundedOriginalBytes {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
+            self.exceeded = true;
+            return Err(std::io::Error::other("bounded original-byte limit"));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn read_original_from_cas<C: ImmutableCasReader>(
     store: &C,
     storage_ref: &str,
     expected_digest: &Sha256Hex,
-    max_bytes: usize,
+    kind: CasObjectKind,
 ) -> Result<MeasuredOriginalBytes, CheckoutProofError> {
     let expected_ref = format!("sha256://{}", expected_digest.as_str());
     if storage_ref != expected_ref {
         return Err(CheckoutProofError::CasStorageRefMismatch);
     }
-    let bytes = store
-        .read_original(storage_ref)
+    let mut reader = store
+        .open_original(storage_ref)
         .map_err(|_| CheckoutProofError::CasReadFailed)?;
-    if bytes.len() > max_bytes {
+    let mut bounded = BoundedOriginalBytes::new(kind.max_bytes());
+    let copy_result = std::io::copy(&mut reader, &mut bounded);
+    if bounded.exceeded {
         return Err(CheckoutProofError::InputTooLarge);
     }
+    if copy_result.is_err() {
+        return Err(CheckoutProofError::CasReadFailed);
+    }
+    let bytes = bounded.bytes;
     let digest = Sha256Hex::from_bytes(&bytes);
     if &digest != expected_digest {
         return Err(CheckoutProofError::CasDigestMismatch);
@@ -489,15 +544,60 @@ pub fn read_original_from_cas<C: ImmutableCasReader>(
     })
 }
 
-/// Verify provider API fixture facts, the immutable ZIP snapshot, and a
-/// checkout-proof subject.  No signature or builder-consumption authority is
-/// inferred here; successful output remains `checkout_only`.
-pub fn verify_checkout_proof_fixture(
+#[derive(Debug)]
+pub(crate) struct CheckoutProofCasRefs {
+    subject_storage_ref: String,
+    subject_sha256: Sha256Hex,
+    provider_job_storage_ref: String,
+    provider_job_sha256: Sha256Hex,
+    provider_artifact_storage_ref: String,
+    provider_artifact_sha256: Sha256Hex,
+    archive_storage_ref: String,
+    archive_sha256: Sha256Hex,
+}
+
+pub(crate) fn verify_checkout_proof_from_cas<C: ImmutableCasReader>(
+    store: &C,
+    refs: &CheckoutProofCasRefs,
+) -> Result<CheckoutOnlyFixtureObservation, CheckoutProofError> {
+    let subject = read_original_from_cas(
+        store,
+        &refs.subject_storage_ref,
+        &refs.subject_sha256,
+        CasObjectKind::Json,
+    )?;
+    let provider_job = read_original_from_cas(
+        store,
+        &refs.provider_job_storage_ref,
+        &refs.provider_job_sha256,
+        CasObjectKind::Json,
+    )?;
+    let provider_artifact = read_original_from_cas(
+        store,
+        &refs.provider_artifact_storage_ref,
+        &refs.provider_artifact_sha256,
+        CasObjectKind::Json,
+    )?;
+    let archive = read_original_from_cas(
+        store,
+        &refs.archive_storage_ref,
+        &refs.archive_sha256,
+        CasObjectKind::Archive,
+    )?;
+    verify_checkout_proof_bytes(
+        subject.bytes(),
+        provider_job.bytes(),
+        provider_artifact.bytes(),
+        archive.bytes(),
+    )
+}
+
+fn verify_checkout_proof_bytes(
     subject_bytes: &[u8],
     provider_job_bytes: &[u8],
     provider_artifact_bytes: &[u8],
     archive_bytes: &[u8],
-) -> Result<VerifiedCheckoutProof, CheckoutProofError> {
+) -> Result<CheckoutOnlyFixtureObservation, CheckoutProofError> {
     let (subject_digest, subject_length) = measure_json_bytes(subject_bytes)?;
     let provider_job: ProviderJobDto = parse_strict_json(provider_job_bytes)?;
     let provider_artifact: ProviderArtifactDto = parse_strict_json(provider_artifact_bytes)?;
@@ -515,12 +615,29 @@ pub fn verify_checkout_proof_fixture(
     verify_provider_identity(&provider_job, &snapshot)?;
     verify_subject_identity(&subject, &provider_job, &snapshot, &archive)?;
 
-    Ok(VerifiedCheckoutProof::from_fixture(
+    Ok(CheckoutOnlyFixtureObservation::from_fixture(
         subject_digest,
         subject_length,
         snapshot,
         archive,
     ))
+}
+
+/// Test-only raw fixture entry point. Production callers must use the CAS
+/// adapter above so no caller-owned byte slice can mint a typed result.
+#[cfg(test)]
+fn verify_checkout_proof_fixture(
+    subject_bytes: &[u8],
+    provider_job_bytes: &[u8],
+    provider_artifact_bytes: &[u8],
+    archive_bytes: &[u8],
+) -> Result<CheckoutOnlyFixtureObservation, CheckoutProofError> {
+    verify_checkout_proof_bytes(
+        subject_bytes,
+        provider_job_bytes,
+        provider_artifact_bytes,
+        archive_bytes,
+    )
 }
 
 fn descriptor_from_provider(
@@ -541,6 +658,10 @@ fn descriptor_from_provider(
         Url::parse(&provider.archive_url).map_err(|_| CheckoutProofError::InvalidProviderUrl)?;
     if url.scheme() != "https"
         || url.host_str() != Some("api.github.com")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || has_explicit_port(&provider.archive_url)
         || url.path() != expected_path
         || url.query().is_some()
         || url.fragment().is_some()
@@ -641,6 +762,19 @@ fn valid_relative_name(value: &str) -> bool {
     SnapshotMemberName::parse(value.to_owned()).is_ok()
 }
 
+fn has_explicit_port(raw_url: &str) -> bool {
+    let Some(authority) = raw_url
+        .strip_prefix("https://")
+        .and_then(|remaining| remaining.split('/').next())
+    else {
+        return false;
+    };
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    host.contains(':')
+}
+
 fn census_archive(
     archive_bytes: &[u8],
     target_name: &SnapshotMemberName,
@@ -673,17 +807,15 @@ fn census_archive(
         if byte_length > MAX_ARCHIVE_MEMBER_BYTES {
             return Err(CheckoutProofError::ArchiveMemberTooLarge);
         }
+        let bytes = read_archive_member_bounded(&mut file, MAX_ARCHIVE_MEMBER_BYTES)?;
+        if bytes.len() as u64 != byte_length {
+            return Err(CheckoutProofError::ArchiveInvalid);
+        }
         total_member_bytes = total_member_bytes
-            .checked_add(byte_length)
+            .checked_add(bytes.len() as u64)
             .ok_or(CheckoutProofError::ArchiveTotalTooLarge)?;
         if total_member_bytes > MAX_ARCHIVE_TOTAL_MEMBER_BYTES {
             return Err(CheckoutProofError::ArchiveTotalTooLarge);
-        }
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
-            .map_err(|_| CheckoutProofError::ArchiveInvalid)?;
-        if bytes.len() as u64 != byte_length {
-            return Err(CheckoutProofError::ArchiveInvalid);
         }
         members.push(ArchiveMemberCensus {
             name,
@@ -709,10 +841,42 @@ fn census_archive(
     })
 }
 
+fn read_archive_member_bounded<R: Read>(
+    reader: &mut R,
+    limit: u64,
+) -> Result<Vec<u8>, CheckoutProofError> {
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|_| CheckoutProofError::ArchiveInvalid)?;
+        if read == 0 {
+            break;
+        }
+        if (bytes.len() as u64)
+            .checked_add(read as u64)
+            .is_none_or(|length| length > limit)
+        {
+            return Err(CheckoutProofError::ArchiveMemberTooLarge);
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+    Ok(bytes)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LocalZipRecord {
+    offset: usize,
+    end: usize,
+}
+
 fn validate_zip_central_directory(bytes: &[u8]) -> Result<(), CheckoutProofError> {
     const EOCD_SIGNATURE: u32 = 0x0605_4b50;
     const CENTRAL_SIGNATURE: u32 = 0x0201_4b50;
     const LOCAL_SIGNATURE: u32 = 0x0403_4b50;
+    const DATA_DESCRIPTOR_FLAG: u16 = 0x0008;
+    const ENCRYPTED_FLAG: u16 = 0x0001;
     if bytes.len() < 22 {
         return Err(CheckoutProofError::ArchiveInvalid);
     }
@@ -756,6 +920,8 @@ fn validate_zip_central_directory(bytes: &[u8]) -> Result<(), CheckoutProofError
 
     let mut cursor = central_offset;
     let mut names = BTreeSet::new();
+    let mut local_offsets = BTreeSet::new();
+    let mut local_records = Vec::with_capacity(entries);
     for _ in 0..entries {
         if read_u32(bytes, cursor) != Some(CENTRAL_SIGNATURE) {
             return Err(CheckoutProofError::ArchiveInvalid);
@@ -765,6 +931,26 @@ fn validate_zip_central_directory(bytes: &[u8]) -> Result<(), CheckoutProofError
             .ok_or(CheckoutProofError::ArchiveInvalid)?;
         if header_end > eocd {
             return Err(CheckoutProofError::ArchiveInvalid);
+        }
+        let version_made = read_u16(bytes, cursor + 4).ok_or(CheckoutProofError::ArchiveInvalid)?;
+        let version_needed =
+            read_u16(bytes, cursor + 6).ok_or(CheckoutProofError::ArchiveInvalid)?;
+        let flags = read_u16(bytes, cursor + 8).ok_or(CheckoutProofError::ArchiveInvalid)?;
+        let method = read_u16(bytes, cursor + 10).ok_or(CheckoutProofError::ArchiveInvalid)?;
+        let modified_time =
+            read_u16(bytes, cursor + 12).ok_or(CheckoutProofError::ArchiveInvalid)?;
+        let modified_date =
+            read_u16(bytes, cursor + 14).ok_or(CheckoutProofError::ArchiveInvalid)?;
+        let crc32 = read_u32(bytes, cursor + 16).ok_or(CheckoutProofError::ArchiveInvalid)?;
+        let compressed_size =
+            u64::from(read_u32(bytes, cursor + 20).ok_or(CheckoutProofError::ArchiveInvalid)?);
+        let uncompressed_size =
+            u64::from(read_u32(bytes, cursor + 24).ok_or(CheckoutProofError::ArchiveInvalid)?);
+        if flags & (DATA_DESCRIPTOR_FLAG | ENCRYPTED_FLAG) != 0 {
+            return Err(CheckoutProofError::ArchiveInvalid);
+        }
+        if uncompressed_size > MAX_ARCHIVE_MEMBER_BYTES {
+            return Err(CheckoutProofError::ArchiveMemberTooLarge);
         }
         let name_length =
             usize::from(read_u16(bytes, cursor + 28).ok_or(CheckoutProofError::ArchiveInvalid)?);
@@ -776,9 +962,11 @@ fn validate_zip_central_directory(bytes: &[u8]) -> Result<(), CheckoutProofError
         let name_end = name_start
             .checked_add(name_length)
             .ok_or(CheckoutProofError::ArchiveInvalid)?;
-        let record_end = name_end
+        let extra_end = name_end
             .checked_add(extra_length)
-            .and_then(|value| value.checked_add(comment_length))
+            .ok_or(CheckoutProofError::ArchiveInvalid)?;
+        let record_end = extra_end
+            .checked_add(comment_length)
             .ok_or(CheckoutProofError::ArchiveInvalid)?;
         if record_end > eocd {
             return Err(CheckoutProofError::ArchiveInvalid);
@@ -792,34 +980,102 @@ fn validate_zip_central_directory(bytes: &[u8]) -> Result<(), CheckoutProofError
             read_u32(bytes, cursor + 42).ok_or(CheckoutProofError::ArchiveInvalid)?,
         )
         .map_err(|_| CheckoutProofError::ArchiveInvalid)?;
-        if read_u32(bytes, local_offset) != Some(LOCAL_SIGNATURE) {
+        if !local_offsets.insert(local_offset)
+            || read_u32(bytes, local_offset) != Some(LOCAL_SIGNATURE)
+        {
             return Err(CheckoutProofError::ArchiveInvalid);
         }
+        let local_header_end = local_offset
+            .checked_add(30)
+            .ok_or(CheckoutProofError::ArchiveInvalid)?;
+        if local_header_end > central_offset {
+            return Err(CheckoutProofError::ArchiveInvalid);
+        }
+        let local_version_needed =
+            read_u16(bytes, local_offset + 4).ok_or(CheckoutProofError::ArchiveInvalid)?;
+        let local_flags =
+            read_u16(bytes, local_offset + 6).ok_or(CheckoutProofError::ArchiveInvalid)?;
+        let local_method =
+            read_u16(bytes, local_offset + 8).ok_or(CheckoutProofError::ArchiveInvalid)?;
+        let local_modified_time =
+            read_u16(bytes, local_offset + 10).ok_or(CheckoutProofError::ArchiveInvalid)?;
+        let local_modified_date =
+            read_u16(bytes, local_offset + 12).ok_or(CheckoutProofError::ArchiveInvalid)?;
+        let local_crc32 =
+            read_u32(bytes, local_offset + 14).ok_or(CheckoutProofError::ArchiveInvalid)?;
+        let local_compressed_size = u64::from(
+            read_u32(bytes, local_offset + 18).ok_or(CheckoutProofError::ArchiveInvalid)?,
+        );
+        let local_uncompressed_size = u64::from(
+            read_u32(bytes, local_offset + 22).ok_or(CheckoutProofError::ArchiveInvalid)?,
+        );
         let local_name_length = usize::from(
             read_u16(bytes, local_offset + 26).ok_or(CheckoutProofError::ArchiveInvalid)?,
         );
         let local_extra_length = usize::from(
             read_u16(bytes, local_offset + 28).ok_or(CheckoutProofError::ArchiveInvalid)?,
         );
-        let local_name_start = local_offset
-            .checked_add(30)
-            .ok_or(CheckoutProofError::ArchiveInvalid)?;
+        let local_name_start = local_header_end;
         let local_name_end = local_name_start
             .checked_add(local_name_length)
             .ok_or(CheckoutProofError::ArchiveInvalid)?;
-        if local_name_end
+        let local_extra_end = local_name_end
             .checked_add(local_extra_length)
-            .ok_or(CheckoutProofError::ArchiveInvalid)?
-            > central_offset
+            .ok_or(CheckoutProofError::ArchiveInvalid)?;
+        let data_end = local_extra_end
+            .checked_add(
+                usize::try_from(compressed_size).map_err(|_| CheckoutProofError::ArchiveInvalid)?,
+            )
+            .ok_or(CheckoutProofError::ArchiveInvalid)?;
+        if local_extra_end > central_offset || data_end > central_offset {
+            return Err(CheckoutProofError::ArchiveInvalid);
+        }
+        if local_name_length != name_length
+            || local_extra_length != extra_length
+            || bytes.get(local_name_start..local_name_end) != Some(&bytes[name_start..name_end])
+            || bytes.get(local_extra_end - local_extra_length..local_extra_end)
+                != Some(&bytes[name_end..extra_end])
         {
             return Err(CheckoutProofError::ArchiveInvalid);
         }
-        if bytes.get(local_name_start..local_name_end) != Some(&bytes[name_start..name_end]) {
+        if local_version_needed != version_needed
+            || local_flags != flags
+            || local_method != method
+            || local_modified_time != modified_time
+            || local_modified_date != modified_date
+            || local_crc32 != crc32
+            || local_compressed_size != compressed_size
+            || local_uncompressed_size != uncompressed_size
+        {
             return Err(CheckoutProofError::ArchiveInvalid);
         }
+        let made_on_unix = version_made >> 8 == 3;
+        let external_attributes =
+            read_u32(bytes, cursor + 38).ok_or(CheckoutProofError::ArchiveInvalid)?;
+        let unix_mode = external_attributes >> 16;
+        if made_on_unix && unix_mode & 0xf000 == 0xa000 {
+            return Err(CheckoutProofError::ArchiveInvalid);
+        }
+        local_records.push(LocalZipRecord {
+            offset: local_offset,
+            end: data_end,
+        });
         cursor = record_end;
     }
     if cursor != eocd {
+        return Err(CheckoutProofError::ArchiveInvalid);
+    }
+    local_records.sort_unstable_by_key(|record| record.offset);
+    if entries == 0 {
+        if central_offset != 0 {
+            return Err(CheckoutProofError::ArchiveInvalid);
+        }
+    } else if local_records.first().map(|record| record.offset) != Some(0)
+        || local_records.last().map(|record| record.end) != Some(central_offset)
+        || local_records
+            .windows(2)
+            .any(|records| records[0].end != records[1].offset)
+    {
         return Err(CheckoutProofError::ArchiveInvalid);
     }
     Ok(())
@@ -1082,18 +1338,169 @@ mod tests {
         );
     }
 
+    fn central_offset_for_test(archive: &[u8]) -> usize {
+        usize::try_from(read_u32(archive, archive.len() - 22 + 16).unwrap()).unwrap()
+    }
+
+    fn central_record_length_for_test(archive: &[u8], offset: usize) -> usize {
+        46 + usize::from(read_u16(archive, offset + 28).unwrap())
+            + usize::from(read_u16(archive, offset + 30).unwrap())
+            + usize::from(read_u16(archive, offset + 32).unwrap())
+    }
+
+    fn write_u16_for_test(bytes: &mut [u8], offset: usize, value: u16) {
+        bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_u32_for_test(bytes: &mut [u8], offset: usize, value: u32) {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    #[test]
+    fn archive_census_rejects_local_metadata_mismatch() {
+        let mut archive = archive_fixture();
+        let central = central_offset_for_test(&archive);
+        let local = usize::try_from(read_u32(&archive, central + 42).unwrap()).unwrap();
+        let modified_time = read_u16(&archive, local + 10).unwrap();
+        write_u16_for_test(&mut archive, local + 10, modified_time.wrapping_add(1));
+        let target = SnapshotMemberName::parse("source/manifest.json".to_owned()).unwrap();
+        assert_eq!(
+            census_archive(&archive, &target),
+            Err(CheckoutProofError::ArchiveInvalid)
+        );
+    }
+
+    #[test]
+    fn archive_census_rejects_symlink_and_shared_local_records() {
+        let target = SnapshotMemberName::parse("source/manifest.json".to_owned()).unwrap();
+
+        let mut symlink = archive_fixture();
+        let central = central_offset_for_test(&symlink);
+        write_u16_for_test(&mut symlink, central + 4, 0x0314);
+        write_u32_for_test(&mut symlink, central + 38, 0xa000_0000);
+        assert_eq!(
+            census_archive(&symlink, &target),
+            Err(CheckoutProofError::ArchiveInvalid)
+        );
+
+        let mut shared = archive_fixture();
+        let central = central_offset_for_test(&shared);
+        let second = central + central_record_length_for_test(&shared, central);
+        let first_local = read_u32(&shared, central + 42).unwrap();
+        write_u32_for_test(&mut shared, second + 42, first_local);
+        assert_eq!(
+            census_archive(&shared, &target),
+            Err(CheckoutProofError::ArchiveInvalid)
+        );
+    }
+
+    #[test]
+    fn archive_census_rejects_unlisted_local_records() {
+        let archive = archive_fixture();
+        let central = central_offset_for_test(&archive);
+        let mut hidden = vec![0_u8; 30];
+        write_u32_for_test(&mut hidden, 0, 0x0403_4b50);
+        write_u16_for_test(&mut hidden, 26, 6);
+        hidden.extend_from_slice(b"hidden");
+
+        let mut mutated = Vec::with_capacity(archive.len() + hidden.len());
+        mutated.extend_from_slice(&archive[..central]);
+        mutated.extend_from_slice(&hidden);
+        mutated.extend_from_slice(&archive[central..]);
+        let new_eocd = archive.len() - 22 + hidden.len();
+        write_u32_for_test(&mut mutated, new_eocd + 16, (central + hidden.len()) as u32);
+
+        let target = SnapshotMemberName::parse("source/manifest.json".to_owned()).unwrap();
+        assert_eq!(
+            census_archive(&mutated, &target),
+            Err(CheckoutProofError::ArchiveInvalid)
+        );
+    }
+
+    #[test]
+    fn archive_member_limit_applies_to_actual_reader_output() {
+        let mut reader = Cursor::new(b"three".to_vec());
+        assert_eq!(
+            read_archive_member_bounded(&mut reader, 2),
+            Err(CheckoutProofError::ArchiveMemberTooLarge)
+        );
+    }
+
+    #[test]
+    fn provider_url_rejects_userinfo_and_explicit_ports() {
+        let archive = archive_fixture();
+        let (subject, job, _) = fixture_json(&archive);
+        for url in [
+            "https://token@api.github.com/repos/tailrocks/example/actions/artifacts/42/zip",
+            "https://api.github.com:443/repos/tailrocks/example/actions/artifacts/42/zip",
+        ] {
+            let (_, _, artifact) = fixture_json(&archive);
+            let mut value: Value = serde_json::from_slice(&artifact).unwrap();
+            value["archive_url"] = Value::String(url.to_owned());
+            let artifact = serde_json::to_vec(&value).unwrap();
+            assert!(matches!(
+                verify_checkout_proof_fixture(&subject, &job, &artifact, &archive),
+                Err(CheckoutProofError::InvalidProviderUrl)
+            ));
+        }
+    }
+
     struct MemoryCas {
-        storage_ref: String,
-        bytes: Vec<u8>,
+        objects: std::collections::BTreeMap<String, Vec<u8>>,
     }
 
     impl ImmutableCasReader for MemoryCas {
-        fn read_original(&self, storage_ref: &str) -> Result<Vec<u8>, CheckoutProofError> {
-            if storage_ref != self.storage_ref {
-                return Err(CheckoutProofError::CasReadFailed);
-            }
-            Ok(self.bytes.clone())
+        fn open_original<'a>(
+            &'a self,
+            storage_ref: &str,
+        ) -> Result<Box<dyn Read + 'a>, CheckoutProofError> {
+            self.objects
+                .get(storage_ref)
+                .cloned()
+                .map(|bytes| Box::new(Cursor::new(bytes)) as Box<dyn Read>)
+                .ok_or(CheckoutProofError::CasReadFailed)
         }
+    }
+
+    fn cas_entry(bytes: &[u8]) -> (String, Sha256Hex, Vec<u8>) {
+        let digest = Sha256Hex::from_bytes(bytes);
+        (
+            format!("sha256://{}", digest.as_str()),
+            digest,
+            bytes.to_vec(),
+        )
+    }
+
+    #[test]
+    fn provider_fixture_cas_path_is_the_only_production_verifier_path() {
+        let archive = archive_fixture();
+        let (subject, job, artifact) = fixture_json(&archive);
+        let (subject_ref, subject_sha256, subject_bytes) = cas_entry(&subject);
+        let (job_ref, job_sha256, job_bytes) = cas_entry(&job);
+        let (artifact_ref, artifact_sha256, artifact_bytes) = cas_entry(&artifact);
+        let (archive_ref, archive_sha256, archive_bytes) = cas_entry(&archive);
+        let store = MemoryCas {
+            objects: [
+                (subject_ref.clone(), subject_bytes),
+                (job_ref.clone(), job_bytes),
+                (artifact_ref.clone(), artifact_bytes),
+                (archive_ref.clone(), archive_bytes),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let refs = CheckoutProofCasRefs {
+            subject_storage_ref: subject_ref,
+            subject_sha256,
+            provider_job_storage_ref: job_ref,
+            provider_job_sha256: job_sha256,
+            provider_artifact_storage_ref: artifact_ref,
+            provider_artifact_sha256: artifact_sha256,
+            archive_storage_ref: archive_ref,
+            archive_sha256,
+        };
+        let proof = verify_checkout_proof_from_cas(&store, &refs).unwrap();
+        assert_eq!(proof.status(), CheckoutEvidenceStatus::CheckoutOnly);
     }
 
     #[test]
@@ -1102,21 +1509,20 @@ mod tests {
         let expected = Sha256Hex::from_bytes(&bytes);
         let storage_ref = format!("sha256://{}", expected.as_str());
         let store = MemoryCas {
-            storage_ref: storage_ref.clone(),
-            bytes: bytes.clone(),
+            objects: [(storage_ref.clone(), bytes.clone())].into_iter().collect(),
         };
         let measured =
-            read_original_from_cas(&store, &storage_ref, &expected, MAX_PROOF_SUBJECT_BYTES)
-                .unwrap();
+            read_original_from_cas(&store, &storage_ref, &expected, CasObjectKind::Json).unwrap();
         assert_eq!(measured.digest(), &expected);
         assert_eq!(measured.byte_length(), 2);
 
         let tampered = MemoryCas {
-            storage_ref: storage_ref.clone(),
-            bytes: b"{\"tampered\":true}".to_vec(),
+            objects: [(storage_ref.clone(), b"{\"tampered\":true}".to_vec())]
+                .into_iter()
+                .collect(),
         };
         assert!(matches!(
-            read_original_from_cas(&tampered, &storage_ref, &expected, MAX_PROOF_SUBJECT_BYTES),
+            read_original_from_cas(&tampered, &storage_ref, &expected, CasObjectKind::Json),
             Err(CheckoutProofError::CasDigestMismatch)
         ));
     }
