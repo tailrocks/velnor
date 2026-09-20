@@ -1713,6 +1713,125 @@ fn render_sign_deb_job(
     ))
 }
 
+/// Normalize every source-bound native sibling into one immutable signer
+/// artifact and one typed, sorted subject inventory. The matrix signer is
+/// downstream of this job; it never infers subjects from a lossy job output.
+#[allow(clippy::too_many_lines)]
+fn render_native_product_subject_plan_job(
+    config: &ProjectConfig,
+    release: &ReleaseSpec,
+    preview: bool,
+) -> String {
+    let download = ActionPin::DownloadArtifact.reference();
+    let upload = ActionPin::UploadArtifact.reference();
+    let needs = if preview {
+        "[admit-product-release, identity, native-product-build]"
+    } else {
+        "[admit-product-release, native-product-build, verify]"
+    };
+    let source_repository = shell_quote(&release.source_repository);
+    r#"  native-product-subject-plan:
+    name: Assemble native product signer subjects
+    needs: __NEEDS__
+    if: ${{ always() && needs.admit-product-release.result == 'success' && needs.native-product-build.result == 'success' }}
+    runs-on: __RUNNER__
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      subjects_json: ${{ steps.plan.outputs.subjects_json }}
+      subject_count: ${{ steps.plan.outputs.subject_count }}
+      blocked_targets: ${{ steps.plan.outputs.blocked_targets }}
+    steps:
+      - name: Download source-bound native product builds
+        uses: __DOWNLOAD__
+        with:
+          pattern: native-product-*
+          path: native-product
+          merge-multiple: true
+      - name: Assemble strict native subject inventory
+        id: plan
+        env:
+          SOURCE_REPOSITORY: __SOURCE_REPOSITORY__
+          SOURCE_REF: ${{ needs.admit-product-release.outputs.source_ref }}
+          SOURCE_COMMIT: ${{ needs.admit-product-release.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          contracts=(native-product/product-contract-*.json)
+          test "${#contracts[@]}" -gt 0 || { echo '::error::native product contract artifact is missing' >&2; exit 1; }
+          contract="${contracts[0]}"
+          for candidate in "${contracts[@]}"; do
+            test -f "$candidate" && test ! -L "$candidate" || { echo "::error::native product contract is linked or missing: $candidate" >&2; exit 1; }
+            cmp -- "$contract" "$candidate" || { echo '::error::native product contract copies differ' >&2; exit 1; }
+          done
+          jq -e --arg repository "$SOURCE_REPOSITORY" --arg ref "$SOURCE_REF" --arg commit "$SOURCE_COMMIT" '
+            (.schema == "velnor.native-product-contract/v1") and
+            (.source_repository == $repository) and (.source_ref == $ref) and
+            (.source_commit == $commit) and
+            (.targets | type == "array" and length == 4) and
+            (.blocked_targets | type == "array") and
+            (.components | type == "array" and length > 0)
+          ' "$contract" >/dev/null || { echo '::error::native product contract is not bound to admitted source' >&2; exit 1; }
+          blocked_targets="$(jq -c '.blocked_targets | sort' "$contract")"
+          expected_targets="$(jq -c --argjson blocked "$blocked_targets" '[.targets[] as $target | select(($blocked | index($target)) == null)] | sort' "$contract")"
+          expected_count="$(jq 'length' <<<"$expected_targets")"
+          test "${#contracts[@]}" -eq "$expected_count" || { echo '::error::native product contract census does not match unblocked target census' >&2; exit 1; }
+          rm -rf -- native-product-assets
+          mkdir -p native-product-assets
+          : > native-subject-rows.jsonl
+          while IFS= read -r target; do
+            case "$target" in ''|*[!a-z0-9._-]*) echo "::error::unsafe native target: $target" >&2; exit 1 ;; esac
+            component_file="native-product/components-$target.jsonl"
+            artifact_file="native-product/artifacts-$target.jsonl"
+            test -f "$component_file" && test ! -L "$component_file" || { echo "::error::missing native component rows: $target" >&2; exit 1; }
+            test -f "$artifact_file" && test ! -L "$artifact_file" || { echo "::error::missing native artifact rows: $target" >&2; exit 1; }
+            jq -s -e --arg target "$target" 'all(.[]; (.target == $target) and (.kind == "binary") and (.name | type == "string") and (.name | test("^[A-Za-z0-9][A-Za-z0-9._-]*$")) and (.sha256 | test("^[0-9a-f]{64}$")) and (.size | numbers and . > 0))' "$artifact_file" >/dev/null || { echo "::error::native artifact rows are malformed: $target" >&2; exit 1; }
+            while IFS= read -r row; do
+              name="$(jq -er '.name' <<<"$row")"
+              source="native-product/$name"
+              test -f "$source" && test ! -L "$source" || { echo "::error::missing or linked native sibling: $name" >&2; exit 1; }
+              expected_sha="$(jq -er '.sha256' <<<"$row")"
+              [ "$(sha256sum "$source" | awk '{print $1}')" = "$expected_sha" ] || { echo "::error::native sibling digest mismatch: $name" >&2; exit 1; }
+              chmod 0755 "$source"
+              test -x "$source" || { echo "::error::native sibling mode was not restored: $name" >&2; exit 1; }
+              cp -- "$source" "native-product-assets/$name"
+              chmod 0755 "native-product-assets/$name"
+              jq -cn --arg name "$name" --arg kind binary --arg sha256 "$expected_sha" --argjson size "$(jq -er '.size' <<<"$row")" --arg source_repository "$SOURCE_REPOSITORY" --arg source_ref "$SOURCE_REF" --arg source_commit "$SOURCE_COMMIT" '{name:$name,kind:$kind,sha256:$sha256,size:$size,source_repository:$source_repository,source_ref:$source_ref,source_commit:$source_commit}' >> native-subject-rows.jsonl
+            done < <(jq -c '.[]' "$artifact_file")
+          done < <(jq -r '.[]' <<<"$expected_targets")
+          jq -s -S 'sort_by(.name)' native-subject-rows.jsonl > native-product-assets/native-subjects.json
+          jq -e '(. | type == "array" and length > 0) and ([.[].name] | length == (unique | length)) and (map(.name) == (map(.name) | sort))' native-product-assets/native-subjects.json >/dev/null || { echo '::error::native subject inventory is not sorted and unique' >&2; exit 1; }
+          jq -S -n --arg schema "velnor.subject-inventory/v1" --arg lane native --arg artifact_name native-product-assets --arg source_repository "$SOURCE_REPOSITORY" --arg source_ref "$SOURCE_REF" --arg source_commit "$SOURCE_COMMIT" --slurpfile subjects native-product-assets/native-subjects.json '{schema:$schema,lane:$lane,artifact_name:$artifact_name,source_repository:$source_repository,source_ref:$source_ref,source_commit:$source_commit,subjects:$subjects[0]}' > native-product-assets/native-subject-inventory.json
+          sha256sum native-product-assets/native-subject-inventory.json > native-product-assets/native-subject-inventory.json.sha256
+          subjects_json="$(jq -c '[.[].name]' native-product-assets/native-subjects.json)"
+          {
+            printf 'subjects_json=%s\n' "$subjects_json"
+            printf 'subject_count=%s\n' "$(jq 'length' native-product-assets/native-subjects.json)"
+            printf 'blocked_targets=%s\n' "$blocked_targets"
+          } >> "$GITHUB_OUTPUT"
+      - name: Upload immutable native signer subjects
+        uses: __UPLOAD__
+        with:
+          name: native-product-assets
+          path: native-product-assets
+          if-no-files-found: error
+          retention-days: 2
+"#
+    .replace("__NEEDS__", needs)
+    .replace("__RUNNER__", &hosted_selector_runs_on(config))
+    .replace("__DOWNLOAD__", download)
+    .replace("__UPLOAD__", upload)
+    .replace("__SOURCE_REPOSITORY__", &source_repository)
+}
+
+/// One reusable shared-signer matrix cell per native subject. The matrix is
+/// derived only from the strict subject-plan output and is blocked while the
+/// declared Intel target remains unavailable.
+fn render_sign_native_product_job() -> String {
+    "  sign-native-product:\n    name: Sign native product / ${{ matrix.subject }}\n    needs: [admit-product-release, native-product-subject-plan]\n    if: ${{ always() && needs.admit-product-release.result == 'success' && needs.native-product-subject-plan.result == 'success' && needs.native-product-subject-plan.outputs.blocked_targets == '[]' }}\n    strategy:\n      fail-fast: false\n      matrix:\n        subject: ${{ fromJSON(needs.native-product-subject-plan.outputs.subjects_json) }}\n    permissions:\n      attestations: write\n      contents: read\n      id-token: write\n    uses: ./.github/workflows/ci-release-package-signer.yml\n    with:\n      artifact-name: native-product-assets\n      subject-path: ${{ matrix.subject }}\n      source-ref: ${{ needs.admit-product-release.outputs.source_ref }}\n      source-digest: ${{ needs.admit-product-release.outputs.source_commit }}\n".to_owned()
+}
+
 /// The multi-arch platform matrix: one native builder per consumer
 /// architecture. The release record and the package consumer demand exactly
 /// amd64+arm64; any other target set fails the lane closed instead of
@@ -1989,6 +2108,8 @@ fn render_native_product_preview_publish_job(
         needs.push("sign-deb");
     }
     needs.push("native-product-build");
+    needs.push("native-product-subject-plan");
+    needs.push("sign-native-product");
     let needs = needs.join(", ");
     let deb_pairs = deb_architectures(&release.targets)
         .unwrap_or_default()
@@ -3342,6 +3463,12 @@ fn render_native_preview(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
     let native_product = native_product_preview_workflow_file(config);
     if let Some(file) = native_product {
         jobs.push_str(&render_native_product_preview_build_job(config, file));
+        jobs.push('\n');
+        jobs.push_str(&render_native_product_subject_plan_job(
+            config, release, true,
+        ));
+        jobs.push('\n');
+        jobs.push_str(&render_sign_native_product_job());
         jobs.push('\n');
     }
     let guest_job = render_guest_payload_job(config, release, true);
@@ -5306,7 +5433,7 @@ fn render_admit_product_release_job(
     )
 }
 
-#[allow(clippy::format_push_string)]
+#[allow(clippy::format_push_string, clippy::too_many_lines)]
 fn render_native_release(config: &ProjectConfig, release: &ReleaseSpec) -> String {
     let mut output = render_binary_release(config, release);
     let hosted_runner = hosted_selector_runs_on(config);
@@ -5343,6 +5470,14 @@ fn render_native_release(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         extra.push_str(&render_native_product_build_job(file));
         extra.push('\n');
         publish_needs.push("native-product-build".to_owned());
+        extra.push_str(&render_native_product_subject_plan_job(
+            config, release, false,
+        ));
+        extra.push('\n');
+        publish_needs.push("native-product-subject-plan".to_owned());
+        extra.push_str(&render_sign_native_product_job());
+        extra.push('\n');
+        publish_needs.push("sign-native-product".to_owned());
     }
     if !release.image.is_empty() {
         extra.push_str(&native_image_jobs(config, release, debian));
@@ -7548,9 +7683,25 @@ mod tests {
         );
         assert!(
             publish.contains(
-                "needs: [admit-provider, admit-product-release, verify, build, native-product-build, image, metadata, debian, sign-deb]"
+                "needs: [admit-provider, admit-product-release, verify, build, native-product-build, native-product-subject-plan, sign-native-product, image, metadata, debian, sign-deb]"
             ),
             "{publish}"
+        );
+        let subject_plan = yaml_job(&workflow, "native-product-subject-plan");
+        assert!(
+            subject_plan.contains("native-subject-inventory.json")
+                && subject_plan.contains("subjects_json:")
+                && subject_plan.contains("blocked_targets:")
+                && subject_plan.contains("chmod 0755")
+                && subject_plan.contains("source_commit:$source_commit"),
+            "native subject plan must emit strict source-bound inventory: {subject_plan}"
+        );
+        let native_sign = yaml_job(&workflow, "sign-native-product");
+        assert!(
+            native_sign.contains("fromJSON(needs.native-product-subject-plan.outputs.subjects_json)")
+                && native_sign.contains("source-digest: ${{ needs.admit-product-release.outputs.source_commit }}")
+                && native_sign.contains("needs.native-product-subject-plan.outputs.blocked_targets == '[]'"),
+            "native signer must consume every admitted subject cell and block incomplete target census: {native_sign}"
         );
         let upload = publish
             .find("gh release upload \"$tag\"")
@@ -10551,6 +10702,26 @@ JSON
         assert!(
             publish.contains("preview-${{ needs.identity.outputs.commit }}"),
             "{publish}"
+        );
+        assert!(
+            publish.contains("native-product-subject-plan")
+                && publish.contains("sign-native-product"),
+            "preview product publisher must wait for the canonical native signer DAG: {publish}"
+        );
+        let subject_plan = yaml_job(&preview, "native-product-subject-plan");
+        assert!(
+            subject_plan.contains("needs: [admit-product-release, identity, native-product-build]")
+                && subject_plan.contains("native-subject-inventory.json"),
+            "preview must render the source-bound native subject plan: {subject_plan}"
+        );
+        let native_sign = yaml_job(&preview, "sign-native-product");
+        assert!(
+            native_sign
+                .contains("source-ref: ${{ needs.admit-product-release.outputs.source_ref }}")
+                && native_sign.contains(
+                    "source-digest: ${{ needs.admit-product-release.outputs.source_commit }}"
+                ),
+            "preview native signer must use admitted source identity: {native_sign}"
         );
         assert!(
             publish.contains("product-manifest.json.sha256"),
