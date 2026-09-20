@@ -8313,6 +8313,53 @@ mod tests {
     }
 
     #[test]
+    fn premerge_generator_changes_bootstrap_from_published_base_runtime() {
+        const PUBLISHED_BASE_REVISION: &str = "0dc79895ff1c5e88be7c3822c437e1c5b5282e12";
+        let mut config = scanned_fixture(provider_set([ProviderId::GithubHosted]));
+        config.repository = workflow_setup_action_repository().to_owned();
+        config.workflow_revision = PUBLISHED_BASE_REVISION.to_owned();
+        assert_ne!(
+            SOURCE_REVISION, PUBLISHED_BASE_REVISION,
+            "the test must model an unpublished generator revision"
+        );
+
+        let workflow = WorkflowIr::from_config(&config);
+        let pull_request = generated_ci_pr(&workflow);
+        assert!(
+            pull_request.contains(&format!("rev: {PUBLISHED_BASE_REVISION}")),
+            "PR planning must use the published base runtime: {pull_request}"
+        );
+        assert!(
+            !pull_request.contains(SOURCE_REVISION),
+            "PR planning must not bootstrap an unpublished generator revision: {pull_request}"
+        );
+
+        let policy = generated_ci_policy(&config);
+        assert!(
+            policy.contains(&format!("rev: {PUBLISHED_BASE_REVISION}")),
+            "policy must use the published base runtime: {policy}"
+        );
+        assert!(
+            policy.contains(&format!("BASE_PIN: {PUBLISHED_BASE_REVISION}")),
+            "candidate acquisition must compare against the published base runtime: {policy}"
+        );
+        assert!(
+            !policy.contains(SOURCE_REVISION),
+            "policy must not acquire an unpublished Stage-0 runtime: {policy}"
+        );
+        assert!(
+            policy.contains("name: Acquire candidate generator product"),
+            "policy must retain the candidate acquisition path: {policy}"
+        );
+        assert!(
+            policy.contains(
+                "head_candidate=\"$(velnor-workflow closure --rev=\"$HEAD_SHA\" --candidate)\""
+            ),
+            "candidate verification must remain anchored to the audited head: {policy}"
+        );
+    }
+
+    #[test]
     fn install_rev_is_always_the_declared_pin() {
         assert_eq!(
             workflow_setup_install_rev(workflow_setup_action_repository(), FIXTURE_REVISION),

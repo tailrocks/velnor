@@ -6,13 +6,10 @@ repository = "tailrocks/velnor"
 # validator regenerates the tree with the generator built at this commit and
 # requires a byte-identical result; bump it in a single pin commit after the
 # last generator change (see the plan ledger).
-# Follow-up: the runtime product for revision
-# 325719f1e05d3d46322c9fd3eeb9ad545e175638 is published. Promote this pin in a
-# separate migration after this PR merges. This 0dc pin is transitional.
-# Gate bootstrap: base-owned Policy checks the base renderer, while Rust CI
-# checks this branch's renderer. A base-policy trust-role change must reconcile
-# them before the pin promotion can pass both required checks.
-revision = "284cd33a24cc9bd5ca8ddf3a97c231f4f23d4146"
+# The branch changes the generator, so keep Stage 0 on the published base
+# product until the generator change is merged and published. The policy
+# candidate path verifies the checked-in tree with this branch's renderer.
+revision = "0dc79895ff1c5e88be7c3822c437e1c5b5282e12"
 
 [scan]
 exclude = ["migrations/**"]
