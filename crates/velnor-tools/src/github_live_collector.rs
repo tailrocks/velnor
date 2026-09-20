@@ -175,7 +175,9 @@ pub struct LiveJob {
 pub struct LiveArtifact {
     pub artifact_id: u64,
     pub run_id: u64,
-    pub run_attempt: u32,
+    /// The list-artifacts API is run-scoped and does not expose run_attempt.
+    /// Keep that fact explicit instead of stamping the latest attempt.
+    pub run_attempt: Option<u32>,
     pub run_head_sha: String,
     pub name: String,
     pub digest: String,
@@ -936,6 +938,7 @@ where
             store,
             auth,
             manifest,
+            repository_id,
             &mut workflows,
             &identity,
             ledger,
@@ -957,6 +960,7 @@ where
         store,
         auth,
         manifest,
+        repository_id,
         &mut workflows,
         &default_branch_sha,
         "main",
@@ -1306,6 +1310,7 @@ async fn collect_pr_execution_facts<T, S>(
     store: &mut S,
     auth: &AuthIdentity,
     manifest: &ManifestRepository,
+    repository_id: u64,
     workflows: &mut Vec<LiveWorkflow>,
     identity: &LivePullRequestIdentity,
     ledger: &mut Ledger,
@@ -1328,6 +1333,7 @@ where
             store,
             auth,
             manifest,
+            repository_id,
             workflows,
             &source_sha,
             &format!("pr-{}", identity.number),
@@ -1363,6 +1369,7 @@ async fn collect_executions_for_source<T, S>(
     store: &mut S,
     auth: &AuthIdentity,
     manifest: &ManifestRepository,
+    repository_id: u64,
     workflows: &mut Vec<LiveWorkflow>,
     source_sha: &str,
     collection_prefix: &str,
@@ -1399,7 +1406,16 @@ where
         if run_source_sha != source_sha {
             bail!("workflow run {run_id} head SHA differs from requested source {source_sha}");
         }
-        let workflow_path = required_string(&run, &["path"])?;
+        let latest_attempt = required_u32(&run, &["run_attempt"])?;
+        validate_workflow_run(
+            &run,
+            &manifest.repository,
+            repository_id,
+            run_id,
+            &run_source_sha,
+            None,
+        )?;
+        let workflow_path = workflow_path_from_run(&run)?;
         let workflow_index = workflows
             .iter()
             .position(|workflow| {
@@ -1426,7 +1442,6 @@ where
             workflow_index
         };
         let workflow = &workflows[workflow_index];
-        let latest_attempt = required_u64(&run, &["run_attempt"])? as u32;
         let attempts = collect_attempt_chain(
             transport,
             store,
@@ -1459,8 +1474,8 @@ where
                 parse_artifact(
                     artifact,
                     &manifest.repository,
+                    repository_id,
                     run_id,
-                    latest_attempt,
                     &run_source_sha,
                     artifact_raw_ids.clone(),
                 )
@@ -1539,8 +1554,15 @@ where
             if attempt_source_sha != run_source_sha {
                 bail!("workflow attempt {run_id}/{attempt_number} head SHA differs from run");
             }
-            let attempt_path = required_string(&attempt, &["path"])?;
-            if attempt_path != workflow_path {
+            validate_workflow_run(
+                &attempt,
+                &manifest.repository,
+                repository_id,
+                run_id,
+                &run_source_sha,
+                Some(attempt_number),
+            )?;
+            if workflow_path_from_run(&attempt)? != workflow_path {
                 bail!("workflow attempt {run_id}/{attempt_number} path differs from run");
             }
             let event = required_string(&attempt, &["event"])?;
@@ -1574,6 +1596,7 @@ where
                         job,
                         &event,
                         &manifest.repository,
+                        repository_id,
                         run_id,
                         attempt_number,
                         &run_source_sha,
@@ -1581,6 +1604,7 @@ where
                     )
                 })
                 .collect::<Result<Vec<_>>>()?;
+            validate_unique_jobs(&live_jobs, run_id, attempt_number)?;
             let mut raw_ids = run_list_raw_ids.clone();
             raw_ids.extend(attempt_raw_ids);
             raw_ids.extend(jobs_raw_ids);
@@ -1652,7 +1676,7 @@ where
             ),
         )
         .await?;
-        let attempt_number = required_u64(&attempt, &["run_attempt"])? as u32;
+        let attempt_number = required_u32(&attempt, &["run_attempt"])?;
         if attempt_number != next_attempt {
             bail!(
                 "workflow run {run_id} attempt endpoint returned attempt {attempt_number}, expected {next_attempt}"
@@ -1741,8 +1765,12 @@ where
     )
     .await?;
     let mut checks = Vec::new();
+    let mut seen_suite_ids = BTreeSet::new();
     for suite in suites {
         let suite_id = required_u64(&suite, &["id"])?;
+        if !seen_suite_ids.insert(suite_id) {
+            bail!("check suite {suite_id} was observed more than once");
+        }
         validate_check_suite(&suite, &manifest.repository, source_sha, suite_id)?;
         let (runs, run_raw_ids) = collect_items(
             transport,
@@ -1781,6 +1809,26 @@ where
         }
     }
     Ok(checks)
+}
+
+fn validate_unique_jobs(jobs: &[LiveJob], run_id: u64, run_attempt: u32) -> Result<()> {
+    let mut job_ids = BTreeSet::new();
+    let mut check_run_ids = BTreeSet::new();
+    for job in jobs {
+        if !job_ids.insert(job.job_id) {
+            bail!(
+                "workflow run {run_id} attempt {run_attempt} repeated job {}",
+                job.job_id
+            );
+        }
+        if !check_run_ids.insert(job.check_run_id) {
+            bail!(
+                "workflow run {run_id} attempt {run_attempt} repeated check run {}",
+                job.check_run_id
+            );
+        }
+    }
+    Ok(())
 }
 
 fn workflow_bindings(executions: &[LiveExecution]) -> Vec<LiveWorkflowBinding> {
@@ -1917,6 +1965,7 @@ fn parse_job(
     value: &Value,
     event: &str,
     repository: &str,
+    repository_id: u64,
     run_id: u64,
     run_attempt: u32,
     source_sha: &str,
@@ -1926,7 +1975,7 @@ fn parse_job(
     if job_run_id != run_id {
         bail!("job belongs to run {job_run_id}, expected {run_id}");
     }
-    let job_attempt = required_u64(value, &["run_attempt"])? as u32;
+    let job_attempt = required_u32(value, &["run_attempt"])?;
     if job_attempt != run_attempt {
         bail!("job belongs to attempt {job_attempt}, expected {run_attempt}");
     }
@@ -1937,6 +1986,23 @@ fn parse_job(
     let job_id = required_u64(value, &["id"])?;
     let source_url = required_string(value, &["html_url"])?;
     validate_job_url(&source_url, repository, run_id, job_id)?;
+    validate_api_url(
+        &required_string(value, &["url"])?,
+        &format!("/repos/{repository}/actions/jobs/{job_id}"),
+        "job API URL",
+    )?;
+    validate_api_url(
+        &required_string(value, &["run_url"])?,
+        &format!("/repos/{repository}/actions/runs/{run_id}"),
+        "job run URL",
+    )?;
+    let job_repository_id = optional_u64(value, &["repository", "id"]);
+    if job_repository_id.is_some_and(|id| id != repository_id) {
+        bail!(
+            "job belongs to repository ID {:?}, expected {repository_id}",
+            job_repository_id
+        );
+    }
     let check_run_url = required_string(value, &["check_run_url"])?;
     let check_run_id = parse_check_run_api_url(&check_run_url, repository)?;
     Ok(LiveJob {
@@ -1958,8 +2024,8 @@ fn parse_job(
 fn parse_artifact(
     value: &Value,
     repository: &str,
+    repository_id: u64,
     run_id: u64,
-    run_attempt: u32,
     run_head_sha: &str,
     raw_object_refs: Vec<String>,
 ) -> Result<LiveArtifact> {
@@ -1971,7 +2037,18 @@ fn parse_artifact(
     if artifact_head_sha != run_head_sha {
         bail!("artifact workflow head SHA differs from run");
     }
+    let artifact_repository_id = required_u64(value, &["workflow_run", "repository_id"])?;
+    if artifact_repository_id != repository_id {
+        bail!(
+            "artifact belongs to repository ID {artifact_repository_id}, expected {repository_id}"
+        );
+    }
     let artifact_id = required_u64(value, &["id"])?;
+    validate_api_url(
+        &required_string(value, &["url"])?,
+        &format!("/repos/{repository}/actions/artifacts/{artifact_id}"),
+        "artifact API URL",
+    )?;
     let source_url = required_string(value, &["archive_download_url"])?;
     validate_artifact_url(&source_url, repository, artifact_id)?;
     let digest = required_string(value, &["digest"])?;
@@ -1981,7 +2058,7 @@ fn parse_artifact(
     Ok(LiveArtifact {
         artifact_id,
         run_id: artifact_run_id,
-        run_attempt,
+        run_attempt: None,
         run_head_sha: artifact_head_sha,
         name: required_string(value, &["name"])?,
         digest,
@@ -2003,28 +2080,16 @@ fn merge_artifacts(destination: &mut Vec<LiveArtifact>, incoming: Vec<LiveArtifa
                 artifact.name
             );
         }
-        if let Some(existing) = destination
-            .iter_mut()
-            .find(|existing| existing.artifact_id == artifact.artifact_id)
+        if destination
+            .iter()
+            .any(|existing| existing.artifact_id == artifact.artifact_id)
         {
-            if existing.run_id != artifact.run_id
-                || existing.run_head_sha != artifact.run_head_sha
-                || existing.name != artifact.name
-                || existing.digest != artifact.digest
-                || existing.expired != artifact.expired
-                || existing.source_url != artifact.source_url
-            {
-                bail!(
-                    "artifact {} has conflicting observations",
-                    artifact.artifact_id
-                );
-            }
-            existing.raw_object_refs.extend(artifact.raw_object_refs);
-            existing.raw_object_refs.sort();
-            existing.raw_object_refs.dedup();
-        } else {
-            destination.push(artifact);
+            bail!(
+                "artifact {} was observed more than once",
+                artifact.artifact_id
+            );
         }
+        destination.push(artifact);
     }
     destination.sort_by_key(|artifact| artifact.artifact_id);
     Ok(())
@@ -2134,6 +2199,65 @@ fn validate_workflow_attempt_url(
     Ok(())
 }
 
+fn validate_workflow_run(
+    value: &Value,
+    repository: &str,
+    repository_id: u64,
+    run_id: u64,
+    source_sha: &str,
+    attempt: Option<u32>,
+) -> Result<()> {
+    if required_u64(value, &["id"])? != run_id || required_sha(value, &["head_sha"])? != source_sha
+    {
+        bail!("workflow run identity does not match requested run/source");
+    }
+    let actual_repository_id = required_u64(value, &["repository", "id"])?;
+    let actual_repository = required_string(value, &["repository", "full_name"])?;
+    if actual_repository_id != repository_id || actual_repository != repository {
+        bail!(
+            "workflow run belongs to {actual_repository} ({actual_repository_id}), expected {repository} ({repository_id})"
+        );
+    }
+    let api_path = match attempt {
+        Some(attempt) => format!("/repos/{repository}/actions/runs/{run_id}/attempts/{attempt}"),
+        None => format!("/repos/{repository}/actions/runs/{run_id}"),
+    };
+    validate_api_url(
+        &required_string(value, &["url"])?,
+        &api_path,
+        "workflow run API URL",
+    )?;
+    let html_path = match attempt {
+        Some(attempt) => format!("/{repository}/actions/runs/{run_id}/attempts/{attempt}"),
+        None => format!("/{repository}/actions/runs/{run_id}"),
+    };
+    validate_github_url(
+        &required_string(value, &["html_url"])?,
+        &html_path,
+        "workflow run HTML URL",
+    )?;
+    Ok(())
+}
+
+fn workflow_path_from_run(value: &Value) -> Result<String> {
+    let raw = required_string(value, &["path"])?;
+    let path =
+        raw.rsplit_once('@').map_or(
+            raw.as_str(),
+            |(path, reference)| {
+                if reference.is_empty() {
+                    ""
+                } else {
+                    path
+                }
+            },
+        );
+    if path.trim().is_empty() {
+        bail!("workflow run path is empty");
+    }
+    Ok(path.to_owned())
+}
+
 fn validate_repository_url(value: &str, repository: &str) -> Result<()> {
     let parsed = parse_safe_url(value, "github.com")?;
     let expected = format!("/{repository}");
@@ -2220,9 +2344,25 @@ fn encode_api_path(value: &str) -> String {
 
 fn validate_job_url(value: &str, repository: &str, run_id: u64, job_id: u64) -> Result<()> {
     let parsed = parse_safe_url(value, "github.com")?;
-    let expected = format!("/{repository}/actions/runs/{run_id}/job/{job_id}");
-    if parsed.path() != expected {
+    let documented = format!("/{repository}/runs/{run_id}/jobs/{job_id}");
+    if parsed.path() != documented {
         bail!("job URL is not bound to {repository}/{run_id}/{job_id}");
+    }
+    Ok(())
+}
+
+fn validate_api_url(value: &str, expected_path: &str, label: &str) -> Result<()> {
+    let parsed = parse_safe_url(value, "api.github.com")?;
+    if parsed.path() != expected_path {
+        bail!("{label} is not bound to {expected_path}");
+    }
+    Ok(())
+}
+
+fn validate_github_url(value: &str, expected_path: &str, label: &str) -> Result<()> {
+    let parsed = parse_safe_url(value, "github.com")?;
+    if parsed.path() != expected_path {
+        bail!("{label} is not bound to {expected_path}");
     }
     Ok(())
 }
@@ -2339,6 +2479,11 @@ fn parse_check(
     }
     let app_id = optional_u64(value, &["app", "id"]).map(|id| id.to_string());
     let check_run_id = required_u64(value, &["id"])?;
+    validate_api_url(
+        &required_string(value, &["url"])?,
+        &format!("/repos/{repository}/check-runs/{check_run_id}"),
+        "check run API URL",
+    )?;
     let source_url = required_string(value, &["html_url"])?;
     validate_check_run_url(&source_url, repository, check_run_id)?;
     Ok(LiveCheck {
@@ -2348,8 +2493,7 @@ fn parse_check(
         check_run_id,
         workflow_run_id,
         job_id: None,
-        run_attempt: optional_u64(value, &["check_suite", "workflow_run", "run_attempt"])
-            .map(|value| value as u32),
+        run_attempt: optional_u32(value, &["check_suite", "workflow_run", "run_attempt"])?,
         source_sha: source_sha.to_owned(),
         checkout: LiveCheckoutObservation::api_head_only(source_sha.to_owned(), raw_ids.clone()),
         event: optional_string(value, &["check_suite", "workflow_run", "event"]),
@@ -2849,12 +2993,34 @@ fn required_u64(value: &Value, fields: &[&str]) -> Result<u64> {
         .ok_or_else(|| anyhow!("GitHub response field {} is not positive", fields.join(".")))
 }
 
+fn required_u32(value: &Value, fields: &[&str]) -> Result<u32> {
+    let raw = required_u64(value, fields)?;
+    u32::try_from(raw).with_context(|| {
+        format!(
+            "GitHub response field {} exceeds u32 run-attempt range",
+            fields.join(".")
+        )
+    })
+}
+
 fn optional_u64(value: &Value, fields: &[&str]) -> Option<u64> {
     let mut current = value;
     for field in fields {
         current = current.get(*field)?;
     }
     current.as_u64().filter(|value| *value > 0)
+}
+
+fn optional_u32(value: &Value, fields: &[&str]) -> Result<Option<u32>> {
+    let Some(raw) = optional_u64(value, fields) else {
+        return Ok(None);
+    };
+    Ok(Some(u32::try_from(raw).with_context(|| {
+        format!(
+            "GitHub response field {} exceeds u32 run-attempt range",
+            fields.join(".")
+        )
+    })?))
 }
 
 fn collection_id(repository: &str, suffix: &str) -> String {
@@ -3238,7 +3404,7 @@ jobs:
         let artifact = |artifact_id, run_id| LiveArtifact {
             artifact_id,
             run_id,
-            run_attempt: 1,
+            run_attempt: Some(1),
             run_head_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
             name: "dist".to_owned(),
             digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
