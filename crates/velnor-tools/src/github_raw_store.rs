@@ -1356,6 +1356,10 @@ fn retain_quarantine_directory(
     retention: &File,
 ) -> Result<bool, RawStorageError> {
     let expected = stat_fd(quarantine).map_err(storage_io)?;
+    if expected.mode & libc::S_IFMT as u32 != libc::S_IFDIR as u32 || expected.mode & 0o777 != 0o700
+    {
+        return Ok(false);
+    }
     let named = match stat_at(parent, name) {
         Ok(identity) => identity,
         Err(RawStorageError::Unavailable) => return Ok(false),
