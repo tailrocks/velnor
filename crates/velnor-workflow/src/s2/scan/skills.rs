@@ -41,8 +41,6 @@ enum FrontmatterMode {
     EmbeddedTemplate,
 }
 
-const SKILLS_CHECKS: [SkillsCheck; 2] = [SkillsCheck::GeneratedDocs, SkillsCheck::HelperSyntax];
-
 impl SkillsCheck {
     fn command(self, bun: &str) -> String {
         match self {
@@ -56,12 +54,13 @@ impl SkillsCheck {
     }
 }
 
-fn verification_commands(bun: &str) -> Vec<String> {
-    SKILLS_CHECKS
-        .iter()
-        .copied()
-        .map(|check| check.command(bun))
-        .collect()
+fn verification_commands(bun: &str, generated_docs: bool) -> Vec<String> {
+    let mut commands = Vec::new();
+    if generated_docs {
+        commands.push(SkillsCheck::GeneratedDocs.command(bun));
+    }
+    commands.push(SkillsCheck::HelperSyntax.command(bun));
+    commands
 }
 
 fn central_bun_version() -> Result<String, GeneratorError> {
@@ -189,12 +188,15 @@ pub(crate) fn detect(
     let catalog = read_catalog(context)?;
     validate_plugin_manifests(context, &catalog.plugin_name)?;
     validate_skills(context, &catalog.names)?;
-    validate_docs(context, &catalog.names)?;
+    let generated_docs = has_generated_docs_surface(context);
+    if generated_docs {
+        validate_docs(context, &catalog.names)?;
+    }
     validate_links(context)?;
     let template_files = template_files(context, &catalog.names);
     validate_templates(context, &template_files)?;
     let bun_version = target_bun_version(context, &template_files)?;
-    if !context.file_set.contains("scripts/generate-docs.ts") {
+    if generated_docs && !context.file_set.contains("scripts/generate-docs.ts") {
         return Err(GeneratorError::usage(
             "skills plugin is missing scripts/generate-docs.ts",
         ));
@@ -219,7 +221,7 @@ pub(crate) fn detect(
         None,
     );
     skill_unit.tool_version = Some(bun_version.clone());
-    let commands = verification_commands(&bun_version);
+    let commands = verification_commands(&bun_version, generated_docs);
     skill_unit.pr_commands.clone_from(&commands);
     skill_unit.full_commands.clone_from(&commands);
     shape.units.push(skill_unit);
@@ -229,6 +231,13 @@ pub(crate) fn detect(
         .detected
         .push(format!("skills-count:{}", catalog.names.len()));
     Ok(template_files)
+}
+
+fn has_generated_docs_surface(context: &ScanContext<'_>) -> bool {
+    context.file_set.contains(DOCS_INDEX)
+        || context.file_set.contains(DOCS_README)
+        || context.file_set.contains("scripts/generate-docs.ts")
+        || context.files.iter().any(|file| file.starts_with("docs/"))
 }
 
 fn has_plugin_marker(context: &ScanContext<'_>) -> bool {
@@ -689,13 +698,21 @@ fn validate_links(context: &ScanContext<'_>) -> Result<(), GeneratorError> {
                 })
     }) {
         let text = read_text(&context.root.join(file), "read Markdown reference")?;
-        let mut fenced = false;
+        let mut fenced = None;
         for (line_number, line) in text.lines().enumerate() {
-            if line.trim_start().as_bytes().starts_with(&[96, 96, 96]) {
-                fenced = !fenced;
+            if let Some((fence, length)) = markdown_fence(line) {
+                match fenced {
+                    None => fenced = Some((fence, length)),
+                    Some((open_fence, open_length))
+                        if fence == open_fence && length >= open_length =>
+                    {
+                        fenced = None;
+                    }
+                    Some(_) => {}
+                }
                 continue;
             }
-            if fenced {
+            if fenced.is_some() {
                 continue;
             }
             let mut offset = 0;
@@ -741,6 +758,16 @@ fn validate_links(context: &ScanContext<'_>) -> Result<(), GeneratorError> {
         }
     }
     Ok(())
+}
+
+fn markdown_fence(line: &str) -> Option<(u8, usize)> {
+    let bytes = line.trim_start().as_bytes();
+    let fence = *bytes.first()?;
+    if fence != b'`' && fence != b'~' {
+        return None;
+    }
+    let length = bytes.iter().take_while(|byte| **byte == fence).count();
+    (length >= 3).then_some((fence, length))
 }
 
 fn find_markdown_link_start(line: &str, from: usize) -> Option<usize> {
@@ -1300,9 +1327,9 @@ fn read_text(path: &Path, operation: &str) -> Result<String, GeneratorError> {
 )]
 mod tests {
     use super::{
-        detect, is_markdown_placeholder, normalize_markdown_destination, parse_frontmatter,
-        parse_markdown_destination, resolve_markdown_path, validate_provider_version,
-        FrontmatterMode,
+        detect, is_markdown_placeholder, markdown_fence, normalize_markdown_destination,
+        parse_frontmatter, parse_markdown_destination, resolve_markdown_path,
+        validate_provider_version, FrontmatterMode,
     };
     use crate::s2::provider::{ProviderId, ProviderSet};
     use crate::s2::scan::{RepositoryShape, ScanContext};
@@ -1748,6 +1775,42 @@ See [policy](references/policy.md "title"), [templates](templates/), [diagram](d
             .unwrap_or_else(|error| panic!("Markdown fixture detects: {error}"));
         assert!(hidden.contains("skills/example/templates/package.json"));
         assert_eq!(shape.units.len(), 1);
+    }
+
+    #[test]
+    fn markdown_link_fixtures_skip_tilde_fenced_code() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "skills/example/references/policy.md",
+            "~~~markdown\n[example](missing.md)\n~~~\n",
+        );
+        let (_, shape) = fixture
+            .run_detect()
+            .unwrap_or_else(|error| panic!("tilde-fenced Markdown must be ignored: {error}"));
+        assert_eq!(shape.units.len(), 1);
+    }
+
+    #[test]
+    fn provider_valid_plugin_without_generated_docs_is_accepted() {
+        let mut fixture = Fixture::new();
+        fixture
+            .files
+            .retain(|file| !file.starts_with("docs/") && file != "scripts/generate-docs.ts");
+        let (_, shape) = fixture
+            .run_detect()
+            .unwrap_or_else(|error| panic!("docs-free plugin must detect: {error}"));
+        assert_eq!(shape.units.len(), 1);
+        assert!(shape.units[0]
+            .pr_commands
+            .iter()
+            .all(|command| !command.contains("generate-docs.ts")));
+    }
+
+    #[test]
+    fn markdown_fence_tracks_character_and_opening_length() {
+        assert_eq!(markdown_fence("~~~rust"), Some((b'~', 3)));
+        assert_eq!(markdown_fence("````rust"), Some((b'`', 4)));
+        assert_eq!(markdown_fence("  prose"), None);
     }
 
     #[test]
