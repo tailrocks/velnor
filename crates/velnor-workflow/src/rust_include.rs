@@ -156,6 +156,11 @@ impl IncludeScanner {
         aliases: &mut BTreeMap<String, IncludeAlias>,
         wrappers: &mut BTreeMap<String, MacroWrapper>,
     ) -> Result<(), String> {
+        // Rust item names are visible throughout their lexical module/block,
+        // regardless of whether the `use` item appears before the invocation.
+        // Pre-collect only declarations in this scope; nested groups are
+        // handled by their own recursive scope.
+        collect_scope_aliases(tokens, aliases);
         let mut index = 0;
         while index < tokens.len() {
             if let Some((name, body, next)) = macro_rules_definition(tokens, index) {
@@ -229,6 +234,26 @@ impl IncludeScanner {
             index += 1;
         }
         Ok(())
+    }
+}
+
+fn collect_scope_aliases(tokens: &[TokenTree], aliases: &mut BTreeMap<String, IncludeAlias>) {
+    let mut index = 0;
+    while index < tokens.len() {
+        if matches!(&tokens[index], TokenTree::Ident(identifier) if identifier == "use") {
+            let mut end = index + 1;
+            while end < tokens.len() && !is_punct(&tokens[end], ';') {
+                end += 1;
+            }
+            collect_use_tree(&tokens[index + 1..end], &[], aliases);
+            index = end.saturating_add(1);
+            continue;
+        }
+        if let Some((_, _, next)) = macro_rules_definition(tokens, index) {
+            index = next;
+            continue;
+        }
+        index += 1;
     }
 }
 
@@ -1010,8 +1035,8 @@ const _: &str = embed!(PATH);
     #[test]
     fn aliases_and_macro_names_follow_lexical_module_scope() {
         let source = r#"
-use std::include_str as asset;
 const _: &str = asset!("root.txt");
+use std::include_str as asset;
 
 mod child {
     const PATH: &str = "not-an-include.txt";
