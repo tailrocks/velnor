@@ -34,8 +34,8 @@ use crate::s2::config::RepoGenerationConfig;
 use crate::s2::provider::ProviderId;
 use crate::s2::scan::RepositoryShape;
 use crate::s2::{
-    nested_unit_workflow_file, CachePurpose, CacheSpec, GeneratorError, ProjectConfig, Unit,
-    UnitKind,
+    prepare_unit_workflow_file, provider_supports_unit, provider_unit_workflow_file, CachePurpose,
+    CacheSpec, GeneratorError, ProjectConfig, Unit, UnitKind,
 };
 
 pub(crate) use ir::{
@@ -47,7 +47,7 @@ pub(crate) use ir::{
 };
 
 #[cfg(test)]
-pub(crate) use ir::jq_read_plan_matrix;
+pub(crate) use ir::{cargo_network_is_restricted, jq_read_plan_matrix};
 
 /// Default `timeout-minutes` for a unit verification job.
 pub(crate) const DEFAULT_UNIT_TIMEOUT_MINUTES: u32 = 45;
@@ -380,7 +380,7 @@ pub(crate) struct Rendered {
     pub(crate) nodes: Vec<GraphNode>,
     /// Unit contract updates, replacing the scanned unit of the same id.
     pub(crate) units: Vec<Unit>,
-    /// Per-unit pipeline contracts carried into the shared kind reusable.
+    /// Per-unit pipeline contracts carried into provider-specific renderers.
     pub(crate) contracts: BTreeMap<String, UnitContract>,
 }
 
@@ -392,14 +392,11 @@ pub(crate) enum GraphNode {
         /// The rendered `plan:` job block.
         job: String,
     },
-    /// One verification unit's reusable-workflow caller.
+    /// One verification unit; aggregate rendering expands it across supported
+    /// providers using this typed kind.
     Unit {
         unit_id: String,
-        job_id: String,
-        /// The caller job's display name.
-        name: String,
-        /// The nested workflow file the caller invokes.
-        file: String,
+        kind: UnitKind,
     },
 }
 
@@ -412,15 +409,10 @@ impl GraphNode {
         }
     }
 
-    fn as_unit(&self) -> Option<(&str, &str, &str, &str)> {
+    fn as_unit(&self) -> Option<(&str, UnitKind)> {
         match self {
             Self::Plan { .. } => None,
-            Self::Unit {
-                unit_id,
-                job_id,
-                name,
-                file,
-            } => Some((unit_id, job_id, name, file)),
+            Self::Unit { unit_id, kind } => Some((unit_id, *kind)),
         }
     }
 }
@@ -837,25 +829,30 @@ fn merge_pipeline_contracts(
     Ok(())
 }
 
-/// A file a non-surface renderer owns cannot be added by a declaration: the
-/// caller would emit the declared bytes and then have the legacy render
-/// overwrite them. Naming the renderer that owns the file turns the silent
-/// clobber into a usage error.
+/// A file the unit renderer owns cannot be added by a declaration: the
+/// generator would otherwise overwrite the declared bytes silently. Naming
+/// the renderer that owns the file turns the clobber into a usage error.
 fn reject_owned_file(
     config: &ProjectConfig,
     file: &str,
     primitive: &str,
 ) -> Result<(), GeneratorError> {
-    // The nested per-unit workflows are rendered for every scanned unit unless
-    // the surface was adopted as reviewed templates.
+    // Provider-specific unit workflows and the shared Rust-preparation
+    // workflow are rendered unless the surface was adopted as reviewed
+    // templates.
     if !config.adopted_workflow_surface
-        && let Some(unit) = config
-            .units
-            .iter()
-            .find(|unit| nested_unit_workflow_file(unit) == file)
+        && let Some(unit) = config.units.iter().find(|unit| {
+            config.providers.iter().any(|provider| {
+                provider_supports_unit(*provider, unit)
+                    && provider_unit_workflow_file(unit.kind, *provider) == file
+            }) || (unit.kind == UnitKind::Rust
+                && crate::s2::primitives::ir::cargo_network_is_restricted(unit)
+                && config.providers.iter().any(|provider| provider.is_local())
+                && prepare_unit_workflow_file(unit.kind) == file)
+        })
     {
         return Err(GeneratorError::usage(format!(
-            "`[[declare]]` primitive `{primitive}` declares `{file}`, which the `{}` family renders for unit `{}`; declare the unit's pipeline or adopt the workflow surface instead",
+            "`[[declare]]` primitive `{primitive}` declares `{file}`, which the `{}` unit family renders for `{}`; declare the unit's pipeline or adopt the workflow surface instead",
             pipeline_id(unit.kind),
             unit.id
         )));
@@ -1053,7 +1050,8 @@ fn rows_for(
 }
 
 /// The per-unit pipeline primitive that renders `kind`.
-/// The per-unit pipeline families: one file per unit, one graph node per unit.
+/// The per-unit pipeline families: one graph node per unit, expanded into
+/// kind/provider reusable workflows by the IR renderer.
 const PIPELINES: &[&str] = &[
     RUST_CRATE,
     BUN_PACKAGE,
@@ -1099,7 +1097,7 @@ impl ResolvedRow {
         Self {
             primitive: primitive.to_owned(),
             units: vec![unit.id.clone()],
-            file: Some(crate::s2::nested_unit_workflow_file(unit)),
+            file: None,
             unit_contract: false,
             args: BTreeMap::new(),
         }
@@ -1213,8 +1211,9 @@ fn validate(
             }
         }
     }
-    // Per-unit pipelines: one row per unit, the canonical file for that unit,
-    // the right primitive for the unit's kind, and no silent gaps.
+    // Per-unit pipeline rows select one typed unit and its kind-specific
+    // primitive. Provider workflow paths are generated from the typed graph;
+    // a declaration cannot name a file alias.
     let mut covered: Vec<(&str, &str)> = Vec::new();
     for row in rows.iter().filter(|row| is_pipeline(&row.primitive)) {
         let Some(unit) = row.nested_file(config) else {
@@ -1234,21 +1233,15 @@ fn validate(
         }
         if row.units.len() > 1 {
             return Err(GeneratorError::usage(format!(
-                "`[[declare]]` primitive `{}` renders one workflow file per unit; declare one row per unit",
+                "`[[declare]]` primitive `{}` renders one unit per graph row; declare one row per unit",
                 row.primitive
             )));
         }
-        if row
-            .file
-            .as_deref()
-            .is_some_and(|file| file != nested_unit_workflow_file(unit))
-        {
+        if let Some(file) = row.file.as_deref() {
             return Err(GeneratorError::usage(format!(
-                "`[[declare]]` primitive `{}` must declare unit `{}` as `{}`, not `{}`; the aggregate callers invoke the canonical file name",
+                "`[[declare]]` primitive `{}` does not accept `file`; unit `{}` provider workflows are derived from its kind and provider (remove `{file}`)",
                 row.primitive,
-                unit.id,
-                nested_unit_workflow_file(unit),
-                row.file.as_deref().unwrap_or_default()
+                unit.id
             )));
         }
         covered.push((row.primitive.as_str(), unit.id.as_str()));

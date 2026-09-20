@@ -48,11 +48,82 @@
 //! and the manifest records.
 
 use std::path::Path;
+use std::ffi::OsStr;
 use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
 use super::GeneratorError;
+
+/// A Git command insulated from environment redirects, replacement refs, and
+/// machine-local global/system configuration. Policy and product closure
+/// checks must inspect the named object database, not a caller-selected Git
+/// directory or alternate object store.
+pub(crate) fn sanitized_git_command() -> Command {
+    let mut command = Command::new("git");
+    for name in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_PREFIX",
+        "GIT_CONFIG",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_TRACE",
+        "GIT_TRACE_SETUP",
+        "GIT_TRACE_PACKET",
+        "GIT_TRACE_PERFORMANCE",
+        "GIT_TRACE_CURL",
+        "GIT_TRACE_CURL_NO_DATA",
+        "GIT_TRACE_REDACT",
+        "GIT_TRACE2",
+        "GIT_TRACE2_EVENT",
+        "GIT_TRACE2_PERF",
+        "GIT_TRACE2_BRIEF",
+        "GIT_TRACE2_CONFIG_PARAMS",
+        "GIT_TRACE2_ENV_VARS",
+        "GIT_CURL_VERBOSE",
+        "GIT_SSH",
+        "GIT_SSH_COMMAND",
+        "GIT_ASKPASS",
+        "GIT_TERMINAL_PROMPT",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_GRAFT_FILE",
+        "GIT_SHALLOW_FILE",
+        "GIT_QUARANTINE_PATH",
+        "GIT_NAMESPACE",
+        "GIT_EXEC_PATH",
+        "GIT_TEMPLATE_DIR",
+        "GIT_ATTR_SOURCE",
+        "GIT_EXTERNAL_DIFF",
+        "GIT_DIFF_OPTS",
+        "GIT_PAGER",
+        "GIT_EDITOR",
+    ] {
+        command.env_remove(name);
+    }
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("GIT_") {
+            command.env_remove(name);
+        }
+    }
+    command
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_NO_REPLACE_OBJECTS", "1");
+    #[cfg(unix)]
+    command.env("GIT_CONFIG_GLOBAL", OsStr::new("/dev/null"));
+    #[cfg(windows)]
+    command.env("GIT_CONFIG_GLOBAL", OsStr::new("NUL"));
+    command
+}
 
 /// Closure algorithm version. Bump when the inputs or canonical form change;
 /// digests minted under different versions never compare equal because the
@@ -141,7 +212,7 @@ pub(crate) fn closure_of_tree(
 ) -> Result<String, GeneratorError> {
     let mut arguments = vec!["ls-tree", "-r", rev, "--"];
     arguments.extend_from_slice(CLOSURE_PATHS);
-    let output = Command::new("git")
+    let output = sanitized_git_command()
         .arg("-C")
         .arg(repo)
         .args(&arguments)
@@ -218,7 +289,7 @@ mod tests {
 
     fn git_in(root: &std::path::Path, arguments: &[&str]) {
         let status = must(
-            Command::new("git")
+            sanitized_git_command()
                 .arg("-C")
                 .arg(root)
                 .args(arguments)
@@ -297,7 +368,7 @@ mod tests {
 
     fn git_output(root: &std::path::Path, arguments: &[&str]) -> String {
         let output = must(
-            Command::new("git")
+            sanitized_git_command()
                 .arg("-C")
                 .arg(root)
                 .args(arguments)
@@ -406,7 +477,7 @@ mod tests {
         );
         let head = String::from_utf8_lossy(
             &must(
-                Command::new("git")
+                sanitized_git_command()
                     .arg("-C")
                     .arg(&root)
                     .args(["rev-parse", "HEAD"])
@@ -421,7 +492,7 @@ mod tests {
         // consumer does (`LC_ALL=C sort`) and hash it with the system tool,
         // proving the Rust canonicalizer agrees byte-for-byte.
         let ls_tree = must(
-            Command::new("git")
+            sanitized_git_command()
                 .arg("-C")
                 .arg(&root)
                 .args([

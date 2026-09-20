@@ -125,18 +125,21 @@ mod tests {
             (
                 ProviderId::GithubHosted,
                 ProviderSelector {
+                    group: None,
                     runs_on: vec!["ubuntu-24.04".to_owned()],
                 },
             ),
             (
                 ProviderId::GithubSelfHosted,
                 ProviderSelector {
+                    group: None,
                     runs_on: vec!["velnor-official".to_owned()],
                 },
             ),
             (
                 ProviderId::Velnor,
                 ProviderSelector {
+                    group: None,
                     runs_on: vec!["velnor-native".to_owned()],
                 },
             ),
@@ -205,6 +208,7 @@ mod tests {
         let tables = BTreeMap::from([(
             "github".to_owned(),
             ProviderSelector {
+                group: None,
                 runs_on: vec!["ubuntu-24.04".to_owned()],
             },
         )]);

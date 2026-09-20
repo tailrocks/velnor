@@ -97,25 +97,32 @@ fn lookup(
 ) -> PinnedBinaryLookup {
     PinnedBinaryLookup {
         pinned_binary,
+        _pinned_binary_guard: None,
+        pinned_binary_sha256: None,
+        pinned_binary_revision: None,
+        pinned_binary_closure: None,
         search_path,
         install_root,
         build_forbidden: true,
-        candidate_manifest: None,
     }
 }
 
-fn lookup_with_manifest(
-    pinned_binary: Option<PathBuf>,
+fn lookup_product(
+    binary: PathBuf,
     search_path: Option<std::ffi::OsString>,
     install_root: PathBuf,
-    candidate_manifest: PathBuf,
+    revision: &str,
+    closure: &str,
 ) -> PinnedBinaryLookup {
     PinnedBinaryLookup {
-        pinned_binary,
+        pinned_binary: Some(binary.clone()),
+        _pinned_binary_guard: None,
+        pinned_binary_sha256: Some(must(sha256_file(&binary), "hash product binary")),
+        pinned_binary_revision: Some(revision.to_owned()),
+        pinned_binary_closure: Some(closure.to_owned()),
         search_path,
         install_root,
         build_forbidden: true,
-        candidate_manifest: Some(candidate_manifest),
     }
 }
 
@@ -132,7 +139,7 @@ fn checkout_source(root: &Path) -> PinSource {
 fn pinned_binary_env_is_used_only_when_it_proves_the_pin() {
     let root = temporary_directory("pinned-env");
     let pinned = fake_velnor_workflow(&root, PIN_A, CLOSURE_A);
-    let lookup = lookup(Some(pinned.clone()), None, root.join("install"));
+    let lookup = lookup_product(pinned.clone(), None, root.join("install"), PIN_A, CLOSURE_A);
     let expected = [CLOSURE_A.to_owned()];
     assert_eq!(
         must(
@@ -153,6 +160,22 @@ fn pinned_binary_env_is_used_only_when_it_proves_the_pin() {
         "an explicit pointer at the wrong closure is refused, not skipped: {error}"
     );
     assert!(error.contains(PIN_A), "{error}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_product_pointer_requires_verified_manifest_identity() {
+    let root = temporary_directory("pinned-unbound");
+    let binary = fake_velnor_workflow(&root, PIN_A, CLOSURE_A);
+    let lookup = lookup(Some(binary), None, root.join("install"));
+    let expected = [CLOSURE_A.to_owned()];
+    let error = must_fail(
+        resolve_pinned_binary(PIN_A, Some(&expected), &lookup, &checkout_source(&root)),
+        "product pointer without manifest identity",
+    )
+    .to_string();
+    assert!(error.contains("verified product manifest"), "{error}");
     let _ = fs::remove_dir_all(root);
 }
 
@@ -179,6 +202,187 @@ fn path_binary_is_used_when_its_reported_closure_is_the_pin() {
         ),
         wanted,
         "the first PATH entry reporting the pin wins; stale entries are skipped"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn shallow_owner_checkout_fetches_d19_history_before_ancestry_checks() {
+    let source = temporary_directory("shallow-history-source");
+    git_ok(&source, &["init", "-q", "-b", "main"]);
+    write(&source.join("README.md"), "pin\n");
+    let pin = commit(&source, "pin");
+    write(&source.join("README.md"), "base\n");
+    let base = commit(&source, "base");
+    write(&source.join("README.md"), "head\n");
+    let head = commit(&source, "head");
+    write(&source.join("README.md"), "tip\n");
+    let _tip = commit(&source, "tip");
+
+    let shallow = temporary_directory("shallow-history-clone");
+    let origin = format!("file://{}", source.display());
+    let output = must(
+        Command::new("git")
+            .args([
+                "clone", "--quiet", "--depth", "1", "--branch", "main", &origin,
+            ])
+            .arg(&shallow)
+            .output(),
+        "clone shallow owner checkout",
+    );
+    assert!(
+        output.status.success(),
+        "git clone: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(is_shallow_checkout(&shallow));
+    assert!(!commit_exists(&shallow, &pin));
+    assert!(!commit_exists(&shallow, &base));
+    assert!(!commit_exists(&shallow, &head));
+
+    must(
+        ensure_pin_history(&shallow, &[&pin, &base, &head]),
+        "fetch D19 pin, base, and head history from origin",
+    );
+    assert!(!is_shallow_checkout(&shallow));
+    assert!(commit_exists(&shallow, &pin));
+    assert!(commit_exists(&shallow, &base));
+    assert!(commit_exists(&shallow, &head));
+    assert_eq!(is_ancestor(&shallow, &pin, &base), Some(true));
+    assert_eq!(is_ancestor(&shallow, &pin, &head), Some(true));
+    assert_eq!(is_ancestor(&shallow, &base, &head), Some(true));
+
+    let _ = fs::remove_dir_all(source);
+    let _ = fs::remove_dir_all(shallow);
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_shallow_pin_fetch_reports_full_history_remedy() {
+    let source = temporary_directory("shallow-fetch-failure-source");
+    git_ok(&source, &["init", "-q", "-b", "main"]);
+    write(&source.join("README.md"), "pin\n");
+    let pin = commit(&source, "pin");
+    write(&source.join("README.md"), "base\n");
+    let base = commit(&source, "base");
+    write(&source.join("README.md"), "head\n");
+    let head = commit(&source, "head");
+    write(&source.join("README.md"), "tip\n");
+    let _tip = commit(&source, "tip");
+
+    let shallow = temporary_directory("shallow-fetch-failure-clone");
+    let origin = format!("file://{}", source.display());
+    let clone = must(
+        Command::new("git")
+            .args([
+                "clone", "--quiet", "--depth", "1", "--branch", "main", &origin,
+            ])
+            .arg(&shallow)
+            .output(),
+        "clone shallow owner checkout",
+    );
+    assert!(
+        clone.status.success(),
+        "git clone: {}",
+        String::from_utf8_lossy(&clone.stderr)
+    );
+    assert!(is_shallow_checkout(&shallow));
+    let inaccessible = format!("file://{}/missing-origin", source.display());
+    git_ok(&shallow, &["remote", "set-url", "origin", &inaccessible]);
+
+    let error = must_fail(
+        ensure_pin_history(&shallow, &[&pin, &base, &head]),
+        "missing D19 history with inaccessible origin",
+    )
+    .to_string();
+    assert!(is_shallow_checkout(&shallow));
+    for revision in [&pin, &base, &head] {
+        assert!(
+            error.contains(revision),
+            "the diagnostic names missing revision {revision}: {error}"
+        );
+    }
+    assert!(
+        error.contains("history remains shallow after fetching from origin"),
+        "the diagnostic distinguishes shallow history: {error}"
+    );
+    assert!(
+        error.contains("actions/checkout `fetch-depth: 0`"),
+        "the diagnostic tells the workflow owner how to fetch complete history: {error}"
+    );
+    assert!(
+        error.contains("verify `origin` can fetch the D19 pin and its ancestry"),
+        "the diagnostic identifies the remote access requirement: {error}"
+    );
+
+    let _ = fs::remove_dir_all(source);
+    let _ = fs::remove_dir_all(shallow);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn pinned_product_exec_uses_sealed_bytes_after_shared_slot_replacement() {
+    let (root, head) = closure_fixture("pinned-product-toctou");
+    let expected = must(expected_closures(&root, &head), "compute pin closures");
+    let product_closure = &expected[0];
+    let product_revision = PIN_A;
+    let shared_slot = root.join("shared-policy-slot");
+    let replacement = root.join("replacement-policy");
+    let rendered = root.join("original-product-rendered");
+    write(
+        &replacement,
+        "#!/bin/sh\nif [ \"$1\" = --revision ]; then echo ".to_owned()
+            + PIN_B
+            + "; exit 0; fi\nif [ \"$1\" = --closure ]; then echo "
+            + CLOSURE_B
+            + "; exit 0; fi\nexit 91\n",
+    );
+    write(
+        &shared_slot,
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = --revision ]; then echo {product_revision}; exit 0; fi\nif [ \"$1\" = --closure ]; then cp '{}' '{}'; echo {product_closure}; exit 0; fi\ntouch '{}'; cp -R \"$1/.\" \"$3/\"\n",
+            replacement.display(),
+            shared_slot.display(),
+            rendered.display()
+        ),
+    );
+    for binary in [&shared_slot, &replacement] {
+        use std::os::unix::fs::PermissionsExt as _;
+        must(
+            fs::set_permissions(binary, fs::Permissions::from_mode(0o755)),
+            "mark fixture runtime executable",
+        );
+    }
+    let lookup = lookup_product(
+        shared_slot.clone(),
+        None,
+        root.join("install"),
+        product_revision,
+        product_closure,
+    );
+    let excludes = std::collections::BTreeSet::new();
+    let comparison = must(
+        regenerate_and_compare(
+            &root,
+            &root,
+            &head,
+            "main",
+            &excludes,
+            &lookup,
+            &checkout_source(&root),
+        ),
+        "render through the verified product snapshot",
+    );
+    assert!(matches!(comparison, TreeComparison::Pin));
+    assert!(
+        rendered.is_file(),
+        "the verified product completed rendering"
+    );
+    assert_eq!(
+        must(fs::read(&shared_slot), "read replaced shared product slot"),
+        must(fs::read(&replacement), "read replacement product"),
+        "the probe replaced the mutable shared slot before the render exec"
     );
     let _ = fs::remove_dir_all(root);
 }
@@ -224,39 +428,79 @@ fn forbidden_build_fails_closed_listing_every_candidate() {
 
 #[cfg(unix)]
 #[test]
-fn revision_fallback_requires_the_pin_and_a_closure_report() {
-    let root = temporary_directory("pinned-fallback");
-    for name in ["matching", "wrong", "legacy"] {
-        must(fs::create_dir_all(root.join(name)), "fallback dir");
-    }
-    let matching = fake_velnor_workflow(&root.join("matching"), PIN_A, CLOSURE_A);
-    let matching_lookup = lookup(Some(matching.clone()), None, root.join("install"));
+fn manifest_bound_product_revision_may_differ_from_pin_for_the_same_closure() {
+    let (root, pin) = closure_fixture("pinned-manifest-same-closure");
+    let closure = must(
+        crate::s2::closure::candidate_closure_of_tree(&root, &pin),
+        "closure at declared pin",
+    );
+    let product_revision = commit(&root, "equivalent product commit");
+    assert_ne!(pin, product_revision, "the commit identities differ");
+    assert_eq!(
+        closure,
+        must(
+            crate::s2::closure::candidate_closure_of_tree(&root, &product_revision),
+            "closure at product commit",
+        ),
+        "both commits name the same source closure",
+    );
+    let product_dir = root.join("product");
+    must(fs::create_dir_all(&product_dir), "product directory");
+    let product = fake_velnor_workflow(&product_dir, &product_revision, &closure);
+    let lookup = lookup_product(
+        product.clone(),
+        None,
+        root.join("install"),
+        &product_revision,
+        &closure,
+    );
     assert_eq!(
         must(
-            resolve_pinned_binary(PIN_A, None, &matching_lookup, &checkout_source(&root)),
-            "env binary at the pin without history"
+            resolve_pinned_binary(&pin, None, &lookup, &checkout_source(&root)),
+            "manifest-bound product with equivalent source closure",
         ),
-        matching
+        product,
     );
-    let wrong = fake_velnor_workflow(&root.join("wrong"), PIN_B, CLOSURE_B);
-    let wrong_lookup = lookup(Some(wrong), None, root.join("install"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn manifest_bound_product_binary_revision_must_match_manifest() {
+    let root = temporary_directory("pinned-manifest-revision-mismatch");
+    let binary = fake_velnor_workflow(&root, PIN_A, CLOSURE_A);
+    let lookup = lookup_product(
+        binary,
+        None,
+        root.join("install"),
+        PIN_B,
+        CLOSURE_A,
+    );
     let error = must_fail(
-        resolve_pinned_binary(PIN_A, None, &wrong_lookup, &checkout_source(&root)),
-        "env binary at another revision without history",
+        resolve_pinned_binary(PIN_A, None, &lookup, &checkout_source(&root)),
+        "manifest whose revision differs from the binary",
     )
     .to_string();
-    assert!(
-        error.contains(&format!("reports revision {PIN_B}")),
-        "an explicit pointer at the wrong revision is refused, not skipped: {error}"
-    );
-    let legacy = fake_legacy_velnor_workflow(&root.join("legacy"), PIN_A);
-    let legacy_lookup = lookup(Some(legacy), None, root.join("install"));
+    assert!(error.contains("reports revision"), "{error}");
+    assert!(error.contains(PIN_A), "{error}");
+    assert!(error.contains(PIN_B), "{error}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn manifest_bound_product_still_requires_a_closure_report() {
+    let root = temporary_directory("pinned-manifest-legacy");
+    let legacy_dir = root.join("legacy");
+    must(fs::create_dir_all(&legacy_dir), "legacy directory");
+    let legacy = fake_legacy_velnor_workflow(&legacy_dir, PIN_A);
+    let lookup = lookup_product(legacy, None, root.join("install"), PIN_A, CLOSURE_A);
     let error = must_fail(
-        resolve_pinned_binary(PIN_A, None, &legacy_lookup, &checkout_source(&root)),
+        resolve_pinned_binary(PIN_A, None, &lookup, &checkout_source(&root)),
         "binary without a closure report",
     )
     .to_string();
-    assert!(error.contains("source-closure digest"), "{error}");
+    assert!(error.contains("manifest names"), "{error}");
     let _ = fs::remove_dir_all(root);
 }
 
@@ -538,6 +782,18 @@ fn hosted_entrypoint(revision: &str) -> String {
     crate::s2::render_policy_entrypoint(&config)
 }
 
+fn hosted_policy_contract() -> VelnorPolicyContract {
+    VelnorPolicyContract {
+        repository: None,
+        providers: vec!["github-hosted".to_owned()],
+        automatic_providers: vec!["github-hosted".to_owned()],
+        selectors: BTreeMap::from([("github-hosted".to_owned(), vec!["ubuntu-24.04".to_owned()])]),
+        selector_groups: BTreeMap::new(),
+        require_local_runner_group: false,
+        default_branch: "main".to_owned(),
+    }
+}
+
 fn entrypoint_tree(name: &str, entrypoint: &str) -> PathBuf {
     let root = temporary_directory(name);
     write(&root.join(POLICY_ENTRYPOINT), entrypoint);
@@ -553,7 +809,7 @@ fn generated_entrypoint_satisfies_the_privilege_and_trigger_invariants() {
     let entrypoint = hosted_entrypoint(PIN_A);
     let root = entrypoint_tree("entrypoint-clean", &entrypoint);
     let audit = must(
-        audit_policy_entrypoint(&root, &VelnorPolicyContract::default()),
+        audit_policy_entrypoint(&root, &hosted_policy_contract()),
         "audit generated entrypoint",
     );
     assert!(audit.trigger.is_empty(), "{:?}", audit.trigger);
@@ -563,13 +819,14 @@ fn generated_entrypoint_satisfies_the_privilege_and_trigger_invariants() {
         "the trust invariant states the absence honestly: {entrypoint}"
     );
     assert!(!entrypoint.contains("secrets."), "{entrypoint}");
-    assert_eq!(
-        entrypoint.matches("permissions:\n").count(),
-        2,
-        "workflow and job level: {entrypoint}"
-    );
+    assert!(entrypoint.contains("permissions: {}\n"), "{entrypoint}");
+    assert_eq!(entrypoint.matches("permissions:\n").count(), 2, "{entrypoint}");
     assert_eq!(entrypoint.matches("contents: read\n").count(), 2);
-    assert!(entrypoint.contains("  workflow_dispatch:\n"));
+    assert!(entrypoint.contains("branches: [main]"), "{entrypoint}");
+    assert!(!entrypoint.contains("workflow_dispatch:"), "{entrypoint}");
+    assert!(entrypoint.contains("acquire-source:"), "{entrypoint}");
+    assert!(entrypoint.contains("render-candidate:"), "{entrypoint}");
+    assert!(entrypoint.contains("if: always()"), "{entrypoint}");
     assert!(entrypoint.contains("# Trust invariant:"), "{entrypoint}");
     let pin = entrypoint_pin(&root, PIN_A);
     assert!(pin.passed, "{}", pin.reason);
@@ -608,10 +865,8 @@ fn owner_entrypoint_pin_ignores_variable_references() {
         "rendered templates never use the space form a pre-product base validator scans for: {job}"
     );
     assert!(
-        job.contains(&format!(
-            "--candidate-manifest \"${{{VELNOR_WORKFLOW_CANDIDATE_MANIFEST_ENV}:-}}\""
-        )),
-        "the Enforce step binds the candidate manifest through the unset-safe fallback: {job}"
+        !job.contains("candidate-manifest") && !job.contains("VELNOR_WORKFLOW_CANDIDATE"),
+        "generic mainline policy does not consume PR-produced candidate binaries: {job}"
     );
     let root = entrypoint_tree("entrypoint-owner-pin", &job);
     let pin = entrypoint_pin(&root, PIN_A);
@@ -637,13 +892,13 @@ fn entrypoint_audit_names_each_escalation() {
             "write",
             "permissions:\n  contents: read\n\njobs:",
             "permissions:\n  contents: write\n\njobs:",
-            "workflow permissions must be exactly `contents: read`",
+            "workflow permissions must be `{}`",
         ),
         (
             "job-permissions",
             "    permissions:\n      contents: read\n",
             "    permissions:\n      contents: read\n      id-token: write\n",
-            "permissions must be exactly `contents: read`",
+            "permissions do not match its least-privilege contract",
         ),
         (
             "secret",
@@ -659,8 +914,8 @@ fn entrypoint_audit_names_each_escalation() {
         ),
         (
             "trigger",
-            "  workflow_dispatch:\n",
-            "  workflow_dispatch:\n  push:\n",
+            "  pull_request_target:\n",
+            "  push:\n  pull_request_target:\n",
             "trigger `push` is not admitted",
         ),
         (
@@ -675,7 +930,7 @@ fn entrypoint_audit_names_each_escalation() {
         let mutated = clean.replacen(from, to, 1);
         let root = entrypoint_tree(&format!("entrypoint-{name}"), &mutated);
         let audit = must(
-            audit_policy_entrypoint(&root, &VelnorPolicyContract::default()),
+            audit_policy_entrypoint(&root, &hosted_policy_contract()),
             "audit mutated entrypoint",
         );
         let findings = [audit.trigger, audit.privileges].concat();
@@ -710,16 +965,16 @@ fn velnor_entrypoint_is_gated_and_never_builds_the_pin() {
 // Semantic rules over a synthetic tree
 // ---------------------------------------------------------------------------
 
-/// The Velnor selector the synthetic trees declare: the labels are the
-/// tree's own routing, matched by set equality against `runs-on`.
+/// The local selector and runner group declared by synthetic trees.
 const VELNOR_SELECTOR: &str = "example-velnor";
+const VELNOR_GROUP: &str = "example-trusted";
 
 fn velnor_tree(name: &str, pr_workflow: &str) -> PathBuf {
     let root = temporary_directory(name);
     write(
         &root.join(GENERATION_CONFIG),
         &format!(
-            "schema = 2\n\n[generator]\nrepository = \"example/consumer\"\n\n[workflow]\nproviders = [\"github-hosted\", \"velnor\"]\nautomatic_providers = [\"github-hosted\", \"velnor\"]\ndefault_branch = \"main\"\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n[workflow.selectors.velnor]\nruns_on = [\"{VELNOR_SELECTOR}\"]\n"
+            "schema = 2\n\n[generator]\nrepository = \"example/consumer\"\n\n[workflow]\nproviders = [\"github-hosted\", \"velnor\"]\nautomatic_providers = [\"github-hosted\", \"velnor\"]\ndefault_branch = \"main\"\nrequire_local_runner_group = true\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n[workflow.selectors.velnor]\ngroup = \"{VELNOR_GROUP}\"\nruns_on = [\"{VELNOR_SELECTOR}\"]\n"
         ),
     );
     write(
@@ -731,120 +986,209 @@ fn velnor_tree(name: &str, pr_workflow: &str) -> PathBuf {
     root
 }
 
-/// A pull-request aggregate with a hosted required job and one Velnor job
-/// on the declared selector, carrying the generated provider admission: a
-/// provider-selecting dispatch on any ref or the automatic events, with the
-/// trusted-event conjunct.
-fn gated_trusted_job() -> String {
+#[test]
+fn policy_resolves_only_explicit_complete_provider_selectors() {
+    let root = temporary_directory("explicit-provider-selectors");
+    write(
+        &root.join(GENERATION_CONFIG),
+        "schema = 2\n\n[generator]\nrepository = \"example/consumer\"\n\n[workflow]\nproviders = [\"github-hosted\", \"github-self-hosted\", \"velnor\"]\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n[workflow.selectors.github-self-hosted]\nruns_on = [\"bastion-scale-set\"]\n\n[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"example-velnor\"]\n",
+    );
+    let policy = must(
+        configured_velnor_policy(&root),
+        "load explicit provider policy",
+    );
+    assert_eq!(
+        policy.provider_for_labels(&["BASTION-SCALE-SET"]),
+        Some("github-self-hosted")
+    );
+    assert_eq!(
+        policy.provider_for_labels(&["SELF-HOSTED", "EXAMPLE-VELNOR"]),
+        Some("velnor")
+    );
+    let _ = fs::remove_dir_all(&root);
+
+    let missing = temporary_directory("missing-provider-selector");
+    write(
+        &missing.join(GENERATION_CONFIG),
+        "schema = 2\n\n[generator]\nrepository = \"example/consumer\"\n\n[workflow]\nproviders = [\"github-hosted\"]\n",
+    );
+    let error = must_fail(
+        configured_velnor_policy(&missing),
+        "missing declared selector must fail policy resolution",
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("requires [workflow.selectors.github-hosted]"),
+        "{error}"
+    );
+    let _ = fs::remove_dir_all(&missing);
+
+    let extra = temporary_directory("extra-provider-selector");
+    write(
+        &extra.join(GENERATION_CONFIG),
+        "schema = 2\n\n[generator]\nrepository = \"example/consumer\"\n\n[workflow]\nproviders = [\"github-hosted\"]\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n[workflow.selectors.velnor]\nruns_on = [\"example-velnor\"]\n",
+    );
+    let error = must_fail(
+        configured_velnor_policy(&extra),
+        "selector outside the provider universe must fail policy resolution",
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("selector for `velnor` outside the configured provider universe"),
+        "{error}"
+    );
+    let _ = fs::remove_dir_all(&extra);
+}
+
+#[test]
+fn policy_rejects_case_insensitive_selector_collisions() {
+    let cases = [
+        (
+            "hosted-local-label-collision",
+            "[workflow]\nproviders = [\"github-hosted\", \"github-self-hosted\"]\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n[workflow.selectors.github-self-hosted]\nruns_on = [\"UBUNTU-24.04\"]\n",
+            "case-insensitive",
+        ),
+        (
+            "local-label-collision",
+            "[workflow]\nproviders = [\"github-self-hosted\", \"velnor\"]\n\n[workflow.selectors.github-self-hosted]\nruns_on = [\"Bastion-Scale-Set\"]\n\n[workflow.selectors.velnor]\nruns_on = [\"bASTION-sCALE-sET\"]\n",
+            "ignoring case",
+        ),
+        (
+            "duplicate-label",
+            "[workflow]\nproviders = [\"github-hosted\"]\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\", \"UBUNTU-24.04\"]\n",
+            "GitHub runner labels are case-insensitive",
+        ),
+        (
+            "hosted-self-hosted-label",
+            "[workflow]\nproviders = [\"github-hosted\"]\n\n[workflow.selectors.github-hosted]\nruns_on = [\"SELF-HOSTED\"]\n",
+            "hosted selector cannot name self-hosted runners",
+        ),
+    ];
+
+    for (name, workflow, expected) in cases {
+        let root = temporary_directory(name);
+        write(
+            &root.join(GENERATION_CONFIG),
+            &format!(
+                "schema = 2\n\n[generator]\nrepository = \"example/consumer\"\n\n{workflow}"
+            ),
+        );
+        let error = must_fail(
+            configured_velnor_policy(&root),
+            "case-insensitive selector collision must fail policy validation",
+        );
+        assert!(
+            error.to_string().contains(expected),
+            "{name}: expected {expected:?}, got {error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+/// PR-controlled workflows contain hosted work only. The required aggregate
+/// itself must always evaluate so a skipped unit cannot produce success.
+fn hosted_pull_request_workflow() -> String {
+    "name: CI / PR\non:\n  pull_request:\njobs:\n  ci-required:\n    name: ci-required\n    if: ${{ always() }}\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo ok\n"
+        .to_owned()
+}
+
+fn local_reusable_workflow(if_expression: &str) -> String {
     format!(
-        "name: CI / PR\non:\n  pull_request:\njobs:\n  ci-required:\n    name: ci-required\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo ok\n  velnor-docker:\n    name: Docker\n    if: ${{{{ ((github.event_name == 'workflow_dispatch' && contains(format(',{{0}},', github.event.inputs.providers), ',velnor,')) || (github.event_name != 'workflow_dispatch')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))) }}}}\n    runs-on: [{VELNOR_SELECTOR}]\n    steps:\n      - run: echo trusted\n"
+        "name: Local unit\non:\n  workflow_call:\njobs:\n  run:\n    if: {if_expression}\n    runs-on:\n      group: {VELNOR_GROUP}\n      labels: [{VELNOR_SELECTOR}]\n    steps:\n      - run: echo trusted\n"
     )
 }
 
-/// The semantic rules pass on a tree whose trusted Velnor job carries the
-/// default-branch trusted-event gate, and fail — naming the job — when the
-/// gate is removed. This is the ungated synthetic tree the design demands.
-#[test]
-fn ungated_trusted_velnor_job_fails_the_trusted_runners_rule() {
-    let gated_job = gated_trusted_job();
-    let gated = velnor_tree("semantic-gated", &gated_job);
-    let audit = must(audit_workflows(&gated), "audit gated tree");
-    assert!(audit.runners.is_empty(), "{:?}", audit.runners);
-    assert!(
-        audit.pull_request_target.is_empty(),
-        "{:?}",
-        audit.pull_request_target
-    );
-    let _ = fs::remove_dir_all(gated);
-
-    let ungated_workflow = gated_job
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("if: "))
-        .fold(String::new(), |mut workflow, line| {
-            workflow.push_str(line);
-            workflow.push('\n');
-            workflow
-        });
-    let ungated = velnor_tree("semantic-ungated", &ungated_workflow);
-    let options = PolicyOptions {
-        root: ungated.clone(),
-        head_sha: None,
-        base_sha: None,
-        base_revision: PIN_A.to_owned(),
-        ruleset_contexts: Some(vec!["ci-required".to_owned(), "DCO".to_owned()]),
-        build_pin: false,
-        candidate_manifest: None,
-    };
-    let report = must(evaluate(&options), "evaluate ungated tree");
-    let runners = must_some(report.rule("trusted-runners"), "trusted-runners rule");
-    assert!(!runners.passed);
-    assert!(
-        runners.details.iter().any(|detail| {
-            detail.contains("velnor-docker")
-                && detail.contains("local-provider jobs require a trusted-event gate")
-        }),
-        "{:?}",
-        runners.details
-    );
-    let rendered = report.render();
-    assert!(rendered.contains("FAIL trusted-runners"), "{rendered}");
-    let required = must_some(report.rule("required-checks"), "required-checks rule");
-    assert!(!required.passed, "{}", required.reason);
-    assert!(
-        required
-            .details
-            .iter()
-            .any(|detail| detail.contains("ruleset requires `DCO`")),
-        "the live ruleset context DCO is undeclared: {:?}",
-        required.details
-    );
-    assert!(
-        required.details.iter().any(|detail| {
-            detail.contains("does not require the policy entrypoint context `Policy`")
-        }),
-        "the ruleset must require the entrypoint's own job: {:?}",
-        required.details
-    );
-    assert!(
-        rendered.contains("PASS pull-request-target"),
-        "the entrypoint is the only pull_request_target workflow: {rendered}"
-    );
-    assert!(!report.passed());
-    let _ = fs::remove_dir_all(ungated);
+fn trusted_local_gate() -> String {
+    "${{ ((false) || (github.repository == 'example/consumer' && github.event_name == 'push' && github.ref == 'refs/heads/main')) && (!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))) }}"
+        .to_owned()
 }
 
-/// The generated provider gate admits a provider-selecting dispatch on any
-/// ref — dispatch authorship is write-authorized — or the automatic events,
-/// with the trusted-event conjunct. A dispatch selecting another provider is
-/// not this provider's gate.
+fn local_main_caller() -> String {
+    "name: CI / Main\non:\n  push:\n    branches: [main]\njobs:\n  rust:\n    uses: ./.github/workflows/ci-unit-rust-velnor.yml\n"
+        .to_owned()
+}
+
+/// Local runners require a base-configured label/group, exact repository
+/// identity, and a default-branch push caller. PR workflows cannot call the
+/// local reusable workflow even if its job carries an `if:` gate.
 #[test]
-fn provider_gate_admits_dispatch_on_any_ref() {
+fn local_runner_reusable_graph_is_repo_and_default_push_bound() {
+    let root = velnor_tree("semantic-local-runner", &hosted_pull_request_workflow());
+    let local_file = root.join(".github/workflows/ci-unit-rust-velnor.yml");
+    write(&local_file, &local_reusable_workflow(&trusted_local_gate()));
+    write(&root.join(".github/workflows/ci-main.yml"), &local_main_caller());
+
+    let audit = must(audit_workflows(&root), "audit trusted local caller");
+    assert!(audit.runners.is_empty(), "{:?}", audit.runners);
+    assert!(audit.structure.is_empty(), "{:?}", audit.structure);
+
+    let wrong_repository = local_reusable_workflow(
+        &trusted_local_gate().replace(
+            "github.repository == 'example/consumer' && ",
+            "",
+        ),
+    );
+    write(&local_file, &wrong_repository);
+    let audit = must(audit_workflows(&root), "audit local caller without identity");
+    assert!(
+        audit.runners.iter().any(|finding| {
+            finding.contains("ci-unit-rust-velnor.yml")
+                && finding.contains("local-provider jobs require a trusted-event gate")
+        }),
+        "repository identity omission must fail: {:?}",
+        audit.runners
+    );
+
+    write(&local_file, &local_reusable_workflow(&trusted_local_gate()));
+    write(
+        &root.join(".github/workflows/ci-main.yml"),
+        &local_main_caller().replace("push:\n    branches: [main]", "pull_request:"),
+    );
+    let audit = must(audit_workflows(&root), "audit PR-rooted local caller");
+    assert!(
+        audit.runners.iter().any(|finding| {
+            finding.contains("ci-main.yml")
+                && finding.contains("push to the trusted default branch")
+        }),
+        "PR-rooted caller must fail even with a job gate: {:?}",
+        audit.runners
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn provider_gate_binds_repository_and_denies_unbrokered_dispatch() {
+    let tree = velnor_tree("provider-gate-identity", &hosted_pull_request_workflow());
+    let policy = must(configured_velnor_policy(&tree), "load provider policy");
     let trusted = "(!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot')))";
-    for automatic in ["(github.event_name != 'workflow_dispatch')", "(false)"] {
-        let gate = format!(
-            "${{{{ ((github.event_name == 'workflow_dispatch' && contains(format(',{{0}},', github.event.inputs.providers), ',velnor,')) || {automatic}) && {trusted} }}}}",
-        );
-        assert!(
-            is_generated_provider_gate(&gate, "velnor"),
-            "provider gate admitted: {gate}"
-        );
-        assert!(
-            !is_generated_provider_gate(&gate, "github-hosted"),
-            "a dispatch selecting Velnor is not the hosted gate: {gate}"
-        );
-    }
-    let github_only = format!(
-        "${{{{ ((github.event_name == 'workflow_dispatch' && contains(format(',{{0}},', github.event.inputs.providers), ',github-hosted,')) || (github.event_name != 'workflow_dispatch')) && {trusted} }}}}",
+    let gate = format!(
+        "${{{{ ((false) || (github.repository == 'example/consumer' && github.event_name == 'push' && github.ref == 'refs/heads/main')) && {trusted} }}}}"
+    );
+    assert!(is_generated_provider_gate(&gate, "velnor", &policy), "{gate}");
+    assert!(
+        !has_trusted_runner_gate(
+            "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+            "main",
+            Some("example/consumer"),
+        ),
+        "a branch/ref check without repository identity is insufficient"
     );
     assert!(
-        !is_generated_provider_gate(&github_only, "velnor"),
-        "a dispatch selecting only the hosted provider is not a Velnor gate",
+        !is_generated_provider_gate(
+            &gate.replace("github.repository == 'example/consumer' && ", ""),
+            "velnor",
+            &policy,
+        ),
+        "a local gate without repository identity must fail"
     );
+    let _ = fs::remove_dir_all(tree);
 }
 
 #[test]
 fn a_second_pull_request_target_workflow_is_refused() {
-    let root = velnor_tree("semantic-prt", &gated_trusted_job());
+    let root = velnor_tree("semantic-prt", &hosted_pull_request_workflow());
     write(
         &root.join(".github/workflows/rogue.yml"),
         "name: Rogue\non:\n  pull_request_target:\njobs:\n  run:\n    runs-on: ubuntu-24.04\n    steps:\n      - run: echo rogue\n",
@@ -866,7 +1210,7 @@ fn a_second_pull_request_target_workflow_is_refused() {
 /// `steps`. A workflow using only those passes `workflow-structure`.
 #[test]
 fn job_level_env_with_allowed_contexts_passes() {
-    let root = velnor_tree("semantic-job-env-allowed", &gated_trusted_job());
+    let root = velnor_tree("semantic-job-env-allowed", &hosted_pull_request_workflow());
     write(
         &root.join(".github/workflows/allowed.yml"),
         "name: Allowed\non: push\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    strategy:\n      matrix:\n        target: [a, b]\n    env:\n      TARGET: ${{ matrix.target }}\n      PARALLEL: ${{ strategy.job-index }}\n      VERSION: ${{ needs.identity.outputs.version }}\n      REPO: ${{ github.repository }}\n      SECRET: ${{ secrets.MY_SECRET }}\n      CONFIG: ${{ vars.MY_VAR }}\n      INPUT: ${{ inputs.my_input }}\n      SELECTOR: ${{ github.event.inputs.providers }}\n    steps:\n      - id: first\n        run: echo ok\n      - run: echo ok\n        env:\n          TMP: ${{ runner.temp }}\n          PREV: ${{ steps.first.outputs.value }}\n",
@@ -882,7 +1226,7 @@ fn job_level_env_with_allowed_contexts_passes() {
 /// expression.
 #[test]
 fn job_level_env_with_runner_context_fails() {
-    let root = velnor_tree("semantic-job-env-runner", &gated_trusted_job());
+    let root = velnor_tree("semantic-job-env-runner", &hosted_pull_request_workflow());
     write(
         &root.join(".github/workflows/bad-runner.yml"),
         "name: Bad\non: push\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    env:\n      CARGO_HOME: ${{ runner.temp }}/velnor-producer-cargo-home\n      INDEXED: ${{ runner['temp'] }}/x\n    steps:\n      - run: echo ok\n",
@@ -908,7 +1252,7 @@ fn job_level_env_with_runner_context_fails() {
 /// The `steps` context is available only from steps, never in job-level `env:`.
 #[test]
 fn job_level_env_with_steps_context_fails() {
-    let root = velnor_tree("semantic-job-env-steps", &gated_trusted_job());
+    let root = velnor_tree("semantic-job-env-steps", &hosted_pull_request_workflow());
     write(
         &root.join(".github/workflows/bad-steps.yml"),
         "name: Bad\non: push\njobs:\n  build:\n    runs-on: ubuntu-24.04\n    env:\n      PREV: ${{ steps.first.outputs.value }}\n    steps:\n      - id: first\n        run: echo ok\n",
@@ -957,46 +1301,21 @@ fn cli_requires_the_base_validator_revision() {
     )
     .to_string();
     assert!(unknown.contains("--approved-policy-revision"), "{unknown}");
-    let duplicate = must_fail(
+    let legacy = must_fail(
         run_cli(&[
             std::ffi::OsString::from("--candidate-manifest"),
             std::ffi::OsString::from("/first.json"),
-            std::ffi::OsString::from("--candidate-manifest"),
-            std::ffi::OsString::from("/second.json"),
         ]),
-        "candidate manifest given twice",
+        "retired candidate-binary manifest option",
     )
     .to_string();
-    assert!(duplicate.contains("--candidate-manifest"), "{duplicate}");
-    assert!(duplicate.contains("given twice"), "{duplicate}");
+    assert!(legacy.contains("--candidate-manifest"), "{legacy}");
+    assert!(legacy.contains("unsupported policy option"), "{legacy}");
     let _ = fs::remove_dir_all(root);
 }
 
 // ---------------------------------------------------------------------------
-// Candidate render exception
-// ---------------------------------------------------------------------------
-
-#[cfg(unix)]
-fn fake_candidate_renderer(directory: &Path, closure: &str) -> PathBuf {
-    let binary = directory.join("candidate");
-    must(
-        fs::write(
-            &binary,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = --closure ]; then echo {closure}; exit 0; fi\ncp -r \"$1/.\" \"$3/\"\n"
-            ),
-        ),
-        "write fake candidate renderer",
-    );
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        must(
-            fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
-            "mark fake candidate renderer executable",
-        );
-    }
-    binary
-}
+// Candidate render artifacts
 
 #[cfg(unix)]
 fn closure_fixture(name: &str) -> (PathBuf, String) {
@@ -1007,345 +1326,647 @@ fn closure_fixture(name: &str) -> (PathBuf, String) {
         "pub fn f() {}\n",
     );
     write(&root.join("Cargo.toml"), "[workspace]\n");
-    write(&root.join("Cargo.lock"), "# lock\n");
+    write(&root.join("Cargo.lock"), "version = 4\n");
     write(&root.join(".github/workflows/ci-pr.yml"), "tree\n");
     let head = commit(&root, "fixture");
     (root, head)
 }
 
-// NOTE: `candidate_render_is_accepted_only_from_a_head_authentic_binary` was
-// deleted here. It asserted that an env-slot binary is accepted when its
-// `--closure` stdout echoes the wanted closure — but that expectation WAS
-// the vulnerability itself: a `--closure` echo is a self-report by
-// untrusted bytes, and treating it as authenticity let any binary that
-// prints the right string execute as the candidate. Acceptance now
-// requires the manifest binding (closure equality plus digest match before
-// any execution); the tests below pin each clause of that rule.
-
-/// A candidate manifest binding `binary` to `closure`: the digest is the
-/// real SHA-256 of the binary bytes, so only a byte-identical binary
-/// satisfies the binding.
-#[cfg(unix)]
-fn candidate_manifest_for(
-    directory: &Path,
-    name: &str,
-    binary: &Path,
-    closure: &str,
-    revision: &str,
-) -> PathBuf {
-    use sha2::Digest as _;
-    let bytes = must(fs::read(binary), "read fake binary bytes");
-    let mut digest = String::with_capacity(64);
-    for byte in sha2::Sha256::digest(&bytes) {
-        let _ = std::fmt::Write::write_fmt(&mut digest, format_args!("{byte:02x}"));
-    }
-    let manifest = directory.join(name);
-    must(
-        fs::write(
-            &manifest,
-            serde_json::json!({
-                "profile": "debug",
-                "platform": "Linux-X64",
-                "repository": crate::s2::workflow_setup_action_repository(),
-                "run_id": "123",
-                "revision": revision,
-                "closure": closure,
-                "binary_sha256": digest,
-            })
-            .to_string(),
+#[test]
+fn cargo_vendor_admission_allows_only_external_packages_present_in_the_trusted_lock() {
+    const REGISTRY: &str = "registry+https://github.com/rust-lang/crates.io-index";
+    const TRUSTED_GIT: &str = "git+https://github.com/tailrocks/termrock.git?rev=5283c2acf9154d0cfcd37b1ffe821c00faf90ea2#5283c2acf9154d0cfcd37b1ffe821c00faf90ea2";
+    let root = temporary_directory("cargo-source-admission");
+    let trusted = root.join("trusted");
+    let candidate = root.join("candidate");
+    must(fs::create_dir_all(&trusted), "create trusted source root");
+    must(fs::create_dir_all(&candidate), "create candidate source root");
+    write(&trusted.join("Cargo.toml"), "[workspace]\nmembers = []\n");
+    write(&candidate.join("Cargo.toml"), "[workspace]\nmembers = []\n");
+    write(
+        &trusted.join("Cargo.lock"),
+        &format!(
+            "version = 4\n\n[[package]]\nname = \"trusted-registry\"\nversion = \"1.0.0\"\nsource = \"{REGISTRY}\"\n\n[[package]]\nname = \"termrock\"\nversion = \"0.1.0\"\nsource = \"{TRUSTED_GIT}\"\n"
         ),
-        "write candidate manifest",
     );
-    manifest
-}
-
-/// A fake candidate renderer that records every `--closure` probe in
-/// `sentinel`, so tests can prove the binary was never executed at all.
-#[cfg(unix)]
-fn fake_probed_candidate_renderer(directory: &Path, closure: &str, sentinel: &Path) -> PathBuf {
-    let binary = directory.join("candidate");
-    must(
-        fs::write(
-            &binary,
-            format!(
-                "#!/bin/sh\nif [ \"$1\" = --closure ]; then touch \"{}\"; echo {closure}; exit 0; fi\ncp -r \"$1/.\" \"$3/\"\n",
-                sentinel.display()
-            ),
+    write(
+        &candidate.join("Cargo.lock"),
+        &format!(
+            "version = 4\n\n[[package]]\nname = \"trusted-registry\"\nversion = \"1.0.0\"\nsource = \"{REGISTRY}\"\n\n[[package]]\nname = \"termrock\"\nversion = \"0.1.0\"\nsource = \"{TRUSTED_GIT}\"\n"
         ),
-        "write fake probed candidate renderer",
     );
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        must(
-            fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)),
-            "mark fake probed candidate renderer executable",
-        );
-    }
-    binary
-}
+    // Cargo configuration inside the candidate is not read by the base
+    // acquisition job. Exact external package identities in the trusted lock
+    // authorize what may be fetched.
+    write(
+        &candidate.join(".cargo/config.toml"),
+        "[registries.untrusted]\nindex = \"sparse+http://127.0.0.1:9/sentinel/\"\n",
+    );
+    must(
+        validate_candidate_cargo_sources(&candidate, &trusted),
+        "allow exact crates.io and Git package identities already in the trusted lock",
+    );
 
-#[cfg(unix)]
-#[test]
-fn bound_candidate_matching_head_tree_is_accepted() {
-    let (root, head) = closure_fixture("candidate-bound");
-    let wanted = must(
-        crate::s2::closure::candidate_closure_of_tree(&root, &head),
-        "candidate closure of the fixture",
+    write(
+        &candidate.join("Cargo.lock"),
+        "version = 4\n\n[[package]]\nname = \"sentinel\"\nversion = \"1.0.0\"\nsource = \"registry+http://127.0.0.1:9/sentinel\"\n",
     );
-    let scratch = temporary_directory("candidate-bound-scratch");
-    let binary = fake_candidate_renderer(&root, &wanted);
-    let manifest =
-        candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, &head);
-    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    let excludes = std::collections::BTreeSet::new();
-    assert_eq!(
-        must(
-            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
-            "bound candidate reproduces the tree",
-        )
-        .as_deref(),
-        Some(wanted.as_str())
-    );
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(scratch);
-}
-
-#[cfg(unix)]
-#[test]
-fn lying_binary_whose_digest_misses_the_manifest_is_rejected() {
-    let (root, head) = closure_fixture("candidate-lying");
-    let wanted = must(
-        crate::s2::closure::candidate_closure_of_tree(&root, &head),
-        "candidate closure of the fixture",
-    );
-    let scratch = temporary_directory("candidate-lying-scratch");
-    let sentinel = root.join("closure-probed");
-    let binary = fake_probed_candidate_renderer(&root, &wanted, &sentinel);
-    // Bind the manifest to *other* bytes, so the binary echoes the wanted
-    // closure but its digest misses.
-    let other = root.join("other-bytes");
-    must(fs::write(&other, "different bytes"), "write decoy bytes");
-    let manifest = candidate_manifest_for(&root, "candidate-manifest.json", &other, &wanted, &head);
-    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    let excludes = std::collections::BTreeSet::new();
-    assert!(
-        must(
-            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
-            "digest mismatch never errors, it simply does not prove",
-        )
-        .is_none(),
-        "a binary whose digest misses the manifest is not the candidate"
-    );
-    assert!(
-        !sentinel.exists(),
-        "the digest gate fires before any execution, not even `--closure`"
-    );
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(scratch);
-}
-
-#[cfg(unix)]
-#[test]
-fn candidate_manifest_for_another_tree_is_rejected() {
-    let (root, head) = closure_fixture("candidate-other-tree");
-    let wanted = must(
-        crate::s2::closure::candidate_closure_of_tree(&root, &head),
-        "candidate closure of the fixture",
-    );
-    let scratch = temporary_directory("candidate-other-tree-scratch");
-    // Self-consistent but for another tree: the binary echoes CLOSURE_A and
-    // the manifest binds CLOSURE_A with a matching digest.
-    let binary = fake_candidate_renderer(&root, CLOSURE_A);
-    let manifest =
-        candidate_manifest_for(&root, "candidate-manifest.json", &binary, CLOSURE_A, &head);
-    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    let excludes = std::collections::BTreeSet::new();
     let error = must_fail(
-        render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
-        "manifest for another tree",
+        validate_candidate_cargo_sources(&candidate, &trusted),
+        "reject a candidate-selected registry before Cargo network access",
     )
     .to_string();
-    assert!(error.contains("names closure"), "{error}");
-    assert!(error.contains(CLOSURE_A), "{error}");
-    assert!(error.contains(&wanted), "{error}");
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(scratch);
+    assert!(error.contains("adds or changes external package"), "{error}");
+    assert!(error.contains("127.0.0.1:9"), "{error}");
+
+    write(
+        &candidate.join("Cargo.lock"),
+        &format!(
+            "version = 4\n\n[[package]]\nname = \"trusted-registry\"\nversion = \"9.9.9\"\nsource = \"{REGISTRY}\"\n"
+        ),
+    );
+    let error = must_fail(
+        validate_candidate_cargo_sources(&candidate, &trusted),
+        "reject a candidate-selected crates.io version absent from the trusted lock",
+    )
+    .to_string();
+    assert!(error.contains("trusted-registry 9.9.9"), "{error}");
+    must(fs::remove_dir_all(root), "remove cargo source fixture");
+}
+
+#[test]
+fn cargo_vendor_admission_rejects_local_paths_outside_the_snapshot() {
+    let root = temporary_directory("cargo-path-admission");
+    let trusted = root.join("trusted");
+    let candidate = root.join("candidate");
+    must(fs::create_dir_all(&trusted), "create trusted path root");
+    must(fs::create_dir_all(candidate.join("crates/member")), "create candidate member");
+    must(fs::create_dir_all(root.join("outside")), "create outside dependency");
+    write(&trusted.join("Cargo.toml"), "[workspace]\nmembers = []\n");
+    write(&trusted.join("Cargo.lock"), "version = 4\n");
+    write(
+        &candidate.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"crates/*\"]\n",
+    );
+    write(&candidate.join("Cargo.lock"), "version = 4\n");
+    write(
+        &candidate.join("crates/member/Cargo.toml"),
+        "[package]\nname = \"member\"\nversion = \"0.1.0\"\n\n[dependencies]\noutside = { path = \"../../../outside\" }\n",
+    );
+    write(&root.join("outside/Cargo.toml"), "[package]\nname = \"outside\"\nversion = \"0.1.0\"\n");
+    let error = must_fail(
+        validate_candidate_cargo_sources(&candidate, &trusted),
+        "reject a path dependency outside the materialized snapshot",
+    )
+    .to_string();
+    assert!(error.contains("resolves outside the source tree"), "{error}");
+    must(fs::remove_dir_all(root), "remove cargo path fixture");
+}
+
+#[test]
+fn sealed_vendor_config_is_rebased_and_routes_every_source_offline() {
+    let root = temporary_directory("vendor-config-rebase");
+    let registry = root.join("vendor/registry");
+    must(fs::create_dir_all(&registry), "create vendor registry");
+    let raw = format!(
+        "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.\"git+https://example.invalid/repo?rev=abc#abc\"]\ngit = \"https://example.invalid/repo\"\nrev = \"abc\"\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = {:?}\n",
+        registry.to_string_lossy()
+    );
+    let rewritten = must(rewrite_vendor_config(&raw, &registry), "rebase vendor config");
+    assert!(rewritten.contains("directory = \"/vendor/registry\""), "{rewritten}");
+    assert!(!rewritten.contains(&root.to_string_lossy().to_string()), "{rewritten}");
+    must(
+        validate_sealed_vendor_config(&rewritten),
+        "validate offline vendor config",
+    );
+    let bypass = "[source.vendored-sources]\ndirectory = \"/vendor/registry\"\n\n[source.untrusted]\nregistry = \"https://example.invalid\"\n";
+    let error = must_fail(
+        validate_sealed_vendor_config(bypass),
+        "reject unvendored Cargo source",
+    )
+    .to_string();
+    assert!(error.contains("bypasses vendored-sources"), "{error}");
+    must(fs::remove_dir_all(root), "remove vendor config fixture");
 }
 
 #[cfg(unix)]
-#[test]
-fn unbound_env_candidate_is_rejected_without_manifest() {
-    let (root, head) = closure_fixture("candidate-unbound");
-    let wanted = must(
-        crate::s2::closure::candidate_closure_of_tree(&root, &head),
-        "candidate closure of the fixture",
-    );
-    let scratch = temporary_directory("candidate-unbound-scratch");
-    let sentinel = root.join("closure-probed");
-    let binary = fake_probed_candidate_renderer(&root, &wanted, &sentinel);
-    let lookup = lookup(Some(binary), None, root.join("install"));
-    let excludes = std::collections::BTreeSet::new();
-    assert!(
-        must(
-            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
-            "missing manifest never errors, it disables the env slot",
-        )
-        .is_none(),
-        "an env-slot binary without a manifest is never the candidate"
-    );
-    assert!(
-        !sentinel.exists(),
-        "an unbound env-slot binary is skipped, never executed"
-    );
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(scratch);
-}
-
-#[cfg(unix)]
-#[test]
-fn malformed_candidate_manifest_is_rejected() {
-    let (root, head) = closure_fixture("candidate-malformed");
-    let wanted = must(
-        crate::s2::closure::candidate_closure_of_tree(&root, &head),
-        "candidate closure of the fixture",
-    );
-    let scratch = temporary_directory("candidate-malformed-scratch");
-    let binary = fake_candidate_renderer(&root, &wanted);
-    let digest = {
-        use sha2::Digest as _;
-        let bytes = must(fs::read(&binary), "read fake binary bytes");
-        let mut digest = String::with_capacity(64);
-        for byte in sha2::Sha256::digest(&bytes) {
-            let _ = std::fmt::Write::write_fmt(&mut digest, format_args!("{byte:02x}"));
+fn remove_snapshot_for_test(path: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            must(
+                fs::set_permissions(path, fs::Permissions::from_mode(0o700)),
+                "make snapshot directory removable",
+            );
+            for entry in must(fs::read_dir(path), "read snapshot for cleanup") {
+                let entry = must(entry, "read snapshot cleanup entry");
+                let child = entry.path();
+                if must(fs::symlink_metadata(&child), "inspect snapshot cleanup entry")
+                    .is_dir()
+                {
+                    remove_snapshot_for_test(&child);
+                } else if !must(
+                    fs::symlink_metadata(&child),
+                    "inspect snapshot cleanup file",
+                )
+                .file_type()
+                .is_symlink()
+                {
+                    must(
+                        fs::set_permissions(&child, fs::Permissions::from_mode(0o600)),
+                        "make snapshot file removable",
+                    );
+                }
+            }
         }
-        digest
+    }
+    must(fs::remove_dir_all(path), "remove candidate snapshot");
+}
+
+#[cfg(unix)]
+fn candidate_source_artifact_fixture(root: &Path, head: &str) -> PathBuf {
+    let closure = must(
+        closure_identity::candidate_closure_of_tree(root, head),
+        "compute candidate source closure",
+    );
+    let artifact = root.with_extension("candidate-source-artifact");
+    must(fs::create_dir(&artifact), "create candidate source artifact");
+    let pack = artifact.join("candidate-source.pack");
+    must(
+        create_candidate_source_pack(root, head, &pack),
+        "pack candidate source objects",
+    );
+    let policy_tool = artifact.join("policy-tool");
+    write(&policy_tool, "trusted base policy tool fixture\n");
+    let vendor_root = artifact.join("vendor");
+    must(
+        fs::create_dir_all(vendor_root.join("registry")),
+        "create empty vendored registry",
+    );
+    write(
+        &vendor_root.join("config.toml"),
+        "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"/vendor/registry\"\n",
+    );
+    let repository = crate::s2::workflow_setup_action_repository();
+    let tree = git_ok(root, &["rev-parse", &format!("{head}^{{tree}}")]);
+    let policy_tool_closure = must(
+        closure_identity::closure_of_tree(
+            root,
+            head,
+            closure_identity::CI_FEATURES,
+            closure_identity::PROFILE_RELEASE,
+        ),
+        "compute trusted policy tool closure",
+    );
+    let manifest = CandidateSourceManifest {
+        schema: "velnor.candidate-source/v2".to_owned(),
+        repository: repository.to_owned(),
+        source_repository: repository.to_owned(),
+        run_id: "123".to_owned(),
+        revision: head.to_owned(),
+        base_revision: head.to_owned(),
+        tree,
+        closure,
+        pack_sha256: must(sha256_file(&pack), "hash candidate source pack"),
+        vendor_sha256: Some(must(render_tree_digest(&vendor_root), "hash empty fixture vendor")),
+        policy_tool_revision: head.to_owned(),
+        policy_tool_closure,
+        policy_tool_sha256: must(sha256_file(&policy_tool), "hash trusted policy tool"),
     };
-    let cases = [
-        ("truncated".to_owned(), "{not json".to_owned()),
-        (
-            "short-revision".to_owned(),
-            serde_json::json!({"revision": "abc", "closure": wanted, "binary_sha256": digest})
-                .to_string(),
+    must(
+        write_json_create_new(&artifact.join("candidate-source-manifest.json"), &manifest),
+        "write candidate source manifest",
+    );
+    artifact
+}
+
+#[cfg(unix)]
+fn candidate_artifact_fixture(root: &Path, head: &str) -> (PathBuf, PathBuf, String) {
+    let source_artifact = candidate_source_artifact_fixture(root, head);
+    let source_manifest_path = source_artifact.join("candidate-source-manifest.json");
+    let source_manifest_bytes = must(
+        fs::read(&source_manifest_path),
+        "read candidate source manifest",
+    );
+    let source_manifest: CandidateSourceManifest = must(
+        serde_json::from_slice(&source_manifest_bytes),
+        "parse candidate source manifest",
+    );
+    let artifact = root.with_extension("candidate-render-artifact");
+    must(fs::create_dir(&artifact), "create candidate render artifact");
+    let rendered = artifact.join("rendered");
+    write(
+        &rendered.join(".github/workflows/ci-pr.yml"),
+        "tree\n",
+    );
+    let render_manifest = CandidateRenderManifest {
+        schema: "velnor.candidate-render/v2".to_owned(),
+        repository: source_manifest.repository,
+        source_repository: source_manifest.source_repository,
+        run_id: source_manifest.run_id,
+        platform: "Linux-X64".to_owned(),
+        revision: source_manifest.revision,
+        base_revision: source_manifest.base_revision,
+        tree: source_manifest.tree,
+        closure: source_manifest.closure.clone(),
+        source_pack_sha256: source_manifest.pack_sha256,
+        vendor_sha256: must(
+            source_manifest
+                .vendor_sha256
+                .clone()
+                .ok_or("fixture has no vendor digest"),
+            "read fixture vendor digest",
         ),
-        (
-            "short-closure".to_owned(),
-            serde_json::json!({"revision": head, "closure": "abc", "binary_sha256": digest})
-                .to_string(),
+        builder_image: CANDIDATE_BUILDER_IMAGE.to_owned(),
+        render_sha256: must(render_tree_digest(&rendered), "digest candidate render"),
+    };
+    must(
+        write_json_create_new(&artifact.join("candidate-render-manifest.json"), &render_manifest),
+        "seal candidate render artifact",
+    );
+    (source_artifact, artifact, source_manifest.closure)
+}
+
+#[cfg(unix)]
+#[test]
+fn raw_snapshot_preserves_export_attributes_without_archive_transforms() {
+    let parent = temporary_directory("raw-snapshot-parent");
+    let checkout = parent.join("checkout");
+    must(fs::create_dir(&checkout), "create checkout");
+    git_ok(&checkout, &["init", "-q", "-b", "main"]);
+    write(
+        &checkout.join(".gitattributes"),
+        "ignored.txt export-ignore\nexpanded.txt export-subst\n",
+    );
+    write(&checkout.join("ignored.txt"), "must remain in raw tree\n");
+    write(&checkout.join("expanded.txt"), "$Format:%H$\n");
+    let head = commit(&checkout, "raw snapshot source");
+    let snapshot = parent.join("snapshot");
+
+    must(
+        materialize_git_snapshot(&checkout, &head, &snapshot),
+        "materialize raw tree",
+    );
+
+    assert_eq!(
+        must(fs::read(snapshot.join("ignored.txt")), "read export-ignore file"),
+        b"must remain in raw tree\n",
+        "raw ls-tree/cat-file materialization must ignore archive export rules",
+    );
+    assert_eq!(
+        must(fs::read(snapshot.join("expanded.txt")), "read export-subst file"),
+        b"$Format:%H$\n",
+        "raw blob bytes must not receive export-subst rewriting",
+    );
+    remove_snapshot_for_test(&snapshot);
+    must(fs::remove_dir_all(parent), "remove raw snapshot fixture");
+}
+
+#[test]
+fn source_pack_contains_unchanged_objects_and_empty_tree_delta_commits() {
+    let parent = temporary_directory("source-pack-closure");
+    let checkout = parent.join("checkout");
+    must(fs::create_dir(&checkout), "create source checkout");
+    git_ok(&checkout, &["init", "-q", "-b", "main"]);
+    write(&checkout.join("unchanged.txt"), "present in every tree\n");
+    write(&checkout.join("changed.txt"), "before\n");
+    let base = commit(&checkout, "base tree");
+    let base_tree = git_ok(&checkout, &["rev-parse", &format!("{base}^{{tree}}")]);
+
+    write(&checkout.join("changed.txt"), "after\n");
+    let changed_head = commit(&checkout, "change one file");
+    let changed_tree = git_ok(&checkout, &["rev-parse", &format!("{changed_head}^{{tree}}")]);
+    assert_ne!(changed_tree, base_tree, "one changed blob changes the tree");
+    let changed_pack = parent.join("changed.pack");
+    must(
+        create_candidate_source_pack(&checkout, &changed_head, &changed_pack),
+        "pack changed candidate source",
+    );
+    let changed_output = parent.join("changed-source");
+    must(
+        create_source_checkout(&changed_pack, &changed_head, &changed_tree, &changed_output),
+        "materialize changed candidate source into an empty repository",
+    );
+    assert_eq!(
+        must(fs::read(changed_output.join("unchanged.txt")), "read unchanged source"),
+        b"present in every tree\n",
+    );
+    assert_eq!(
+        must(fs::read(changed_output.join("changed.txt")), "read changed source"),
+        b"after\n",
+    );
+
+    let empty_delta_head = commit(&checkout, "same tree, new commit");
+    let empty_delta_tree = git_ok(
+        &checkout,
+        &["rev-parse", &format!("{empty_delta_head}^{{tree}}")],
+    );
+    assert_eq!(empty_delta_tree, git_ok(&checkout, &["rev-parse", &format!("{changed_head}^{{tree}}")]),
+        "the second commit has the same tree as its parent");
+    let empty_delta_pack = parent.join("empty-delta.pack");
+    must(
+        create_candidate_source_pack(&checkout, &empty_delta_head, &empty_delta_pack),
+        "pack candidate commit with an unchanged tree",
+    );
+    let empty_delta_output = parent.join("empty-delta-source");
+    must(
+        create_source_checkout(
+            &empty_delta_pack,
+            &empty_delta_head,
+            &empty_delta_tree,
+            &empty_delta_output,
         ),
-        (
-            "short-digest".to_owned(),
-            serde_json::json!({"revision": head, "closure": wanted, "binary_sha256": "abc"})
-                .to_string(),
-        ),
-    ];
-    for (name, body) in &cases {
-        let manifest = root.join(format!("candidate-manifest-{name}.json"));
-        must(fs::write(&manifest, body), "write malformed manifest");
-        let lookup =
-            lookup_with_manifest(Some(binary.clone()), None, root.join("install"), manifest);
-        let excludes = std::collections::BTreeSet::new();
+        "materialize commit with unchanged tree into an empty repository",
+    );
+    assert_eq!(
+        must(fs::read(empty_delta_output.join("unchanged.txt")), "read empty-delta source"),
+        b"present in every tree\n",
+    );
+    must(fs::remove_dir_all(parent), "remove source pack fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn raw_snapshot_rejects_dirty_checkout_and_mismatched_head_before_creating_output() {
+    let (checkout, head) = closure_fixture("raw-snapshot-head");
+    let snapshot = checkout.with_extension("snapshot-output");
+    write(&checkout.join("untracked.txt"), "dirty\n");
+    let dirty = must_fail(
+        materialize_git_snapshot(&checkout, &head, &snapshot),
+        "dirty checkout must be refused",
+    )
+    .to_string();
+    assert!(dirty.contains("dirty"), "{dirty}");
+    assert!(!snapshot.exists(), "refusal happens before output creation");
+    must(fs::remove_file(checkout.join("untracked.txt")), "clean fixture");
+
+    let other_head = commit(&checkout, "different explicit HEAD");
+    assert_ne!(head, other_head);
+    let mismatch = must_fail(
+        materialize_git_snapshot(&checkout, &head, &snapshot),
+        "a caller-supplied non-HEAD revision must be refused",
+    )
+    .to_string();
+    assert!(mismatch.contains("does not match the explicit audited head"), "{mismatch}");
+    assert!(!snapshot.exists(), "mismatch happens before output creation");
+    must(fs::remove_dir_all(checkout), "remove raw snapshot checkout");
+}
+
+#[test]
+fn raw_snapshot_rejects_case_and_file_directory_collisions() {
+    let entry = |path: &str, mode: &str| RawTreeEntry {
+        mode: mode.to_owned(),
+        kind: if mode == "160000" { "commit" } else { "blob" }.to_owned(),
+        object: "a".repeat(40),
+        path: path.to_owned(),
+    };
+    for entries in [
+        vec![entry("README.md", "100644"), entry("readme.md", "100644")],
+        vec![entry("path", "100644"), entry("path/child", "100644")],
+        vec![entry("Folder/child", "100644"), entry("folder", "100644")],
+    ] {
         let error = must_fail(
-            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
-            &format!("malformed manifest {name}"),
+            validate_snapshot_path_collisions(&entries),
+            "ambiguous snapshot path set",
         )
         .to_string();
         assert!(
-            error.contains(&format!("candidate-manifest-{name}.json")),
-            "{name}: the error names the manifest: {error}"
+            error.contains("case-colliding") || error.contains("both a file and a directory"),
+            "{error}"
         );
     }
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(scratch);
-}
-
-#[test]
-fn candidate_manifest_source_prefers_flag_over_env() {
-    // The flag wins over the environment, so generated CI stays auditable.
-    // (In-process: setting process env needs `unsafe`, which this crate
-    // forbids, so the flag directions — which hold in every environment —
-    // are pinned here, and the environment-fallback direction is pinned by
-    // the `policy` CLI subprocess test in `velnor_first_ci.rs`, which owns
-    // the child's environment.)
-    assert_eq!(
-        candidate_manifest_source(Some("/flag/manifest.json")),
-        Some(PathBuf::from("/flag/manifest.json"))
-    );
-    // An explicit empty flag disables the binding.
-    assert_eq!(candidate_manifest_source(Some("")), None);
-    // Without either source the env-slot candidate is disabled. Like
-    // `cli_requires_the_base_validator_revision`, this relies on the ambient
-    // test environment not exporting the variable.
-    assert_eq!(candidate_manifest_source(None), None);
-}
-
-#[test]
-fn from_env_consent_mapping_is_fail_closed() {
-    // Without `--pin-build` the pin is never built, in every environment.
-    assert!(PinnedBinaryLookup::from_env(PIN_A, false, None).build_forbidden);
-    assert!(
-        PinnedBinaryLookup::from_env(PIN_A, false, Some(PathBuf::from("/manifest.json")))
-            .build_forbidden
-    );
-    // The explicit manifest survives; without one the environment fallback
-    // applies (unset in the ambient test environment, so `None` here).
-    assert_eq!(
-        PinnedBinaryLookup::from_env(PIN_A, false, Some(PathBuf::from("/manifest.json")))
-            .candidate_manifest,
-        Some(PathBuf::from("/manifest.json"))
-    );
-    assert_eq!(
-        PinnedBinaryLookup::from_env(PIN_A, false, None).candidate_manifest,
-        None
-    );
-    // `CARGO_NET_OFFLINE=true` forbids the build even with `--pin-build`;
-    // setting process env needs `unsafe`, which this crate forbids, so that
-    // direction is pinned by the `--check` CLI subprocess test in
-    // `velnor_first_ci.rs`, which owns the child's environment.
 }
 
 #[cfg(unix)]
 #[test]
-fn candidate_render_rejects_a_binary_claiming_another_closure() {
-    let (root, head) = closure_fixture("candidate-foreign");
-    let wanted = must(
-        crate::s2::closure::candidate_closure_of_tree(&root, &head),
-        "candidate closure of the fixture",
-    );
-    let scratch = temporary_directory("candidate-foreign-scratch");
-    // Valid binding for the audited tree (manifest closure plus the real
-    // digest of the binary bytes), but the binary echoes CLOSURE_A: the
-    // `--closure` self-report stays as the final tripwire.
-    let binary = fake_candidate_renderer(&root, CLOSURE_A);
-    let manifest =
-        candidate_manifest_for(&root, "candidate-manifest.json", &binary, &wanted, &head);
-    let lookup = lookup_with_manifest(Some(binary), None, root.join("install"), manifest);
-    let excludes = std::collections::BTreeSet::new();
-    assert!(
-        must(
-            render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
-            "foreign closure never errors, it simply does not prove",
-        )
-        .is_none(),
-        "a binary reporting another closure is not the tree's candidate"
-    );
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(scratch);
+fn raw_snapshot_rejects_escaping_symlinks() {
+    assert!(validate_symlink_target("nested/link", b"../target").is_ok());
+    let error = must_fail(
+        validate_symlink_target("nested/link", b"../../../outside"),
+        "escaping Git symlink",
+    )
+    .to_string();
+    assert!(error.contains("escapes the candidate source snapshot"), "{error}");
 }
 
 #[test]
-fn candidate_render_is_unavailable_without_git_history() {
-    let root = temporary_directory("candidate-nogit");
-    let scratch = temporary_directory("candidate-nogit-scratch");
-    let binary = root.join("missing");
-    let lookup = lookup(Some(binary), None, root.join("install"));
-    let excludes = std::collections::BTreeSet::new();
-    assert!(must(
-        render_with_candidate(&root, &root, &scratch, "main", &excludes, &lookup),
-        "no checkout, no candidate",
+fn sanitized_git_command_removes_repository_and_object_store_redirects() {
+    let env: BTreeMap<_, _> = closure_identity::sanitized_git_command().get_envs().collect();
+    for key in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_NAMESPACE",
+    ] {
+        assert_eq!(env.get(std::ffi::OsStr::new(key)), Some(&None), "{key}");
+    }
+    assert_eq!(
+        env.get(std::ffi::OsStr::new("GIT_CONFIG_NOSYSTEM")),
+        Some(&Some(std::ffi::OsStr::new("1"))),
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn candidate_render_artifact_binds_identity_and_never_executes_candidate_bytes() {
+    let (root, head) = closure_fixture("candidate-artifact");
+    let sentinel = root.join("candidate-executed");
+    let (source_artifact, artifact, closure) = candidate_artifact_fixture(&root, &head);
+    let expected_repository = crate::s2::workflow_setup_action_repository();
+
+    assert_eq!(
+        must(
+            verify_candidate_render_artifact(
+                &artifact,
+                &source_artifact,
+                &root,
+                &root,
+                &head,
+                &head,
+                &BTreeSet::new(),
+                Some(expected_repository),
+                Some(expected_repository),
+                Some("123"),
+                Some("Linux-X64"),
+                Some(CANDIDATE_BUILDER_IMAGE),
+            ),
+            "verify candidate artifact as data",
+        ),
+        Some(closure.clone()),
+    );
+    let materialized_parent = temporary_directory("candidate-source-materialized");
+    let materialized = materialized_parent.join("source");
+    let pack = source_artifact.join("candidate-source.pack");
+    let tree = git_ok(&root, &["rev-parse", &format!("{head}^{{tree}}")]);
+    must(
+        create_source_checkout(&pack, &head, &tree, &materialized),
+        "materialize candidate source artifact",
+    );
+    assert_eq!(
+        must(
+            verify_candidate_source_artifact(
+                &source_artifact,
+                &root,
+                &materialized,
+                &head,
+                &head,
+                expected_repository,
+                expected_repository,
+                "123",
+            ),
+            "verify candidate source artifact",
+        ),
+        closure,
+    );
+    assert!(!sentinel.exists(), "policy verification must never execute candidate bytes");
+
+    let wrong_repo = must_fail(
+        verify_candidate_render_artifact(
+            &artifact,
+            &source_artifact,
+            &root,
+            &root,
+            &head,
+            &head,
+            &BTreeSet::new(),
+            Some("another/repository"),
+            Some(expected_repository),
+            Some("123"),
+            Some("Linux-X64"),
+            Some(CANDIDATE_BUILDER_IMAGE),
+        ),
+        "artifact from the wrong repository",
     )
-    .is_none());
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(scratch);
+    .to_string();
+    assert!(wrong_repo.contains("identity does not match"), "{wrong_repo}");
+    let wrong_run = must_fail(
+        verify_candidate_render_artifact(
+            &artifact,
+            &source_artifact,
+            &root,
+            &root,
+            &head,
+            &head,
+            &BTreeSet::new(),
+            Some(expected_repository),
+            Some(expected_repository),
+            Some("456"),
+            Some("Linux-X64"),
+            Some(CANDIDATE_BUILDER_IMAGE),
+        ),
+        "artifact from the wrong producer run",
+    )
+    .to_string();
+    assert!(wrong_run.contains("identity does not match"), "{wrong_run}");
+    assert!(!sentinel.exists(), "invalid artifacts are data-only too");
+
+    must(
+        fs::remove_dir_all(&artifact),
+        "remove candidate artifact fixture",
+    );
+    must(
+        fs::remove_dir_all(&source_artifact),
+        "remove candidate source artifact fixture",
+    );
+    remove_snapshot_for_test(&materialized_parent);
+    must(fs::remove_dir_all(root), "remove candidate source fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn candidate_source_manifest_binds_hidden_vendored_files() {
+    let (root, head) = closure_fixture("vendor-digest");
+    let artifact = candidate_source_artifact_fixture(&root, &head);
+    let manifest_bytes = must(
+        fs::read(artifact.join("candidate-source-manifest.json")),
+        "read candidate source manifest",
+    );
+    let manifest: CandidateSourceManifest =
+        must(serde_json::from_slice(&manifest_bytes), "parse candidate source manifest");
+    must(
+        verify_source_vendor(&artifact, &manifest),
+        "verify original vendor tree",
+    );
+    write(
+        &artifact.join("vendor/registry/.cargo-checksum.json"),
+        "{}\n",
+    );
+    let error = must_fail(
+        verify_source_vendor(&artifact, &manifest),
+        "detect hidden vendor tampering",
+    )
+    .to_string();
+    assert!(error.contains("candidate vendor digest mismatch"), "{error}");
+    must(fs::remove_dir_all(&artifact), "remove source vendor fixture");
+    must(fs::remove_dir_all(root), "remove source vendor git fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn candidate_render_digest_is_path_independent_and_rejects_symlinks() {
+    let first = temporary_directory("render-digest-a");
+    let second = temporary_directory("render-digest-b");
+    write(&first.join("nested/output.yml"), "bytes\n");
+    write(&second.join("nested/output.yml"), "bytes\n");
+    assert_eq!(
+        must(render_tree_digest(&first), "digest first render tree"),
+        must(render_tree_digest(&second), "digest second render tree"),
+        "the digest uses relative names and file bytes only",
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        must(
+            symlink("/etc/passwd", first.join("nested/outside")),
+            "create hostile candidate symlink",
+        );
+        let error = must_fail(
+            render_tree_digest(&first),
+            "candidate render symlink",
+        )
+        .to_string();
+        assert!(error.contains("contains a symlink"), "{error}");
+    }
+    must(fs::remove_dir_all(first), "remove first digest fixture");
+    must(fs::remove_dir_all(second), "remove second digest fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn candidate_render_artifact_rejects_tampered_output_digest() {
+    let (root, head) = closure_fixture("candidate-artifact-tamper");
+    let (source_artifact, artifact, _) = candidate_artifact_fixture(&root, &head);
+    write(
+        &artifact.join("rendered/.github/workflows/ci-pr.yml"),
+        "tampered\n",
+    );
+    let error = must_fail(
+        verify_candidate_render_artifact(
+            &artifact,
+            &source_artifact,
+            &root,
+            &root,
+            &head,
+            &head,
+            &BTreeSet::new(),
+            Some(crate::s2::workflow_setup_action_repository()),
+            Some(crate::s2::workflow_setup_action_repository()),
+            Some("123"),
+            Some("Linux-X64"),
+            Some(CANDIDATE_BUILDER_IMAGE),
+        ),
+        "tampered candidate output",
+    )
+    .to_string();
+    assert!(error.contains("candidate render digest mismatch"), "{error}");
+    must(fs::remove_dir_all(artifact), "remove candidate artifact fixture");
+    must(fs::remove_dir_all(source_artifact), "remove candidate source fixture");
+    must(fs::remove_dir_all(root), "remove candidate source fixture");
 }
 
 #[test]

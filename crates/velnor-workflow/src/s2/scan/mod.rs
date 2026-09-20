@@ -22,9 +22,9 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::s2::provider::{
-    Capabilities, Platform, ProviderId, ProviderSelector, ProviderSet, TrustReq,
-};
+use crate::s2::provider::{Capabilities, Platform, ProviderSet, TrustReq};
+#[cfg(test)]
+use crate::s2::provider::{ProviderId, ProviderSelector};
 use crate::s2::{
     default_workflow_files, identifier_suffix, AnalysisSummary, CacheSpec, GeneratorError,
     MaintenanceSpec, ProjectConfig, Unit, UnitKind,
@@ -235,25 +235,29 @@ pub(crate) fn refresh_service_capabilities(unit: &mut Unit) {
     unit.capabilities.services_with_readiness = true;
 }
 
-/// Scan-default `runs-on` routing per provider. A repo-owned config
-/// overrides per provider; local defaults are disjoint dedicated selectors.
+/// Test-fixture selectors. Production generation accepts routes only from
+/// `[workflow.selectors]` in the repo-owned config.
+#[cfg(test)]
 pub(crate) fn default_selectors() -> crate::s2::provider::SelectorMap {
     [
         (
             ProviderId::GithubHosted,
             ProviderSelector {
+                group: None,
                 runs_on: vec!["ubuntu-24.04".to_owned()],
             },
         ),
         (
             ProviderId::GithubSelfHosted,
             ProviderSelector {
+                group: None,
                 runs_on: vec!["bastion-scale-set".to_owned()],
             },
         ),
         (
             ProviderId::Velnor,
             ProviderSelector {
+                group: None,
                 runs_on: vec!["velnor-native".to_owned()],
             },
         ),
@@ -276,6 +280,14 @@ fn disambiguate_unit_ids(units: &mut [Unit]) {
 
 impl From<RepositoryShape> for ProjectConfig {
     fn from(shape: RepositoryShape) -> Self {
+        let providers = shape.providers;
+        #[cfg(test)]
+        let selectors = default_selectors()
+            .into_iter()
+            .filter(|(provider, _)| providers.contains(provider))
+            .collect();
+        #[cfg(not(test))]
+        let selectors = crate::s2::provider::SelectorMap::new();
         Self {
             repository: String::new(),
             workflow_revision: crate::s2::SOURCE_REVISION.to_owned(),
@@ -290,10 +302,10 @@ impl From<RepositoryShape> for ProjectConfig {
             notes: Vec::new(),
             version_bump_units: Vec::new(),
             default_branch: shape.default_branch,
-            providers: shape.providers.clone(),
-            automatic_providers: shape.providers.clone(),
-            default_dispatch_providers: shape.providers,
-            selectors: default_selectors(),
+            providers: providers.clone(),
+            automatic_providers: providers.clone(),
+            default_dispatch_providers: providers,
+            selectors,
             release_enabled: false,
             release_reason: "Release is fail-closed. Enable only after declaring immutable artifact, registry, provenance, and tag-protection policy.".to_owned(),
             release: None,

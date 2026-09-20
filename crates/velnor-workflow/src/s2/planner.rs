@@ -272,18 +272,21 @@ mod tests {
             (
                 ProviderId::GithubHosted,
                 ProviderSelector {
+                    group: None,
                     runs_on: vec!["ubuntu-24.04".to_owned()],
                 },
             ),
             (
                 ProviderId::GithubSelfHosted,
                 ProviderSelector {
+                    group: None,
                     runs_on: vec!["velnor-official".to_owned()],
                 },
             ),
             (
                 ProviderId::Velnor,
                 ProviderSelector {
+                    group: None,
                     runs_on: vec!["velnor-native".to_owned()],
                 },
             ),
@@ -401,6 +404,7 @@ mod tests {
         selectors.insert(
             ProviderId::Velnor,
             ProviderSelector {
+                group: None,
                 runs_on: vec!["velnor-official".to_owned()],
             },
         );

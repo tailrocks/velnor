@@ -1,20 +1,29 @@
-schema = 1
+schema = 2
 
 [generator]
 repository = "example/synthetic-release"
 
 [workflow]
-velnor_labels = ["self-hosted", "example-lane"]
+providers = ["github-hosted", "velnor"]
+automatic_providers = ["github-hosted", "velnor"]
+default_dispatch_providers = ["github-hosted", "velnor"]
+default_branch = "main"
+
+[workflow.selectors.github-hosted]
+runs_on = ["ubuntu-24.04"]
+
+[workflow.selectors.velnor]
+runs_on = ["self-hosted", "example-lane"]
 
 [release]
 enabled = true
 kind = "tasks"
-modes = ["validate"]
 tag_pattern = "v[0-9]*"
 
 [[release.job]]
 id = "build"
 tasks = ["build-release", "verify-release"]
+modes = ["validate", "publish"]
 
 [[release.job]]
 id = "sign"
@@ -23,6 +32,7 @@ tasks = ["sign-release"]
 needs = ["build"]
 runner = "macos"
 modes = ["publish"]
+timeout_minutes = 45
 environment = "example-signing"
 attest_subjects = ["dist/example-app.zip"]
 
@@ -33,6 +43,11 @@ attestations = "write"
 [release.job.env]
 DEVELOPER_DIR = "/Applications/Xcode.app/Contents/Developer"
 SIGNING_KEY_ID = "${{ secrets.EXAMPLE_SIGNING_KEY_ID }}"
+
+[[release.job]]
+id = "manual-review"
+tasks = ["review-release"]
+modes = ["validate"]
 
 [[declare]]
 primitive = "release"

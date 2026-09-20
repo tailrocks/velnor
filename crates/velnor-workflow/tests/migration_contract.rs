@@ -1,14 +1,15 @@
-//! Migration contract for the PR #994 capability extraction.
+//! Schema-2 consumer contract.
 //!
 //! The `swift-ffi-consumer` fixture is a neutral second consumer shaped
-//! differently from `synthetic-workspace`: a Rust workspace under
+//! differently from the older Rust-only fixture: a Rust workspace under
 //! `packages/` (not `crates/`), a standalone nested crate, a Swift package
 //! under `clients/apple/` (not `native/`), no Dockerfile, no docs surface,
-//! and a `[renovate]` declaration with writer lanes. It pins the behaviors
-//! the migration depends on: Swift units land on macOS while Rust stays on
-//! Linux, a declared cross-kind `depends_on` selects the Swift consumer when
-//! only FFI files change, Renovate renders on a github-runners repository,
-//! generation is byte-stable, and no consumer name leaks into output. The
+//! and a `[renovate]` declaration with explicit provider selectors. It pins
+//! the behaviors the consumer contract requires: Swift units land on macOS
+//! while Rust stays on Linux, a declared cross-kind `depends_on` selects the
+//! Swift consumer when only FFI files change, Renovate uses its declared
+//! Velnor and hosted selectors, generation is byte-stable, and no consumer
+//! name leaks into output. The
 //! deny probe declares the release, preview, docs, scheduled, and
 //! maintenance surfaces on its own temp copy, so every rendered family is
 //! scanned, not just the default file set.
@@ -60,7 +61,7 @@ fn copy_tree(source: &Path, destination: &Path) {
 /// parsed the same way and applied to the scanned text first, so this
 /// contract matches the law exactly.
 fn deny_list_probes() -> (Vec<String>, (String, String)) {
-    const LAW: &str = include_str!("generic_surface_literals.rs");
+    const LAW: &str = include_str!("../src/s2/generic_surface_literals.rs");
     const LIST_MARKER: &str = "const DENY_LIST";
     const REWRITE_MARKER: &str = ".replace(";
     fn quoted(line: &str) -> Vec<String> {
@@ -155,6 +156,73 @@ fn git_output(repo: &Path, arguments: &[&str]) -> String {
     String::from_utf8_lossy(&outcome.stdout).trim().to_owned()
 }
 
+#[cfg(unix)]
+fn stale_remote_pin_fixture(case: &str) -> (PathBuf, String, PathBuf) {
+    let repo = fixture_root(case);
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.email", "fixture@example.test"]);
+    git(&repo, &["config", "user.name", "fixture"]);
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "base fixture"]);
+    let pin = git_output(&repo, &["rev-parse", "HEAD"]);
+    let config_path = repo.join(".github-gen/velnor-workflow.toml");
+    let config = fs::read_to_string(&config_path).unwrap();
+    fs::write(
+        &config_path,
+        config.replace(
+            "repository = \"example/swift-ffi\"",
+            &format!("repository = \"example/swift-ffi\"\nrevision = \"{pin}\""),
+        ),
+    )
+    .unwrap();
+    git(&repo, &["add", ".github-gen/velnor-workflow.toml"]);
+    git(&repo, &["commit", "-qm", "declare remote generator pin"]);
+    let output = generate(&repo, case);
+    (repo, pin, output)
+}
+
+#[cfg(unix)]
+fn write_cargo_shim(directory: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let sentinel = directory.join("cargo-shim-fired");
+    let shim = directory.join("cargo");
+    fs::write(
+        &shim,
+        "#!/bin/sh\nprintf 'cargo invoked: %s\\n' \"$*\" > \"$CARGO_SHIM_SENTINEL\"\nexit 99\n",
+    )
+    .unwrap();
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+    sentinel
+}
+
+#[cfg(unix)]
+fn policy_check_command(repo: &Path, output: &Path, bin_directory: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_velnor-workflow"));
+    command
+        .args([
+            "--plain",
+            "--check",
+            "--default-branch",
+            "main",
+            "--output",
+            output.to_str().unwrap(),
+            repo.to_str().unwrap(),
+        ])
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", bin_directory.display()),
+        )
+        .env_remove("VELNOR_WORKFLOW_PINNED_BINARY")
+        .env_remove("VELNOR_WORKFLOW_PINNED_BINARY_SHA256")
+        .env_remove("VELNOR_WORKFLOW_PINNED_BINARY_REVISION")
+        .env_remove("VELNOR_WORKFLOW_PINNED_BINARY_CLOSURE")
+        .env_remove("VELNOR_WORKFLOW_CANDIDATE_BINARY")
+        .env_remove("VELNOR_WORKFLOW_CANDIDATE_MANIFEST")
+        .env_remove("CARGO_NET_OFFLINE");
+    command
+}
+
 fn workflow(output: &Path, name: &str) -> String {
     fs::read_to_string(output.join(".github/workflows").join(name)).unwrap()
 }
@@ -186,7 +254,7 @@ fn swift_kind_renders_macos_while_rust_stays_linux() {
     let repo = fixture_root("swift-runners");
     let output = generate(&repo, "swift-runners");
 
-    let swift = workflow(&output, "ci-unit-swift.yml");
+    let swift = workflow(&output, "ci-unit-swift-github-hosted.yml");
     assert!(
         swift.contains("runs-on: macos-15"),
         "swift kind must land on macOS:\n{swift}"
@@ -196,7 +264,7 @@ fn swift_kind_renders_macos_while_rust_stays_linux() {
         "swift kind must not land on Linux:\n{swift}"
     );
 
-    let rust = workflow(&output, "ci-unit-rust.yml");
+    let rust = workflow(&output, "ci-unit-rust-github-hosted.yml");
     assert!(
         rust.contains("runs-on: ubuntu-24.04"),
         "rust kind must stay on Linux:\n{rust}"
@@ -208,22 +276,18 @@ fn swift_kind_renders_macos_while_rust_stays_linux() {
 }
 
 #[test]
-fn renovate_lanes_render_on_a_github_runners_repository() {
+fn renovate_writer_and_validator_use_declared_provider_selectors() {
     let repo = fixture_root("reno-lanes");
     let output = generate(&repo, "reno-lanes");
 
     let writer = workflow(&output, "renovate.yml");
     assert!(
-        writer.contains("options: [velnor, github]"),
-        "writer must offer the declared lane choice:\n{writer}"
+        writer.contains("runs-on: [self-hosted, example-lane]"),
+        "writer must use the repository's declared Velnor selector:\n{writer}"
     );
     assert!(
-        writer.contains("inputs.lanes == 'github'"),
-        "writer must route manual dispatch by lane choice:\n{writer}"
-    );
-    assert!(
-        writer.contains("fromJSON('[\"self-hosted\",\"example-lane\",\"example-trusted\"]')"),
-        "scheduled runs must stay on the declared Velnor labels:\n{writer}"
+        !writer.contains("inputs.lanes"),
+        "schema 2 must not render the retired lane selector:\n{writer}"
     );
 
     let validate = workflow(&output, "renovate-validate.yml");
@@ -441,7 +505,7 @@ fn generated_output_names_no_consumer() {
 
     // The probe names come from the genericity law's own deny list, parsed at
     // runtime: this file must not spell a consumer name literally (see
-    // `generic_surface_literals`), and the probes stay in sync with the law.
+    // `s2::generic_surface_literals`), and the probes stay in sync with the law.
     let (forbidden, (admitted, replacement)) = deny_list_probes();
     assert!(
         !forbidden.is_empty(),
@@ -459,4 +523,119 @@ fn generated_output_names_no_consumer() {
             );
         }
     }
+}
+
+#[test]
+fn clean_room_regeneration_keeps_ownership_proof_and_rejects_orphans() {
+    let script = include_str!("../../../migrations/generic-workflow-generator/clean-room-regen.sh");
+    assert!(
+        script.contains("OWNERSHIP_STATE=\"$REPO_DIR/.github/ci/.github-actions-generator-state\""),
+        "clean-room migration keeps the generated ownership ledger"
+    );
+    assert!(
+        script.contains("grep -qx 'schema = 2' \"$OWNERSHIP_STATE\""),
+        "an unknown ledger schema fails before regeneration"
+    );
+    assert!(
+        !script.contains("rm -f \"$REPO_DIR/.github/ci/.github-actions-generator-state\""),
+        "clean-room migration cannot erase hash ownership proof"
+    );
+    assert!(
+        script.contains("Unowned obsolete workflow remains after regeneration"),
+        "a missing ownership ledger cannot silently carry obsolete generic unit files forward"
+    );
+}
+
+/// Offline policy execution must stay fail-closed even when the operator
+/// explicitly opens `--pin-build`: a cargo shim proves no hidden source
+/// build is attempted as a fallback.
+#[cfg(unix)]
+#[test]
+fn offline_pin_build_does_not_invoke_cargo() {
+    let (repo, pin, output) = stale_remote_pin_fixture("offline-pin-build");
+    let bin_directory = repo.parent().unwrap().join("offline-pin-build-bin");
+    fs::create_dir_all(&bin_directory).unwrap();
+    let sentinel = write_cargo_shim(&bin_directory);
+    let outcome = policy_check_command(&repo, &output, &bin_directory)
+        .arg("--pin-build")
+        .env("CARGO_NET_OFFLINE", "true")
+        .env("CARGO_SHIM_SENTINEL", &sentinel)
+        .output()
+        .expect("run offline generator check");
+    let detail = format!(
+        "{}{}",
+        String::from_utf8_lossy(&outcome.stdout),
+        String::from_utf8_lossy(&outcome.stderr)
+    );
+    assert!(!outcome.status.success(), "offline pin build must fail: {detail}");
+    assert!(detail.contains(&pin), "the failure names the pin: {detail}");
+    assert!(
+        detail.contains("building one is forbidden here"),
+        "the offline guard rejects the build fallback: {detail}"
+    );
+    assert!(
+        !sentinel.exists(),
+        "CARGO_NET_OFFLINE=true must stop before cargo executes"
+    );
+}
+
+/// The candidate-manifest environment fallback is part of the generated
+/// consumer contract. A manifest for another tree must fail before the
+/// candidate executable can run.
+#[cfg(unix)]
+#[test]
+fn candidate_manifest_environment_mismatch_fails_before_candidate_exec() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (repo, pin, output) = stale_remote_pin_fixture("candidate-manifest-env");
+    let head = git_output(&repo, &["rev-parse", "HEAD"]);
+    let bin_directory = repo.parent().unwrap().join("candidate-manifest-env-bin");
+    fs::create_dir_all(&bin_directory).unwrap();
+    let pinned = bin_directory.join("velnor-workflow");
+    fs::write(
+        &pinned,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = --revision ]; then echo {pin}; exit 0; fi\nif [ \"$1\" = --closure ]; then echo cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; exit 0; fi\nmkdir -p \"$3/drift\"\nprintf 'pin drift\\n' > \"$3/drift/file.txt\"\nexit 0\n"
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&pinned, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let candidate = bin_directory.join("candidate");
+    let sentinel = bin_directory.join("candidate-executed");
+    fs::write(
+        &candidate,
+        "#!/bin/sh\nprintf 'candidate executed\\n' > \"$CANDIDATE_EXEC_SENTINEL\"\nexit 91\n",
+    )
+    .unwrap();
+    fs::set_permissions(&candidate, fs::Permissions::from_mode(0o755)).unwrap();
+    let manifest = bin_directory.join("candidate-manifest.json");
+    fs::write(
+        &manifest,
+        format!(
+            "{{\"profile\":\"debug\",\"platform\":\"Linux-X64\",\"repository\":\"example/swift-ffi\",\"run_id\":\"1\",\"revision\":\"{head}\",\"build_revision\":\"{pin}\",\"closure\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"binary_sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}"
+        ),
+    )
+    .unwrap();
+
+    let outcome = policy_check_command(&repo, &output, &bin_directory)
+        .env("VELNOR_WORKFLOW_CANDIDATE_BINARY", &candidate)
+        .env("VELNOR_WORKFLOW_CANDIDATE_MANIFEST", &manifest)
+        .env("CANDIDATE_EXEC_SENTINEL", &sentinel)
+        .output()
+        .expect("run generator check with env candidate manifest");
+    let detail = format!(
+        "{}{}",
+        String::from_utf8_lossy(&outcome.stdout),
+        String::from_utf8_lossy(&outcome.stderr)
+    );
+    assert!(!outcome.status.success(), "mismatched candidate must fail: {detail}");
+    assert!(
+        detail.contains("names closure"),
+        "the environment manifest is loaded and its tree mismatch is explicit: {detail}"
+    );
+    assert!(
+        !sentinel.exists(),
+        "candidate bytes must not execute before the manifest closure matches"
+    );
 }

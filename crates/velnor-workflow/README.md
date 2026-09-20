@@ -4,15 +4,15 @@ Velnor-owned static GitHub Actions workflow generator and CI runtime.
 
 The binary scans repository evidence without executing project code, renders
 owned workflows plus `.github/ci/project.toml`, and runs the declared contract
-on GitHub-hosted or Velnor runners. Runtime commands replace the former large
+on GitHub-hosted, GitHub self-hosted, or Velnor providers. Runtime commands replace the former large
 generated `run.sh`, `policy.sh`, and `release.sh` helpers:
 
 ```sh
 velnor-workflow REPOSITORY --plain
-velnor-workflow REPOSITORY --runners both --plain
+velnor-workflow REPOSITORY --providers github-hosted,github-self-hosted,velnor --plain
 velnor-workflow promote --rev HEAD
 velnor-workflow plan --config .github/ci/project.toml
-velnor-workflow run --config .github/ci/project.toml --scope affected
+velnor-workflow run --config .github/ci/project.toml --scope affected --provider github-hosted
 velnor-workflow test-crates --config .github/ci/project.toml
 velnor-workflow policy --workflow-root . \
   --head-sha <pr-head-sha> --base-sha <base-sha> \
@@ -38,18 +38,26 @@ tree in a single commit; `--check` verifies the pinned generator renders the
 tree.
 
 Runtime commands are derived from scanned capabilities, not from config-supplied
-shell arrays. GitHub-hosted execution is the automatic and omitted-dispatch
-default; Velnor runs only when dispatch selects `velnor` or `both`. The binary
-owns selection, dependency ordering, policy, release validation, and every
+shell arrays. Provider selection uses the strict IDs `github-hosted`,
+`github-self-hosted`, and `velnor`; `[workflow] providers` sets the generation
+universe, and `--providers` overrides it for one run. The binary owns selection,
+dependency ordering, policy, release validation, and every
 `.github/workflows/*.{yml,yaml}` file it emits. Foreign workflow bodies are
 never imported. The ownership sidecar stays at
 `.github/ci/.github-actions-generator-state`.
 
-Repositories may pin their generation inputs in an optional
-`.github-gen/velnor-workflow.toml` (`schema = 1`): the repository slug, runner
-and branch overrides, scan excludes, policy switches, and `[[declare]]` render
-primitives. Generation is a function of the scanned repository shape, this
-config, and the generator revision (`GENERATOR_REVISION`); all three are
+`run --provider` selects provider-specific execution transport. It is required
+for units that declare a Docker mutable-cache seed: both GitHub Actions
+providers use their own Actions cache; Velnor keeps its retained local BuildKit
+cache.
+
+Repositories must pin their generation inputs in
+`.github-gen/velnor-workflow.toml` (`schema = 2`): the repository slug,
+provider set and selectors, branch overrides, scan excludes, policy switches,
+and `[[declare]]` render primitives. Schema-1 configs are rejected. Generation
+fails when this config is absent. Generation is a function of the scanned
+repository shape, this config, and the generator revision
+(`GENERATOR_REVISION`); all three are
 recorded in the ownership sidecar (`schema = 2`) and `--check` fails when they
 no longer match the current run, even if every generated file is unchanged.
 
@@ -86,11 +94,12 @@ in explicitly:
 
 ```toml
 [workflow]
-runners = "velnor"
-velnor_labels = ["self-hosted", "example-lane"]
-velnor_trusted_label = "example-trusted"
-velnor_trusted_runner_available = true
+providers = ["velnor"]
+automatic_providers = ["velnor"]
 files = [..., "renovate.yml", "renovate-validate.yml"]
+
+[workflow.selectors.velnor]
+runs_on = ["self-hosted", "example-lane"]
 
 [renovate]
 enabled = true
@@ -118,8 +127,7 @@ repository cache under `velnor-renovate-${{ github.repository }}-`. The
 are generation-time only and are not written into `.github/ci/project.toml`.
 The scan reads the git index (tracked files only), so untracked CI runtime
 artifacts, scratch files, and linked-worktree `.git` files never enter the
-recorded scan input. A sidecar written by an older schema is never parsed:
-rerun generate on a byte-matching tree to move it to schema 2.
+recorded scan input.
 
 Generated jobs install the runtime through the versioned composite action
 (mise-action model: declare a revision, get the binary on PATH, cached)
@@ -136,3 +144,14 @@ instead of an inline `cargo install`, so toolchain setup stays centralized:
 The action isolates the install from job-level toolchain wrappers (for
 example an `RUSTC_WRAPPER` pointing at an `sccache` that is set up later in
 the job) and caches the cargo install keyed by revision and runner OS.
+
+## Release task trust
+
+For `kind = "tasks"`, `release.yml` runs publisher tasks from pushed release
+tags. Protect the configured tag pattern against unauthorized creation,
+movement, and deletion with repository rules outside this workflow. GitHub loads
+workflow and task code from the tag ref, so checks inside the workflow are
+defense-in-depth, not a trust boundary. The optional `release-validate.yml`
+workflow accepts a user-selected ref, but its task rows receive only
+`contents: read`; config validation rejects environments, custom env values,
+write/OIDC scopes, attestations, and Velnor runners for those rows.

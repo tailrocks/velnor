@@ -1,9 +1,8 @@
 //! The per-unit verification pipelines.
 //!
-//! One primitive per unit kind and one declared row per unit. Units of a kind
-//! share one reusable workflow file so a monorepo stays under GitHub's unique
-//! reusable-workflow limit. Each row contributes a CI graph node; the kind
-//! workflow body is rendered once by the generator.
+//! One primitive per unit kind and one declared row per unit. The typed unit
+//! graph renders a provider-specific reusable workflow for each supported
+//! provider, keeping each reusable within GitHub's template budget.
 
 use super::{
     Args, CacheBackend, GraphNode, Primitive, RenderCtx, Rendered, UnitContract, BUN_PACKAGE,
@@ -37,21 +36,9 @@ fn render_unit(ctx: &RenderCtx<'_>, args: &Args<'_>) -> Result<Rendered, Generat
     };
     let mut contracts = std::collections::BTreeMap::new();
     contracts.insert(unit.id.clone(), contract);
-    if let Some(file) = ctx.file.filter(|file| !file.is_empty()) {
-        let canonical = crate::s2::nested_unit_workflow_file(unit);
-        if file != canonical {
-            return Err(GeneratorError::usage(format!(
-                "`{}` must declare unit `{}` as `{canonical}`, not `{file}`; the aggregate callers invoke the canonical file name",
-                ctx.family,
-                unit.id
-            )));
-        }
-    }
     let nodes = vec![GraphNode::Unit {
         unit_id: unit.id.clone(),
-        job_id: crate::s2::stack_group_job_id(unit.kind),
-        name: crate::s2::sidebar_group_name(unit),
-        file: crate::s2::nested_unit_workflow_file(unit),
+        kind: unit.kind,
     }];
     Ok(Rendered {
         nodes,

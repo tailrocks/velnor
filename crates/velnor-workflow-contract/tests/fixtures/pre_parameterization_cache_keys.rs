@@ -1,12 +1,13 @@
 //! Primary cache keys, restore keys, and cache paths of every hosted
-//! (unit, lane) job as the generator rendered them BEFORE the kind reusables
-//! were parameterized by `workflow_call` inputs (captured from the generated
-//! workflows at `origin/plan/ci-workflow-and-cache` @ 85e6568e; compatibility digests re-captured at 284f1091 after the mbx 1.11.1 bump;
+//! (unit, lane) job before provider-specific reusable workflows were split
+//! out (captured from the generated workflows at
+//! `origin/plan/ci-workflow-and-cache` @ 85e6568e; compatibility digests
+//! re-captured at 284f1091 after the mbx 1.11.1 bump;
 //! `rust-velnor-workflow`'s freshness list gained `crates/velnor-workflow/build.rs`
 //! when that crate acquired a build script — the same scan fact the literal
 //! tree would have rendered). D9 of
 //! `plans/2026-09-16-ci-workflow-and-cache-plan.md` requires the resolved
-//! keys of the parameterized callee to equal these literal forms.
+//! keys of the current hosted callee to equal these literal forms.
 //!
 //! Regenerate this table only when a key format changes on purpose; the test
 //! that consumes it then documents the migration.
@@ -39,7 +40,7 @@ pub(crate) struct UnitLaneKeys {
 
 pub(crate) const PRE_PARAMETERIZATION_KEYS: &[UnitLaneKeys] = &[
     UnitLaneKeys {
-        callee: "ci-unit-bun.yml",
+        callee: "ci-unit-bun-github-hosted.yml",
         caller_job: "github-hosted-bun-velnor",
         job: "verify-github-hosted",
         keys: &[
@@ -54,7 +55,7 @@ pub(crate) const PRE_PARAMETERIZATION_KEYS: &[UnitLaneKeys] = &[
         ],
     },
     UnitLaneKeys {
-        callee: "ci-unit-docker.yml",
+        callee: "ci-unit-docker-github-hosted.yml",
         caller_job: "github-hosted-docker",
         job: "verify-github-hosted",
         keys: &[
@@ -70,7 +71,7 @@ pub(crate) const PRE_PARAMETERIZATION_KEYS: &[UnitLaneKeys] = &[
         ],
     },
     UnitLaneKeys {
-        callee: "ci-unit-docs.yml",
+        callee: "ci-unit-docs-github-hosted.yml",
         caller_job: "github-hosted-docs",
         job: "verify-github-hosted",
         keys: &[
@@ -85,7 +86,7 @@ pub(crate) const PRE_PARAMETERIZATION_KEYS: &[UnitLaneKeys] = &[
         ],
     },
     UnitLaneKeys {
-        callee: "ci-unit-opentofu.yml",
+        callee: "ci-unit-opentofu-github-hosted.yml",
         caller_job: "github-hosted-opentofu",
         job: "verify-github-hosted",
         keys: &[
@@ -100,7 +101,7 @@ pub(crate) const PRE_PARAMETERIZATION_KEYS: &[UnitLaneKeys] = &[
         ],
     },
     UnitLaneKeys {
-        callee: "ci-unit-rust.yml",
+        callee: "ci-unit-rust-github-hosted.yml",
         caller_job: "github-hosted-rust-policy",
         job: "verify-github-hosted",
         keys: &[
@@ -145,7 +146,7 @@ pub(crate) const PRE_PARAMETERIZATION_KEYS: &[UnitLaneKeys] = &[
         ],
     },
     UnitLaneKeys {
-        callee: "ci-unit-rust.yml",
+        callee: "ci-unit-rust-github-hosted.yml",
         caller_job: "github-hosted-rust-unit-collector",
         job: "verify-github-hosted",
         keys: &[
@@ -183,7 +184,7 @@ pub(crate) const PRE_PARAMETERIZATION_KEYS: &[UnitLaneKeys] = &[
         ],
     },
     UnitLaneKeys {
-        callee: "ci-unit-rust.yml",
+        callee: "ci-unit-rust-github-hosted.yml",
         caller_job: "github-hosted-rust-velnor-bench",
         job: "verify-github-hosted",
         keys: &[
@@ -221,7 +222,7 @@ pub(crate) const PRE_PARAMETERIZATION_KEYS: &[UnitLaneKeys] = &[
         ],
     },
     UnitLaneKeys {
-        callee: "ci-unit-rust.yml",
+        callee: "ci-unit-rust-github-hosted.yml",
         caller_job: "github-hosted-rust-velnor-client",
         job: "verify-github-hosted",
         keys: &[
@@ -259,7 +260,7 @@ pub(crate) const PRE_PARAMETERIZATION_KEYS: &[UnitLaneKeys] = &[
         ],
     },
     UnitLaneKeys {
-        callee: "ci-unit-rust.yml",
+        callee: "ci-unit-rust-github-hosted.yml",
         caller_job: "github-hosted-rust-velnor-control",
         job: "verify-github-hosted",
         keys: &[
@@ -297,7 +298,7 @@ pub(crate) const PRE_PARAMETERIZATION_KEYS: &[UnitLaneKeys] = &[
         ],
     },
     UnitLaneKeys {
-        callee: "ci-unit-rust.yml",
+        callee: "ci-unit-rust-github-hosted.yml",
         caller_job: "github-hosted-rust-velnor-model",
         job: "verify-github-hosted",
         keys: &[
@@ -335,7 +336,7 @@ pub(crate) const PRE_PARAMETERIZATION_KEYS: &[UnitLaneKeys] = &[
         ],
     },
     UnitLaneKeys {
-        callee: "ci-unit-rust.yml",
+        callee: "ci-unit-rust-github-hosted.yml",
         caller_job: "github-hosted-rust-velnor-render",
         job: "verify-github-hosted",
         keys: &[
@@ -373,7 +374,7 @@ pub(crate) const PRE_PARAMETERIZATION_KEYS: &[UnitLaneKeys] = &[
         ],
     },
     UnitLaneKeys {
-        callee: "ci-unit-rust.yml",
+        callee: "ci-unit-rust-github-hosted.yml",
         caller_job: "github-hosted-rust-velnor-runner",
         job: "verify-github-hosted",
         keys: &[
@@ -411,7 +412,7 @@ pub(crate) const PRE_PARAMETERIZATION_KEYS: &[UnitLaneKeys] = &[
         ],
     },
     UnitLaneKeys {
-        callee: "ci-unit-rust.yml",
+        callee: "ci-unit-rust-github-hosted.yml",
         caller_job: "github-hosted-rust-velnor-tools",
         job: "verify-github-hosted",
         keys: &[
@@ -449,7 +450,7 @@ pub(crate) const PRE_PARAMETERIZATION_KEYS: &[UnitLaneKeys] = &[
         ],
     },
     UnitLaneKeys {
-        callee: "ci-unit-rust.yml",
+        callee: "ci-unit-rust-github-hosted.yml",
         caller_job: "github-hosted-rust-velnor-workflow",
         job: "verify-github-hosted",
         keys: &[
@@ -487,7 +488,7 @@ pub(crate) const PRE_PARAMETERIZATION_KEYS: &[UnitLaneKeys] = &[
         ],
     },
     UnitLaneKeys {
-        callee: "ci-unit-rust.yml",
+        callee: "ci-unit-rust-github-hosted.yml",
         caller_job: "github-hosted-rust-velnor-workflow-contract",
         job: "verify-github-hosted",
         keys: &[
@@ -525,7 +526,7 @@ pub(crate) const PRE_PARAMETERIZATION_KEYS: &[UnitLaneKeys] = &[
         ],
     },
     UnitLaneKeys {
-        callee: "ci-unit-rust.yml",
+        callee: "ci-unit-rust-github-hosted.yml",
         caller_job: "github-hosted-rust-velnorctl",
         job: "verify-github-hosted",
         keys: &[
@@ -563,7 +564,7 @@ pub(crate) const PRE_PARAMETERIZATION_KEYS: &[UnitLaneKeys] = &[
         ],
     },
     UnitLaneKeys {
-        callee: "ci-unit-rust.yml",
+        callee: "ci-unit-rust-github-hosted.yml",
         caller_job: "github-hosted-rust-production-topology",
         job: "verify-github-hosted",
         keys: &[

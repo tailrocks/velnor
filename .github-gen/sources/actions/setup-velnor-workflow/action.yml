@@ -120,14 +120,18 @@ runs:
           echo "::error::no runtime product for revision $INSTALL_REV (closure ${CLOSURE:0:16}); the mainline runtime-product publisher builds it after merge" >&2
           exit 1
         fi
+        manifest_revision="$(jq -er '.revision' "$temporary/manifest.json")"
+        [[ "$manifest_revision" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::runtime manifest revision is not a full commit SHA" >&2; exit 1; }
         gh attestation verify "$temporary/$asset" \
           --owner tailrocks \
           --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml \
-          --source-ref refs/heads/main
+          --source-ref refs/heads/main \
+          --source-digest "$manifest_revision"
         gh attestation verify "$temporary/manifest.json" \
           --owner tailrocks \
           --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml \
-          --source-ref refs/heads/main
+          --source-ref refs/heads/main \
+          --source-digest "$manifest_revision"
         jq -e \
           --arg closure "$CLOSURE" \
           --arg platform "${RUNNER_OS}-${RUNNER_ARCH}" \

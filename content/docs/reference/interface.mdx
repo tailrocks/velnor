@@ -71,12 +71,16 @@ generated GitHub Actions jobs. It writes only its owned files and keeps the
 declarative execution contract in `.github/ci/project.toml`:
 
 ```sh
-velnor-workflow REPOSITORY --runners both
+velnor-workflow REPOSITORY --providers github-hosted,github-self-hosted,velnor
 velnor-workflow plan --config .github/ci/project.toml
-velnor-workflow run --scope affected
+velnor-workflow run --scope affected --provider github-hosted
 velnor-workflow policy --workflow-root .
 velnor-workflow release verify-tag
 ```
+
+`run --provider` is required for Docker units with a mutable-cache seed. The
+two GitHub Actions providers use separate Actions caches; Velnor keeps the
+cache on its retained local BuildKit builder.
 
 `velnor-tools workflow-monitor` joins authoritative GitHub run state with
 read-only local Velnor observations. GitHub remains authoritative for the

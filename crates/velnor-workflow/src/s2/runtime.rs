@@ -36,6 +36,8 @@ use super::provider::{
 };
 use super::{GeneratorError, UnitKind};
 
+mod promote;
+
 const DEFAULT_CONFIG: &str = ".github/ci/project.toml";
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
 
@@ -361,6 +363,63 @@ fn print_closure(arguments: &[OsString]) -> Result<(), GeneratorError> {
     Ok(())
 }
 
+/// `velnor-workflow promote --rev SHA|HEAD [--repo PATH]
+/// [--generator-repo PATH] [--default-branch BRANCH] [--providers IDS]
+/// [--message TEXT] [--dry-run]`: stamp and regenerate a schema-2 tree in
+/// one atomic commit. The running binary must prove it has the source
+/// closure named by the pin before it writes anything.
+fn promote_command(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let (flags, rest): (Vec<&OsString>, Vec<&OsString>) = arguments
+        .iter()
+        .partition(|argument| argument.to_str().is_some_and(|value| value == "--dry-run"));
+    if flags.len() > 1 {
+        return Err(GeneratorError::usage(
+            "duplicate option: --dry-run".to_owned(),
+        ));
+    }
+    let dry_run = !flags.is_empty();
+    let rest: Vec<OsString> = rest.into_iter().cloned().collect();
+    let options = parse_options(
+        &rest,
+        &[
+            "rev",
+            "repo",
+            "generator-repo",
+            "default-branch",
+            "providers",
+            "message",
+        ],
+    )?;
+    let rev = options
+        .get("rev")
+        .ok_or_else(|| GeneratorError::usage("promote requires --rev SHA".to_owned()))?;
+    let repo = match options.get("repo") {
+        Some(path) => PathBuf::from(path.as_str()),
+        None => env::current_dir()
+            .map_err(|error| GeneratorError::usage(format!("resolve promote root: {error}")))?,
+    };
+    let providers = options
+        .get("providers")
+        .map(|value| {
+            let providers = value.split(',').map(str::to_owned).collect::<Vec<_>>();
+            parse_provider_set(&providers, "--providers")
+        })
+        .transpose()?;
+    let report = promote::run_promote(&promote::PromoteOptions {
+        rev: rev.clone(),
+        repo,
+        generator_repo: options
+            .get("generator-repo")
+            .map(|path| PathBuf::from(path.as_str())),
+        default_branch: options.get("default-branch").cloned(),
+        providers,
+        message: options.get("message").cloned(),
+        dry_run,
+    })?;
+    print!("{}", promote::render_report(&report));
+    Ok(())
+}
+
 /// Dispatch the binary-only subcommands. `false` means the arguments belong
 /// to the workflow generator CLI proper.
 pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
@@ -374,18 +433,23 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
             Ok(true)
         }
         "run" => {
-            let options = parse_options(&arguments[1..], &["config", "scope", "unit"])?;
+            let options = parse_options(&arguments[1..], &["config", "scope", "unit", "provider"])?;
             let root = env::current_dir()
                 .map_err(|error| GeneratorError::usage(format!("resolve CI root: {error}")))?;
             let config = resolve_config_path(options.get("config"));
             let scope = options
                 .get("scope")
                 .map_or(Ok(Scope::Full), |value| Scope::parse(value))?;
-            run_units(
+            let provider = options
+                .get("provider")
+                .map(|value| ProviderId::parse(value))
+                .transpose()?;
+            run_units_for_provider(
                 &root,
                 &config,
                 scope,
                 options.get("unit").map(String::as_str),
+                provider,
             )?;
             Ok(true)
         }
@@ -410,6 +474,10 @@ pub(crate) fn try_run(arguments: &[OsString]) -> Result<bool, GeneratorError> {
         }
         "closure" => {
             print_closure(arguments.get(1..).unwrap_or_default())?;
+            Ok(true)
+        }
+        "promote" => {
+            promote_command(arguments.get(1..).unwrap_or_default())?;
             Ok(true)
         }
         "prepared-tool-install" => {
@@ -1478,6 +1546,7 @@ pub(crate) fn is_unit_id(value: &str) -> bool {
 struct PlannedUnit {
     unit_id: String,
     providers: ProviderSet,
+    platform: Platform,
     command_digest: String,
 }
 
@@ -1486,6 +1555,23 @@ struct PlannedExclusion {
     unit_id: String,
     provider: ProviderId,
     reason: ExclusionReason,
+}
+
+fn planned_units_json(planned: &[PlannedUnit]) -> Result<String, GeneratorError> {
+    serde_json::to_string(
+        &planned
+            .iter()
+            .map(|unit| {
+                serde_json::json!({
+                    "unit_id": unit.unit_id,
+                    "providers": unit.providers.iter().map(ProviderId::as_str).collect::<Vec<_>>(),
+                    "platform": unit.platform.as_str(),
+                    "command_digest": unit.command_digest,
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| GeneratorError::usage(format!("serialize plan units: {error}")))
 }
 
 #[allow(
@@ -1558,6 +1644,7 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
             planned.push(PlannedUnit {
                 unit_id: unit.id.clone(),
                 providers,
+                platform,
                 command_digest: command_digest_for(unit, scope),
             });
         }
@@ -1587,18 +1674,7 @@ fn plan(config_path: &Path) -> Result<(), GeneratorError> {
         })
         .collect();
     let digest = plan_digest(&digest_input, &exclusion_input);
-    let units_json = serde_json::to_string(
-        &planned
-            .iter()
-            .map(|unit| {
-                serde_json::json!({
-                    "unit_id": unit.unit_id,
-                    "providers": unit.providers.iter().map(ProviderId::as_str).collect::<Vec<_>>(),
-                })
-            })
-            .collect::<Vec<_>>(),
-    )
-    .map_err(|error| GeneratorError::usage(format!("serialize plan units: {error}")))?;
+    let units_json = planned_units_json(&planned)?;
     let excluded_json = serde_json::to_string(
         &excluded
             .iter()
@@ -1884,8 +1960,10 @@ mod scope_event_tests {
 #[cfg(test)]
 mod runner_lane_tests {
     use super::{
-        collect_manifests, expand_affected_units, plan_providers_for_value, CiUnit, Scope,
+        collect_manifests, expand_affected_units, plan_providers_for_value, provider_commands,
+        CiUnit, Scope,
     };
+    use crate::s2::provider::ProviderId;
     use std::path::Path;
 
     #[test]
@@ -1939,6 +2017,66 @@ mod runner_lane_tests {
         };
         assert_eq!(unit.commands(Scope::Affected), &["pr".to_owned()]);
         assert_eq!(unit.commands(Scope::Full), &["full".to_owned()]);
+    }
+
+    #[test]
+    fn docker_seed_transport_is_provider_specific_and_requires_identity() {
+        let unit = CiUnit {
+            id: "docker-example".to_owned(),
+            label: "Docker".to_owned(),
+            kind: "docker".to_owned(),
+            root: ".".to_owned(),
+            watch: vec!["Dockerfile".to_owned()],
+            pr_commands: Vec::new(),
+            full_commands: Vec::new(),
+            depends_on: Vec::new(),
+            tool_version: None,
+            cache: None,
+            platform: "linux-x64".to_owned(),
+            trust: "untrusted-ok".to_owned(),
+            capabilities: super::RuntimeCapabilities::default(),
+            workspace_check: false,
+        };
+        let commands = vec![
+            "docker buildx build --load --build-context velnor-cache-seed='.velnor-docker-cache/seed' --cache-from type=gha,scope=docker-example,mode=max --cache-to type=gha,scope=docker-example,mode=max --secret id=github_token,env=GITHUB_TOKEN .".to_owned(),
+            "docker buildx build --target velnor-cache-export --output type=local,dest=.velnor-docker-cache/export --build-context velnor-cache-seed='.velnor-docker-cache/seed' .".to_owned(),
+        ];
+        let missing = provider_commands(&unit, commands.clone(), None)
+            .expect_err("seed transport requires an explicit provider");
+        assert!(missing
+            .to_string()
+            .contains("requires an explicit --provider"));
+
+        for provider in [ProviderId::GithubHosted, ProviderId::GithubSelfHosted] {
+            assert_eq!(
+                provider_commands(&unit, commands.clone(), Some(provider))
+                    .expect("GitHub Actions keeps its optional GHA cache transport"),
+                commands,
+                "{provider} restores and saves its provider-keyed Actions seed"
+            );
+        }
+
+        let local = provider_commands(&unit, commands, Some(ProviderId::Velnor))
+            .expect("Velnor keeps its local BuildKit cache");
+        assert_eq!(
+            local.len(),
+            1,
+            "the retained builder does not export a seed"
+        );
+        assert!(local[0].contains("docker buildx build"));
+        assert!(local[0].contains("--secret id=github_token,env=GITHUB_TOKEN"));
+        for actions_transport in [
+            "velnor-cache-seed",
+            "type=gha",
+            "velnor-cache-export",
+            ".velnor-docker-cache/export",
+        ] {
+            assert!(
+                !local[0].contains(actions_transport),
+                "Velnor uses only its retained builder, without {actions_transport}: {}",
+                local[0]
+            );
+        }
     }
 
     #[test]
@@ -2105,27 +2243,46 @@ mod runner_lane_tests {
     }
 }
 
-pub(crate) fn run_units(
+pub(crate) fn run_units_for_provider(
     root: &Path,
     config_path: &Path,
     scope: Scope,
     only_unit: Option<&str>,
+    provider: Option<ProviderId>,
 ) -> Result<(), GeneratorError> {
     let selection_file = env::var_os("VELNOR_SELECTION_FILE").map_or_else(
         || root.join(".velnor-ci-selection/velnor-ci-selection"),
         PathBuf::from,
     );
-    run_units_with_selection_file(root, config_path, scope, only_unit, &selection_file)
+    run_units_with_selection_file_and_provider(
+        root,
+        config_path,
+        scope,
+        only_unit,
+        &selection_file,
+        provider,
+    )
 }
 
-pub(crate) fn run_units_with_selection_file(
+fn run_units_with_selection_file_and_provider(
     root: &Path,
     config_path: &Path,
     scope: Scope,
     only_unit: Option<&str>,
     selection_file: &Path,
+    provider: Option<ProviderId>,
 ) -> Result<(), GeneratorError> {
     let config = read_config(config_path)?;
+    if let Some(provider) = provider
+        && !config
+            .providers
+            .iter()
+            .any(|configured| configured == provider.as_str())
+    {
+        return Err(GeneratorError::usage(format!(
+            "run provider `{provider}` is not in the project provider universe"
+        )));
+    }
     if matches!(env::var("EVENT_NAME").as_deref(), Ok("push" | "schedule")) && scope != Scope::Full
     {
         return Err(GeneratorError::usage(
@@ -2158,7 +2315,7 @@ pub(crate) fn run_units_with_selection_file(
     }
     let full_units = selection.full_units;
     let selected = select_units_for_job(selected, only_unit)?;
-    run_layers(root, &selected, scope, &full_units)
+    run_layers(root, &selected, scope, &full_units, provider)
 }
 
 fn select_units_for_job<'a>(
@@ -2614,6 +2771,7 @@ fn run_layers(
     units: &[&CiUnit],
     run_scope: Scope,
     full_units: &BTreeSet<String>,
+    provider: Option<ProviderId>,
 ) -> Result<(), GeneratorError> {
     let mut finished = BTreeSet::new();
     while finished.len() < units.len() {
@@ -2636,15 +2794,22 @@ fn run_layers(
                 "CI dependency graph contains a cycle or invalid ordering",
             ));
         }
-        let (sender, receiver) = mpsc::channel();
-        thread::scope(|thread_scope| {
-            for unit in ready.iter().copied() {
-                let sender = sender.clone();
+        let commands = ready
+            .iter()
+            .copied()
+            .map(|unit| {
                 let commands = if full_units.contains(&unit.id) {
                     unit.commands(run_scope).to_vec()
                 } else {
                     prerequisite_commands(unit, run_scope)
                 };
+                provider_commands(unit, commands, provider).map(|commands| (unit, commands))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let (sender, receiver) = mpsc::channel();
+        thread::scope(|thread_scope| {
+            for (unit, commands) in commands {
+                let sender = sender.clone();
                 thread_scope.spawn(move || {
                     let result = run_unit(root, unit, &commands);
                     let _ = sender.send((unit.id.clone(), result));
@@ -2658,6 +2823,61 @@ fn run_layers(
         }
     }
     Ok(())
+}
+
+/// A Docker cache seed is an Actions transport, while Velnor keeps BuildKit's
+/// cache mounts on its retained local builder. Provider must be explicit for
+/// seed-aware commands so a local runner never tries the GitHub-only context
+/// or cache backend.
+fn provider_commands(
+    unit: &CiUnit,
+    commands: Vec<String>,
+    provider: Option<ProviderId>,
+) -> Result<Vec<String>, GeneratorError> {
+    let has_seed_transport = commands.iter().any(|command| {
+        command.contains(&format!(
+            "--build-context {}=",
+            super::primitives::MUTABLE_MOUNT_SEED_CONTEXT
+        )) || command.contains(&format!(
+            "--target {}",
+            super::primitives::MUTABLE_MOUNT_EXPORT_TARGET
+        ))
+    });
+    if !has_seed_transport {
+        return Ok(commands);
+    }
+    let provider = provider.ok_or_else(|| {
+        GeneratorError::usage(format!(
+            "CI unit `{}` uses a Docker seed; `run` requires an explicit --provider",
+            unit.id
+        ))
+    })?;
+    if provider != ProviderId::Velnor {
+        return Ok(commands);
+    }
+
+    let seed_context = format!(
+        "--build-context {}='{}/seed'",
+        super::primitives::MUTABLE_MOUNT_SEED_CONTEXT,
+        super::primitives::MUTABLE_MOUNT_HOST_DIR
+    );
+    let cache_from = format!("--cache-from type=gha,scope={},mode=max", unit.id);
+    let cache_to = format!("--cache-to type=gha,scope={},mode=max", unit.id);
+    Ok(commands
+        .into_iter()
+        .filter(|command| {
+            !command.contains(&format!(
+                "--target {}",
+                super::primitives::MUTABLE_MOUNT_EXPORT_TARGET
+            ))
+        })
+        .map(|command| {
+            command
+                .replace(&format!(" {seed_context}"), "")
+                .replace(&format!(" {cache_from}"), "")
+                .replace(&format!(" {cache_to}"), "")
+        })
+        .collect())
 }
 
 fn prerequisite_commands(unit: &CiUnit, scope: Scope) -> Vec<String> {
@@ -3052,7 +3272,7 @@ fn collect_manifests(
 fn release(arguments: &[OsString]) -> Result<(), GeneratorError> {
     let Some(command) = arguments.first().and_then(|value| value.to_str()) else {
         return Err(GeneratorError::usage(
-            "usage: release verify-tag | release package-binary | release package-deb | release package-guest | release verify-feed | release update-feed | release verify-digests | release resolve-mode | release resolve-source | release admit-producer | release assemble-manifest",
+            "usage: release verify-tag | release package-binary | release package-deb | release package-guest | release verify-feed | release update-feed | release apt-resolve-commit | release apt-fetch | release apt-verify | release apt-http-probe | release apt-seed | release apt-publish | release apt-previous-pointer | release apt-channel-update | release apt-deploy-guard | release apt-preview-discover | release verify-digests | release resolve-mode | release resolve-source | release admit-producer | release assemble-manifest | release runtime-products-manifest | release verify-runtime-products",
         ));
     };
     match command {
@@ -3062,11 +3282,23 @@ fn release(arguments: &[OsString]) -> Result<(), GeneratorError> {
         "package-guest" => package_guest(&arguments[1..]),
         "verify-feed" => verify_feed(&arguments[1..]),
         "update-feed" => update_feed(&arguments[1..]),
+        "apt-resolve-commit" => apt_resolve_commit(&arguments[1..]),
+        "apt-fetch" => apt_fetch(&arguments[1..]),
+        "apt-verify" => apt_verify(&arguments[1..]),
+        "apt-http-probe" => apt_http_probe(&arguments[1..]),
+        "apt-seed" => apt_seed(&arguments[1..]),
+        "apt-preview-discover" => apt_preview_discover(&arguments[1..]),
+        "apt-publish" => apt_publish(&arguments[1..]),
+        "apt-previous-pointer" => apt_previous_pointer(&arguments[1..]),
+        "apt-channel-update" => apt_channel_update(&arguments[1..]),
+        "apt-deploy-guard" => apt_deploy_guard(&arguments[1..]),
         "verify-digests" => verify_digests(&arguments[1..]),
         "resolve-mode" => resolve_mode(&arguments[1..]),
         "resolve-source" => resolve_source(&arguments[1..]),
         "admit-producer" => admit_producer(&arguments[1..]),
         "assemble-manifest" => assemble_manifest(&arguments[1..]),
+        "runtime-products-manifest" => runtime_products_manifest(&arguments[1..]),
+        "verify-runtime-products" => verify_runtime_products(&arguments[1..]),
         _ => Err(GeneratorError::usage(format!(
             "unsupported release command: {command}"
         ))),
@@ -3074,30 +3306,11 @@ fn release(arguments: &[OsString]) -> Result<(), GeneratorError> {
 }
 
 fn verify_tag(arguments: &[OsString]) -> Result<(), GeneratorError> {
-    let options = parse_options(arguments, &["branch", "package"])?;
-    let reference = env::var("GITHUB_REF").unwrap_or_default();
-    let tag = reference
-        .strip_prefix("refs/tags/v")
-        .filter(|value| is_semver(value))
-        .ok_or_else(|| GeneratorError::usage("release requires a semver v* tag"))?;
-    if env::var("GITHUB_REF_TYPE").unwrap_or_else(|_| "tag".to_owned()) != "tag" {
-        return Err(GeneratorError::usage("release ref is not a tag"));
-    }
-    let branch = options
-        .get("branch")
-        .map(String::as_str)
-        .ok_or_else(|| GeneratorError::usage("release requires --branch"))?;
-    if !valid_branch(branch) {
-        return Err(GeneratorError::usage("invalid release branch"));
-    }
-    let branch_reference = format!("refs/remotes/origin/{branch}");
-    let tag_commit = git_revision(&reference)?;
-    let branch_commit = git_revision(&branch_reference)?;
-    if tag_commit != branch_commit {
-        return Err(GeneratorError::usage(format!(
-            "release tag must equal current origin/{branch} tip"
-        )));
-    }
+    let options = parse_options(arguments, &["tag", "commit", "package"])?;
+    let tag = required_option(&options, "tag")?;
+    let commit = required_option(&options, "commit")?;
+    let head = git_revision("HEAD")?;
+    let version = validate_release_tag_target(tag, commit, &head)?;
     if let Some(package) = options.get("package") {
         if !valid_package(package) {
             return Err(GeneratorError::usage("invalid release package"));
@@ -3113,7 +3326,8 @@ fn verify_tag(arguments: &[OsString]) -> Result<(), GeneratorError> {
             .map_err(|error| GeneratorError::usage(format!("parse cargo metadata: {error}")))?;
         let found = document["packages"].as_array().is_some_and(|packages| {
             packages.iter().any(|item| {
-                item["name"].as_str() == Some(package) && item["version"].as_str() == Some(tag)
+                item["name"].as_str() == Some(package)
+                    && item["version"].as_str() == Some(version)
             })
         });
         if !found {
@@ -3124,6 +3338,28 @@ fn verify_tag(arguments: &[OsString]) -> Result<(), GeneratorError> {
     }
     println!("{tag}");
     Ok(())
+}
+
+fn validate_release_tag_target<'a>(
+    tag: &'a str,
+    commit: &str,
+    checkout_commit: &str,
+) -> Result<&'a str, GeneratorError> {
+    let version = tag
+        .strip_prefix('v')
+        .filter(|value| is_canonical_semver(value))
+        .ok_or_else(|| GeneratorError::usage("release requires a canonical semver v* tag"))?;
+    if commit.len() != 40 || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(GeneratorError::usage(
+            "release target commit must be a full 40-character Git SHA",
+        ));
+    }
+    if checkout_commit != commit {
+        return Err(GeneratorError::usage(
+            "release checkout does not match the admitted target commit",
+        ));
+    }
+    Ok(version)
 }
 
 fn package_binary(arguments: &[OsString]) -> Result<(), GeneratorError> {
@@ -3729,11 +3965,9 @@ fn verify_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
             }
         }
         "apt" => {
-            if !Path::new("conf/distributions").is_file() && !Path::new("debian").is_dir() {
-                return Err(GeneratorError::usage(
-                    "apt feed requires conf/distributions or debian/",
-                ));
-            }
+            return Err(GeneratorError::usage(
+                "`release verify-feed --kind apt` is unsupported; use the typed `release apt-verify` command",
+            ));
         }
         other => {
             return Err(GeneratorError::usage(format!(
@@ -3746,14 +3980,23 @@ fn verify_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
 
 fn update_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
     let options = parse_options(arguments, &["kind", "package", "coordinate", "channel"])?;
-    verify_feed(arguments)?;
     let kind = required_option(&options, "kind")?;
+    if kind == "apt" {
+        return Err(GeneratorError::usage(
+            "`release update-feed --kind apt` is unsupported; use the typed `release apt-publish` command",
+        ));
+    }
+    let package = required_option(&options, "package")?;
+    if !valid_package(package) {
+        return Err(GeneratorError::usage("invalid feed package"));
+    }
     let channel = options.get("channel").map_or("stable", String::as_str);
     if !matches!(channel, "stable" | "preview") {
         return Err(GeneratorError::usage("channel must be stable or preview"));
     }
     match kind {
-        "homebrew" | "apt" => {
+        "homebrew" => {
+            verify_homebrew_feed(package)?;
             println!("feed {kind} channel {channel} verified; mutation is GitHub-writer only");
             Ok(())
         }
@@ -3761,6 +4004,844 @@ fn update_feed(arguments: &[OsString]) -> Result<(), GeneratorError> {
             "unsupported feed kind: {other}"
         ))),
     }
+}
+
+fn verify_homebrew_feed(package: &str) -> Result<(), GeneratorError> {
+    let formula = Path::new("Formula").join(format!("{package}.rb"));
+    if !formula.is_file() {
+        return Err(GeneratorError::usage(format!(
+            "homebrew feed requires {}",
+            formula.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Parse an explicit `true`/`false` value on the typed APT command surface.
+fn apt_flag_bool(options: &BTreeMap<String, String>, name: &str) -> Result<bool, GeneratorError> {
+    match options.get(name).map(String::as_str) {
+        None | Some("false") => Ok(false),
+        Some("true") => Ok(true),
+        Some(value) => Err(GeneratorError::usage(format!(
+            "--{name} must be `true` or `false`, found `{value}`"
+        ))),
+    }
+}
+
+fn apt_resolve_commit(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["source-repo", "version"])?;
+    let source = required_option(&options, "source-repo")?;
+    let version = required_option(&options, "version")?;
+    let commit = crate::s2::apt::run_resolve_commit(source, version, None)?;
+    println!("{commit}");
+    Ok(())
+}
+
+fn apt_fetch(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &["suite", "source-repo", "package", "version", "dir"],
+    )?;
+    let suite = crate::s2::apt::Suite::parse(required_option(&options, "suite")?)?;
+    let source = required_option(&options, "source-repo")?;
+    let package = required_option(&options, "package")?;
+    let version = required_option(&options, "version")?;
+    let dir = required_option(&options, "dir")?;
+    crate::s2::apt::run_fetch(suite, source, package, version, Path::new(dir), None)?;
+    println!("fetched {} coherence inputs for {version}", suite.as_str());
+    Ok(())
+}
+
+fn apt_verify(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "suite",
+            "source-repo",
+            "package",
+            "binary",
+            "identity-dir",
+            "manifest-schema",
+            "preview-source-ref",
+            "version",
+            "incoming",
+            "commit",
+            "signer",
+            "expect-signer",
+            "verify-oci",
+        ],
+    )?;
+    let inputs = crate::s2::apt::VerifyInputs {
+        suite: crate::s2::apt::Suite::parse(required_option(&options, "suite")?)?,
+        source_repo: required_option(&options, "source-repo")?.to_owned(),
+        package: required_option(&options, "package")?.to_owned(),
+        binary: required_option(&options, "binary")?.to_owned(),
+        manifest_schema: required_option(&options, "manifest-schema")?.to_owned(),
+        preview_source_ref: required_option(&options, "preview-source-ref")?.to_owned(),
+        identity_dir: required_option(&options, "identity-dir")?.to_owned(),
+        version: required_option(&options, "version")?.to_owned(),
+        commit: options.get("commit").cloned(),
+        incoming: Path::new(required_option(&options, "incoming")?),
+        signer_live: required_option(&options, "signer")?.to_owned(),
+        signer_pinned: required_option(&options, "expect-signer")?.to_owned(),
+        verify_oci: apt_flag_bool(&options, "verify-oci")?,
+        backend: crate::s2::apt::DebBackend::Auto,
+        path_overlay: None,
+    };
+    crate::s2::apt::verify_suite(&inputs)?;
+    println!("{} feed inputs are coherent", inputs.suite.as_str());
+    Ok(())
+}
+
+/// Resolve the same complete APT contract as the S2 renderer, directly from
+/// its CLI fields. No schema-1 release record is constructed at runtime.
+fn apt_contract_from_options(
+    options: &BTreeMap<String, String>,
+) -> Result<crate::s2::apt::AptContract, GeneratorError> {
+    let empty_arches = Vec::new();
+    crate::s2::apt::AptContract::resolve_input(crate::s2::apt::AptContractInput {
+        kind: "apt",
+        source_repository: required_option(options, "source-repo")?,
+        package: required_option(options, "package")?,
+        binary: required_option(options, "binary")?,
+        consumer_repository: required_option(options, "consumer-repo")?,
+        manifest_schema: required_option(options, "manifest-schema")?,
+        signer_fingerprint: required_option(options, "signer")?,
+        passphrase_secret: required_option(options, "passphrase-env")?,
+        signing_key_secret: required_option(options, "key-env")?,
+        apt_attestation_secret: "",
+        keyring_path: required_option(options, "keyring")?,
+        apt_origin: required_option(options, "origin")?,
+        apt_identity_dir: required_option(options, "identity-dir")?,
+        apt_feed_url: required_option(options, "feed-url")?,
+        preview_source_ref: required_option(options, "preview-source-ref")?,
+        description: required_option(options, "description")?,
+        apt_arches: &empty_arches,
+        retention: 0,
+    })
+}
+
+fn apt_publish(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "suite",
+            "source-repo",
+            "package",
+            "binary",
+            "consumer-repo",
+            "manifest-schema",
+            "preview-source-ref",
+            "signer",
+            "passphrase-env",
+            "key-env",
+            "keyring",
+            "origin",
+            "identity-dir",
+            "feed-url",
+            "preview-source-ref",
+            "description",
+            "version",
+            "incoming",
+            "prev-dir",
+            "published-record",
+            "published-signature",
+            "previous-pointer",
+            "staging",
+            "bootstrap",
+        ],
+    )?;
+    let contract = apt_contract_from_options(&options)?;
+    let passphrase_env = required_option(&options, "passphrase-env")?.to_owned();
+    let passphrase = env::var(&passphrase_env).ok();
+    let key_env = required_option(&options, "key-env")?.to_owned();
+    let key_material = env::var(&key_env).ok();
+    let empty_prev;
+    let prev_dir = match options.get("prev-dir") {
+        Some(dir) if !dir.is_empty() => {
+            empty_prev = PathBuf::from(dir);
+            Some(empty_prev.as_path())
+        }
+        _ => None,
+    };
+    let inputs = crate::s2::apt::PublishInputs {
+        suite: crate::s2::apt::Suite::parse(required_option(&options, "suite")?)?,
+        contract,
+        version: required_option(&options, "version")?.to_owned(),
+        incoming: Path::new(required_option(&options, "incoming")?),
+        prev_dir,
+        published_record: options
+            .get("published-record")
+            .filter(|path| !path.is_empty())
+            .map(Path::new),
+        published_signature: options
+            .get("published-signature")
+            .filter(|path| !path.is_empty())
+            .map(Path::new),
+        previous_pointer: Path::new(required_option(&options, "previous-pointer")?),
+        staging: Path::new(required_option(&options, "staging")?),
+        bootstrap: apt_flag_bool(&options, "bootstrap")?,
+        passphrase_env,
+        passphrase,
+        key_env,
+        key_material,
+        backend: crate::s2::apt::DebBackend::Auto,
+        path_overlay: None,
+    };
+    match crate::s2::apt::publish_suite(&inputs)? {
+        crate::s2::apt::PublishOutcome::Published => {
+            println!("status=published");
+        }
+        crate::s2::apt::PublishOutcome::AlreadyPublished => {
+            println!("status=already-published");
+        }
+    }
+    Ok(())
+}
+
+fn apt_http_probe(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(arguments, &["url", "output"])?;
+    let result = crate::s2::apt::probe_https(
+        required_option(&options, "url")?,
+        Path::new(required_option(&options, "output")?),
+        None,
+    )?;
+    println!("{}", result.as_str());
+    Ok(())
+}
+
+fn apt_seed(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "source-repo",
+            "package",
+            "binary",
+            "consumer-repo",
+            "manifest-schema",
+            "signer",
+            "passphrase-env",
+            "key-env",
+            "keyring",
+            "origin",
+            "identity-dir",
+            "feed-url",
+            "preview-source-ref",
+            "description",
+            "staging",
+        ],
+    )?;
+    let contract = apt_contract_from_options(&options)?;
+    crate::s2::apt::seed_live_feed(
+        &contract,
+        Path::new(required_option(&options, "staging")?),
+        None,
+    )?;
+    println!("live APT suites restored");
+    Ok(())
+}
+
+/// Select an immutable preview release only after verifying its manifest,
+/// signer provenance and exact Debian bytes. The existing live feed is
+/// restored and authenticated first, so selection cannot move its head back.
+fn apt_preview_discover(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "source-repo",
+            "package",
+            "binary",
+            "consumer-repo",
+            "manifest-schema",
+            "signer",
+            "passphrase-env",
+            "key-env",
+            "keyring",
+            "origin",
+            "identity-dir",
+            "feed-url",
+            "preview-source-ref",
+            "description",
+            "signer-workflow",
+            "tag-prefix",
+            "token-env",
+        ],
+    )?;
+    let contract = apt_contract_from_options(&options)?;
+    let source_repo = required_option(&options, "source-repo")?;
+    let package = required_option(&options, "package")?;
+    let source_ref = required_option(&options, "preview-source-ref")?;
+    let signer_workflow = required_option(&options, "signer-workflow")?;
+    let tag_prefix = required_option(&options, "tag-prefix")?;
+    if !crate::s2::apt::valid_repository_slug(source_repo)
+        || tag_prefix != "preview-"
+        || !source_ref
+            .strip_prefix("refs/heads/")
+            .is_some_and(valid_branch)
+        || signer_workflow != format!("{source_repo}/.github/workflows/preview.yml")
+    {
+        return Err(GeneratorError::usage(
+            "preview discovery needs a safe source repository, default-branch ref, preview- tag prefix and source preview workflow",
+        ));
+    }
+    let token_env = required_option(&options, "token-env")?;
+    if !valid_environment_name(token_env) {
+        return Err(GeneratorError::usage(
+            "preview discovery token environment name is invalid",
+        ));
+    }
+    let token = env::var(token_env).map_err(|_| {
+        GeneratorError::usage(format!(
+            "preview discovery token environment is missing: {token_env}"
+        ))
+    })?;
+    if token.is_empty() {
+        return Err(GeneratorError::usage(
+            "preview discovery token environment is empty",
+        ));
+    }
+
+    let temp = RuntimeTempDir::create("velnor-apt-preview-discover")?;
+    let live_staging = temp.path.join("authenticated-live-feed");
+    crate::s2::apt::seed_live_feed(&contract, &live_staging, None)?;
+    let after_version = read_authenticated_preview_head(&live_staging)?;
+    let selected = discover_authenticated_preview_release(
+        source_repo,
+        package,
+        required_option(&options, "manifest-schema")?,
+        source_ref,
+        signer_workflow,
+        tag_prefix,
+        &token,
+        after_version.as_deref(),
+        &temp.path,
+        None,
+    )?;
+    let assets = selected
+        .assets
+        .iter()
+        .map(|(arch, asset)| {
+            (
+                arch.clone(),
+                serde_json::json!({"name": asset.name, "sha256": asset.sha256}),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let output = serde_json::json!({
+        "tag": selected.tag,
+        "version": selected.version,
+        "source_sha": selected.source_sha,
+        "assets": assets,
+    });
+    println!("{output}");
+    Ok(())
+}
+
+fn read_authenticated_preview_head(staging: &Path) -> Result<Option<String>, GeneratorError> {
+    let marker = staging.join(crate::s2::apt::Suite::Preview.last_publish_file());
+    match fs::symlink_metadata(&marker) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            let bytes = read_regular_release_file(&marker, 256)?;
+            let value = std::str::from_utf8(&bytes)
+                .map_err(|_| GeneratorError::usage("live preview marker is not UTF-8"))?
+                .trim()
+                .to_owned();
+            crate::s2::apt::parse_preview_version(&value)?;
+            Ok(Some(value))
+        }
+        Ok(_) => Err(GeneratorError::usage(
+            "live preview marker is not a regular file",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(GeneratorError::io(
+            "inspect authenticated preview marker",
+            &marker,
+            &error,
+        )),
+    }
+}
+
+fn discover_authenticated_preview_release(
+    source_repo: &str,
+    package: &str,
+    manifest_schema: &str,
+    source_ref: &str,
+    signer_workflow: &str,
+    tag_prefix: &str,
+    token: &str,
+    after_version: Option<&str>,
+    temp_root: &Path,
+    path_overlay: Option<&Path>,
+) -> Result<crate::s2::apt::PreviewSourceRelease, GeneratorError> {
+    if !crate::s2::apt::valid_repository_slug(source_repo)
+        || !crate::s2::apt::valid_package_name(package)
+        || manifest_schema.is_empty()
+        || !source_ref
+            .strip_prefix("refs/heads/")
+            .is_some_and(valid_branch)
+        || tag_prefix != "preview-"
+        || signer_workflow != format!("{source_repo}/.github/workflows/preview.yml")
+    {
+        return Err(GeneratorError::usage(
+            "preview release discovery contract is malformed",
+        ));
+    }
+    if let Some(version) = after_version {
+        crate::s2::apt::parse_preview_version(version)?;
+    }
+    let listing = run_gh_release_command(
+        &[
+            "api".to_owned(),
+            "--paginate".to_owned(),
+            "--slurp".to_owned(),
+            format!("repos/{source_repo}/releases?per_page=100"),
+        ],
+        token,
+        path_overlay,
+        32 * 1024 * 1024,
+    )?;
+    let listing: serde_json::Value = serde_json::from_slice(&listing)
+        .map_err(|error| GeneratorError::usage(format!("parse GitHub releases response: {error}")))?;
+    let releases = flatten_release_pages(&listing)?;
+    let mut authenticated = Vec::new();
+    for (index, release) in releases.iter().enumerate() {
+        let tag = release
+            .get("tag_name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| GeneratorError::usage("GitHub release has no tag name"))?;
+        if !tag.starts_with(tag_prefix) {
+            continue;
+        }
+        let draft = release
+            .get("draft")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| GeneratorError::usage("GitHub release has no draft state"))?;
+        let prerelease = release
+            .get("prerelease")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| GeneratorError::usage("GitHub release has no prerelease state"))?;
+        if draft || !prerelease {
+            continue;
+        }
+        let listed_assets = release
+            .get("assets")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| GeneratorError::usage("GitHub release has no asset list"))?;
+        let listed_names = listed_assets
+            .iter()
+            .map(|asset| {
+                asset
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| GeneratorError::usage("GitHub release asset has no name"))
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        if !listed_names.contains(crate::s2::apt::PREVIEW_MANIFEST_FILE) {
+            continue;
+        }
+
+        let release_dir = temp_root.join(format!("preview-release-{index}"));
+        fs::create_dir(&release_dir)
+            .map_err(|error| GeneratorError::io("create preview release workspace", &release_dir, &error))?;
+        download_preview_release_asset(
+            source_repo,
+            tag,
+            crate::s2::apt::PREVIEW_MANIFEST_FILE,
+            &release_dir,
+            token,
+            path_overlay,
+        )?;
+        let manifest_path = release_dir.join(crate::s2::apt::PREVIEW_MANIFEST_FILE);
+        let manifest_bytes = read_regular_release_file(&manifest_path, 1_048_576)?;
+        let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)
+            .map_err(|error| GeneratorError::usage(format!("parse preview release manifest: {error}")))?;
+        let candidate = crate::s2::apt::parse_preview_source_release_manifest(
+            &manifest,
+            manifest_schema,
+            source_repo,
+            source_ref,
+            tag,
+            package,
+        )?;
+        let expected_workflow_asset_names = candidate
+            .assets
+            .values()
+            .map(|asset| asset.name.as_str())
+            .collect::<BTreeSet<_>>();
+        for asset_name in &expected_workflow_asset_names {
+            if !listed_names.contains(*asset_name) {
+                return Err(GeneratorError::usage(format!(
+                    "preview release {tag} omits manifest-pinned asset {asset_name}"
+                )));
+            }
+            download_preview_release_asset(
+                source_repo,
+                tag,
+                asset_name,
+                &release_dir,
+                token,
+                path_overlay,
+            )?;
+        }
+
+        let mut attested = verify_preview_release_asset_attestation(
+            &manifest_path,
+            source_repo,
+            source_ref,
+            signer_workflow,
+            &candidate,
+            token,
+            path_overlay,
+        )?;
+        let mut expected_subjects = BTreeSet::from([sha256_file(&manifest_path)?]);
+        for (arch, asset) in &candidate.assets {
+            let path = release_dir.join(&asset.name);
+            let bytes = read_regular_release_file(&path, 512 * 1024 * 1024)?;
+            let digest = sha256_bytes_runtime(&bytes);
+            if digest != asset.sha256 {
+                return Err(GeneratorError::usage(format!(
+                    "preview release {tag} {arch} asset digest differs from its signed manifest"
+                )));
+            }
+            let subjects = verify_preview_release_asset_attestation(
+                &path,
+                source_repo,
+                source_ref,
+                signer_workflow,
+                &candidate,
+                token,
+                path_overlay,
+            )?;
+            attested.extend(subjects);
+            expected_subjects.insert(digest);
+        }
+        if attested != expected_subjects {
+            return Err(GeneratorError::usage(format!(
+                "preview release {tag} attestation subjects do not exactly bind its manifest and Debian assets"
+            )));
+        }
+        authenticated.push(candidate);
+    }
+    crate::s2::apt::select_preview_source_release(&authenticated, tag_prefix, after_version)
+}
+
+fn flatten_release_pages(
+    document: &serde_json::Value,
+) -> Result<Vec<serde_json::Value>, GeneratorError> {
+    let values = document
+        .as_array()
+        .ok_or_else(|| GeneratorError::usage("GitHub release listing is not an array"))?;
+    let mut releases = Vec::new();
+    if values.is_empty() {
+        return Ok(releases);
+    }
+    if values.iter().all(serde_json::Value::is_array) {
+        for page in values {
+            for release in page.as_array().ok_or_else(|| {
+                GeneratorError::usage("GitHub release page is not an array")
+            })? {
+                if !release.is_object() {
+                    return Err(GeneratorError::usage(
+                        "GitHub release row is not an object",
+                    ));
+                }
+                releases.push(release.clone());
+            }
+        }
+    } else if values.iter().all(serde_json::Value::is_object) {
+        releases.extend(values.iter().cloned());
+    } else {
+        return Err(GeneratorError::usage(
+            "GitHub release listing mixes pages and release rows",
+        ));
+    }
+    Ok(releases)
+}
+
+fn download_preview_release_asset(
+    source_repo: &str,
+    tag: &str,
+    asset_name: &str,
+    destination: &Path,
+    token: &str,
+    path_overlay: Option<&Path>,
+) -> Result<(), GeneratorError> {
+    let destination = destination
+        .to_str()
+        .ok_or_else(|| GeneratorError::usage("preview release directory is not UTF-8"))?;
+    run_gh_release_command(
+        &[
+            "release".to_owned(),
+            "download".to_owned(),
+            tag.to_owned(),
+            "--repo".to_owned(),
+            source_repo.to_owned(),
+            "--dir".to_owned(),
+            destination.to_owned(),
+            "--pattern".to_owned(),
+            asset_name.to_owned(),
+        ],
+        token,
+        path_overlay,
+        1_048_576,
+    )?;
+    Ok(())
+}
+
+fn verify_preview_release_asset_attestation(
+    path: &Path,
+    source_repo: &str,
+    source_ref: &str,
+    signer_workflow: &str,
+    release: &crate::s2::apt::PreviewSourceRelease,
+    token: &str,
+    path_overlay: Option<&Path>,
+) -> Result<BTreeSet<String>, GeneratorError> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| GeneratorError::usage("preview release asset path is not UTF-8"))?;
+    let output = run_gh_release_command(
+        &[
+            "attestation".to_owned(),
+            "verify".to_owned(),
+            path.to_owned(),
+            "--repo".to_owned(),
+            source_repo.to_owned(),
+            "--signer-workflow".to_owned(),
+            signer_workflow.to_owned(),
+            "--source-ref".to_owned(),
+            source_ref.to_owned(),
+            "--source-digest".to_owned(),
+            release.source_sha.clone(),
+            "--predicate-type".to_owned(),
+            crate::s2::apt::RELEASE_SOURCE_PREDICATE.to_owned(),
+            "--format".to_owned(),
+            "json".to_owned(),
+        ],
+        token,
+        path_overlay,
+        8 * 1024 * 1024,
+    )?;
+    crate::s2::apt::parse_release_source_attestation(
+        &output,
+        &release.source_sha,
+        &release.tag,
+        &release.version,
+        source_repo,
+    )
+}
+
+fn run_gh_release_command(
+    arguments: &[String],
+    token: &str,
+    path_overlay: Option<&Path>,
+    max_output: usize,
+) -> Result<Vec<u8>, GeneratorError> {
+    let mut command = Command::new("gh");
+    command.args(arguments).env("GH_TOKEN", token).env("GH_PROMPT", "disabled");
+    if let Some(directory) = path_overlay {
+        let path = env::var_os("PATH").map_or_else(
+            || directory.as_os_str().to_owned(),
+            |existing| {
+                let mut paths = vec![directory.to_path_buf()];
+                paths.extend(env::split_paths(&existing));
+                env::join_paths(paths).unwrap_or_else(|_| directory.as_os_str().to_owned())
+            },
+        );
+        command.env("PATH", path);
+    }
+    let output = command
+        .output()
+        .map_err(|_| GeneratorError::usage("GitHub CLI is not installed or cannot run"))?;
+    if !output.status.success() {
+        return Err(GeneratorError::usage(format!(
+            "GitHub CLI request failed with status {}",
+            output.status
+        )));
+    }
+    if output.stdout.len() > max_output {
+        return Err(GeneratorError::usage(
+            "GitHub CLI response exceeds its size limit",
+        ));
+    }
+    Ok(output.stdout)
+}
+
+fn sha256_bytes_runtime(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        output.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
+        output.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
+    }
+    output
+}
+
+fn valid_environment_name(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+struct RuntimeTempDir {
+    path: PathBuf,
+}
+
+impl RuntimeTempDir {
+    fn create(prefix: &str) -> Result<Self, GeneratorError> {
+        let path = env::temp_dir().join(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            crate::s2::unique_suffix()
+        ));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&path)
+                .map_err(|error| GeneratorError::io("create private release directory", &path, &error))?;
+        }
+        #[cfg(not(unix))]
+        fs::create_dir(&path)
+            .map_err(|error| GeneratorError::io("create private release directory", &path, &error))?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for RuntimeTempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+fn apt_previous_pointer(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "suite",
+            "published",
+            "published-signature",
+            "keyring",
+            "signer",
+            "prior",
+            "candidate",
+            "candidate-sha",
+            "bootstrap",
+        ],
+    )?;
+    let suite = crate::s2::apt::Suite::parse(required_option(&options, "suite")?)?;
+    let bootstrap = apt_flag_bool(&options, "bootstrap")?;
+    let pointer = match suite {
+        crate::s2::apt::Suite::Stable => {
+            if bootstrap {
+                serde_json::Value::Null
+            } else {
+                let document = crate::s2::apt::read_authenticated_publication_record(
+                    Path::new(required_option(&options, "published")?),
+                    Path::new(required_option(&options, "published-signature")?),
+                    required_option(&options, "keyring")?,
+                    required_option(&options, "signer")?,
+                    None,
+                )?;
+                crate::s2::apt::derive_previous_pointer(
+                    &document,
+                    required_option(&options, "prior")?,
+                    required_option(&options, "candidate")?,
+                    required_option(&options, "candidate-sha")?,
+                )?
+            }
+        }
+        crate::s2::apt::Suite::Preview => {
+            if bootstrap {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(crate::s2::apt::PREVIEW_TAG.to_owned())
+            }
+        }
+    };
+    println!("{pointer}");
+    Ok(())
+}
+
+fn apt_channel_update(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "suite",
+            "source-repo",
+            "source-ref",
+            "preview-source-ref",
+            "commit",
+            "version",
+            "package",
+            "manifest",
+            "staging",
+        ],
+    )?;
+    let inputs = crate::s2::apt::ChannelUpdateInputs {
+        suite: crate::s2::apt::Suite::parse(required_option(&options, "suite")?)?,
+        source_repo: required_option(&options, "source-repo")?.to_owned(),
+        source_ref: required_option(&options, "source-ref")?.to_owned(),
+        preview_source_ref: required_option(&options, "preview-source-ref")?.to_owned(),
+        commit: required_option(&options, "commit")?.to_owned(),
+        version: required_option(&options, "version")?.to_owned(),
+        package: required_option(&options, "package")?.to_owned(),
+        manifest: Path::new(required_option(&options, "manifest")?),
+        staging: Path::new(required_option(&options, "staging")?),
+    };
+    crate::s2::apt::run_channel_update(&inputs)?;
+    println!("{} channel state updated", inputs.suite.as_str());
+    Ok(())
+}
+
+fn apt_deploy_guard(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "suite",
+            "staged",
+            "bootstrap",
+            "source-repo",
+            "package",
+            "binary",
+            "consumer-repo",
+            "manifest-schema",
+            "signer",
+            "passphrase-env",
+            "key-env",
+            "keyring",
+            "origin",
+            "identity-dir",
+            "feed-url",
+            "preview-source-ref",
+            "description",
+            "source-commit",
+            "source-ref",
+            "version",
+            "source-record-sha256",
+        ],
+    )?;
+    let suite = crate::s2::apt::Suite::parse(required_option(&options, "suite")?)?;
+    let staged = Path::new(required_option(&options, "staged")?);
+    let bootstrap = apt_flag_bool(&options, "bootstrap")?;
+    let contract = apt_contract_from_options(&options)?;
+    crate::s2::apt::check_deploy_guard(&crate::s2::apt::DeployGuardInputs {
+        suite,
+        contract,
+        staged,
+        bootstrap,
+        source_commit: required_option(&options, "source-commit")?,
+        source_ref: required_option(&options, "source-ref")?,
+        version: required_option(&options, "version")?,
+        source_record_sha256: required_option(&options, "source-record-sha256")?,
+        path_overlay: None,
+    })?;
+    println!("{} deploy guard passed", suite.as_str());
+    Ok(())
 }
 
 /// Resolve the release mode for one event: the total event×mode matrix.
@@ -4053,6 +5134,153 @@ fn assemble_manifest(arguments: &[OsString]) -> Result<(), GeneratorError> {
     Ok(())
 }
 
+/// Build the canonical source-release wrapper for the exact runtime consumer
+/// manifest and three raw product assets downloaded by the signer.
+fn runtime_products_manifest(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "consumer-manifest",
+            "asset-dir",
+            "repository",
+            "source-ref",
+            "source-sha",
+            "tag",
+            "version",
+            "closure",
+            "output",
+        ],
+    )?;
+    let (expected, consumer_manifest, assets) =
+        read_runtime_products_inputs(&options, "consumer-manifest")?;
+    let wrapper = crate::s2::primitives::runtime_products::build_runtime_products_release_manifest(
+        &consumer_manifest,
+        &assets,
+        &expected,
+    )?;
+    let output = Path::new(required_option(&options, "output")?);
+    write_runtime_products_output(output, &wrapper)?;
+    println!("{}", output.display());
+    Ok(())
+}
+
+/// Re-verify the source-release wrapper against the transported consumer
+/// manifest and raw assets immediately before the publisher mutates a tag.
+fn verify_runtime_products(arguments: &[OsString]) -> Result<(), GeneratorError> {
+    let options = parse_options(
+        arguments,
+        &[
+            "consumer-manifest",
+            "release-manifest",
+            "asset-dir",
+            "repository",
+            "source-ref",
+            "source-sha",
+            "tag",
+            "version",
+            "closure",
+        ],
+    )?;
+    let (expected, consumer_manifest, assets) =
+        read_runtime_products_inputs(&options, "consumer-manifest")?;
+    let release_manifest_path = Path::new(required_option(&options, "release-manifest")?);
+    let release_manifest = read_regular_release_file(release_manifest_path, 1_048_576)?;
+    crate::s2::primitives::runtime_products::validate_runtime_products_release_manifest(
+        &release_manifest,
+        &consumer_manifest,
+        &assets,
+        &expected,
+    )?;
+    println!("runtime products verified");
+    Ok(())
+}
+
+fn read_runtime_products_inputs<'a>(
+    options: &'a BTreeMap<String, String>,
+    consumer_manifest_option: &str,
+) -> Result<(
+    crate::s2::primitives::runtime_products::RuntimeProductsReleaseExpectation<'a>,
+    Vec<u8>,
+    BTreeMap<String, Vec<u8>>,
+), GeneratorError> {
+    let expected = crate::s2::primitives::runtime_products::RuntimeProductsReleaseExpectation {
+        repository: required_option(options, "repository")?,
+        source_ref: required_option(options, "source-ref")?,
+        source_sha: required_option(options, "source-sha")?,
+        release_tag: required_option(options, "tag")?,
+        version: required_option(options, "version")?,
+        closure: required_option(options, "closure")?,
+    };
+    let consumer_manifest_path = Path::new(required_option(options, consumer_manifest_option)?);
+    let consumer_manifest = read_regular_release_file(consumer_manifest_path, 1_048_576)?;
+    let asset_dir = Path::new(required_option(options, "asset-dir")?);
+    let mut assets = BTreeMap::new();
+    for platform in crate::s2::primitives::runtime_products::runtime_product_platforms() {
+        let key = platform.key();
+        let path = asset_dir.join(platform.asset_name());
+        let bytes = read_regular_release_file(&path, 512 * 1024 * 1024)?;
+        if assets.insert(key.clone(), bytes).is_some() {
+            return Err(GeneratorError::usage(format!(
+                "duplicate runtime product platform: {key}"
+            )));
+        }
+    }
+    Ok((expected, consumer_manifest, assets))
+}
+
+fn read_regular_release_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, GeneratorError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| GeneratorError::io("inspect release product input", path, &error))?;
+    if !metadata.file_type().is_file() {
+        return Err(GeneratorError::usage(format!(
+            "release product input is not a regular file: {}",
+            path.display()
+        )));
+    }
+    if metadata.len() > max_bytes {
+        return Err(GeneratorError::usage(format!(
+            "release product input exceeds its size limit: {}",
+            path.display()
+        )));
+    }
+    let bytes = fs::read(path)
+        .map_err(|error| GeneratorError::io("read release product input", path, &error))?;
+    if u64::try_from(bytes.len()).ok() != Some(metadata.len()) {
+        return Err(GeneratorError::usage(format!(
+            "release product input changed while being read: {}",
+            path.display()
+        )));
+    }
+    Ok(bytes)
+}
+
+fn write_runtime_products_output(path: &Path, bytes: &[u8]) -> Result<(), GeneratorError> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| GeneratorError::io("create runtime release manifest", path, &error))?;
+    if let Err(error) = file.write_all(bytes) {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(GeneratorError::io(
+            "write runtime release manifest",
+            path,
+            &error,
+        ));
+    }
+    if let Err(error) = file.flush() {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(GeneratorError::io(
+            "flush runtime release manifest",
+            path,
+            &error,
+        ));
+    }
+    Ok(())
+}
+
 /// Re-verify a checksum corpus strictly: every line re-hashes its subject
 /// from disk and any mismatch, miss, or malformed line fails.
 fn verify_checksum_corpus(dir: &Path, corpus: &str) -> Result<(), GeneratorError> {
@@ -4145,25 +5373,50 @@ fn sha256_file(path: &Path) -> Result<String, GeneratorError> {
     Ok(output)
 }
 
-fn is_semver(value: &str) -> bool {
-    let (core, suffix) = value
+/// Whether `value` is a canonical SemVer 2.0 version without a leading `v`.
+/// Release admission and versioned-tool publication share this parser so
+/// malformed or non-canonical manifest values cannot become tags.
+pub(crate) fn is_canonical_semver(value: &str) -> bool {
+    fn valid_identifiers(value: &str, reject_numeric_leading_zero: bool) -> bool {
+        !value.is_empty()
+            && value.split('.').all(|identifier| {
+                !identifier.is_empty()
+                    && identifier
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                    && (!reject_numeric_leading_zero
+                        || !identifier.bytes().all(|byte| byte.is_ascii_digit())
+                        || identifier.len() == 1
+                        || !identifier.starts_with('0'))
+            })
+    }
+
+    let (without_build, build) = value
+        .split_once('+')
+        .map_or((value, None), |(version, metadata)| (version, Some(metadata)));
+    if build.is_some_and(|metadata| {
+        metadata.contains('+') || !valid_identifiers(metadata, false)
+    }) {
+        return false;
+    }
+
+    let (core, prerelease) = without_build
         .split_once('-')
-        .map_or((value, None), |(core, suffix)| (core, Some(suffix)));
-    let parts = core.split('.').collect::<Vec<_>>();
-    parts.len() == 3
-        && parts
-            .iter()
-            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
-        && suffix.is_none_or(|value| {
-            !value.is_empty()
-                && value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+        .map_or((without_build, None), |(core, prerelease)| {
+            (core, Some(prerelease))
+        });
+    let core = core.split('.').collect::<Vec<_>>();
+    core.len() == 3
+        && core.iter().all(|identifier| {
+            !identifier.is_empty()
+                && identifier.bytes().all(|byte| byte.is_ascii_digit())
+                && (identifier.len() == 1 || !identifier.starts_with('0'))
         })
+        && prerelease.is_none_or(|identifiers| valid_identifiers(identifiers, true))
 }
 
 fn is_artifact_version(value: &str) -> bool {
-    value == "preview" || is_semver(value) || is_preview_version(value)
+    value == "preview" || is_canonical_semver(value) || is_preview_version(value)
 }
 
 /// A rolling-preview Debian version: the crate version, a `~preview.N`
@@ -4282,6 +5535,7 @@ pub(crate) fn valid_registry_host(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use std::error::Error;
+    use std::fmt::Write as _;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
@@ -4335,6 +5589,417 @@ mod tests {
         must(
             std::fs::write(dir.join(format!("image-{arch}.digest")), digest),
             "write platform digest",
+        );
+    }
+
+    #[test]
+    fn legacy_apt_feed_commands_fail_closed_in_favor_of_typed_apt_commands() {
+        let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
+        let verify = must_fail(
+            verify_feed(&args(&["--kind", "apt", "--package", "example"])),
+            "legacy APT verification must fail",
+        );
+        assert!(verify.to_string().contains("release apt-verify"), "{verify}");
+
+        let update = must_fail(
+            update_feed(&args(&[
+                "--kind", "apt", "--package", "example", "--channel", "stable",
+            ])),
+            "legacy APT update must fail",
+        );
+        assert!(update.to_string().contains("release apt-publish"), "{update}");
+    }
+
+    #[test]
+    fn runtime_product_manifest_cli_rechecks_exact_source_and_asset_bytes() {
+        let root = digest_fixture("runtime-products-cli");
+        let asset_dir = root.join("assets");
+        must(fs::create_dir_all(&asset_dir), "create runtime asset fixture");
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let closure = "a".repeat(64);
+        let mut products = serde_json::Map::new();
+        for platform in crate::s2::primitives::runtime_products::runtime_product_platforms() {
+            let key = platform.key();
+            let asset = platform.asset_name();
+            let path = asset_dir.join(&asset);
+            must(
+                fs::write(&path, format!("runtime product {key}")),
+                "write runtime asset fixture",
+            );
+            let digest = must(sha256_file(&path), "hash runtime asset fixture");
+            products.insert(
+                key,
+                serde_json::json!({"binary": digest, "asset": asset}),
+            );
+        }
+        let consumer_manifest = serde_json::json!({
+            "closure": closure,
+            "revision": revision,
+            "profile": "release",
+            "features": "",
+            "products": products,
+        });
+        let consumer_path = root.join("manifest.json");
+        must(
+            fs::write(
+                &consumer_path,
+                serde_json::to_vec(&consumer_manifest).expect("serialize consumer manifest"),
+            ),
+            "write runtime consumer manifest",
+        );
+        let output_path = root.join("runtime-products-release.json");
+        let manifest_args = vec![
+            "--consumer-manifest".to_owned(),
+            consumer_path.display().to_string(),
+            "--asset-dir".to_owned(),
+            asset_dir.display().to_string(),
+            "--repository".to_owned(),
+            "owner/project".to_owned(),
+            "--source-ref".to_owned(),
+            "refs/heads/main".to_owned(),
+            "--source-sha".to_owned(),
+            revision.to_owned(),
+            "--tag".to_owned(),
+            "v1.2.3".to_owned(),
+            "--version".to_owned(),
+            "1.2.3".to_owned(),
+            "--closure".to_owned(),
+            closure.clone(),
+            "--output".to_owned(),
+            output_path.display().to_string(),
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>();
+        must(
+            runtime_products_manifest(&manifest_args),
+            "build runtime product release wrapper",
+        );
+
+        let verify_args = vec![
+            "--consumer-manifest".to_owned(),
+            consumer_path.display().to_string(),
+            "--release-manifest".to_owned(),
+            output_path.display().to_string(),
+            "--asset-dir".to_owned(),
+            asset_dir.display().to_string(),
+            "--repository".to_owned(),
+            "owner/project".to_owned(),
+            "--source-ref".to_owned(),
+            "refs/heads/main".to_owned(),
+            "--source-sha".to_owned(),
+            revision.to_owned(),
+            "--tag".to_owned(),
+            "v1.2.3".to_owned(),
+            "--version".to_owned(),
+            "1.2.3".to_owned(),
+            "--closure".to_owned(),
+            closure,
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>();
+        must(
+            verify_runtime_products(&verify_args),
+            "verify runtime product source wrapper",
+        );
+
+        let linux_x64 = crate::s2::primitives::runtime_products::runtime_product_platforms()
+            .into_iter()
+            .find(|platform| platform.key() == "Linux-X64")
+            .expect("Linux X64 platform");
+        must(
+            fs::write(asset_dir.join(linux_x64.asset_name()), "substituted bytes"),
+            "replace runtime asset after wrapping",
+        );
+        let error = must_fail(
+            verify_runtime_products(&verify_args),
+            "reject substituted asset bytes",
+        );
+        assert!(error.to_string().contains("digest mismatch"), "{error}");
+
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_product_input_reader_rejects_symlinked_assets() {
+        use std::os::unix::fs::symlink;
+
+        let root = digest_fixture("runtime-products-symlink");
+        let target = root.join("outside.bin");
+        let link = root.join("asset.bin");
+        must(fs::write(&target, b"runtime"), "write symlink target");
+        must(symlink(&target, &link), "create symlinked runtime asset");
+        let error = must_fail(
+            read_regular_release_file(&link, 1024),
+            "reject symlinked runtime asset",
+        );
+        assert!(error.to_string().contains("not a regular file"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preview_discovery_authenticates_manifest_assets_and_live_head_order() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = RuntimeTempDir::create("velnor-preview-discovery-test")
+            .expect("create preview discovery test root");
+        let root = temp.path.clone();
+        let remote = root.join("remote");
+        let work = root.join("work");
+        let bin = root.join("bin");
+        must(fs::create_dir(&remote), "create remote release fixture");
+        must(fs::create_dir(&work), "create release download workspace");
+        must(fs::create_dir(&bin), "create gh fixture directory");
+
+        let source_sha = "abcdef0123456789abcdef0123456789abcdef01";
+        let version = "1.2.3~preview.1+abcdef0";
+        let tag = "preview-1.2.3.preview.1+abcdef0";
+        let manifest_schema = "example.release/v1";
+        let source_repo = "owner/source";
+        let source_ref = "refs/heads/main";
+        let signer_workflow = "owner/source/.github/workflows/preview.yml";
+        let package = "example-app";
+        let mut manifest_assets = Vec::new();
+        let mut asset_digests = BTreeMap::new();
+        for arch in crate::s2::apt::REQUIRED_ARCHES {
+            let name = format!(
+                "{package}-preview-{}-{arch}.deb",
+                crate::s2::apt::dotted_asset_version(version)
+            );
+            let bytes = format!("deb bytes for {arch}").into_bytes();
+            let path = remote.join(&name);
+            must(fs::write(&path, &bytes), "write preview deb fixture");
+            let digest = sha256_bytes_runtime(&bytes);
+            manifest_assets.push(serde_json::json!({"name": name, "sha256": digest}));
+            asset_digests.insert(name, digest);
+        }
+        let manifest_value = serde_json::json!({
+            "schema": manifest_schema,
+            "source_repository": source_repo,
+            "source_ref": source_ref,
+            "source_commit": source_sha,
+            "release_tag": tag,
+            "version": version,
+            "assets": manifest_assets,
+        });
+        let manifest_bytes = serde_json::to_vec(&manifest_value).expect("serialize preview manifest");
+        let manifest_digest = sha256_bytes_runtime(&manifest_bytes);
+        must(
+            fs::write(remote.join(crate::s2::apt::PREVIEW_MANIFEST_FILE), &manifest_bytes),
+            "write preview manifest fixture",
+        );
+        let mut asset_names = vec![crate::s2::apt::PREVIEW_MANIFEST_FILE.to_owned()];
+        asset_names.extend(asset_digests.keys().cloned());
+        let release_listing = serde_json::json!([[
+            {
+                "tag_name": tag,
+                "draft": false,
+                "prerelease": true,
+                "assets": asset_names.iter().map(|name| serde_json::json!({"name": name})).collect::<Vec<_>>(),
+            }
+        ]]);
+        let listing_path = root.join("releases.json");
+        must(
+            fs::write(
+                &listing_path,
+                serde_json::to_vec(&release_listing).expect("serialize release listing"),
+            ),
+            "write GitHub release listing fixture",
+        );
+        let attestation_document = |digest: &str| {
+            serde_json::json!([{
+                "verificationResult": {
+                    "statement": {
+                        "predicateType": crate::s2::apt::RELEASE_SOURCE_PREDICATE,
+                        "predicate": {
+                            "source_sha": source_sha,
+                            "release_tag": tag,
+                            "version": version,
+                            "source_repository": source_repo,
+                        },
+                        "subject": [{"digest": {"sha256": digest}}],
+                    },
+                },
+            }])
+        };
+        let manifest_attestation = root.join("attestation-manifest.json");
+        must(
+            fs::write(
+                &manifest_attestation,
+                serde_json::to_vec(&attestation_document(&manifest_digest))
+                    .expect("serialize manifest attestation"),
+            ),
+            "write manifest attestation fixture",
+        );
+        let mut asset_attestations = BTreeMap::new();
+        for (name, digest) in &asset_digests {
+            let path = root.join(format!("attestation-{name}.json"));
+            must(
+                fs::write(
+                    &path,
+                    serde_json::to_vec(&attestation_document(digest))
+                        .expect("serialize asset attestation"),
+                ),
+                "write asset attestation fixture",
+            );
+            asset_attestations.insert(name.clone(), path);
+        }
+        let mut attestation_cases = String::new();
+        let _ = writeln!(
+            attestation_cases,
+            "  */{}) cat '{}';;",
+            crate::s2::apt::PREVIEW_MANIFEST_FILE,
+            manifest_attestation.display()
+        );
+        for (name, path) in &asset_attestations {
+            let _ = writeln!(attestation_cases, "  */{name}) cat '{}';;", path.display());
+        }
+        let stub = format!(
+            r#"#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$*" >> '{log}'
+case "$1" in
+  api) cat '{listing}' ;;
+  release)
+    [[ "$2" == download ]] || exit 1
+    tag="$3"
+    [[ "$tag" == '{tag}' ]] || exit 1
+    destination=''
+    pattern=''
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --dir) destination="$2"; shift 2 ;;
+        --pattern) pattern="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    cp '{remote}/'$pattern "$destination/$pattern"
+    ;;
+  attestation)
+    [[ "$2" == verify ]] || exit 1
+    [[ " $* " == *" --repo {source_repo} "* ]] || exit 1
+    [[ " $* " == *" --signer-workflow {signer_workflow} "* ]] || exit 1
+    [[ " $* " == *" --source-ref {source_ref} "* ]] || exit 1
+    [[ " $* " == *" --source-digest {source_sha} "* ]] || exit 1
+    [[ " $* " == *" --predicate-type {predicate} "* ]] || exit 1
+    path="$3"
+    case "$path" in
+{attestation_cases}      *) exit 1 ;;
+    esac
+    ;;
+  *) exit 1 ;;
+esac
+"#,
+            log = root.join("gh.log").display(),
+            listing = listing_path.display(),
+            remote = remote.display(),
+            tag = tag,
+            source_repo = source_repo,
+            signer_workflow = signer_workflow,
+            source_ref = source_ref,
+            source_sha = source_sha,
+            predicate = crate::s2::apt::RELEASE_SOURCE_PREDICATE,
+            attestation_cases = attestation_cases,
+        );
+        let gh = bin.join("gh");
+        must(fs::write(&gh, stub), "write fake GitHub CLI");
+        let mut permissions = must(fs::metadata(&gh), "stat fake GitHub CLI").permissions();
+        permissions.set_mode(0o755);
+        must(fs::set_permissions(&gh, permissions), "make fake GitHub CLI executable");
+
+        let selected = must(
+            discover_authenticated_preview_release(
+                source_repo,
+                package,
+                manifest_schema,
+                source_ref,
+                signer_workflow,
+                "preview-",
+                "test-token",
+                Some("1.2.3~preview.1+abcdef0"),
+                &work,
+                Some(&bin),
+            ),
+            "discover authenticated preview release",
+        );
+        assert_eq!(selected.tag, tag);
+        assert_eq!(selected.version, version);
+        assert_eq!(selected.source_sha, source_sha);
+        assert_eq!(selected.assets.len(), 2);
+        let log = must(fs::read_to_string(root.join("gh.log")), "read gh discovery log");
+        assert_eq!(
+            log.lines()
+                .filter(|line| line.starts_with("attestation verify "))
+                .count(),
+            3,
+            "manifest and both deb bytes have individual source attestations"
+        );
+
+        let stale_work = root.join("stale-work");
+        must(fs::create_dir(&stale_work), "create stale-release workspace");
+        let error = must_fail(
+            discover_authenticated_preview_release(
+                source_repo,
+                package,
+                manifest_schema,
+                source_ref,
+                signer_workflow,
+                "preview-",
+                "test-token",
+                Some("1.2.4~preview.1+abcdef0"),
+                &stale_work,
+                Some(&bin),
+            ),
+            "reject a source release older than the authenticated live head",
+        );
+        assert!(error.to_string().contains("older than authenticated live head"), "{error}");
+    }
+
+    #[test]
+    fn release_tag_target_uses_canonical_semver_and_admitted_checkout_sha() {
+        let commit = "a".repeat(40);
+        assert_eq!(
+            validate_release_tag_target("v1.2.3-rc.1+build.7", &commit, &commit)
+                .expect("canonical tag and exact target commit"),
+            "1.2.3-rc.1+build.7"
+        );
+
+        for tag in ["1.2.3", "v01.2.3", "v1.2.3-01", "v1.2.3+", "v1.2.3~preview.2"] {
+            let error = must_fail(
+                validate_release_tag_target(tag, &commit, &commit),
+                "invalid release tag",
+            );
+            assert!(
+                error.to_string().contains("canonical semver v* tag"),
+                "{tag}: {error}"
+            );
+        }
+
+        let short_commit = "a".repeat(39);
+        let error = must_fail(
+            validate_release_tag_target("v1.2.3", &short_commit, &commit),
+            "short release target commit",
+        );
+        assert!(error.to_string().contains("full 40-character Git SHA"), "{error}");
+
+        let moved = "b".repeat(40);
+        let error = must_fail(
+            validate_release_tag_target("v1.2.3", &commit, &moved),
+            "release checkout moved from admitted target",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("checkout does not match the admitted target commit"),
+            "{error}"
+        );
+
+        let args = [OsString::from("--branch"), OsString::from("main")];
+        let error = must_fail(verify_tag(&args), "branch-tip verify-tag interface");
+        assert!(
+            error.to_string().contains("unsupported CI argument: --branch"),
+            "{error}"
         );
     }
 
@@ -4522,6 +6187,37 @@ mod tests {
     }
 
     #[test]
+    fn canonical_semver_enforces_core_prerelease_and_build_grammar() {
+        for version in [
+            "0.0.0",
+            "1.2.3",
+            "1.2.3-rc.1",
+            "1.2.3-0A.Beta-x",
+            "1.2.3+build.01",
+            "1.2.3-rc.1+build.5",
+            "999999999999999999999.2.3",
+        ] {
+            assert!(is_canonical_semver(version), "{version} must be accepted");
+        }
+        for version in [
+            "01.2.3",
+            "1.02.3",
+            "1.2.03",
+            "1.2",
+            "1.2.3-",
+            "1.2.3+",
+            "1.2.3-01",
+            "1.2.3-rc..1",
+            "1.2.3+build..7",
+            "1.2.3-rc+foo+bar",
+            "1.2.3-rc#",
+            "v1.2.3",
+        ] {
+            assert!(!is_canonical_semver(version), "{version} must be rejected");
+        }
+    }
+
+    #[test]
     fn preview_versions_are_strictly_shaped() {
         for version in [
             "0.1.274~preview.145+d3e441f",
@@ -4552,7 +6248,7 @@ mod tests {
             assert!(!is_preview_version(version), "{version} must be rejected");
         }
         // The tag gate stays strict semver: preview shapes never leak into it.
-        assert!(!is_semver("0.1.274~preview.145+d3e441f"));
+        assert!(!is_canonical_semver("0.1.274~preview.145+d3e441f"));
     }
 
     #[test]
@@ -5209,6 +6905,30 @@ workspace_check = true
             "supported kinds keep their matrices: {output}"
         );
         Ok(())
+    }
+
+    #[test]
+    fn planned_unit_json_carries_result_identity_fields() {
+        let providers = must(
+            parse_provider_set(&["velnor".to_owned()], "providers"),
+            "parse plan provider",
+        );
+        let units = must(
+            planned_units_json(&[PlannedUnit {
+                unit_id: "rust-app".to_owned(),
+                providers,
+                platform: Platform::LinuxArm64,
+                command_digest: "0123456789abcdef".to_owned(),
+            }]),
+            "serialize plan result identity",
+        );
+        let rows: Vec<serde_json::Value> =
+            must(serde_json::from_str(&units), "parse plan result identity");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["unit_id"], "rust-app");
+        assert_eq!(rows[0]["providers"], serde_json::json!(["velnor"]));
+        assert_eq!(rows[0]["platform"], "linux-arm64");
+        assert_eq!(rows[0]["command_digest"], "0123456789abcdef");
     }
 
     #[test]
@@ -6009,6 +7729,66 @@ workspace_check = true
     }
     fn release_args(options: &[&str]) -> Vec<OsString> {
         options.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn apt_runtime_resolves_typed_contract_and_dispatches_fail_closed() {
+        let options = BTreeMap::from([
+            ("source-repo".to_owned(), "example/app".to_owned()),
+            ("package".to_owned(), "example".to_owned()),
+            ("binary".to_owned(), "example".to_owned()),
+            ("consumer-repo".to_owned(), "example/feed".to_owned()),
+            (
+                "manifest-schema".to_owned(),
+                "example.test/apt-v1".to_owned(),
+            ),
+            (
+                "signer".to_owned(),
+                "0123456789ABCDEF0123456789ABCDEF01234567".to_owned(),
+            ),
+            ("passphrase-env".to_owned(), "APT_PASSPHRASE".to_owned()),
+            ("key-env".to_owned(), "APT_SIGNING_KEY".to_owned()),
+            ("keyring".to_owned(), "example.gpg".to_owned()),
+            ("origin".to_owned(), "example".to_owned()),
+            ("identity-dir".to_owned(), "example".to_owned()),
+            (
+                "preview-source-ref".to_owned(),
+                "refs/heads/trunk".to_owned(),
+            ),
+            (
+                "feed-url".to_owned(),
+                "https://feed.example.test/apt".to_owned(),
+            ),
+            (
+                "description".to_owned(),
+                "apt repository for example".to_owned(),
+            ),
+        ]);
+        let contract = must(
+            apt_contract_from_options(&options),
+            "resolve runtime APT contract",
+        );
+        assert_eq!(contract.source_repo, "example/app");
+        assert_eq!(contract.consumer_repo, "example/feed");
+        assert_eq!(contract.preview_source_ref, "refs/heads/trunk");
+        assert_eq!(contract.signer, "0123456789ABCDEF0123456789ABCDEF01234567");
+
+        let error = must_fail(
+            release(&release_args(&["apt-publish", "--suite", "stable"])),
+            "APT CLI must require the typed contract fields",
+        );
+        assert!(
+            error.to_string().contains("--source-repo needs a value"),
+            "{error}"
+        );
+        let error = must_fail(
+            release(&release_args(&["apt-publish", "--unknown", "value"])),
+            "APT CLI must reject unknown options",
+        );
+        assert!(
+            error.to_string().contains("unsupported CI argument"),
+            "{error}"
+        );
     }
 
     /// Every event resolves to exactly one mode token: tag pushes and

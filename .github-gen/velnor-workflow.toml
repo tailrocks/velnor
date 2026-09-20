@@ -6,18 +6,20 @@ repository = "tailrocks/velnor"
 # validator regenerates the tree with the generator built at this commit and
 # requires a byte-identical result; bump it in a single pin commit after the
 # last generator change (see the plan ledger).
-revision = "0dc79895ff1c5e88be7c3822c437e1c5b5282e12"
+revision = "fdeed261bd2247a38db6922a7726cd45d3d6f31e"
 
 [scan]
 exclude = ["migrations/**"]
 
-# Provider placement: `providers` is the available backends.
-# `automatic_providers` run on PR/push/schedule without a dispatch choice.
-# Recovery: hosted runs automatically; Velnor is manual opt-in.
+# Provider placement: this repo declares all three available backends.
+# Automatic and dispatch-default CI stays on GitHub-hosted until the local
+# runners are registered in the restricted `velnor-trusted` group and its
+# exact protected-main workflow allowlist is applied.
 [workflow]
-providers = ["github-hosted", "velnor"]
+providers = ["github-hosted", "github-self-hosted", "velnor"]
 automatic_providers = ["github-hosted"]
-default_dispatch_providers = ["github-hosted", "velnor"]
+default_dispatch_providers = ["github-hosted"]
+require_local_runner_group = true
 default_branch = "main"
 # Routing contract: the release-side guest-payload producer builds Linux
 # cross-target guest agents and Firecracker kernel/rootfs images, so the
@@ -38,9 +40,16 @@ version_bump_units = ["docker", "rust-velnor-bench", "rust-velnor-runner", "rust
 [workflow.selectors.github-hosted]
 runs_on = ["ubuntu-24.04"]
 
-# Recovery: repository-scoped macOS/Linux hosts claim Velnor-lane jobs with
-# these labels without joining an org pool.
+# Dedicated selector for the official GitHub self-hosted provider. It does
+# not share labels with the Velnor-managed native provider below.
+[workflow.selectors.github-self-hosted]
+group = "velnor-trusted"
+runs_on = ["bastion-scale-set"]
+
+# The Velnor-managed native provider is also restricted to this org group.
+# Its current zero-runner state intentionally leaves this lane unscheduled.
 [workflow.selectors.velnor]
+group = "velnor-trusted"
 runs_on = ["self-hosted", "velnor-target-mvp"]
 
 [policy]
@@ -75,6 +84,11 @@ source_repository = "tailrocks/velnor"
 consumer_repository = "tailrocks/velnor-apt"
 description = "Native high-performance GitHub Actions runner"
 manifest_schema = "velnor.package-release.v1"
+
+# Exact patterns admitted by the local runner manifest for task-release
+# provenance. The generator consumes these as repository-owned capabilities.
+[release.runner_capabilities.velnor]
+attest_subjects = ["dist/*.tar.gz", "dist/l2-subject.json"]
 
 # Verification pipelines: one reusable workflow per unit, one row per unit, in
 # scan order. The aggregate workflows compose exactly these units, in this
@@ -254,8 +268,9 @@ paths = ["~/.cargo/registry", "~/.cargo/git"]
 # mount seed through the image's `velnor-cache-seed` stage, exports the layer
 # cache without `ignore-error` (a failed export must be visible, not a silent
 # cold builder next run), and a trusted build extracts the updated cache
-# mounts back out of the `velnor-cache-export` target. The self-hosted lane
-# keeps its own retained builder and needs no seed transport.
+# mounts back out of the `velnor-cache-export` target. Both GitHub Actions
+# providers transport that seed through provider-keyed Actions caches. Velnor
+# keeps it on the retained native builder and needs no remote seed transport.
 
 [[units]]
 id = "docker"

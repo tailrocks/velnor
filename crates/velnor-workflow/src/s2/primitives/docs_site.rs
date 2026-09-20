@@ -16,9 +16,9 @@
 use std::fmt::Write as _;
 
 use super::{Args, Primitive, RenderCtx, Rendered};
-use crate::s2::provider::{runs_on_for, ProviderId};
+use crate::s2::provider::{selector_for, ProviderId};
 use crate::s2::{
-    runs_on_labels_yaml, yaml_scalar, ActionPin, DocsSpec, GeneratorError, ProjectConfig,
+    selector_runs_on_yaml, yaml_scalar, ActionPin, DocsSpec, GeneratorError, ProjectConfig,
     GENERATED_HEADER,
 };
 
@@ -126,7 +126,7 @@ fn docs_runner(config: &ProjectConfig) -> Result<String, GeneratorError> {
                 "`docs-site` renders a pipeline but [workflow] providers is empty; declare the provider universe",
             )
         })?;
-    runs_on_for(&config.selectors, provider).map(runs_on_labels_yaml)
+    selector_for(&config.selectors, provider).map(selector_runs_on_yaml)
 }
 
 /// The reuse-recipe contract version. It feeds the recipe fingerprint and the
@@ -885,6 +885,7 @@ mod tests {
             selectors: std::collections::BTreeMap::from([(
                 crate::s2::provider::ProviderId::GithubHosted,
                 crate::s2::provider::ProviderSelector {
+                    group: None,
                     runs_on: vec!["ubuntu-24.04".to_owned()],
                 },
             )]),
@@ -1320,6 +1321,7 @@ mod tests {
         config.selectors = std::collections::BTreeMap::from([(
             crate::s2::provider::ProviderId::Velnor,
             crate::s2::provider::ProviderSelector {
+                group: None,
                 runs_on: vec!["self-hosted".to_owned(), "example-fleet".to_owned()],
             },
         )]);

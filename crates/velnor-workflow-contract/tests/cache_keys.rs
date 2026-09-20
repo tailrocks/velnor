@@ -1,7 +1,8 @@
 //! D9 of `plans/2026-09-16-ci-workflow-and-cache-plan.md`: parameterizing the
-//! kind reusables by `workflow_call` inputs must not change one cache key.
+//! provider-specific reusable workflows by `workflow_call` inputs must not
+//! change one cache key.
 //!
-//! The kind reusables (`ci-unit-<kind>.yml`) render every unit-specific value
+//! The provider-specific reusable workflows render every unit-specific value
 //! as an `inputs.*` reference and the aggregate callers supply the values in
 //! `with:`. This test resolves those references for every hosted caller of
 //! `ci-pr.yml` — `${{ inputs.x }}` from the caller's value, and
@@ -280,7 +281,7 @@ fn parameterized_callees_resolve_to_the_pre_parameterization_cache_keys() {
     }
 }
 
-/// The kind reusables hold exactly one step block per lane job: no step is
+/// The provider-specific reusable workflows hold one step block per lane job: no step is
 /// guarded by a unit identity, and the callee's size is independent of how
 /// many units the kind has.
 #[test]
@@ -291,7 +292,7 @@ fn kind_reusables_hold_no_per_unit_step_blocks() {
         if !name.starts_with("ci-unit-") {
             continue;
         }
-        let content = fs::read_to_string(&path).expect("read kind reusable");
+        let content = fs::read_to_string(&path).expect("read provider reusable");
         assert!(
             !content.contains("inputs.unit == '"),
             "{name} guards steps by unit identity"

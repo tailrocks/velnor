@@ -100,12 +100,22 @@ fn generate_fail(root: &Path) -> String {
 }
 
 fn write_config(root: &Path, body: &str) {
+    write_config_with_provider(root, "github-hosted", &["ubuntu-24.04"], body);
+}
+
+fn write_config_with_provider(root: &Path, provider: &str, labels: &[&str], body: &str) {
     fs::create_dir_all(root.join(".github-gen")).unwrap();
-    fs::write(
-        root.join(".github-gen/velnor-workflow.toml"),
-        format!("schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n{body}"),
-    )
-    .unwrap();
+    let provider_list = format!("[\"{provider}\"]");
+    let selector_labels = labels
+        .iter()
+        .map(|label| format!("\"{label}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let selectors = format!("[workflow.selectors.{provider}]\nruns_on = [{selector_labels}]\n");
+    let config = format!(
+        "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = {provider_list}\nautomatic_providers = {provider_list}\ndefault_dispatch_providers = {provider_list}\ndefault_branch = \"main\"\n\n{selectors}\n{body}",
+    );
+    fs::write(root.join(".github-gen/velnor-workflow.toml"), config).unwrap();
 }
 
 fn write_swift_fixture(root: &Path) {
@@ -202,36 +212,73 @@ fn unit_block<'a>(project: &'a str, id: &str) -> &'a str {
     }
 }
 
+fn workflow_job_block<'a>(workflow: &'a str, job: &str) -> &'a str {
+    let header = format!("\n  {job}:\n");
+    let start = workflow.find(&header).expect("workflow contains the job") + header.len();
+    let tail = &workflow[start..];
+    let mut end = tail.len();
+    let mut search = 0;
+    while let Some(found) = tail[search..].find("\n  ") {
+        let candidate = search + found + 3;
+        if tail[candidate..]
+            .chars()
+            .next()
+            .is_some_and(|next| next != ' ')
+        {
+            end = search + found;
+            break;
+        }
+        search = candidate;
+    }
+    &tail[..end]
+}
+
 #[test]
 fn swiftpm_verifies_on_the_default_executor_while_xcode_needs_macos() {
     let root = unique_dir("swift-split");
     write_swift_fixture(&root);
-    write_config(
-        &root,
-        "[workflow]\nrunners = \"github\"\ngithub_runner = \"ubuntu-24.04\"\n",
-    );
+    write_config(&root, "");
     let generated = generate(&root);
-    let swift = generated.workflow("ci-unit-swift.yml");
-    let (default, apple) = swift
-        .split_once("verify-github-apple:")
-        .expect("the split kind renders both partitions");
-    assert!(
-        default.contains("runs-on: ubuntu-24.04"),
-        "the default partition stays on Linux: {default}"
-    );
+    let project = generated.project();
+    let package = unit_block(&project, "swift-package-app");
+    let xcode = unit_block(&project, "swift-xcodeproj-app");
+    assert!(package.contains("platform = \"linux-x64\""), "{package}");
+    assert!(xcode.contains("platform = \"macos-arm64\""), "{xcode}");
+    let swift = generated.workflow("ci-unit-swift-github-hosted.yml");
+    let default = workflow_job_block(&swift, "verify-github-hosted");
+    assert!(default.contains("runs-on: ubuntu-24.04"), "{default}");
     assert!(
         default.contains("inputs.apple_executor != true"),
-        "the default partition admits only portable callers: {default}"
+        "the default executor rejects Apple callers: {default}"
     );
     assert!(
-        apple.contains("runs-on: macos-15"),
-        "the Apple partition reaches macOS: {apple}"
+        !default.contains("runs-on: macos-15"),
+        "portable Swift stays on the configured default executor: {default}"
     );
+    let apple = workflow_job_block(&swift, "verify-github-hosted-apple");
+    assert!(apple.contains("runs-on: macos-15"), "{apple}");
     assert!(
         apple.contains("&& inputs.apple_executor"),
-        "the Apple partition admits only Apple callers: {apple}"
+        "the Apple executor admits only Apple callers: {apple}"
     );
+    assert!(
+        !apple.contains("runs-on: ubuntu-24.04"),
+        "Apple-bound Swift never reaches the default executor: {apple}"
+    );
+    assert!(swift.contains(
+        "jobs.verify-github-hosted.outputs.result_identity || jobs.verify-github-hosted-apple.outputs.result_identity"
+    ));
     let pr = generated.workflow("ci-pr.yml");
+    let apple_caller = workflow_job_block(&pr, "github-hosted-swift-xcodeproj-app");
+    assert!(
+        apple_caller.contains("apple_executor: true"),
+        "only the Apple caller selects the Apple executor: {apple_caller}"
+    );
+    let portable_caller = workflow_job_block(&pr, "github-hosted-swift-package-app");
+    assert!(
+        !portable_caller.contains("apple_executor"),
+        "the portable caller keeps the default false input: {portable_caller}"
+    );
     assert_eq!(
         pr.matches("apple_executor: true").count(),
         1,
@@ -243,10 +290,7 @@ fn swiftpm_verifies_on_the_default_executor_while_xcode_needs_macos() {
 fn velnor_only_rejects_apple_placement() {
     let root = unique_dir("apple-fail-closed");
     write_swift_fixture(&root);
-    write_config(
-        &root,
-        "[workflow]\nrunners = \"velnor\"\ngithub_runner = \"ubuntu-24.04\"\nvelnor_labels = [\"self-hosted\", \"example-runner\"]\n",
-    );
+    write_config_with_provider(&root, "velnor", &["self-hosted", "example-runner"], "");
     let error = generate_fail(&root);
     assert!(
         error.contains("swift-xcodeproj-app") && error.contains("no matching executor"),
@@ -260,11 +304,11 @@ fn ffi_prerequisite_selects_the_consumer_and_prepares_the_product() {
     write_ffi_fixture(&root);
     write_config(
         &root,
-        "[workflow]\nrunners = \"github\"\ngithub_runner = \"ubuntu-24.04\"\n\n\
+        "\n\
          [[units]]\nid = \"rust-ffi\"\n\n\
          [[units.products]]\nname = \"xcframework\"\ntask = \"build-xcframework\"\n\n\
          [units.products.env]\nXCFRAMEWORK_PATH = \"target/xcframework/App.xcframework\"\n\n\
-         [[units]]\nid = \"swift-package-app\"\ncapabilities = [\"xcframework\"]\n\n\
+         [[units]]\nid = \"swift-package-app\"\nkind = \"swift\"\nroot = \"app\"\nplatform = \"macos-arm64\"\n\n\
          [[units.prerequisites]]\nproducer = \"rust-ffi\"\nproduct = \"xcframework\"\n\n\
          [units.prerequisites.env]\nTARGETS = \"ios\"\n",
     );
@@ -288,10 +332,10 @@ fn ffi_prerequisite_selects_the_consumer_and_prepares_the_product() {
         swift.contains("TARGETS='ios' mise run build-xcframework"),
         "the consumer prepares the product with its task inputs: {swift}"
     );
-    let kind = generated.workflow("ci-unit-swift.yml");
+    let kind = generated.workflow("ci-unit-swift-github-hosted.yml");
     assert!(
         kind.contains("runs-on: macos-15"),
-        "the xcframework capability resolves to macOS: {kind}"
+        "the consumer's declared platform resolves to macOS: {kind}"
     );
     assert!(
         kind.contains("XCFRAMEWORK_PATH: \"target/xcframework/App.xcframework\""),
@@ -305,10 +349,10 @@ fn prerequisite_on_an_undeclared_product_fails_closed() {
     write_ffi_fixture(&root);
     write_config(
         &root,
-        "[workflow]\nrunners = \"github\"\ngithub_runner = \"ubuntu-24.04\"\n\n\
+        "\n\
          [[units]]\nid = \"rust-ffi\"\n\n\
          [[units.products]]\nname = \"xcframework\"\ntask = \"build-xcframework\"\n\n\
-         [[units]]\nid = \"swift-package-app\"\n\n\
+         [[units]]\nid = \"swift-package-app\"\nkind = \"swift\"\nroot = \"app\"\nplatform = \"macos-arm64\"\n\n\
          [[units.prerequisites]]\nproducer = \"rust-ffi\"\nproduct = \"headers\"\n",
     );
     let error = generate_fail(&root);
@@ -326,8 +370,8 @@ fn prerequisite_on_an_unknown_producer_fails_closed() {
     write_ffi_fixture(&root);
     write_config(
         &root,
-        "[workflow]\nrunners = \"github\"\ngithub_runner = \"ubuntu-24.04\"\n\n\
-         [[units]]\nid = \"swift-package-app\"\n\n\
+        "\n\
+         [[units]]\nid = \"swift-package-app\"\nkind = \"swift\"\nroot = \"app\"\nplatform = \"macos-arm64\"\n\n\
          [[units.prerequisites]]\nproducer = \"rust-ghost\"\nproduct = \"xcframework\"\n",
     );
     let error = generate_fail(&root);
@@ -343,12 +387,12 @@ fn declared_build_flags_reach_unit_jobs() {
     write_single_rust_fixture(&root, "svc");
     write_config(
         &root,
-        "[workflow]\nrunners = \"github\"\ngithub_runner = \"ubuntu-24.04\"\n\n\
+        "\n\
          [[units]]\nid = \"rust-svc\"\n\n\
          [units.env]\nRUSTFLAGS = \"-C link-arg=-fuse-ld=mold -D warnings\"\nCUSTOM_FLAG = \"yes\"\n",
     );
     let generated = generate(&root);
-    let kind = generated.workflow("ci-unit-rust.yml");
+    let kind = generated.workflow("ci-unit-rust-github-hosted.yml");
     assert!(
         kind.contains("RUSTFLAGS: \"-C link-arg=-fuse-ld=mold -D warnings\""),
         "declared flags render into the kind env: {kind}"
@@ -365,7 +409,7 @@ fn mbx_opt_out_keeps_plain_cargo() {
     write_single_rust_fixture(&root, "svc");
     write_config(
         &root,
-        "[workflow]\nrunners = \"github\"\ngithub_runner = \"ubuntu-24.04\"\n\n\
+        "\n\
          [[units]]\nid = \"rust-svc\"\nmbx = false\n",
     );
     let generated = generate(&root);
@@ -375,7 +419,7 @@ fn mbx_opt_out_keeps_plain_cargo() {
         unit.contains("cargo test") && !unit.contains("mbx test"),
         "an opted-out unit keeps plain Cargo: {unit}"
     );
-    let kind = generated.workflow("ci-unit-rust.yml");
+    let kind = generated.workflow("ci-unit-rust-github-hosted.yml");
     assert!(
         !kind.contains("Set up Mr. Boxington"),
         "an opted-out unit provisions no object transport: {kind}"
@@ -388,7 +432,7 @@ fn mbx_on_a_non_rust_unit_fails_closed() {
     write_single_rust_fixture(&root, "svc");
     write_config(
         &root,
-        "[workflow]\nrunners = \"github\"\ngithub_runner = \"ubuntu-24.04\"\n\n\
+        "\n\
          [[units]]\nid = \"extra-docs\"\nkind = \"docs\"\nroot = \".\"\nmbx = true\n",
     );
     let error = generate_fail(&root);
@@ -399,19 +443,19 @@ fn mbx_on_a_non_rust_unit_fails_closed() {
 }
 
 #[test]
-fn capability_override_moves_a_unit_to_macos() {
+fn unit_platform_override_moves_rust_to_macos() {
     let root = unique_dir("capability-override");
     write_single_rust_fixture(&root, "svc");
     write_config(
         &root,
-        "[workflow]\nrunners = \"github\"\ngithub_runner = \"ubuntu-24.04\"\n\n\
-         [[units]]\nid = \"rust-svc\"\ncapabilities = [\"xcframework\"]\n",
+        "\n\
+         [[units]]\nid = \"rust-svc\"\nplatform = \"macos-arm64\"\n",
     );
     let generated = generate(&root);
-    let kind = generated.workflow("ci-unit-rust.yml");
+    let kind = generated.workflow("ci-unit-rust-github-hosted.yml");
     assert!(
         kind.contains("runs-on: macos-15"),
-        "an Apple capability resolves to the macOS executor: {kind}"
+        "the declared macOS platform resolves to its executor: {kind}"
     );
     assert!(
         !kind.contains("runs-on: ubuntu-24.04"),

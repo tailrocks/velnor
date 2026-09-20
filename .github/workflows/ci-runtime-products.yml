@@ -24,12 +24,6 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Same-ref runs serialize so two pushes can never race on one release; a
-# publish in flight is never cancelled.
-concurrency:
-  group: runtime-products-${{ github.ref }}
-  cancel-in-progress: false
-
 permissions:
   contents: read
 
@@ -198,10 +192,46 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  publish:
-    name: Publish runtime products
+  freshness:
+    name: Check source freshness
     needs: [closure, build]
     if: needs.closure.outputs.exists != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      fresh: ${{ steps.freshness.outputs.fresh }}
+    steps:
+      - name: Check the default branch head
+        id: freshness
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: tailrocks/velnor
+          DEFAULT_BRANCH: main
+          HEAD_SHA: ${{ needs.closure.outputs.head-sha }}
+        run: |
+          set -euo pipefail
+          current="$(gh api "repos/$REPOSITORY/commits/$DEFAULT_BRANCH" --jq '.sha')"
+          [[ "$current" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::the default branch returned an invalid commit SHA: $current" >&2; exit 1; }
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::the built source revision is invalid: $HEAD_SHA" >&2; exit 1; }
+          if [[ "$current" == "$HEAD_SHA" ]]; then
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::source advanced to $current while runtime products for $HEAD_SHA were building"
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  publish:
+    name: Publish runtime products
+    needs: [closure, build, freshness]
+    if: needs.closure.outputs.exists != 'true' && needs.freshness.outputs.fresh == 'true'
+    # Serialize publishers by the immutable product tag, even when separate
+    # source runs have the same closure. Never cancel a writer mid-publish.
+    concurrency:
+      group: runtime-products-${{ needs.closure.outputs.tag }}
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -297,15 +327,106 @@ jobs:
           CLOSURE: ${{ needs.closure.outputs.closure }}
           TAG: ${{ needs.closure.outputs.tag }}
           HEAD_SHA: ${{ needs.closure.outputs.head-sha }}
+          DEFAULT_BRANCH: main
+          REPOSITORY: tailrocks/velnor
         run: |
           set -euo pipefail
-          # Every verification above passed on exactly these bytes; the
-          # re-check immediately before creating keeps the never-overwrite
-          # promise against a concurrent run that published first.
-          if gh release view "$TAG" --repo tailrocks/velnor >/dev/null 2>&1; then
-            echo "::notice::release $TAG already exists; leaving it untouched"
-            exit 0
-          fi
-          gh release create "$TAG" --repo tailrocks/velnor --target "$HEAD_SHA" --title "$TAG" \
-            --notes "Immutable velnor-workflow runtime product for source closure $CLOSURE (built from $HEAD_SHA). Consumers verify the manifest digest, the binary self-report, and the build provenance attestation." \
-            dist/velnor-workflow-Linux-X64 dist/velnor-workflow-Linux-ARM64 dist/velnor-workflow-macOS-ARM64 dist/manifest.json
+          current_default_branch_head() {
+            local current
+            current="$(gh api "repos/$REPOSITORY/commits/$DEFAULT_BRANCH" --jq '.sha')"
+            [[ "$current" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::the default branch returned an invalid commit SHA: $current" >&2; return 1; }
+            printf '%s' "$current"
+          }
+          ensure_fresh_source() {
+            local current
+            current="$(current_default_branch_head)" || return 1
+            if [[ "$current" != "$HEAD_SHA" ]]; then
+              echo "::notice::source advanced to $current while runtime products for $HEAD_SHA were building"
+              return 1
+            fi
+          }
+          verify_existing_release() {
+            local existing_dir manifest_revision asset platform actual expected reported
+            local -a patterns=(--pattern manifest.json)
+            existing_dir="$(mktemp -d)"
+            for platform in Linux-X64 Linux-ARM64 macOS-ARM64; do
+              patterns+=(--pattern "velnor-workflow-$platform")
+            done
+            if ! gh release download "$TAG" --repo "$REPOSITORY" --dir "$existing_dir" "${patterns[@]}"; then
+              echo "::error::could not download the existing release $TAG for convergence verification" >&2
+              rm -rf "$existing_dir"
+              return 1
+            fi
+            if ! gh attestation verify "$existing_dir/manifest.json" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref refs/heads/main; then
+              echo "::error::existing release $TAG has no trusted manifest attestation" >&2
+              rm -rf "$existing_dir"
+              return 1
+            fi
+            if ! manifest_revision="$(jq -er '.revision' "$existing_dir/manifest.json")" || [[ ! "$manifest_revision" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::existing release $TAG has an invalid source revision" >&2
+              rm -rf "$existing_dir"
+              return 1
+            fi
+            for platform in Linux-X64 Linux-ARM64 macOS-ARM64; do
+              asset="velnor-workflow-$platform"
+              if ! jq -e --arg closure "$CLOSURE" --arg platform "$platform" --arg asset "$asset" '.closure == $closure and (.revision | test("^[0-9a-f]{40}$")) and .profile == "release" and .features == "" and (.products[$platform].binary | test("^[0-9a-f]{64}$")) and .products[$platform].asset == $asset' "$existing_dir/manifest.json" >/dev/null; then
+                echo "::error::existing release $TAG manifest does not accept $asset for closure $CLOSURE" >&2
+                rm -rf "$existing_dir"
+                return 1
+              fi
+              expected="$(jq -er --arg platform "$platform" '.products[$platform].binary' "$existing_dir/manifest.json")"
+              actual="$(sha256sum "$existing_dir/$asset" | awk '{print $1}')"
+              if [[ "$actual" != "$expected" ]]; then
+                echo "::error::existing release $TAG has a digest mismatch for $asset" >&2
+                rm -rf "$existing_dir"
+                return 1
+              fi
+              chmod 0755 "$existing_dir/$asset"
+              if ! gh attestation verify "$existing_dir/$asset" --owner tailrocks --signer-workflow tailrocks/velnor/.github/workflows/ci-runtime-products.yml --source-ref refs/heads/main; then
+                echo "::error::existing release $TAG has no trusted attestation for $asset" >&2
+                rm -rf "$existing_dir"
+                return 1
+              fi
+            done
+            reported="$("$existing_dir/velnor-workflow-Linux-X64" --closure)"
+            if [[ "$reported" != "$CLOSURE" ]]; then
+              echo "::error::existing release $TAG binary reports closure $reported, expected $CLOSURE" >&2
+              rm -rf "$existing_dir"
+              return 1
+            fi
+            reported="$("$existing_dir/velnor-workflow-Linux-X64" --revision)"
+            if [[ "$reported" != "$manifest_revision" ]]; then
+              echo "::error::existing release $TAG binary reports revision $reported, expected manifest revision $manifest_revision" >&2
+              rm -rf "$existing_dir"
+              return 1
+            fi
+            rm -rf "$existing_dir"
+          }
+          for attempt in 1 2 3 4; do
+            # The workflow-level freshness output prevents stale runs from
+            # entering this job. Recheck immediately before each possible
+            # mutation because the default branch can advance while queued.
+            if ! ensure_fresh_source; then
+              exit 0
+            fi
+            if gh release view "$TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
+              verify_existing_release || exit 1
+              echo "::notice::release $TAG already exists and has the verified product; leaving it untouched"
+              exit 0
+            fi
+            if gh release create "$TAG" --repo "$REPOSITORY" --title "$TAG" \
+              --notes "Immutable velnor-workflow runtime product for source closure $CLOSURE (built from $HEAD_SHA). Consumers verify the manifest digest, the binary self-report, and the build provenance attestation." \
+              dist/velnor-workflow-Linux-X64 dist/velnor-workflow-Linux-ARM64 dist/velnor-workflow-macOS-ARM64 dist/manifest.json; then
+              exit 0
+            fi
+            if gh release view "$TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
+              verify_existing_release || exit 1
+              echo "::notice::release $TAG won a concurrent create and has the verified product"
+              exit 0
+            fi
+            if [[ "$attempt" != 4 ]]; then
+              sleep "$attempt"
+            fi
+          done
+          echo "::error::release $TAG did not converge after four bounded create attempts" >&2
+          exit 1

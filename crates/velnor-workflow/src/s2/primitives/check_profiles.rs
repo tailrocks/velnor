@@ -30,10 +30,10 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use super::{Args, Primitive, RenderCtx, Rendered};
-use crate::s2::provider::{runs_on_for, ProviderId};
+use crate::s2::provider::{selector_for, ProviderId};
 use crate::s2::{
-    runs_on_labels_yaml, yaml_scalar, ActionPin, CheckProfileSpec, GeneratorError, ProjectConfig,
-    GENERATED_HEADER,
+    selector_runs_on_yaml, yaml_scalar, ActionPin, CheckProfileSpec, GeneratorError,
+    ProjectConfig, GENERATED_HEADER,
 };
 
 /// Default `timeout-minutes` for a scheduled-check job.
@@ -475,10 +475,11 @@ fn profile_runs_on(
     profile: &CheckProfileSpec,
 ) -> Result<String, GeneratorError> {
     match profile.runner.as_str() {
-        "github" => runs_on_for(&config.selectors, ProviderId::GithubHosted)
-            .map(runs_on_labels_yaml),
+        "github" => selector_for(&config.selectors, ProviderId::GithubHosted)
+            .map(selector_runs_on_yaml),
         "macos" => Ok(yaml_scalar(crate::s2::MACOS_HOSTED_RUNS_ON)),
-        "velnor" => runs_on_for(&config.selectors, ProviderId::Velnor).map(runs_on_labels_yaml),
+        "velnor" => selector_for(&config.selectors, ProviderId::Velnor)
+            .map(selector_runs_on_yaml),
         runner => Err(GeneratorError::usage(format!(
             "check profile `{}` runs on `{runner}`, which names no profile runner; use github, macos, or velnor",
             profile.id
@@ -612,12 +613,14 @@ mod tests {
                 (
                     crate::s2::provider::ProviderId::GithubHosted,
                     crate::s2::provider::ProviderSelector {
+                        group: None,
                         runs_on: vec!["ubuntu-24.04".to_owned()],
                     },
                 ),
                 (
                     crate::s2::provider::ProviderId::Velnor,
                     crate::s2::provider::ProviderSelector {
+                        group: None,
                         runs_on: vec!["self-hosted".to_owned(), "example-lane".to_owned()],
                     },
                 ),

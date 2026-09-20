@@ -29,9 +29,6 @@ impl ProviderId {
     /// All three canonical providers in canonical order.
     pub(crate) const ALL: [Self; 3] = [Self::GithubHosted, Self::GithubSelfHosted, Self::Velnor];
 
-    /// The local providers: the two whose selectors must be disjoint.
-    pub(crate) const LOCAL: [Self; 2] = [Self::GithubSelfHosted, Self::Velnor];
-
     #[must_use]
     #[allow(
         clippy::trivially_copy_pass_by_ref,
@@ -131,10 +128,21 @@ pub(crate) fn require_subset(
 pub(crate) struct ProviderSelector {
     #[serde(default)]
     pub(crate) runs_on: Vec<String>,
+    /// Optional GitHub runner group that bounds the eligible runner pool.
+    /// When present, it is emitted with `runs_on` in the native mapping form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) group: Option<String>,
 }
 
 /// Per-provider selectors keyed by provider ID.
 pub(crate) type SelectorMap = BTreeMap<ProviderId, ProviderSelector>;
+
+/// Canonical comparison form for GitHub runner labels. GitHub treats runner
+/// labels without regard to ASCII/Unicode letter case, while the generator
+/// preserves their configured spelling in rendered `runs-on` values.
+pub(crate) fn normalize_runner_label(label: &str) -> String {
+    label.to_lowercase()
+}
 
 /// Parse `[workflow.selectors.<id>]` tables keyed by strict provider ID.
 pub(crate) fn parse_selectors(
@@ -152,10 +160,42 @@ pub(crate) fn parse_selectors(
                 "[workflow.selectors.{key}] runs_on must name at least one label"
             )));
         }
+        let mut normalized_labels = BTreeSet::new();
         for label in &selector.runs_on {
             if label.is_empty() || label.chars().any(char::is_control) {
                 return Err(GeneratorError::usage(format!(
                     "[workflow.selectors.{key}] runs_on labels must be non-empty and contain no control characters"
+                )));
+            }
+            if !normalized_labels.insert(normalize_runner_label(label)) {
+                return Err(GeneratorError::usage(format!(
+                    "[workflow.selectors.{key}] runs_on repeats label `{label}`; GitHub runner labels are case-insensitive"
+                )));
+            }
+            if provider == ProviderId::GithubHosted
+                && (label.trim().eq_ignore_ascii_case("self-hosted")
+                    || label.contains("${{")
+                    || label.contains("}}"))
+            {
+                return Err(GeneratorError::usage(format!(
+                    "[workflow.selectors.{key}] github-hosted runs_on labels cannot name self-hosted runners or use expressions; untrusted pull requests may use this provider"
+                )));
+            }
+        }
+        if let Some(group) = selector.group.as_deref() {
+            if !provider.is_local() {
+                return Err(GeneratorError::usage(format!(
+                    "[workflow.selectors.{key}] group is only valid for a local provider"
+                )));
+            }
+            if group.trim().is_empty()
+                || group != group.trim()
+                || group.chars().any(char::is_control)
+                || group.contains("${{")
+                || group.contains("}}")
+            {
+                return Err(GeneratorError::usage(format!(
+                    "[workflow.selectors.{key}] group must be a non-empty static runner-group name without surrounding whitespace or control characters"
                 )));
             }
         }
@@ -180,22 +220,51 @@ pub(crate) fn require_selectors_for(
     Ok(())
 }
 
-/// The two local providers must use disjoint dedicated selectors: any shared
-/// label is a routing ambiguity and a hard error.
+/// A repository-owned provider contract declares exactly one selector row per
+/// provider in its universe. Extra rows are stale or typoed routing facts and
+/// must not survive as implicit providers.
+pub(crate) fn require_exact_selectors_for(
+    selectors: &SelectorMap,
+    universe: &ProviderSet,
+) -> Result<(), GeneratorError> {
+    require_selectors_for(selectors, universe)?;
+    for provider in selectors.keys() {
+        if !universe.contains(provider) {
+            return Err(GeneratorError::usage(format!(
+                "[workflow.selectors.{provider}] is declared but `{provider}` is not in [workflow] providers"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Provider selectors must be disjoint: any shared label is a routing
+/// ambiguity because GitHub matches runner labels case-insensitively. This
+/// includes hosted selectors and custom local labels, since a hosted job must
+/// never be eligible for a caller-managed runner.
 pub(crate) fn validate_selector_disjointness(
     selectors: &SelectorMap,
 ) -> Result<(), GeneratorError> {
-    let mut claimed: BTreeMap<&str, ProviderId> = BTreeMap::new();
-    for provider in ProviderId::LOCAL {
-        let Some(selector) = selectors.get(&provider) else {
-            continue;
-        };
+    let mut claimed: BTreeMap<String, (ProviderId, String)> = BTreeMap::new();
+    for (provider, selector) in selectors {
         for label in &selector.runs_on {
-            if let Some(owner) = claimed.insert(label.as_str(), provider) {
+            let normalized = normalize_runner_label(label);
+            if let Some((owner, owner_label)) = claimed.get(&normalized) {
+                if owner == provider {
+                    return Err(GeneratorError::usage(format!(
+                        "[workflow.selectors.{provider}] runs_on repeats label `{label}` (already listed as `{owner_label}`); GitHub runner labels are case-insensitive"
+                    )));
+                }
+                if owner.is_local() && provider.is_local() {
+                    return Err(GeneratorError::usage(format!(
+                        "[workflow.selectors] label `{label}` is claimed by {owner} and {provider}; local providers need disjoint dedicated selectors (GitHub runner labels are case-insensitive)"
+                    )));
+                }
                 return Err(GeneratorError::usage(format!(
-                    "[workflow.selectors] label `{label}` is claimed by {owner} and {provider}; local providers need disjoint dedicated selectors"
+                    "[workflow.selectors] label `{label}` overlaps between {owner} (`{owner_label}`) and {provider}; provider selectors must be disjoint because GitHub runner labels are case-insensitive"
                 )));
             }
+            claimed.insert(normalized, (*provider, label.clone()));
         }
     }
     Ok(())
@@ -208,14 +277,20 @@ pub(crate) fn runs_on_for(
     selectors: &SelectorMap,
     provider: ProviderId,
 ) -> Result<&[String], GeneratorError> {
-    selectors
-        .get(&provider)
-        .map(|selector| selector.runs_on.as_slice())
-        .ok_or_else(|| {
-            GeneratorError::usage(format!(
-                "no [workflow.selectors.{provider}] routing for a selected provider"
-            ))
-        })
+    selector_for(selectors, provider).map(|selector| selector.runs_on.as_slice())
+}
+
+/// Return the full selector for one provider so renderers cannot drop a
+/// declared runner-group boundary while retaining its labels.
+pub(crate) fn selector_for(
+    selectors: &SelectorMap,
+    provider: ProviderId,
+) -> Result<&ProviderSelector, GeneratorError> {
+    selectors.get(&provider).ok_or_else(|| {
+        GeneratorError::usage(format!(
+            "no [workflow.selectors.{provider}] routing for a selected provider"
+        ))
+    })
 }
 
 /// Execution platform, typed. Platforms are never label strings.
@@ -654,6 +729,14 @@ pub(crate) fn evaluate_verdict(
             });
             continue;
         }
+        if run.platform_for(&identity.unit_id) != Some(identity.platform) {
+            failures.push(VerdictFailure::IdentityMismatch {
+                unit_id: identity.unit_id.clone(),
+                provider: identity.provider,
+                reason: "platform does not match the planned unit".to_owned(),
+            });
+            continue;
+        }
         if identity.command_digest != run.command_digest_for(&identity.unit_id) {
             failures.push(VerdictFailure::IdentityMismatch {
                 unit_id: identity.unit_id.clone(),
@@ -748,10 +831,19 @@ pub(crate) struct RunIdentity {
     pub(crate) run_id: String,
     pub(crate) run_attempt: String,
     pub(crate) plan_digest: String,
+    pub(crate) platforms: BTreeMap<String, Platform>,
     pub(crate) command_digests: BTreeMap<String, String>,
 }
 
 impl RunIdentity {
+    #[allow(
+        dead_code,
+        reason = "D2 part-A strict-results API; no schema-2 caller yet"
+    )]
+    fn platform_for(&self, unit_id: &str) -> Option<Platform> {
+        self.platforms.get(unit_id).copied()
+    }
+
     #[allow(
         dead_code,
         reason = "D2 part-A strict-results API; no schema-2 caller yet"
@@ -927,6 +1019,150 @@ mod tests {
             "missing selector",
         );
         assert!(error.contains("[workflow.selectors.velnor]"), "{error}");
+    }
+
+    #[test]
+    fn github_hosted_selector_cannot_route_untrusted_events_to_self_hosted_runners() {
+        for label in ["self-hosted", "SELF-HOSTED", " self-hosted ", "${{ vars.RUNNER }}"] {
+            let tables = BTreeMap::from([(
+                "github-hosted".to_owned(),
+                ProviderSelector {
+                    group: None,
+                    runs_on: vec!["ubuntu-latest".to_owned(), label.to_owned()],
+                },
+            )]);
+            let error = must_fail(parse_selectors(&tables), "unsafe hosted selector");
+            assert!(
+                error.contains("github-hosted runs_on labels cannot name self-hosted runners or use expressions"),
+                "label {label:?}: {error}"
+            );
+        }
+
+        let safe_hosted = BTreeMap::from([(
+            "github-hosted".to_owned(),
+            ProviderSelector {
+                group: None,
+                runs_on: vec!["ubuntu-latest".to_owned()],
+            },
+        )]);
+        assert!(parse_selectors(&safe_hosted).is_ok());
+
+        let local_dynamic = BTreeMap::from([(
+            "github-self-hosted".to_owned(),
+            ProviderSelector {
+                group: None,
+                runs_on: vec!["${{ vars.RUNNER }}".to_owned()],
+            },
+        )]);
+        assert!(
+            parse_selectors(&local_dynamic).is_ok(),
+            "trusted caller-managed providers may use configured runner labels"
+        );
+    }
+
+    #[test]
+    fn runner_groups_are_static_and_local_only() {
+        for group in ["", "   ", " runner-group", "runner-group ", "${{ vars.GROUP }}"] {
+            let tables = BTreeMap::from([(
+                "velnor".to_owned(),
+                ProviderSelector {
+                    group: Some(group.to_owned()),
+                    runs_on: vec!["self-hosted".to_owned(), "velnor".to_owned()],
+                },
+            )]);
+            assert!(
+                parse_selectors(&tables).is_err(),
+                "runner group {group:?} must be rejected"
+            );
+        }
+
+        let hosted = BTreeMap::from([(
+            "github-hosted".to_owned(),
+            ProviderSelector {
+                runs_on: vec!["ubuntu-24.04".to_owned()],
+                group: Some("pool".to_owned()),
+            },
+        )]);
+        let error = must_fail(parse_selectors(&hosted), "hosted group");
+        assert!(error.contains("only valid for a local provider"), "{error}");
+
+        let local = BTreeMap::from([(
+            "velnor".to_owned(),
+            ProviderSelector {
+                runs_on: vec!["self-hosted".to_owned(), "velnor".to_owned()],
+                group: Some("trusted-pool".to_owned()),
+            },
+        )]);
+        assert_eq!(
+            parse_selectors(&local)
+                .expect("static local runner group")
+                .get(&ProviderId::Velnor)
+                .and_then(|selector| selector.group.as_deref()),
+            Some("trusted-pool")
+        );
+    }
+
+    #[test]
+    fn runner_selector_labels_are_case_insensitive_for_duplicates_and_overlaps() {
+        let duplicate = BTreeMap::from([(
+            "github-hosted".to_owned(),
+            ProviderSelector {
+                group: None,
+                runs_on: vec!["Ubuntu-24.04".to_owned(), "UBUNTU-24.04".to_owned()],
+            },
+        )]);
+        let error = must_fail(parse_selectors(&duplicate), "case-insensitive duplicate");
+        assert!(error.contains("GitHub runner labels are case-insensitive"), "{error}");
+
+        let local_overlap = BTreeMap::from([
+            (
+                "github-self-hosted".to_owned(),
+                ProviderSelector {
+                    group: None,
+                    runs_on: vec!["Bastion-Scale-Set".to_owned()],
+                },
+            ),
+            (
+                "velnor".to_owned(),
+                ProviderSelector {
+                    group: None,
+                    runs_on: vec!["bASTION-sCALE-sET".to_owned()],
+                },
+            ),
+        ]);
+        let selectors = parse_selectors(&local_overlap).expect("distinct provider ids parse");
+        let error = must_fail(
+            validate_selector_disjointness(&selectors),
+            "case-insensitive local selector overlap",
+        );
+        assert!(error.contains("label `bASTION-sCALE-sET` is claimed"), "{error}");
+
+        let hosted_local_overlap = BTreeMap::from([
+            (
+                "github-hosted".to_owned(),
+                ProviderSelector {
+                    group: None,
+                    runs_on: vec!["ubuntu-24.04".to_owned()],
+                },
+            ),
+            (
+                "github-self-hosted".to_owned(),
+                ProviderSelector {
+                    group: None,
+                    runs_on: vec!["UBUNTU-24.04".to_owned(), "custom-runner".to_owned()],
+                },
+            ),
+        ]);
+        let selectors = parse_selectors(&hosted_local_overlap).expect("distinct provider ids parse");
+        let error = must_fail(
+            validate_selector_disjointness(&selectors),
+            "hosted and custom local selector overlap",
+        );
+        assert!(
+            error.contains("provider selectors must be disjoint")
+                && error.contains("case-insensitive"),
+            "{error}"
+        );
     }
 
     #[test]

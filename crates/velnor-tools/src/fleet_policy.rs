@@ -2522,6 +2522,48 @@ mod tests {
         }
     }
 
+    #[test]
+    fn velnor_runner_group_is_limited_to_exact_main_workflow_paths() {
+        let policy = load_policy(
+            &repo_root().join("config/fleet/policies/tailrocks-desired-policy.json"),
+        )
+        .expect("load committed Velnor runner-group policy");
+        let actual = policy
+            .selected_workflows
+            .iter()
+            .filter(|workflow| workflow.path.starts_with("tailrocks/velnor/"))
+            .map(|workflow| (workflow.path.as_str(), workflow.git_ref.as_str()))
+            .collect::<BTreeSet<_>>();
+        let workflow_files = [
+            "ci-main.yml",
+            "ci-unit-bun-github-self-hosted.yml",
+            "ci-unit-bun-velnor.yml",
+            "ci-unit-docker-github-self-hosted.yml",
+            "ci-unit-docker-velnor.yml",
+            "ci-unit-docs-github-self-hosted.yml",
+            "ci-unit-docs-velnor.yml",
+            "ci-unit-opentofu-github-self-hosted.yml",
+            "ci-unit-opentofu-velnor.yml",
+            "ci-unit-rust-github-self-hosted.yml",
+            "ci-unit-rust-prepare-cargo.yml",
+            "ci-unit-rust-velnor.yml",
+        ];
+        let expected = workflow_files
+            .iter()
+            .map(|file| {
+                (
+                    format!("tailrocks/velnor/.github/workflows/{file}"),
+                    "refs/heads/main".to_owned(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        let expected = expected
+            .iter()
+            .map(|(path, git_ref)| (path.as_str(), git_ref.as_str()))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected, "Velnor workflow allowlist drifted");
+    }
+
     fn approved_sample_ledger() -> ReleaseRefLedger {
         let mut ledger = sample_ledger();
         for entry in &mut ledger.entries {

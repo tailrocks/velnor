@@ -4,9 +4,9 @@ repository = "tailrocks/velnor"
 profile = "rust-workspace-release"
 verified = true
 default_branch = "main"
-providers = ["github-hosted", "velnor"]
-automatic_providers = ["github-hosted"]
-default_dispatch_providers = ["github-hosted", "velnor"]
+providers = ["github-hosted", "github-self-hosted", "velnor"]
+automatic_providers = ["github-hosted", "github-self-hosted", "velnor"]
+default_dispatch_providers = ["github-hosted", "github-self-hosted", "velnor"]
 
 [analysis]
 method = "static-filesystem-and-manifest-inspection"
@@ -14,8 +14,8 @@ detected = ["cargo-deny-policy", "cargo-lockfile", "cargo-nextest-policy", "gues
 limitations = ["Manifests nested under tests/ or benches/ directories are treated as test fixtures and ignored.", "No test script is declared in package.json; no package test command was invented.", "Project code, build scripts, task runners, and commands are never executed during analysis.", "Release, signing, registry, deployment, branch-protection, and runner-capability contracts remain explicit manual inputs.", "Renovate credentials, runner placement, and write permissions cannot be inferred from repository files.", "Rust build scripts are watched but their system dependencies and generated outputs are not inferred."]
 
 [workflow]
-files = ["ci-main.yml", "ci-policy.yml", "ci-pr.yml", "ci-release-package-signer.yml", "ci-runtime-products.yml", "ci-unit-bun.yml", "ci-unit-docker.yml", "ci-unit-docs.yml", "ci-unit-opentofu.yml", "ci-unit-rust.yml", "maintenance.yml", "nightly.yml", "preview.yml", "release.yml"]
-notes = ["Rust verification uses Mr. Boxington 1.11.1 on providers [github-hosted, velnor]. GitHub-hosted jobs use its GitHub cache backend with bounded snapshot keys (a key names the toolchain/image/linker compatibility class and the hashed source state, so a new source state saves a new snapshot and retention keeps generations bounded). Local-provider jobs use an explicit local-backend setup step against the image/runner-provided local store."]
+files = ["ci-main.yml", "ci-policy.yml", "ci-pr.yml", "ci-release-package-signer.yml", "ci-runtime-products.yml", "ci-unit-bun-github-hosted.yml", "ci-unit-bun-github-self-hosted.yml", "ci-unit-bun-velnor.yml", "ci-unit-docker-github-hosted.yml", "ci-unit-docker-github-self-hosted.yml", "ci-unit-docker-velnor.yml", "ci-unit-docs-github-hosted.yml", "ci-unit-docs-github-self-hosted.yml", "ci-unit-docs-velnor.yml", "ci-unit-opentofu-github-hosted.yml", "ci-unit-opentofu-github-self-hosted.yml", "ci-unit-opentofu-velnor.yml", "ci-unit-rust-github-hosted.yml", "ci-unit-rust-github-self-hosted.yml", "ci-unit-rust-prepare-cargo.yml", "ci-unit-rust-velnor.yml", "maintenance.yml", "nightly.yml", "preview.yml", "release.yml"]
+notes = ["Rust verification uses Mr. Boxington 1.11.1 on providers [github-hosted, github-self-hosted, velnor]. GitHub-hosted jobs use its GitHub cache backend with bounded snapshot keys (a key names the toolchain/image/linker compatibility class and the hashed source state, so a new source state saves a new snapshot and retention keeps generations bounded). Local-provider jobs use an explicit local-backend setup step against the image/runner-provided local store."]
 version_bump_units = ["docker", "rust-velnor-bench", "rust-velnor-runner", "rust-velnorctl"]
 
 [release]
@@ -328,7 +328,7 @@ id = "rust-velnor-workflow"
 label = "Rust crate (velnor-workflow)"
 kind = "rust"
 root = "crates/velnor-workflow"
-watch = [".cargo/**", "Cargo.lock", "Cargo.toml", "Dockerfile", "crates/velnor-workflow/**/*.rs", "crates/velnor-workflow/Cargo.toml", "crates/velnor-workflow/README.md", "crates/velnor-workflow/benches/**", "crates/velnor-workflow/build.rs", "crates/velnor-workflow/examples/**", "crates/velnor-workflow/src/**", "crates/velnor-workflow/src/runtime.rs", "crates/velnor-workflow/templates/**", "crates/velnor-workflow/templates/release-package-signer.yml", "crates/velnor-workflow/tests/**", "crates/velnor-workflow/tests/generic_surface_literals.rs", "docker/build-mise.*", "mise.lock", "mise.toml", "rust-toolchain", "rust-toolchain.toml"]
+watch = [".cargo/**", "Cargo.lock", "Cargo.toml", "Dockerfile", "crates/velnor-workflow/**/*.rs", "crates/velnor-workflow/Cargo.toml", "crates/velnor-workflow/README.md", "crates/velnor-workflow/benches/**", "crates/velnor-workflow/build.rs", "crates/velnor-workflow/examples/**", "crates/velnor-workflow/src/**", "crates/velnor-workflow/src/runtime.rs", "crates/velnor-workflow/src/s2/generic_surface_literals.rs", "crates/velnor-workflow/templates/**", "crates/velnor-workflow/templates/release-package-signer.yml", "crates/velnor-workflow/tests/**", "docker/build-mise.*", "mise.lock", "mise.toml", "rust-toolchain", "rust-toolchain.toml"]
 pr_commands = ["cd -- 'crates/velnor-workflow' && mbx run --locked --manifest-path 'Cargo.toml' -- --plain --check ../..", "cd -- 'crates/velnor-workflow' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-workflow' && mbx nextest run --locked --all-features --package 'velnor-workflow' --no-tests pass", "cd -- 'crates/velnor-workflow' && mbx clippy --locked --profile test --all-targets --all-features --package 'velnor-workflow' -- -D warnings"]
 full_commands = ["cd -- 'crates/velnor-workflow' && mbx run --locked --manifest-path 'Cargo.toml' -- --plain --check ../..", "cd -- 'crates/velnor-workflow' && mbx fmt --manifest-path 'Cargo.toml' -- --check", "cd -- 'crates/velnor-workflow' && mbx nextest run --locked --all-features --package 'velnor-workflow' --no-tests pass", "cd -- 'crates/velnor-workflow' && mbx clippy --locked --profile test --all-targets --all-features --package 'velnor-workflow' -- -D warnings"]
 depends_on = ["rust-velnor-runner"]

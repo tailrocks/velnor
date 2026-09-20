@@ -23,10 +23,10 @@ use crate::s2::reuse::REQUIRED_CHECK;
 use crate::s2::{
     config_rust_toolchain, github_expression, hosted_cargo_bin_toolchain_restore,
     hosted_cargo_bin_toolchain_save, hosted_cargo_bin_toolchain_verify, hosted_mold_setup,
-    kind_unit_workflow_file, nested_unit_workflow_file, prepare_cargo_caller_job_id,
-    provider_supports_unit, render_mr_boxington_store_budget_step, rendered_cache_values,
-    rust_dependency_needs, stack_group_job_id, unit_group, unit_group_job_id,
-    unit_job_display_name, unit_job_id, workflow_runtime_artifact_upload,
+    prepare_cargo_caller_job_id, prepare_unit_workflow_file,
+    provider_supports_unit, provider_unit_workflow_file, render_mr_boxington_store_budget_step,
+    rendered_cache_values, rust_dependency_needs, unit_group, unit_job_display_name, unit_job_id,
+    workflow_runtime_artifact_upload,
     workflow_runtime_download, workflow_runtime_setup, workflow_selection_file_materialize,
     yaml_scalar, CachePurpose, CacheSpec, GeneratorError, ProjectConfig, RustNeeds, RustToolchain,
     SelectionFieldSources, Unit, UnitKind, GENERATED_HEADER, MR_BOXINGTON_VERSION,
@@ -72,32 +72,33 @@ fn snapshot_dependency_inputs(members: &[&Unit]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::process::{Command, Output};
 
     use super::{
-        provider_input, unit_owns_workflow_crate, GraphNode, Pins, ProviderAdmission, ProviderId,
+        provider_input, GraphNode, Pins, ProviderAdmission, ProviderId,
         ProviderSet, RustNeeds, Unit, UnitKind, WorkflowIr, WorkflowKind,
     };
-    use crate::s2::{
-        nested_unit_workflow_file, sidebar_group_name, stack_group_job_id,
-        workflow_setup_action_repository,
-    };
+    use crate::s2::workflow_setup_action_repository;
 
     #[test]
-    fn dispatch_admission_matches_each_provider_by_comma_boundary() {
+    fn dispatch_admission_is_hosted_only_and_local_admission_is_default_push_only() {
         let ir = owner_test_ir("example/owner", Vec::new());
-        for provider in ProviderId::ALL {
-            let expression =
-                ir.provider_admission_expression(ProviderAdmission::Provider(provider));
+        let hosted = ir.provider_admission_expression(ProviderAdmission::Provider(
+            ProviderId::GithubHosted,
+        ));
+        assert!(
+            hosted.contains("contains(format(',{{0}},', github.event.inputs.providers), ',github-hosted,')"),
+            "the hosted provider matches workflow_dispatch by comma boundary: {hosted}"
+        );
+        for provider in [ProviderId::GithubSelfHosted, ProviderId::Velnor] {
+            let expression = ir.provider_admission_expression(ProviderAdmission::Provider(provider));
             assert!(
-                expression.contains(&format!(
-                    "contains(format(',{{0}},', github.event.inputs.providers), ',{},')",
-                    provider.as_str()
-                )),
-                "{provider:?} dispatch matches by comma boundary: {expression}"
+                !expression.contains("workflow_dispatch")
+                    && expression.contains("github.event_name == 'push'")
+                    && expression.contains("github.ref == 'refs/heads/main'"),
+                "{provider:?} admits only automatic default-branch pushes: {expression}"
             );
         }
-        let hosted =
-            ir.provider_admission_expression(ProviderAdmission::Provider(ProviderId::GithubHosted));
         assert!(
             !hosted.contains(",github-self-hosted,)"),
             "github-hosted must not match inside github-self-hosted: {hosted}"
@@ -105,9 +106,220 @@ mod tests {
     }
 
     #[test]
+    fn local_admission_is_exact_repository_default_push_only_and_shared_by_surfaces() {
+        const TRUSTED_EVENT: &str = "!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))";
+
+        let unit = rust_unit("rust", "crates/rust");
+        let nodes = [GraphNode::Unit {
+            unit_id: unit.id.clone(),
+            kind: unit.kind,
+        }];
+        let mut ir = owner_test_ir("example/owner", vec![unit]);
+        ir.default_branch = "trunk".to_owned();
+        ir.automatic_providers = ProviderSet::from([ProviderId::Velnor]);
+
+        let expression = ir
+            .provider_admission_expression(ProviderAdmission::ProviderTrusted(ProviderId::Velnor));
+        let expected = format!(
+            "((false) || (github.repository == 'example/owner' && github.event_name == 'push' && github.ref == 'refs/heads/trunk')) && ({TRUSTED_EVENT})"
+        );
+        assert_eq!(
+            expression, expected,
+            "local admission pins same-repository default-branch pushes and the trusted-event gate"
+        );
+
+        // No GitHub expression evaluator is available in this crate. Pinning
+        // the full canonical expression above and checking all generated
+        // consumers below keeps this case matrix tied to the rendered policy.
+        for (name, repository, event, git_ref, expected_admitted) in [
+            (
+                "same-repository default-branch push",
+                "example/owner",
+                "push",
+                "refs/heads/trunk",
+                true,
+            ),
+            (
+                "wrong repository",
+                "fork/owner",
+                "push",
+                "refs/heads/trunk",
+                false,
+            ),
+            (
+                "wrong branch",
+                "example/owner",
+                "push",
+                "refs/heads/feature",
+                false,
+            ),
+            (
+                "tag push",
+                "example/owner",
+                "push",
+                "refs/tags/v1.2.3",
+                false,
+            ),
+            (
+                "schedule",
+                "example/owner",
+                "schedule",
+                "refs/heads/trunk",
+                false,
+            ),
+            (
+                "workflow dispatch",
+                "example/owner",
+                "workflow_dispatch",
+                "refs/heads/trunk",
+                false,
+            ),
+            (
+                "pull request",
+                "example/owner",
+                "pull_request",
+                "refs/pull/1/merge",
+                false,
+            ),
+            (
+                "pull request target",
+                "example/owner",
+                "pull_request_target",
+                "refs/heads/trunk",
+                false,
+            ),
+            (
+                "workflow run",
+                "example/owner",
+                "workflow_run",
+                "refs/heads/trunk",
+                false,
+            ),
+            (
+                "repository dispatch",
+                "example/owner",
+                "repository_dispatch",
+                "refs/heads/trunk",
+                false,
+            ),
+            (
+                "merge group",
+                "example/owner",
+                "merge_group",
+                "refs/heads/trunk",
+                false,
+            ),
+            (
+                "unknown event",
+                "example/owner",
+                "unknown",
+                "refs/heads/trunk",
+                false,
+            ),
+        ] {
+            let admitted =
+                repository == "example/owner" && event == "push" && git_ref == "refs/heads/trunk";
+            assert_eq!(
+                admitted, expected_admitted,
+                "local admission contract for {name}: repo={repository} event={event} ref={git_ref}"
+            );
+        }
+
+        assert_velnor_admission_reaches_generated_surfaces(&ir, &nodes, &expression);
+    }
+
+    #[test]
+    fn local_provider_dispatch_allowlist_cannot_replace_automatic_admission() {
+        const TRUSTED_EVENT: &str = "!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))";
+
+        let unit = rust_unit("rust", "crates/rust");
+        let nodes = [GraphNode::Unit {
+            unit_id: unit.id.clone(),
+            kind: unit.kind,
+        }];
+        let mut ir = owner_test_ir("example/owner", vec![unit]);
+        ir.default_branch = "trunk".to_owned();
+        ir.automatic_providers = ProviderSet::default();
+        ir.default_dispatch_providers = ProviderSet::from([ProviderId::Velnor]);
+        assert!(ir.default_dispatch_providers.contains(&ProviderId::Velnor));
+        assert!(!ir.automatic_providers.contains(&ProviderId::Velnor));
+
+        let expression = ir
+            .provider_admission_expression(ProviderAdmission::ProviderTrusted(ProviderId::Velnor));
+        assert_eq!(
+            expression,
+            format!("((false) || (false)) && ({TRUSTED_EVENT})"),
+            "a local provider omitted from automatic admission stays denied even if dispatch lists it"
+        );
+        assert_velnor_admission_reaches_generated_surfaces(&ir, &nodes, &expression);
+    }
+
+    fn assert_velnor_admission_reaches_generated_surfaces(
+        ir: &WorkflowIr,
+        nodes: &[GraphNode],
+        expression: &str,
+    ) {
+        let main = ir.render_nested(WorkflowKind::Main, nodes, None);
+        let callee = must_render_kind(ir);
+        let exact_gate = format!("&& ({expression})");
+        assert!(
+            main.contains(&exact_gate),
+            "aggregate local caller uses the canonical admission predicate: {main}"
+        );
+        assert!(
+            callee.contains(&exact_gate),
+            "provider reusable job uses the canonical admission predicate: {callee}"
+        );
+        let required_check_env = format!(
+            "PROVIDER_ADMITTED_VELNOR_TRUSTED: {}",
+            super::github_expression(expression)
+        );
+        assert!(
+            main.contains(&required_check_env),
+            "required check evaluates the canonical admission predicate: {main}"
+        );
+    }
+
+    #[test]
+    fn pull_request_aggregate_emits_hosted_callers_only() {
+        let unit = rust_unit("rust", "crates/rust");
+        let nodes = [GraphNode::Unit {
+            unit_id: unit.id.clone(),
+            kind: unit.kind,
+        }];
+        let ir = owner_test_ir("example/owner", vec![unit]);
+        let pr = ir.render_nested(WorkflowKind::PullRequest, &nodes, None);
+        assert!(
+            pr.contains("ci-unit-rust-github-hosted.yml"),
+            "the untrusted PR aggregate keeps its hosted caller: {pr}"
+        );
+        for provider in [ProviderId::GithubSelfHosted, ProviderId::Velnor] {
+            assert!(
+                !pr.contains(&format!("ci-unit-rust-{}.yml", provider.as_str()))
+                    && !pr.contains(&format!("provider: {}\n", provider.as_str()))
+                    && !pr.contains(provider.as_str()),
+                "PR-controlled workflow YAML must not name or schedule {provider}: {pr}"
+            );
+        }
+        assert!(
+            !pr.contains("PROVIDER_ADMITTED_VELNOR_TRUSTED")
+                && !pr.contains("PROVIDER_ADMITTED_GITHUB_SELF_HOSTED_TRUSTED"),
+            "the PR required check evaluates no local admission classes: {pr}"
+        );
+
+        let main = ir.render_nested(WorkflowKind::Main, &nodes, None);
+        for provider in [ProviderId::GithubSelfHosted, ProviderId::Velnor] {
+            assert!(
+                main.contains(&format!("ci-unit-rust-{}.yml", provider.as_str())),
+                "protected main keeps its configured caller for {provider}: {main}"
+            );
+        }
+    }
+
+    #[test]
     fn caller_and_callee_selectors_share_one_plan_json_needle() {
         // The aggregate callers read the plan's `units` JSON through
-        // `needs.plan.outputs.units`; the kind reusables read the same JSON
+        // `needs.plan.outputs.units`; provider-specific reusables read the same JSON
         // through `inputs.selected_units`. GitHub `contains()` is a literal
         // substring test, so both needles must appear verbatim in the plan
         // output: bare quotes, no backslashes. The caller once over-escaped
@@ -161,6 +373,68 @@ mod tests {
         );
     }
 
+    #[test]
+    fn main_local_callers_are_push_only_and_nightly_is_scheduled_hosted_only() {
+        let unit = rust_unit("rust", "crates/rust");
+        let nodes = [GraphNode::Unit {
+            unit_id: unit.id.clone(),
+            kind: unit.kind,
+        }];
+        let mut ir = owner_test_ir("example/aggregate-trust", vec![unit]);
+        ir.automatic_providers = ProviderSet::from([ProviderId::GithubHosted]);
+        ir.default_dispatch_providers = ProviderSet::from([ProviderId::GithubHosted]);
+        let main = ir.render_nested(WorkflowKind::Main, &nodes, None);
+        let nightly = ir.render_nightly(&nodes, None);
+        assert!(
+            main.contains("push:\n    branches: [main]") && !main.contains("workflow_dispatch:"),
+            "Main uses only the protected default-branch push trigger: {main}"
+        );
+        assert!(nightly.contains("schedule:"), "nightly remains scheduled: {nightly}");
+        assert!(
+            !nightly.contains("workflow_dispatch:")
+                && !nightly.contains("actions: write")
+                && !nightly.contains("gh workflow run ci-main.yml"),
+            "nightly has no branch-selected dispatcher or write token: {nightly}"
+        );
+        assert!(
+            nightly.contains("ci-unit-rust-github-hosted.yml")
+                && !nightly.contains("ci-unit-rust-github-self-hosted.yml")
+                && !nightly.contains("ci-unit-rust-velnor.yml"),
+            "nightly aggregate structurally contains hosted callers only: {nightly}"
+        );
+        assert!(
+            nightly.contains("nightly-required:") && nightly.contains("nightly-alert:"),
+            "the direct scheduled aggregate retains its required status and alert: {nightly}"
+        );
+    }
+
+    #[test]
+    fn docker_buildkit_exposes_actions_runtime_only_on_github_providers() {
+        let ir = owner_test_ir("example/docker-runtime", Vec::new());
+        let tools = BTreeSet::from([super::ToolRequirement::DockerBuildx]);
+        for provider in [ProviderId::GithubHosted, ProviderId::GithubSelfHosted] {
+            let mut output = String::new();
+            ir.render_kind_level_tool_steps(&mut output, provider, &tools, false);
+            assert!(
+                output.contains("name: Expose GitHub Actions runtime")
+                    && output.contains(&ir.pins.github_runtime),
+                "{provider} exposes the GitHub cache runtime before BuildKit: {output}"
+            );
+            if provider == ProviderId::GithubHosted {
+                assert!(output.contains(&ir.pins.docker_buildx));
+            } else {
+                assert!(!output.contains(&ir.pins.docker_buildx));
+            }
+        }
+        let mut velnor = String::new();
+        ir.render_kind_level_tool_steps(&mut velnor, ProviderId::Velnor, &tools, false);
+        assert!(
+            !velnor.contains("Expose GitHub Actions runtime")
+                && !velnor.contains("setup-buildx-action"),
+            "Velnor retains its local builder environment: {velnor}"
+        );
+    }
+
     /// One hand-built Rust unit: the id is fixture-local, the root decides
     /// ownership of the generator crate.
     fn rust_unit(id: &str, root: &str) -> Unit {
@@ -207,6 +481,228 @@ mod tests {
                 .to_owned(),
         ];
         unit
+    }
+
+    #[test]
+    fn docker_seed_key_tracks_source_only_watch_changes() {
+        let mut original = docker_unit("docker-seed");
+        original.watch = vec!["containers/app/**".to_owned()];
+        let mut changed = original.clone();
+        changed.watch = vec!["containers/app-v2/**".to_owned()];
+        let original_ir = owner_test_ir("example/docker-seed", vec![original.clone()]);
+        let changed_ir = owner_test_ir("example/docker-seed", vec![changed.clone()]);
+
+        let original_facts =
+            super::unit_snapshot_facts(&original_ir, &original, ProviderId::GithubHosted);
+        let changed_facts =
+            super::unit_snapshot_facts(&changed_ir, &changed, ProviderId::GithubHosted);
+        assert_eq!(
+            original_facts.compatibility, changed_facts.compatibility,
+            "watch-only source changes keep compatibility stable"
+        );
+        assert_eq!(
+            original_facts.dependency_files, changed_facts.dependency_files,
+            "watch-only source changes keep dependency inputs stable"
+        );
+        assert_ne!(
+            original_facts.state_files, changed_facts.state_files,
+            "Docker watch inputs belong to source freshness"
+        );
+
+        let (original_key, _) = super::unit_snapshot(
+            &original_ir,
+            &original,
+            ProviderId::GithubHosted,
+            super::DOCKER_SEED_SNAPSHOT_NAMESPACE,
+        );
+        let (changed_key, _) = super::unit_snapshot(
+            &changed_ir,
+            &changed,
+            ProviderId::GithubHosted,
+            super::DOCKER_SEED_SNAPSHOT_NAMESPACE,
+        );
+        assert_ne!(
+            original_key, changed_key,
+            "source-only changes mint a new key"
+        );
+        assert!(
+            original_key.contains("containers/app/**"),
+            "the original seed key hashes Docker's source context: {original_key}"
+        );
+
+        let mut seeded = original.clone();
+        seeded.cache = Some(crate::s2::CacheSpec {
+            key_files: vec!["Dockerfile".to_owned(), "Cargo.lock".to_owned()],
+            paths: vec![".velnor-docker-cache".to_owned()],
+            purpose: crate::s2::CachePurpose::DockerSeed,
+            mbx_output_cache_justification: None,
+            mutable_mount_seed: true,
+        });
+        let seeded_ir = owner_test_ir("example/docker-seed", vec![seeded.clone()]);
+        let contract = seeded_ir.default_unit_contract(&seeded, true);
+        let mut provider_keys = BTreeSet::new();
+        for provider in [ProviderId::GithubHosted, ProviderId::GithubSelfHosted] {
+            let facts = seeded_ir.unit_provider_facts(&seeded, &contract, provider);
+            assert!(
+                facts.seed.is_some(),
+                "{provider} uses Actions seed transport"
+            );
+            let (key, _) = super::unit_snapshot(
+                &seeded_ir,
+                &seeded,
+                provider,
+                super::DOCKER_SEED_SNAPSHOT_NAMESPACE,
+            );
+            assert!(
+                key.contains(provider.as_str()),
+                "{provider} key is isolated: {key}"
+            );
+            assert!(
+                provider_keys.insert(key),
+                "each Actions provider gets a distinct seed key"
+            );
+            let provider_job = contract
+                .providers
+                .iter()
+                .find(|job| job.provider == provider)
+                .expect("provider is in the explicit contract");
+            assert!(provider_job.cache_save, "{provider} can save its own seed");
+        }
+        let velnor = seeded_ir.unit_provider_facts(&seeded, &contract, ProviderId::Velnor);
+        assert!(velnor.seed.is_none(), "Velnor uses its retained builder");
+        assert!(
+            velnor.host_warm_layers.contains(&"docker_seed"),
+            "Velnor reports the retained seed as host-warm"
+        );
+        assert!(
+            !contract
+                .providers
+                .iter()
+                .find(|job| job.provider == ProviderId::Velnor)
+                .expect("Velnor provider job")
+                .cache_save,
+            "Velnor never writes a GitHub Actions cache"
+        );
+        let no_cache = docker_unit("docker-no-seed");
+        let no_cache_ir = owner_test_ir("example/docker-seed", vec![no_cache.clone()]);
+        let no_cache_contract = no_cache_ir.default_unit_contract(&no_cache, true);
+        assert!(
+            no_cache_ir
+                .unit_provider_facts(&no_cache, &no_cache_contract, ProviderId::GithubHosted)
+                .seed
+                .is_none(),
+            "Docker seed transport remains optional"
+        );
+    }
+
+    #[test]
+    fn docker_seed_collection_only_marks_complete_new_exports_for_save() {
+        let ir = owner_test_ir("example/docker-seed", Vec::new());
+        let save = (".velnor-docker-cache".to_owned(), "seed-key".to_owned());
+        let mut rendered = String::new();
+        super::render_seed_collection_steps(&mut rendered, &ir, "", Some(&save));
+        let script = shell_script_from_step(&rendered, "Collect Docker mutable-cache export");
+        let save_gate = super::mutable_mount_seed_cache_save_if("main");
+        assert!(rendered.contains("id: collect-seed"));
+        assert!(rendered.contains("steps.collect-seed.outputs.updated == 'true'"));
+        assert!(
+            save_gate.starts_with("success() && ("),
+            "failed collection cannot reach the save step: {save_gate}"
+        );
+        assert!(
+            save_gate.contains("steps.collect-seed.outputs.updated == 'true'"),
+            "no-op collection cannot save: {save_gate}"
+        );
+        assert!(
+            save_gate.contains("steps.cache.outputs.cache-hit != 'true'"),
+            "an exact restored seed cannot be re-saved: {save_gate}"
+        );
+        assert!(!save_gate.contains("always()"), "{save_gate}");
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-seed-collection-{}-{}",
+            std::process::id(),
+            crate::s2::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create collection test root");
+
+        let no_export = root.join("no-export");
+        std::fs::create_dir_all(&no_export).expect("create no-export directory");
+        let (result, outputs) = run_seed_collection_script(&script, &no_export);
+        assert!(
+            result.status.success(),
+            "no-export collection is a no-op: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(outputs.trim(), "updated=false");
+
+        let partial_export = root.join("partial-export");
+        let partial_dir = partial_export
+            .join(super::MUTABLE_MOUNT_HOST_DIR)
+            .join("export");
+        std::fs::create_dir_all(&partial_dir).expect("create partial export directory");
+        let old_seed = partial_export
+            .join(super::MUTABLE_MOUNT_HOST_DIR)
+            .join("seed");
+        std::fs::create_dir_all(&old_seed).expect("create prior seed");
+        std::fs::write(old_seed.join("cargo-registry.tar"), b"previous-seed")
+            .expect("write previous seed");
+        std::fs::write(partial_dir.join("mbx-closure.tar"), b"closure")
+            .expect("write partial export marker");
+        let (result, outputs) = run_seed_collection_script(&script, &partial_export);
+        assert!(
+            !result.status.success(),
+            "an incomplete export fails before saving"
+        );
+        assert!(!outputs.contains("updated=true"));
+        assert_eq!(
+            std::fs::read(old_seed.join("cargo-registry.tar")).expect("prior seed survives"),
+            b"previous-seed",
+            "an incomplete export cannot replace the previous seed"
+        );
+
+        let full_export = root.join("full-export");
+        let full_dir = full_export
+            .join(super::MUTABLE_MOUNT_HOST_DIR)
+            .join("export");
+        std::fs::create_dir_all(&full_dir).expect("create full export directory");
+        for file in ["cargo-registry.tar", "cargo-git.tar", "mbx-closure.tar"] {
+            std::fs::write(full_dir.join(file), b"seed").expect("write full export member");
+        }
+        let (result, outputs) = run_seed_collection_script(&script, &full_export);
+        assert!(
+            result.status.success(),
+            "complete export collection succeeds: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(outputs.trim(), "updated=true");
+        for file in ["cargo-registry.tar", "cargo-git.tar", "mbx-closure.tar"] {
+            assert!(
+                full_export
+                    .join(super::MUTABLE_MOUNT_HOST_DIR)
+                    .join("seed")
+                    .join(file)
+                    .is_file(),
+                "complete export contains {file}"
+            );
+        }
+        std::fs::remove_dir_all(root).expect("remove collection test root");
+    }
+
+    fn run_seed_collection_script(
+        script: &str,
+        working_directory: &std::path::Path,
+    ) -> (Output, String) {
+        let github_output = working_directory.join("github-output");
+        std::fs::write(&github_output, "").expect("create GitHub output file");
+        let output = Command::new("bash")
+            .args(["-euo", "pipefail", "-c", script])
+            .current_dir(working_directory)
+            .env("GITHUB_OUTPUT", &github_output)
+            .output()
+            .expect("bash is available for this test");
+        let outputs = std::fs::read_to_string(github_output).expect("read GitHub outputs");
+        (output, outputs)
     }
 
     fn owner_test_ir(repository: &str, units: Vec<Unit>) -> WorkflowIr {
@@ -348,18 +844,80 @@ mod tests {
         );
     }
 
-    fn candidate_flagged_callers(ir: &WorkflowIr) -> Vec<String> {
-        let mut flagged = Vec::new();
-        for unit in &ir.units {
-            for caller in ir.unit_provider_callers(unit, "ci-unit-rust.yml", None) {
-                if caller.inputs.iter().any(|(name, value)| {
-                    *name == provider_input::CANDIDATE_PUBLISH && value == "true"
-                }) {
-                    flagged.push(caller.job_id.clone());
-                }
-            }
+    #[test]
+    fn provider_reusable_exports_the_identity_of_the_job_that_ran() {
+        let ir = owner_test_ir("example/strict-results", vec![rust_unit("rust", ".")]);
+        let rendered = must_render_kind(&ir);
+        let outputs = must_some(
+            rendered.find("    outputs:\n      result_identity:\n"),
+            "reusable workflow result output",
+        );
+        let jobs = must_some(rendered.find("\njobs:\n"), "provider jobs block");
+        assert!(outputs < jobs, "workflow output maps before the jobs block");
+        for job in [
+            "jobs.verify-github-hosted.outputs.result_identity",
+            "jobs.verify-github-self-hosted.outputs.result_identity",
+            "jobs.verify-velnor.outputs.result_identity",
+        ] {
+            assert!(
+                rendered.contains(job),
+                "reusable output routes through {job}"
+            );
         }
-        flagged
+        assert!(rendered.contains("result_identity: ${{ steps.result-identity.outputs.value }}"));
+        assert!(rendered.contains("- name: Record provider result identity\n        id: result-identity\n        if: always()"));
+        assert!(rendered.contains("OBSERVED_RUNNER_OS: ${{ runner.os }}"));
+        assert!(rendered.contains("OBSERVED_RUNNER_ARCH: ${{ runner.arch }}"));
+        assert!(rendered.contains("command_digest:$command_digest"));
+        assert!(rendered.contains("platform:$platform"));
+
+        let identity_script = shell_script_from_step(&rendered, "Record provider result identity");
+        let root = std::env::temp_dir().join(format!(
+            "velnor-provider-identity-{}-{}",
+            std::process::id(),
+            crate::s2::unique_suffix()
+        ));
+        std::fs::create_dir_all(&root).expect("create provider identity test root");
+        let github_output = root.join("github-output");
+        std::fs::write(&github_output, "").expect("create GitHub output file");
+        let selected_units = serde_json::json!([{
+            "unit_id": "rust",
+            "providers": ProviderId::ALL.iter().map(ProviderId::as_str).collect::<Vec<_>>(),
+            "platform": "linux-x64",
+            "command_digest": "command-digest-abc",
+        }])
+        .to_string();
+        let identity = Command::new("bash")
+            .args(["-euo", "pipefail", "-c", &identity_script])
+            .env("GITHUB_OUTPUT", &github_output)
+            .env("REPOSITORY_ID", "12345")
+            .env("SOURCE_SHA", "commit-abc")
+            .env("RUN_ID", "987654")
+            .env("RUN_ATTEMPT", "2")
+            .env("PLAN_DIGEST", "plan-digest-abc")
+            .env("UNIT_ID", "rust")
+            .env("PROVIDER", "github-hosted")
+            .env("SELECTED_UNITS", selected_units)
+            .env("OBSERVED_RUNNER_OS", "Linux")
+            .env("OBSERVED_RUNNER_ARCH", "X64")
+            .output()
+            .expect("bash and jq are available for this test");
+        assert!(
+            identity.status.success(),
+            "generated provider identity step succeeds: {}",
+            String::from_utf8_lossy(&identity.stderr)
+        );
+        let output = std::fs::read_to_string(github_output).expect("read GitHub output");
+        let value = output
+            .strip_prefix("value=")
+            .expect("provider result identity output")
+            .trim();
+        let identity: serde_json::Value =
+            serde_json::from_str(value).expect("identity output is JSON");
+        assert_eq!(identity["provider"], "github-hosted");
+        assert_eq!(identity["platform"], "linux-x64");
+        assert_eq!(identity["command_digest"], "command-digest-abc");
+        std::fs::remove_dir_all(root).expect("remove provider identity test root");
     }
 
     #[expect(
@@ -384,12 +942,279 @@ mod tests {
         }
     }
 
+    fn shell_script_from_step(rendered: &str, step_name: &str) -> String {
+        let header = format!("      - name: {step_name}\n");
+        let step = must_some(rendered.find(&header), "generated shell step");
+        let run_marker = "        run: |\n";
+        let run = must_some(
+            rendered[step..]
+                .find(run_marker)
+                .map(|offset| step + offset + run_marker.len()),
+            "generated shell script",
+        );
+        let mut script = String::new();
+        for line in rendered[run..].lines() {
+            if let Some(line) = line.strip_prefix("          ") {
+                script.push_str(line);
+                script.push('\n');
+            } else if line.is_empty() {
+                script.push('\n');
+            } else {
+                break;
+            }
+        }
+        script
+    }
+
+    fn generated_required_script() -> (String, Vec<super::RequiredCaller>) {
+        let ir = owner_test_ir("example/strict-results", vec![rust_unit("rust-check", ".")]);
+        let nodes = [GraphNode::Unit {
+            unit_id: "rust-check".to_owned(),
+            kind: UnitKind::Rust,
+        }];
+        let callers = ir.required_callers(&nodes, None);
+        let mut rendered = String::new();
+        ir.render_nodes_required(&nodes, None, &mut rendered, false, "ci-required");
+        let script = shell_script_from_step(&rendered, "Validate generated stack results");
+        (script, callers)
+    }
+
+    fn synthetic_required_needs(
+        callers: &[super::RequiredCaller],
+        wrong_field: Option<(&str, &str)>,
+    ) -> String {
+        let mut needs = serde_json::Map::new();
+        needs.insert("plan".to_owned(), serde_json::json!({"result": "success"}));
+        for caller in callers.iter().filter(|caller| !caller.prerequisite) {
+            let mut identity = serde_json::json!({
+                "repository_id": "12345",
+                "source_sha": "commit-abc",
+                "run_id": "987654",
+                "run_attempt": "2",
+                "plan_digest": "plan-digest-abc",
+                "unit_id": "rust-check",
+                "provider": caller.provider.as_str(),
+                "platform": "linux-x64",
+                "command_digest": "command-digest-abc",
+            });
+            if let Some((field, value)) = wrong_field
+                && caller.provider == ProviderId::GithubHosted
+            {
+                identity[field] = serde_json::Value::String(value.to_owned());
+            }
+            needs.insert(
+                caller.job_id.clone(),
+                serde_json::json!({
+                    "result": "success",
+                    "outputs": {"result_identity": identity.to_string()},
+                }),
+            );
+        }
+        serde_json::Value::Object(needs).to_string()
+    }
+
+    fn run_generated_required_script(script: &str, needs_json: &str) -> Output {
+        run_generated_required_script_with(script, needs_json, &ProviderId::ALL, &[])
+    }
+
+    fn run_generated_required_script_with(
+        script: &str,
+        needs_json: &str,
+        selected_providers: &[ProviderId],
+        admission_overrides: &[(&str, &str)],
+    ) -> Output {
+        let selected_units = serde_json::json!([{
+            "unit_id": "rust-check",
+            "providers": selected_providers.iter().map(|provider| provider.as_str()).collect::<Vec<_>>(),
+            "platform": "linux-x64",
+            "command_digest": "command-digest-abc",
+        }])
+        .to_string();
+        let mut command = Command::new("bash");
+        command
+            .args(["-euo", "pipefail", "-c", script])
+            .env("NEEDS_JSON", needs_json)
+            .env("SELECTED_UNITS", selected_units)
+            .env("PLAN_DIGEST", "plan-digest-abc")
+            .env("REPOSITORY_ID", "12345")
+            .env("SOURCE_SHA", "commit-abc")
+            .env("RUN_ID", "987654")
+            .env("RUN_ATTEMPT", "2")
+            .env("EXCLUDED", "[]");
+        for provider in ProviderId::ALL {
+            for admission in [
+                super::ProviderAdmission::Provider(provider),
+                super::ProviderAdmission::ProviderTrusted(provider),
+            ] {
+                command.env(admission.env_name(), "true");
+            }
+        }
+        command.env(super::ProviderAdmission::AnyLocalTrusted.env_name(), "true");
+        for (name, value) in admission_overrides {
+            command.env(name, value);
+        }
+        command
+            .output()
+            .expect("bash and jq are available for this test")
+    }
+
+    fn synthetic_required_needs_with_result(
+        callers: &[super::RequiredCaller],
+        job_id: &str,
+        result: Option<&str>,
+    ) -> String {
+        let mut needs: serde_json::Value =
+            serde_json::from_str(&synthetic_required_needs(callers, None))
+                .expect("synthetic needs are JSON");
+        let needs = needs.as_object_mut().expect("synthetic needs object");
+        if let Some(result) = result {
+            needs
+                .get_mut(job_id)
+                .expect("synthetic caller need")
+                .as_object_mut()
+                .expect("synthetic caller object")
+                .insert(
+                    "result".to_owned(),
+                    serde_json::Value::String(result.to_owned()),
+                );
+        } else {
+            needs.remove(job_id);
+        }
+        serde_json::Value::Object(needs.clone()).to_string()
+    }
+
+    #[test]
+    fn generated_ci_required_executes_strict_provider_result_identity_checks() {
+        let (script, callers) = generated_required_script();
+        let correct = synthetic_required_needs(&callers, None);
+        let output = run_generated_required_script(&script, &correct);
+        assert!(
+            output.status.success(),
+            "correct provider result identities pass: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        for (field, value) in [
+            ("repository_id", "other-repo-id"),
+            ("provider", "velnor"),
+            ("run_id", "older-run"),
+            ("source_sha", "different-commit"),
+            ("run_attempt", "1"),
+            ("plan_digest", "different-plan"),
+            ("platform", "macos-arm64"),
+            ("command_digest", "different-commands"),
+        ] {
+            let needs = synthetic_required_needs(&callers, Some((field, value)));
+            let output = run_generated_required_script(&script, &needs);
+            assert!(
+                !output.status.success(),
+                "wrong {field} identity must fail: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("provider result identity mismatch"),
+                "wrong {field} is diagnosed as an identity mismatch: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[test]
+    fn generated_ci_required_executes_caller_result_verdicts() {
+        let (script, callers) = generated_required_script();
+        let caller = callers
+            .iter()
+            .find(|caller| caller.provider == ProviderId::GithubHosted && !caller.prerequisite)
+            .expect("generated hosted caller");
+        let correct = synthetic_required_needs(&callers, None);
+
+        let success = run_generated_required_script(&script, &correct);
+        assert!(
+            success.status.success(),
+            "expected, admitted caller with matching result identity passes: {}",
+            String::from_utf8_lossy(&success.stderr)
+        );
+
+        for (label, result, diagnostic) in [
+            ("missing", None, "did not pass"),
+            ("skipped", Some("skipped"), "was skipped"),
+            ("cancelled", Some("cancelled"), "was cancelled"),
+            ("failed", Some("failure"), "did not pass: failure"),
+        ] {
+            let needs = synthetic_required_needs_with_result(&callers, &caller.job_id, result);
+            let output = run_generated_required_script(&script, &needs);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !output.status.success(),
+                "{label} expected result must fail the generated caller verdict"
+            );
+            assert!(
+                stderr.contains(diagnostic),
+                "{label} has a specific caller verdict diagnostic: {stderr}"
+            );
+        }
+
+        let wrong_identity = synthetic_required_needs(&callers, Some(("provider", "velnor")));
+        let output = run_generated_required_script(&script, &wrong_identity);
+        assert!(
+            !output.status.success()
+                && String::from_utf8_lossy(&output.stderr)
+                    .contains("provider result identity mismatch"),
+            "wrong provider identity fails the caller verdict: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let selected_without_hosted = ProviderId::ALL
+            .into_iter()
+            .filter(|provider| *provider != caller.provider)
+            .collect::<Vec<_>>();
+        let output =
+            run_generated_required_script_with(&script, &correct, &selected_without_hosted, &[]);
+        assert!(
+            !output.status.success()
+                && String::from_utf8_lossy(&output.stderr)
+                    .contains("succeeded outside the expected set"),
+            "success from a provider absent from the frozen plan fails: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let admission_false = [(caller.admission.env_name(), "false")];
+        let output = run_generated_required_script_with(
+            &script,
+            &correct,
+            &ProviderId::ALL,
+            &admission_false,
+        );
+        assert!(
+            !output.status.success()
+                && String::from_utf8_lossy(&output.stderr)
+                    .contains("ran outside its provider admission"),
+            "a successful caller outside admission fails: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let skipped =
+            synthetic_required_needs_with_result(&callers, &caller.job_id, Some("skipped"));
+        let output = run_generated_required_script_with(
+            &script,
+            &skipped,
+            &ProviderId::ALL,
+            &admission_false,
+        );
+        assert!(
+            output.status.success(),
+            "a caller skipped by its false admission predicate is an allowed outcome: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     fn must_render_kind(ir: &WorkflowIr) -> String {
         let rendered = must_ok(
-            ir.render_kind_unit_workflow(UnitKind::Rust, None),
+            ir.render_kind_provider_workflows_for_test(UnitKind::Rust, None),
             "rust kind reusable renders",
         );
-        must_some(rendered, "rust kind has members").1
+        must_some(rendered, "rust kind has provider workflows")
     }
 
     /// One job's body from a rendered workflow. Job bodies indent past two
@@ -428,10 +1253,10 @@ mod tests {
             vec![swift, rust_unit("rust-widget", "crates/widget")],
         );
         let swift_rendered = must_ok(
-            ir.render_kind_unit_workflow(UnitKind::Swift, None),
+            ir.render_kind_provider_workflows_for_test(UnitKind::Swift, None),
             "swift kind reusable renders",
         );
-        let swift_workflow = must_some(swift_rendered, "swift kind has members").1;
+        let swift_workflow = must_some(swift_rendered, "swift kind has provider workflows");
         assert!(
             swift_workflow.contains("runs-on: macos-26"),
             "{swift_workflow}"
@@ -441,10 +1266,10 @@ mod tests {
             "{swift_workflow}"
         );
         let rust_rendered = must_ok(
-            ir.render_kind_unit_workflow(UnitKind::Rust, None),
+            ir.render_kind_provider_workflows_for_test(UnitKind::Rust, None),
             "rust kind reusable renders",
         );
-        let rust_workflow = must_some(rust_rendered, "rust kind has members").1;
+        let rust_workflow = must_some(rust_rendered, "rust kind has provider workflows");
         assert!(
             rust_workflow.contains("runs-on: ubuntu-24.04"),
             "{rust_workflow}"
@@ -457,77 +1282,10 @@ mod tests {
     }
 
     #[test]
-    fn candidate_publish_flags_only_the_hosted_owner_of_the_generator_crate() {
-        let owner = workflow_setup_action_repository().to_owned();
-        let mut documentation = rust_unit("docs-generator-root", "crates/velnor-workflow");
-        documentation.kind = UnitKind::Docs;
-        let units = vec![
-            rust_unit("rust-generator-crate", "crates/velnor-workflow"),
-            rust_unit("rust-sibling-crate", "crates/sibling"),
-            rust_unit("rust-workspace-root", "."),
-            documentation,
-        ];
-        let ir = owner_test_ir(&owner, units);
-        for unit in &ir.units {
-            for provider in [ProviderId::GithubHosted, ProviderId::Velnor] {
-                let contract = ir.default_unit_contract(unit, false);
-                let facts = ir.unit_provider_facts(unit, &contract, provider);
-                assert_eq!(
-                    facts.candidate_publish,
-                    provider == ProviderId::GithubHosted && unit_owns_workflow_crate(unit),
-                    "candidate_publish for {} on {provider:?}",
-                    unit.id
-                );
-            }
-        }
-        assert_eq!(
-            ir.units
-                .iter()
-                .filter(|unit| unit_owns_workflow_crate(unit))
-                .count(),
-            1,
-            "exactly one unit owns the generator crate"
-        );
-
-        // A consumer tree that happens to carry the same crate root still
-        // publishes nothing: the owner repository check comes first.
-        let foreign = owner_test_ir(
-            "example/foreign",
-            vec![rust_unit("rust-generator-crate", "crates/velnor-workflow")],
-        );
-        for unit in &foreign.units {
-            for provider in [ProviderId::GithubHosted, ProviderId::Velnor] {
-                let contract = foreign.default_unit_contract(unit, false);
-                assert!(
-                    !foreign
-                        .unit_provider_facts(unit, &contract, provider)
-                        .candidate_publish,
-                    "foreign trees never publish on {provider:?}"
-                );
-            }
-        }
-        let anonymous = owner_test_ir(
-            "",
-            vec![rust_unit("rust-generator-crate", "crates/velnor-workflow")],
-        );
-        let contract = anonymous.default_unit_contract(&anonymous.units[0], false);
-        assert!(
-            !anonymous
-                .unit_provider_facts(&anonymous.units[0], &contract, ProviderId::GithubHosted)
-                .candidate_publish,
-            "an empty repository is not the owner"
-        );
-    }
-
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one implication pinned at facts, render, and caller level"
-    )]
-    #[test]
     fn local_provider_check_implies_policy_runtime() {
         const CHECK: &str = "cd -- 'crates/velnor-workflow' && mbx run -- --plain --check ../..";
         const OTHER: &str = "cargo test --locked";
-        const PROVISION: &str = "      - name: Provision pinned Velnor workflow policy runtime\n        if: ${{ inputs.policy_runtime }}\n";
+        const PROVISION: &str = "      - name: Provision pinned workflow policy runtime\n        if: ${{ inputs.policy_runtime }}\n";
         let owner = workflow_setup_action_repository().to_owned();
         // Facts level: the regen-gate command in either command vector
         // implies the provision flag on every local provider, never GitHub.
@@ -574,64 +1332,79 @@ mod tests {
         let ir = owner_test_ir(&owner, vec![check, rust_unit("rust-plain", "crates/plain")]);
         let content = must_render_kind(&ir);
         for job in ["verify-github-self-hosted", "verify-velnor"] {
+            let block = job_block(&content, job);
             assert!(
-                job_block(&content, job).contains(PROVISION),
+                block.contains(PROVISION),
                 "{job} provisions the pinned policy binary behind the input gate: {}",
-                job_block(&content, job)
+                block
+            );
+            assert!(
+                block.contains("PRODUCT_REPOSITORY: tailrocks/velnor")
+                    && block.contains("source_ref=\"refs/heads/main\"")
+                    && !block.contains("DEFAULT_BRANCH"),
+                "{job} resolves and attests the generator product, independent of the consumer branch: {block}"
             );
         }
         assert!(
             !job_block(&content, "verify-github-hosted")
-                .contains("Provision pinned Velnor workflow policy runtime"),
+                .contains("Provision pinned workflow policy runtime"),
             "the hosted provider carries the pin in the Planning artifact instead: {}",
             job_block(&content, "verify-github-hosted")
         );
-        // Caller level: only the Velnor caller of the regen-gate unit passes
-        // `policy_runtime: true`.
+        // Caller level: generated PR workflow YAML is hosted-only, while the
+        // protected default-branch aggregate keeps both local regen-gate
+        // callers and their runtime input.
         let nodes = ir
             .units
             .iter()
-            .map(|unit| GraphNode::Unit {
-                unit_id: unit.id.clone(),
-                job_id: stack_group_job_id(unit.kind),
-                name: sidebar_group_name(unit),
-                file: nested_unit_workflow_file(unit),
+                .map(|unit| GraphNode::Unit {
+                    unit_id: unit.id.clone(),
+                    kind: unit.kind,
             })
             .collect::<Vec<_>>();
-        for kind in [WorkflowKind::PullRequest, WorkflowKind::Main] {
-            let rendered = ir.render_nested(kind, &nodes, None);
-            assert_eq!(
-                rendered.matches("policy_runtime: true").count(),
-                2,
-                "exactly the local regen-gate callers pass the flag on {kind:?}: {rendered}"
+        let pr = ir.render_nested(WorkflowKind::PullRequest, &nodes, None);
+        assert_eq!(
+            pr.matches("policy_runtime: true").count(),
+            0,
+            "PR workflow has no caller-managed provider caller: {pr}"
+        );
+        for provider in [ProviderId::GithubSelfHosted, ProviderId::Velnor] {
+            assert!(
+                !pr.contains(&format!("ci-unit-rust-{}.yml", provider.as_str())),
+                "PR workflow must not call {provider}: {pr}"
             );
         }
-        let pr = ir.render_nested(WorkflowKind::PullRequest, &nodes, None);
+        let main = ir.render_nested(WorkflowKind::Main, &nodes, None);
+        assert_eq!(
+            main.matches("policy_runtime: true").count(),
+            2,
+            "exactly the two local regen-gate callers pass the flag on main: {main}"
+        );
         let headers: Vec<String> = ir
             .units
             .iter()
-            .flat_map(|unit| ir.unit_provider_callers(unit, "ci-unit-rust.yml", None))
+            .flat_map(|unit| ir.unit_provider_callers(unit, None))
             .map(|caller| format!("  {}:\n", caller.job_id))
             .collect();
         for unit in &ir.units {
-            for caller in ir.unit_provider_callers(unit, "ci-unit-rust.yml", None) {
+            for caller in ir.unit_provider_callers(unit, None) {
                 if !caller.provider.is_local() {
                     continue;
                 }
                 let header = format!("  {}:\n", caller.job_id);
-                let start = must_some(pr.find(&header), "the local caller renders");
+                let start = must_some(main.find(&header), "the local main caller renders");
                 let after = start + 1;
                 let end = headers
                     .iter()
                     .filter(|other| *other != &header)
                     .filter_map(|other| {
-                        pr[after..]
+                        main[after..]
                             .find(&format!("\n{other}"))
                             .map(|index| after + index)
                     })
                     .min()
-                    .unwrap_or(pr.len());
-                let block = &pr[start..end];
+                    .unwrap_or(main.len());
+                let block = &main[start..end];
                 if unit.id == "rust-check" {
                     assert!(
                         block.contains("policy_runtime: true"),
@@ -750,43 +1523,7 @@ mod tests {
     }
 
     #[test]
-    fn exactly_one_caller_per_run_passes_candidate_publish() {
-        let owner = workflow_setup_action_repository().to_owned();
-        let ir = owner_test_ir(
-            &owner,
-            vec![
-                rust_unit("rust-generator-crate", "crates/velnor-workflow"),
-                rust_unit("rust-sibling-crate", "crates/sibling"),
-            ],
-        );
-        assert_eq!(candidate_flagged_callers(&ir).len(), 1);
-
-        let nodes = ir
-            .units
-            .iter()
-            .map(|unit| GraphNode::Unit {
-                unit_id: unit.id.clone(),
-                job_id: stack_group_job_id(unit.kind),
-                name: sidebar_group_name(unit),
-                file: nested_unit_workflow_file(unit),
-            })
-            .collect::<Vec<_>>();
-        let pr = ir.render_nested(WorkflowKind::PullRequest, &nodes, None);
-        assert_eq!(
-            pr.matches("candidate_publish: true").count(),
-            1,
-            "one publishing caller per run: {pr}"
-        );
-        let flagged = candidate_flagged_callers(&ir);
-        let only = must_some(flagged.first(), "one caller passes the flag");
-        assert!(
-            pr.contains(&format!("  {only}:\n")),
-            "the publishing caller renders: {pr}"
-        );
-    }
-
-    #[test]
-    fn github_lane_fetches_pin_history_for_check_running_units() {
+    fn provider_workflow_does_not_fetch_d19_pin_history_per_unit() {
         let owner = workflow_setup_action_repository().to_owned();
         let mut checker = rust_unit("rust-generator-crate", "crates/velnor-workflow");
         checker
@@ -797,35 +1534,13 @@ mod tests {
             vec![checker, rust_unit("rust-sibling-crate", "crates/sibling")],
         );
         let content = must_render_kind(&ir);
-        let (hosted, velnor) = must_some(
-            content.split_once("\n  verify-velnor:\n"),
-            "both provider jobs render",
+        assert!(
+            !content.contains("Fetch D19 pin history"),
+            "D19 pin history is acquired by policy, not repeated in each unit workflow: {content}"
         );
         assert!(
-            !velnor.contains("Fetch D19 pin history"),
-            "the Velnor provider provisions the pin through its pinned-renderer step: {velnor}"
-        );
-        let fetch = must_some(
-            hosted.find("      - name: Fetch D19 pin history"),
-            "fetch step renders on the GitHub provider: {hosted}",
-        );
-        let checks = must_some(hosted.find("- name: Run unit checks"), "checks render");
-        assert!(
-            fetch < checks,
-            "the pin is present before verification runs: {hosted}"
-        );
-        let step = &hosted[fetch..checks];
-        assert!(
-            step.contains("'rust-generator-crate') : ;;"),
-            "the check-running member proceeds to the fetch: {step}"
-        );
-        assert!(
-            step.contains("'rust-sibling-crate') exit 0 ;;"),
-            "other members skip the fetch: {step}"
-        );
-        assert!(
-            step.contains("git fetch --no-tags --depth 1"),
-            "a shallow checkout gains the pin commit: {step}"
+            content.contains("- name: Run unit checks"),
+            "checks render: {content}"
         );
     }
 
@@ -834,10 +1549,10 @@ mod tests {
         let owner = "example/owner";
         let ir = owner_test_ir(owner, vec![docker_unit("docker-example")]);
         let rendered = must_ok(
-            ir.render_kind_unit_workflow(UnitKind::Docker, None),
+            ir.render_kind_provider_workflows_for_test(UnitKind::Docker, None),
             "docker kind reusable renders",
         );
-        let content = must_some(rendered, "docker kind has members").1;
+        let content = must_some(rendered, "docker kind has provider workflows");
         let checks = content
             .split("- name: Run unit checks")
             .skip(1)
@@ -856,12 +1571,11 @@ mod tests {
         let rust = owner_test_ir(owner, vec![rust_unit("rust-example", ".")]);
         let rust_content = must_some(
             must_ok(
-                rust.render_kind_unit_workflow(UnitKind::Rust, None),
+                rust.render_kind_provider_workflows_for_test(UnitKind::Rust, None),
                 "rust kind reusable renders",
             ),
-            "rust kind has members",
-        )
-        .1;
+            "rust kind has provider workflows",
+        );
         assert!(
             !rust_content.contains("GITHUB_TOKEN: ${{ github.token }}"),
             "other kinds run no secret-passing command and get no token: {rust_content}"
@@ -899,304 +1613,6 @@ mod tests {
                 "{provider:?} must not rename the report action's input: {output}"
             );
         }
-    }
-
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one consumer contract pinned clause by clause"
-    )]
-    #[test]
-    fn candidate_steps_match_the_policy_consumer_contract() {
-        let owner = workflow_setup_action_repository().to_owned();
-        let ir = owner_test_ir(
-            &owner,
-            vec![
-                rust_unit("rust-generator-crate", "crates/velnor-workflow"),
-                rust_unit("rust-sibling-crate", "crates/sibling"),
-            ],
-        );
-        let content = must_render_kind(&ir);
-        assert!(
-            content.contains(
-                "      candidate_publish:\n        required: false\n        type: boolean\n        default: false\n"
-            ),
-            "the callee declares the flag: {content}"
-        );
-        let (hosted, velnor) = must_some(
-            content.split_once("\n  verify-velnor:\n"),
-            "both provider jobs render",
-        );
-        assert!(
-            !velnor.contains("candidate generator product"),
-            "the Velnor provider never publishes: {velnor}"
-        );
-        let checks = must_some(hosted.find("- name: Run unit checks"), "checks render");
-        let start = must_some(
-            hosted.find("      - name: Prepare candidate generator product"),
-            "prepare step renders",
-        );
-        assert!(
-            checks < start,
-            "packaging reuses the checks' own build, after it: {hosted}"
-        );
-        let end = must_some(
-            hosted.find("      - name: Report phase timings"),
-            "report step renders",
-        );
-        let candidate = &hosted[start..end];
-        assert_eq!(
-            hosted
-                .matches(
-                    "if: ${{ inputs.candidate_publish && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}"
-                )
-                .count(),
-            1,
-            "the prepare step carries the input gate merged with the pull-request same-repo gate: {hosted}"
-        );
-        assert!(
-            hosted.contains(
-                "if: ${{ inputs.candidate_publish && (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true') }}"
-            ),
-            "the publish step additionally gates on the prepare step's skip output: {hosted}"
-        );
-        assert!(
-            candidate.contains("CANDIDATE_MERGE_SHA: ${{ inputs.head_sha }}"),
-            "the merge SHA names the checked-out tree: {candidate}"
-        );
-        assert!(
-            candidate.contains("CANDIDATE_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}"),
-            "the PR-head SHA anchors the published identity: {candidate}"
-        );
-        assert!(
-            candidate.contains("CANDIDATE_BASE_SHA: ${{ inputs.base_sha }}"),
-            "the base SHA anchors the skip gate: {candidate}"
-        );
-        assert!(
-            !candidate.contains("CANDIDATE_HEAD_SHA"),
-            "nothing keys off the merge tree alone anymore: {candidate}"
-        );
-        for sha in ["$PR_HEAD", "$BASE", "$base_pin"] {
-            assert!(
-                candidate.contains(&format!(
-                    "git fetch --no-tags --depth 1 \"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY\" \"{sha}\""
-                )),
-                "an unauthenticated shallow fetch pins {sha}: {candidate}"
-            );
-        }
-        for probe in [
-            "\"$PR_HEAD^{commit}\"",
-            "\"$BASE^{commit}\"",
-            "\"$base_pin^{commit}\"",
-        ] {
-            assert!(
-                candidate.contains(&format!("git cat-file -e {probe}")),
-                "the fetch is skipped when {probe} is already local: {candidate}"
-            );
-        }
-        assert!(
-            !candidate.contains("GH_TOKEN"),
-            "fetches are unauthenticated reads of the public repository: {candidate}"
-        );
-        assert!(
-            !candidate.contains("actions/checkout@"),
-            "no second checkout: the job extends its own history with fetches: {candidate}"
-        );
-        assert!(
-            candidate.contains("velnor-workflow closure --rev=\"$PR_HEAD\" --candidate"),
-            "the head candidate closure names the artifact: {candidate}"
-        );
-        assert!(
-            candidate.contains("velnor-workflow closure --rev=\"$base_pin\" --candidate"),
-            "the base candidate closure feeds the skip gate: {candidate}"
-        );
-        assert!(
-            candidate
-                .contains("velnor-workflow closure --rev=\"$CANDIDATE_MERGE_SHA\" --candidate"),
-            "the merge candidate closure selects the fast path: {candidate}"
-        );
-        assert!(
-            candidate.contains("git show \"$BASE:.github-gen/velnor-workflow.toml\""),
-            "the base pin is read from the base tree: {candidate}"
-        );
-        assert!(
-            candidate.contains("git show \"$BASE:.github/workflows/ci-policy.yml\""),
-            "the entrypoint literal is the fallback pin source: {candidate}"
-        );
-        assert!(
-            candidate.contains("echo \"skip=true\" >> \"$GITHUB_OUTPUT\""),
-            "an unchanged generator skips the publish: {candidate}"
-        );
-        assert!(
-            candidate.contains("test -x target/debug/velnor-workflow"),
-            "the fast path reuses the job's own binary: {candidate}"
-        );
-        assert!(
-            candidate.contains("binary=\"target/debug/velnor-workflow\"")
-                && candidate.contains("build_rev=\"$CANDIDATE_MERGE_SHA\""),
-            "the fast path records the merge tree as the build revision: {candidate}"
-        );
-        assert!(
-            candidate.contains("use_unit_binary=false")
-                && candidate.contains(
-                    "if [[ \"$(target/debug/velnor-workflow --closure)\" == \"$head_closure\" ]]; then"
-                )
-                && candidate.contains("if [[ \"$use_unit_binary\" == true ]]; then"),
-            "the fast path reuses the checks' binary only when it already reports the head closure (the checks may build wider features): {candidate}"
-        );
-        assert_eq!(
-            candidate.matches("cargo build").count(),
-            1,
-            "the slow path builds exactly once: {candidate}"
-        );
-        assert!(
-            candidate.contains("cargo build --locked -p velnor-workflow"),
-            "the slow build pins the lockfile and the generator package: {candidate}"
-        );
-        assert!(
-            candidate.contains("--manifest-path \"$worktree/crates/velnor-workflow/Cargo.toml\""),
-            "the slow build compiles the head worktree: {candidate}"
-        );
-        assert!(
-            !candidate.contains("--no-default-features")
-                && !candidate.contains("--all-features")
-                && !candidate.contains("cargo install"),
-            "the slow build uses default features, the candidate feature set: {candidate}"
-        );
-        assert!(
-            candidate.contains("git worktree add --detach \"$worktree\" \"$PR_HEAD\""),
-            "the slow path checks the head out beside the job: {candidate}"
-        );
-        assert!(
-            candidate.contains("trap 'git worktree remove --force \"$worktree\"' EXIT"),
-            "the worktree is cleaned up on failure: {candidate}"
-        );
-        assert!(
-            candidate.contains(
-                "git worktree remove --force \"$worktree\"\n            trap - EXIT"
-            ),
-            "the explicit worktree removal disarms the EXIT trap so the step cannot double-remove: {candidate}"
-        );
-        assert!(
-            candidate.contains("binary=\"$worktree/target/debug/velnor-workflow\"")
-                && candidate.contains("build_rev=\"$PR_HEAD\""),
-            "the slow path records the head as the build revision: {candidate}"
-        );
-        assert!(
-            candidate.contains("\"$stage/velnor-workflow\" --closure")
-                && candidate.contains("[[ \"$reported\" == \"$head_closure\" ]]"),
-            "the staged binary proves the head closure before upload: {candidate}"
-        );
-        for argument in [
-            "--arg profile debug",
-            "--arg platform \"${RUNNER_OS}-${RUNNER_ARCH}\"",
-            "--arg repository \"$GITHUB_REPOSITORY\"",
-            "--arg run_id \"$GITHUB_RUN_ID\"",
-            "--arg revision \"$PR_HEAD\"",
-            "--arg closure \"$head_closure\"",
-            "--arg build_revision \"$build_rev\"",
-            "--arg binary_sha256 \"$digest\"",
-        ] {
-            assert!(
-                candidate.contains(argument),
-                "the manifest carries {argument}: {candidate}"
-            );
-        }
-        assert!(
-            candidate.contains("build_revision: $build_revision"),
-            "the manifest object records the build revision: {candidate}"
-        );
-        assert!(
-            candidate.contains(
-                "echo \"name=velnor-workflow-candidate-${head_closure:0:16}-${RUNNER_OS}-${RUNNER_ARCH}\""
-            ),
-            "the artifact name derives exactly like the policy consumer's: {candidate}"
-        );
-        assert!(
-            !candidate.contains("head_candidate"),
-            "the merge-tree closure name is gone: {candidate}"
-        );
-        assert!(
-            candidate.contains("actions/upload-artifact@"),
-            "the publish step uses the pinned upload action: {candidate}"
-        );
-        assert!(
-            candidate.contains("name: ${{ steps.candidate.outputs.name }}")
-                && candidate.contains("path: ${{ runner.temp }}/velnor-workflow-candidate")
-                && candidate.contains("retention-days: 1"),
-            "the publish step uploads the staged directory with short retention: {candidate}"
-        );
-    }
-
-    #[test]
-    fn solo_kind_keeps_the_bare_event_gate() {
-        // A kind with no sibling keeps the bare event gate: every member
-        // publishes, so no input gate is needed.
-        let owner = workflow_setup_action_repository().to_owned();
-        let solo = owner_test_ir(
-            &owner,
-            vec![rust_unit("rust-generator-crate", "crates/velnor-workflow")],
-        );
-        let solo_content = must_render_kind(&solo);
-        assert_eq!(
-            solo_content
-                .matches("if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository\n")
-                .count(),
-            1,
-            "the prepare step keeps the bare pull-request same-repo gate: {solo_content}"
-        );
-        assert_eq!(
-            solo_content
-                .matches("if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true'\n")
-                .count(),
-            1,
-            "the publish step adds the skip gate: {solo_content}"
-        );
-        assert!(
-            !solo_content.contains("inputs.candidate_publish &&"),
-            "no presence gate when every member publishes: {solo_content}"
-        );
-    }
-
-    #[test]
-    fn candidate_step_gates_sit_directly_after_their_name_lines() {
-        // The presence-gate combiner only merges an `if:` it finds directly
-        // after the step's `name:` line.
-        let steps = super::candidate_publish_steps("actions/upload-artifact@pinned");
-        assert!(
-            steps.contains("      - name: Prepare candidate generator product\n        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository\n"),
-            "the prepare gate is the pull-request same-repo gate: {steps}"
-        );
-        assert!(
-            steps.contains("      - name: Publish candidate generator product\n        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true'\n"),
-            "the publish gate adds the skip output: {steps}"
-        );
-    }
-
-    #[test]
-    fn foreign_trees_render_no_candidate_surface() {
-        let ir = owner_test_ir(
-            "example/foreign",
-            vec![
-                rust_unit("rust-generator-crate", "crates/velnor-workflow"),
-                rust_unit("rust-sibling-crate", "crates/sibling"),
-            ],
-        );
-        let content = must_render_kind(&ir);
-        assert!(
-            !content.contains("candidate generator product")
-                && !content.contains("inputs.candidate_publish"),
-            "foreign trees render no candidate steps or gates: {content}"
-        );
-        assert!(
-            content.contains(
-                "      candidate_publish:\n        required: false\n        type: boolean\n        default: false\n"
-            ),
-            "the input declaration stays for every kind: {content}"
-        );
-        assert!(
-            candidate_flagged_callers(&ir).is_empty(),
-            "no caller passes the flag"
-        );
     }
 }
 
@@ -1288,9 +1704,20 @@ fn format_cargo_bundle_cache_key(
 fn snapshot_state_files(members: &[&Unit], unit: &Unit) -> Vec<String> {
     if !cargo_network_is_restricted(unit) {
         let mut files = vec!["Cargo.lock".to_owned(), "deny.toml".to_owned()];
-        for watched in &unit.watch {
-            if watched.ends_with("deny.toml") || watched.ends_with("audit.toml") {
-                files.push(watched.clone());
+        if unit.kind == UnitKind::Docker {
+            // The Docker seed is built from the checked-out context. Hash its
+            // watched inputs in the freshness segment so a source-only edit
+            // mints a new seed key even when lockfiles and toolchain inputs
+            // stay unchanged.
+            files.extend(unit.watch.iter().cloned());
+            if unit.watch.is_empty() {
+                files.push(format!("{}/**", unit.root));
+            }
+        } else {
+            for watched in &unit.watch {
+                if watched.ends_with("deny.toml") || watched.ends_with("audit.toml") {
+                    files.push(watched.clone());
+                }
             }
         }
         files.sort();
@@ -1637,7 +2064,7 @@ impl CacheReportFacts {
         }) {
             layers.insert(ReportedCacheLayer::CargoBundle);
         }
-        if seed && provider == ProviderId::GithubHosted {
+        if seed && uses_github_actions_cache(provider) {
             layers.insert(ReportedCacheLayer::DockerSeed);
         }
         Self {
@@ -1701,6 +2128,13 @@ fn local_host_warm_layers(unit: &Unit, ir: &WorkflowIr) -> Vec<&'static str> {
     host_warm
 }
 
+fn uses_github_actions_cache(provider: ProviderId) -> bool {
+    matches!(
+        provider,
+        ProviderId::GithubHosted | ProviderId::GithubSelfHosted
+    )
+}
+
 fn render_cache_outcome_report_inputs(
     output: &mut String,
     provider: ProviderId,
@@ -1715,7 +2149,7 @@ fn render_cache_outcome_report_inputs(
         ProviderId::Velnor => "velnor",
     };
     let _ = writeln!(output, "          ci_lane: {lane_name}");
-    if provider.is_local() {
+    if provider == ProviderId::Velnor {
         if let Some(layers) = &facts.host_warm_layers {
             let _ = writeln!(output, "          host_warm_layers: {layers}");
         }
@@ -1777,7 +2211,7 @@ fn command_resolves_its_own_inputs(command: &str) -> bool {
 /// the source-preparation step. Restriction requires a root `Cargo.lock` so
 /// `cargo fetch --locked` is well-defined, and exempts units whose commands
 /// resolve their own inputs (deny, audit, publish).
-fn cargo_network_is_restricted(unit: &Unit) -> bool {
+pub(crate) fn cargo_network_is_restricted(unit: &Unit) -> bool {
     if !unit.pinned_lockfile {
         return false;
     }
@@ -1878,129 +2312,6 @@ fn unit_commands(unit: &Unit) -> impl Iterator<Item = &String> {
 /// the checks run with the network restricted.
 pub(crate) fn unit_runs_workflow_plain_check(unit: &Unit) -> bool {
     unit_commands(unit).any(|command| command.contains("--plain --check"))
-}
-
-/// Whether the unit owns the generator crate itself: a Rust unit rooted at
-/// the generator crate's manifest directory. The scan mints one unit per
-/// manifest root, so at most one unit per repository matches; the owner
-/// repository's tree carries exactly that unit, and fixture trees carry
-/// none. The match is structural (kind plus root), never the unit id, so a
-/// renamed unit cannot silently gain or lose the publish.
-fn unit_owns_workflow_crate(unit: &Unit) -> bool {
-    unit.kind == UnitKind::Rust && unit.root == "crates/velnor-workflow"
-}
-
-/// Stage-1 candidate packaging steps for the collapsed hosted provider job,
-/// head-anchored: everything keys off the pull-request head tree, the same
-/// identity the owner policy run waits for and verifies.
-///
-/// The unit job checks out the merge commit, but the policy consumer waits
-/// for an artifact named by the audited head's candidate closure and verifies
-/// the audited PR-head tree's closure. Naming the artifact from the merge
-/// tree flakes whenever main advances in closure paths (rebase/merge-state
-/// decides pass/fail), so the prepare step fetches the PR head, the base,
-/// and the base pin (shallow, unauthenticated, each skipped when already
-/// local) and computes all closures from those.
-///
-/// The step skips the publish (`skip=true`, exit 0) when the head candidate
-/// closure equals the base pin's: no generator change, nothing to publish.
-/// Otherwise the fast path reuses the checks' own `target/debug/velnor-workflow`
-/// when the merge closure equals the head closure (zero builds), and the slow
-/// path builds the generator once from an explicit head worktree in this same
-/// step (same job, same toolchain, warm cargo home — a separate job would
-/// duplicate checkout, toolchain, and cache for a rare event). Either way the
-/// step stages the binary, proves it self-reports the head closure, and writes
-/// the manifest the policy consumer verifies (`profile`, `platform`,
-/// `repository`, `run_id`, `revision` = PR-head SHA, `closure` = head
-/// candidate closure, `build_revision` = tree the binary compiled from,
-/// `binary_sha256`). The publish step uploads both files under the name the
-/// policy derives the same way (`velnor-workflow-candidate-<closure16>-<os>-<arch>`).
-///
-/// Both steps carry the pull-request same-repo gate directly after their name
-/// line (the presence-gate combiner only merges an `if:` it finds there),
-/// and the publish step additionally gates on the prepare step's `skip`
-/// output, so the collapsed renderer can add the per-unit input gate without
-/// touching them.
-fn candidate_publish_steps(upload_artifact_pin: &str) -> String {
-    format!(
-        r#"      - name: Prepare candidate generator product
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        id: candidate
-        env:
-          CANDIDATE_MERGE_SHA: ${{{{ inputs.head_sha }}}}
-          CANDIDATE_PR_HEAD_SHA: ${{{{ github.event.pull_request.head.sha }}}}
-          CANDIDATE_BASE_SHA: ${{{{ inputs.base_sha }}}}
-        run: |
-          set -euo pipefail
-          PR_HEAD="$CANDIDATE_PR_HEAD_SHA"
-          BASE="$CANDIDATE_BASE_SHA"
-          if ! git cat-file -e "$PR_HEAD^{{commit}}" 2>/dev/null; then
-            git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$PR_HEAD"
-          fi
-          head_closure="$(velnor-workflow closure --rev="$PR_HEAD" --candidate)"
-          if ! git cat-file -e "$BASE^{{commit}}" 2>/dev/null; then
-            git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$BASE"
-          fi
-          base_pin="$(git show "$BASE:.github-gen/velnor-workflow.toml" 2>/dev/null | sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*"([0-9a-f]{{40}})".*/\1/p' | head -n 1)"
-          test "$base_pin" != '' || base_pin="$(git show "$BASE:.github/workflows/ci-policy.yml" 2>/dev/null | sed -n -E 's/^.*VELNOR_WORKFLOW_POLICY_REVISION:[[:space:]]*([0-9a-f]{{40}}).*/\1/p' | head -n 1)"
-          test "$base_pin" != '' || {{ echo "::error::base $BASE declares no generator pin" >&2; exit 1; }}
-          if ! git cat-file -e "$base_pin^{{commit}}" 2>/dev/null; then
-            git fetch --no-tags --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$base_pin"
-          fi
-          base_closure="$(velnor-workflow closure --rev="$base_pin" --candidate)"
-          if [[ "$head_closure" == "$base_closure" ]]; then
-            echo "head $PR_HEAD shares the base pin's candidate closure; no candidate to publish"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          merge_closure="$(velnor-workflow closure --rev="$CANDIDATE_MERGE_SHA" --candidate)"
-          worktree=""
-          use_unit_binary=false
-          if [[ "$merge_closure" == "$head_closure" ]]; then
-            test -x target/debug/velnor-workflow || {{ echo "::error::candidate packaging needs the unit's own target/debug/velnor-workflow; the checks must build the generator binary" >&2; exit 1; }}
-            # The checks may build with different features than the candidate
-            # profile stamps, so only reuse their binary when it already
-            # reports the head closure; otherwise fall through to a clean
-            # default-features build below.
-            if [[ "$(target/debug/velnor-workflow --closure)" == "$head_closure" ]]; then
-              use_unit_binary=true
-            fi
-          fi
-          if [[ "$use_unit_binary" == true ]]; then
-            binary="target/debug/velnor-workflow"
-            build_rev="$CANDIDATE_MERGE_SHA"
-          else
-            worktree="$RUNNER_TEMP/velnor-workflow-head"
-            rm -rf "$worktree"
-            git worktree add --detach "$worktree" "$PR_HEAD"
-            trap 'git worktree remove --force "$worktree"' EXIT
-            cargo build --locked -p velnor-workflow --manifest-path "$worktree/crates/velnor-workflow/Cargo.toml"
-            binary="$worktree/target/debug/velnor-workflow"
-            build_rev="$PR_HEAD"
-          fi
-          stage="$RUNNER_TEMP/velnor-workflow-candidate"
-          rm -rf "$stage"
-          mkdir -p "$stage"
-          install -m 0755 "$binary" "$stage/velnor-workflow"
-          digest="$(sha256sum "$stage/velnor-workflow" | awk '{{print $1}}')"
-          reported="$("$stage/velnor-workflow" --closure)"
-          [[ "$reported" == "$head_closure" ]] || {{ echo "::error::candidate reports closure $reported, head $PR_HEAD declares $head_closure" >&2; exit 1; }}
-          jq -n --arg profile debug --arg platform "${{RUNNER_OS}}-${{RUNNER_ARCH}}" --arg repository "$GITHUB_REPOSITORY" --arg run_id "$GITHUB_RUN_ID" --arg revision "$PR_HEAD" --arg closure "$head_closure" --arg build_revision "$build_rev" --arg binary_sha256 "$digest" '{{profile: $profile, platform: $platform, repository: $repository, run_id: $run_id, revision: $revision, closure: $closure, build_revision: $build_revision, binary_sha256: $binary_sha256}}' > "$stage/candidate-manifest.json"
-          if [[ "$worktree" != "" ]]; then
-            git worktree remove --force "$worktree"
-            trap - EXIT
-          fi
-          echo "name=velnor-workflow-candidate-${{head_closure:0:16}}-${{RUNNER_OS}}-${{RUNNER_ARCH}}" >> "$GITHUB_OUTPUT"
-      - name: Publish candidate generator product
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.candidate.outputs.skip != 'true'
-        uses: {upload_artifact_pin}
-        with:
-          name: ${{{{ steps.candidate.outputs.name }}}}
-          path: ${{{{ runner.temp }}}}/velnor-workflow-candidate
-          if-no-files-found: error
-          retention-days: 1
-"#,
-    )
 }
 
 /// Whether any of the unit's commands drive the test runner through Cargo or
@@ -2130,6 +2441,16 @@ pub(crate) fn dependency_bundle_cache_save_if_for_step(
 ) -> String {
     format!(
         "always() && ({}) && steps.{cache_step_id}.outputs.cache-hit != 'true'",
+        trusted_cache_save_expression(default_branch)
+    )
+}
+
+/// A Docker seed is immutable state for one source snapshot. Save it only when
+/// the job succeeded, the collector produced a complete new export, the
+/// event may write trusted cache state, and restore did not hit this exact key.
+fn mutable_mount_seed_cache_save_if(default_branch: &str) -> String {
+    format!(
+        "success() && ({}) && steps.collect-seed.outputs.updated == 'true' && steps.cache.outputs.cache-hit != 'true'",
         trusted_cache_save_expression(default_branch)
     )
 }
@@ -2558,6 +2879,34 @@ fn render_seed_restore_steps(
     );
 }
 
+/// Restore the mutable Docker mount seed for a standalone release leg. Release
+/// jobs do not pass through the provider reusable's snapshot inputs, so build
+/// the same provider-scoped key directly from the selected unit. Both GitHub
+/// Actions providers use their own cache namespace; Velnor keeps the seed on
+/// its retained builder and must not receive an Actions cache step.
+pub(crate) fn render_mutable_mount_seed_restore_for_unit(
+    output: &mut String,
+    ir: &WorkflowIr,
+    provider: ProviderId,
+    unit: &Unit,
+    checks_env: &str,
+) {
+    if !uses_github_actions_cache(provider)
+        || !unit
+            .cache
+            .as_ref()
+            .is_some_and(|cache| cache.mutable_mount_seed)
+    {
+        return;
+    }
+    let Some(cache) = unit.cache.as_ref() else {
+        return;
+    };
+    let (paths, _) = crate::s2::rendered_cache_values(cache);
+    let (key, restore_keys) = unit_snapshot(ir, unit, provider, DOCKER_SEED_SNAPSHOT_NAMESPACE);
+    render_seed_restore_steps(output, ir, &paths, &key, &restore_keys, checks_env);
+}
+
 /// The seed collection for a collapsed provider job: the save key reads the same
 /// inputs the restore step keyed on.
 fn render_mutable_mount_seed_collection_from_input(
@@ -2601,11 +2950,12 @@ fn render_seed_collection_steps(
         .join("\n");
     let _ = writeln!(
         output,
-        "      - name: Collect Docker mutable-cache export\n        if: {trusted_cache}\n        env:{}
+        "      - name: Collect Docker mutable-cache export\n        id: collect-seed\n        if: {trusted_cache}\n        env:{}
         run: |
           set -euo pipefail
           if [ ! -f \"{MUTABLE_MOUNT_HOST_DIR}/export/{}\" ]; then
             echo \"no Docker cache export: this run did not execute the full build commands\"
+            printf 'updated=false\\n' >> \"$GITHUB_OUTPUT\"
             exit 0
           fi
 {required_files}
@@ -2615,6 +2965,7 @@ fn render_seed_collection_steps(
           rm -rf \"{MUTABLE_MOUNT_HOST_DIR}/seed\"
           mv \"{MUTABLE_MOUNT_HOST_DIR}/seed.next\" \"{MUTABLE_MOUNT_HOST_DIR}/seed\"
           rm -rf \"{MUTABLE_MOUNT_HOST_DIR}/export\"
+          printf 'updated=true\\n' >> \"$GITHUB_OUTPUT\"
           echo \"Docker build seed updated:\"
           du -sh \"{MUTABLE_MOUNT_HOST_DIR}\"/seed/*",
         checks_env,
@@ -2624,7 +2975,7 @@ fn render_seed_collection_steps(
         let _ = writeln!(
             output,
             "      - name: Save Docker build seed\n        if: {}\n        uses: {}\n        with:\n          path: |\n{paths}\n          key: {key}",
-            dependency_bundle_cache_save_if(&ir.default_branch),
+            mutable_mount_seed_cache_save_if(&ir.default_branch),
             ir.pins.cache_save
         );
     }
@@ -2654,7 +3005,7 @@ pub(crate) fn render_retained_output_cache_note(
 ///
 /// Rendering is kept separate from scanning so output policy is inspectable
 /// and unit-tested.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "these independent switches are the stable generated workflow contract"
@@ -2719,8 +3070,9 @@ pub(crate) enum WorkflowKind {
 /// `if:`, the aggregate caller's `if:`, and the required check's expectation
 /// for that caller — and each renders it from
 /// [`WorkflowIr::provider_admission_expression`] on this key. A fork pull
-/// request, a provider-restricted `workflow_dispatch`, and an untrusted event
-/// are all just values of that predicate, never special cases of the gate.
+/// request, a branch-selected `workflow_dispatch`, or a local event away
+/// from the configured default-branch push is denied by the predicate,
+/// never by a downstream fallback.
 /// [`crate::s2::validate_provider_admission_single_source`] checks the rendered
 /// tree for drift between the three surfaces.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -2815,7 +3167,7 @@ pub(crate) struct RequiredCaller {
     pub(crate) prerequisite: bool,
 }
 
-/// The plan-JSON needle both the aggregate callers and the kind reusables
+/// The plan-JSON needle both the aggregate callers and provider reusables
 /// match with `contains(...)`: bare quotes, exactly as the plan output spells
 /// the `unit_id` member. One spelling shared by both emitters so they cannot
 /// diverge again — GitHub `contains()` is a literal substring test, so an
@@ -2866,8 +3218,8 @@ fn aggregate_concurrency_kind_suffix(kind: WorkflowKind) -> &'static str {
 fn aggregate_concurrency_group(ir: &WorkflowIr, kind: WorkflowKind) -> String {
     ir.concurrency_group.as_deref().map_or_else(
         || match kind {
-            // Main accepts both pushes and manual dispatches. A ref-based
-            // group makes unrelated runs wait behind each other, which is
+            // Main accepts only default-branch pushes. A ref-based group
+            // makes unrelated runs wait behind each other, which is
             // especially harmful because this aggregate intentionally keeps
             // cancellation disabled so valid producers finish.
             WorkflowKind::Main => "ci-${{ github.workflow }}-${{ github.run_id }}".to_owned(),
@@ -2924,31 +3276,15 @@ fn aggregate_triggers(
             "CI / Main",
             "CI / main",
             format!(
-                "on:\n  push:\n    branches: [{}]\n{}",
-                yaml_scalar(default_branch),
-                workflow_dispatch_inputs(
-                    "full",
-                    default_branch,
-                    "",
-                    providers,
-                    default_dispatch_providers,
-                )
+                "on:\n  push:\n    branches: [{}]",
+                yaml_scalar(default_branch)
             ),
             "false",
         ),
         WorkflowKind::Nightly => (
             "Nightly",
             "Nightly",
-            format!(
-                "on:\n  schedule:\n    - cron: '17 3 * * *'\n{}",
-                workflow_dispatch_inputs(
-                    "full",
-                    default_branch,
-                    "      simulate_failure:\n        description: Force the red-to-signal test path\n        required: false\n        default: false\n        type: boolean\n",
-                    providers,
-                    default_dispatch_providers,
-                )
-            ),
+            "on:\n  schedule:\n    - cron: '17 3 * * *'".to_owned(),
             "false",
         ),
     }
@@ -2971,24 +3307,6 @@ pub(crate) fn jq_read_plan_matrix(matrix_key: &str) -> String {
     )
 }
 
-fn kind_from_unit_workflow_file(file: &str) -> Option<UnitKind> {
-    let stem = file
-        .strip_prefix("ci-unit-")
-        .and_then(|value| value.strip_suffix(".yml"))?;
-    match stem {
-        "rust" => Some(UnitKind::Rust),
-        "gradle" => Some(UnitKind::Gradle),
-        "node" => Some(UnitKind::Node),
-        "bun" => Some(UnitKind::Bun),
-        "swift" => Some(UnitKind::Swift),
-        "opentofu" => Some(UnitKind::OpenTofu),
-        "docker" => Some(UnitKind::Docker),
-        "homebrew" => Some(UnitKind::Homebrew),
-        "docs" => Some(UnitKind::Docs),
-        _ => None,
-    }
-}
-
 /// One aggregate caller for a (unit, provider) pair (D1, D5).
 struct UnitProviderCaller {
     job_id: String,
@@ -2997,12 +3315,12 @@ struct UnitProviderCaller {
     provider: ProviderId,
     file: String,
     /// The per-unit `workflow_call` inputs this caller supplies to the kind
-    /// reusable: every unit-specific literal the collapsed provider job reads
+    /// reusable: every unit-specific literal the provider job reads
     /// through `inputs.*` instead of carrying one step block per unit.
     inputs: Vec<(&'static str, String)>,
 }
 
-/// The `workflow_call` inputs a kind reusable reads per-unit facts from.
+/// The `workflow_call` inputs a provider-specific reusable reads per-unit facts from.
 ///
 /// GitHub loads a called workflow once per caller into one template-memory
 /// budget, so the callee must be O(1) in the number of units: every value that
@@ -3053,11 +3371,6 @@ pub(crate) mod provider_input {
     pub(crate) const UNIT_PLATFORM: &str = "unit_platform";
     /// The unit's typed trust requirement (`untrusted-ok`, `trusted-only`).
     pub(crate) const UNIT_TRUST: &str = "unit_trust";
-    /// `true` when the hosted provider job must publish its own debug product of
-    /// the generator crate as the Stage-1 candidate artifact the owner
-    /// policy run consumes. Only the generator crate's owning Rust unit sets
-    /// it, on the hosted provider, in the owner repository, on pull requests.
-    pub(crate) const CANDIDATE_PUBLISH: &str = "candidate_publish";
     /// `true` when the unit needs the Apple executor: a kind whose members
     /// split across the default and Apple executors renders one collapsed
     /// job per executor, and each job admits only its own callers.
@@ -3091,7 +3404,7 @@ pub(crate) mod provider_input {
         CARGO_NET_OFFLINE,
         HOST_WARM_LAYERS,
         POLICY_RUNTIME,
-        CANDIDATE_PUBLISH,
+        APPLE_EXECUTOR,
         UNIT_PLATFORM,
         UNIT_TRUST,
         UNIT_DEPENDENCIES,
@@ -3110,7 +3423,6 @@ pub(crate) mod provider_input {
                 | CARGO_FETCH_SKIP_WHEN_WARM
                 | CARGO_NET_OFFLINE
                 | POLICY_RUNTIME
-                | CANDIDATE_PUBLISH
                 | APPLE_EXECUTOR
         )
     }
@@ -3188,7 +3500,8 @@ pub(crate) struct ProviderStepFacts {
     pub(crate) cargo_net_offline: bool,
     pub(crate) host_warm_layers: Vec<&'static str>,
     pub(crate) policy_runtime: bool,
-    pub(crate) candidate_publish: bool,
+    /// `true` when a hosted caller must run on the Apple executor.
+    pub(crate) apple_executor: bool,
     pub(crate) platform: String,
     pub(crate) trust: String,
     pub(crate) unit_dependencies: Vec<String>,
@@ -3267,8 +3580,8 @@ impl ProviderStepFacts {
         if self.policy_runtime {
             values.push((provider_input::POLICY_RUNTIME, "true".to_owned()));
         }
-        if self.candidate_publish {
-            values.push((provider_input::CANDIDATE_PUBLISH, "true".to_owned()));
+        if self.apple_executor {
+            values.push((provider_input::APPLE_EXECUTOR, "true".to_owned()));
         }
         // Cache keys always carry the platform/trust segments, so every
         // caller passes them unconditionally.
@@ -3414,9 +3727,18 @@ fn render_required_caller_verdicts(output: &mut String, callers: &[RequiredCalle
             )
         };
         let admitted = caller.admission.env_name();
+        let success_case = if caller.prerequisite {
+            "success) ;;".to_owned()
+        } else {
+            format!(
+                "success) assert_result_identity \"{job_id}\" \"{}\" \"{}\" ;;",
+                caller.unit_id,
+                caller.provider.as_str()
+            )
+        };
         let _ = writeln!(
             output,
-            "          if {expected_condition}; then\n            result=\"$(result_for_job {job_id})\"\n            if [[ \"${admitted}\" == true ]]; then\n              case \"$result\" in\n                success) ;;\n                skipped) echo \"expected {noun} {job_id} was skipped: a skipped expected result cannot pass\" >&2; exit 1 ;;\n                cancelled) echo \"expected {noun} {job_id} was cancelled: a cancelled expected result cannot pass\" >&2; exit 1 ;;\n                *) echo \"expected {noun} {job_id} did not pass: $result\" >&2; exit 1 ;;\n              esac\n            else\n              case \"$result\" in\n                skipped) ;;\n                *) echo \"selected {noun} {job_id} ran outside its provider admission ({admitted}=${admitted}): $result\" >&2; exit 1 ;;\n              esac\n            fi\n          else\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              skipped) ;;\n              success) echo \"unexpected {noun} {job_id} succeeded outside the expected set: the plan did not declare it\" >&2; exit 1 ;;\n              *) echo \"unexpected {noun} {job_id} ran outside the expected set: $result\" >&2; exit 1 ;;\n            esac\n          fi"
+            "          if {expected_condition}; then\n            result=\"$(result_for_job {job_id})\"\n            if [[ \"${admitted}\" == true ]]; then\n              case \"$result\" in\n                {success_case}\n                skipped) echo \"expected {noun} {job_id} was skipped: a skipped expected result cannot pass\" >&2; exit 1 ;;\n                cancelled) echo \"expected {noun} {job_id} was cancelled: a cancelled expected result cannot pass\" >&2; exit 1 ;;\n                *) echo \"expected {noun} {job_id} did not pass: $result\" >&2; exit 1 ;;\n              esac\n            else\n              case \"$result\" in\n                skipped) ;;\n                *) echo \"selected {noun} {job_id} ran outside its provider admission ({admitted}=${admitted}): $result\" >&2; exit 1 ;;\n              esac\n            fi\n          else\n            result=\"$(result_for_job {job_id})\"\n            case \"$result\" in\n              skipped) ;;\n              success) echo \"unexpected {noun} {job_id} succeeded outside the expected set: the plan did not declare it\" >&2; exit 1 ;;\n              *) echo \"unexpected {noun} {job_id} ran outside the expected set: $result\" >&2; exit 1 ;;\n            esac\n          fi"
         );
     }
 }
@@ -3529,6 +3851,32 @@ impl WorkflowIr {
         nodes: &[GraphNode],
         contracts: Option<&BTreeMap<String, UnitContract>>,
     ) -> String {
+        // `pull_request` loads YAML from the PR merge commit, and
+        // `workflow_dispatch` can load it from a branch selected by the
+        // dispatcher. Keep both refs hosted-only even when they carry this
+        // aggregate's YAML. Nightly also stays hosted-only; Main alone emits
+        // local callers, behind its protected default-branch push trigger.
+        if matches!(kind, WorkflowKind::PullRequest | WorkflowKind::Nightly) {
+            let mut hosted = self.clone();
+            hosted.providers.retain(|provider| *provider == ProviderId::GithubHosted);
+            hosted
+                .automatic_providers
+                .retain(|provider| *provider == ProviderId::GithubHosted);
+            hosted
+                .default_dispatch_providers
+                .retain(|provider| *provider == ProviderId::GithubHosted);
+            hosted.render_nested_configured(kind, nodes, contracts)
+        } else {
+            self.render_nested_configured(kind, nodes, contracts)
+        }
+    }
+
+    fn render_nested_configured(
+        &self,
+        kind: WorkflowKind,
+        nodes: &[GraphNode],
+        contracts: Option<&BTreeMap<String, UnitContract>>,
+    ) -> String {
         let mut output = String::from(GENERATED_HEADER);
         let (workflow_name, run_name, triggers, cancel_in_progress) = aggregate_triggers(
             kind,
@@ -3561,7 +3909,6 @@ impl WorkflowIr {
                 &mut output,
                 true,
                 "nightly-required",
-                true,
             );
             self.render_nightly_alert(&mut output, "nightly-required", None);
         } else if self.ci_required {
@@ -3571,7 +3918,6 @@ impl WorkflowIr {
                 &mut output,
                 kind != WorkflowKind::PullRequest,
                 REQUIRED_CHECK,
-                false,
             );
         }
         while output.ends_with("\n\n") {
@@ -3580,50 +3926,15 @@ impl WorkflowIr {
         output
     }
 
-    /// Nightly is a scheduled dispatcher of `ci-main.yml` on the default branch.
-    /// `workflow_dispatch` on ci-main is trusted for mbx saves; schedule alone is not.
-    pub(crate) fn render_nightly_dispatcher(&self) -> String {
-        let mut output = String::from(GENERATED_HEADER);
-        let (workflow_name, run_name, triggers, _) = aggregate_triggers(
-            WorkflowKind::Nightly,
-            &self.default_branch,
-            &self.providers,
-            &self.default_dispatch_providers,
-        );
-        let concurrency = aggregate_concurrency_block(self, WorkflowKind::Nightly, "false");
-        let default_branch = yaml_scalar(&self.default_branch);
-        let default_providers = self
-            .default_dispatch_providers
-            .iter()
-            .map(ProviderId::as_str)
-            .collect::<Vec<_>>()
-            .join(",");
-        let runner = self.runs_on_yaml(CONTROL_PLANE_PROVIDER);
-        let dispatch_if = "github.event_name != 'workflow_dispatch' || !inputs.simulate_failure";
-        let simulate_if = "github.event_name == 'workflow_dispatch' && inputs.simulate_failure";
-        let _ = writeln!(
-            output,
-            "name: {workflow_name}\nrun-name: {run_name} · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\n{triggers}\n\n{concurrency}permissions:\n  actions: read\n  contents: read\n\njobs:"
-        );
-        let _ = writeln!(
-            output,
-            "  dispatch-ci-main:\n    name: {}\n    if: ${{{{ {dispatch_if} }}}}\n    runs-on: {runner}\n    timeout-minutes: 5\n    permissions:\n      actions: write\n      contents: read\n    steps:\n      - name: Dispatch ci-main on default branch\n        env:\n          GH_TOKEN: ${{{{ github.token }}}}\n          GITHUB_REPOSITORY: ${{{{ github.repository }}}}\n          DEFAULT_BRANCH: {default_branch}\n          DISPATCH_PROVIDERS: ${{{{ github.event.inputs.providers || '{default_providers}' }}}}\n          DISPATCH_SCOPE: ${{{{ github.event.inputs.scope || 'full' }}}}\n          DISPATCH_BASE_SHA: ${{{{ github.event.inputs.base_sha || format('refs/heads/{{0}}', github.event.repository.default_branch) }}}}\n        shell: bash\n        run: |\n          set -euo pipefail\n          gh workflow run ci-main.yml \\\n            -R \"$GITHUB_REPOSITORY\" \\\n            --ref \"$DEFAULT_BRANCH\" \\\n            -f providers=\"$DISPATCH_PROVIDERS\" \\\n            -f scope=\"$DISPATCH_SCOPE\" \\\n            -f base_sha=\"$DISPATCH_BASE_SHA\"",
-            crate::s2::control_job_name("Dispatch ci-main"),
-        );
-        let _ = writeln!(
-            output,
-            "  nightly-red-to-signal:\n    name: {}\n    if: ${{{{ {simulate_if} }}}}\n    runs-on: {runner}\n    timeout-minutes: 5\n    steps:\n      - name: Simulate nightly failure\n        shell: bash\n        run: |\n          set -euo pipefail\n          echo \"nightly red-to-signal simulation requested\" >&2\n          exit 1",
-            crate::s2::control_job_name("Nightly red-to-signal"),
-        );
-        self.render_nightly_alert(
-            &mut output,
-            "nightly-red-to-signal",
-            Some("always() && needs.nightly-red-to-signal.result == 'failure'"),
-        );
-        while output.ends_with("\n\n") {
-            output.pop();
-        }
-        output
+    /// Nightly directly runs the hosted verification graph on a scheduled
+    /// default-branch workflow. It has no branch-selectable trigger or
+    /// credentialed dispatcher path.
+    pub(crate) fn render_nightly(
+        &self,
+        nodes: &[GraphNode],
+        contracts: Option<&BTreeMap<String, UnitContract>>,
+    ) -> String {
+        self.render_nested(WorkflowKind::Nightly, nodes, contracts)
     }
 
     /// The (unit, provider) callers of one unit. The `with:` values come from the
@@ -3632,20 +3943,21 @@ impl WorkflowIr {
     fn unit_provider_callers(
         &self,
         unit: &Unit,
-        file: &str,
         contracts: Option<&BTreeMap<String, UnitContract>>,
     ) -> Vec<UnitProviderCaller> {
         let contract = self.contract_for(unit, contracts);
         contract
             .providers
             .iter()
-            .filter(|job| provider_supports_unit(job.provider, unit))
+            .filter(|job| {
+                self.providers.contains(&job.provider) && provider_supports_unit(job.provider, unit)
+            })
             .map(|job| UnitProviderCaller {
                 job_id: unit_job_id(job.provider, &unit.id),
                 unit_id: unit.id.clone(),
                 name: unit_job_display_name(unit, job.provider),
                 provider: job.provider,
-                file: file.to_owned(),
+                file: provider_unit_workflow_file(unit.kind, job.provider),
                 inputs: self
                     .unit_provider_facts(unit, &contract, job.provider)
                     .input_values(),
@@ -3653,13 +3965,25 @@ impl WorkflowIr {
             .collect()
     }
 
-    fn kind_file_needs_prepare_cargo(&self, file: &str) -> bool {
-        self.providers.iter().any(|provider| provider.is_local())
-            && kind_from_unit_workflow_file(file) == Some(UnitKind::Rust)
+    fn kind_needs_prepare_cargo(
+        &self,
+        kind: UnitKind,
+        contracts: Option<&BTreeMap<String, UnitContract>>,
+    ) -> bool {
+        kind == UnitKind::Rust
             && self.units.iter().any(|unit| {
-                unit.kind == UnitKind::Rust
-                    && nested_unit_workflow_file(unit) == file
-                    && cargo_network_is_restricted(unit)
+                if unit.kind != kind || !cargo_network_is_restricted(unit) {
+                    return false;
+                }
+                let contract = self.contract_for(unit, contracts);
+                self.providers.iter().any(|provider| {
+                    provider.is_local()
+                        && provider_supports_unit(*provider, unit)
+                        && contract
+                            .providers
+                            .iter()
+                            .any(|job| job.provider == *provider)
+                })
             })
     }
 
@@ -3668,13 +3992,26 @@ impl WorkflowIr {
     /// callee's `velnor-prepare-cargo-sources` job selects on the same set
     /// (`restricted_unit_selection_if`), so the caller, the callee, and the
     /// required check agree on when the prerequisite runs.
-    fn prepare_cargo_selected_by(&self, file: &str) -> Vec<String> {
+    fn prepare_cargo_selected_by(
+        &self,
+        kind: UnitKind,
+        contracts: Option<&BTreeMap<String, UnitContract>>,
+    ) -> Vec<String> {
         self.units
             .iter()
             .filter(|unit| {
-                unit.kind == UnitKind::Rust
-                    && nested_unit_workflow_file(unit) == file
+                unit.kind == kind
+                    && kind == UnitKind::Rust
                     && cargo_network_is_restricted(unit)
+                    && self.providers.iter().any(|provider| {
+                        let contract = self.contract_for(unit, contracts);
+                        provider.is_local()
+                            && provider_supports_unit(*provider, unit)
+                            && contract
+                                .providers
+                                .iter()
+                                .any(|job| job.provider == *provider)
+                    })
             })
             .map(|unit| unit.id.clone())
             .collect()
@@ -3684,14 +4021,29 @@ impl WorkflowIr {
     /// prerequisite selected by any restricted unit of the file and admitted
     /// with any local provider, whose stores it warms — every local
     /// provider's, through its own callee job.
-    fn prepare_cargo_required_caller(&self, file: &str) -> RequiredCaller {
+    fn prepare_cargo_required_caller(
+        &self,
+        kind: UnitKind,
+        contracts: Option<&BTreeMap<String, UnitContract>>,
+    ) -> RequiredCaller {
         let provider = self
             .providers
             .iter()
             .copied()
-            .find(|provider| provider.is_local())
+            .find(|provider| {
+                provider.is_local()
+                    && self.units.iter().any(|unit| {
+                        unit.kind == kind
+                            && cargo_network_is_restricted(unit)
+                            && self
+                                .contract_for(unit, contracts)
+                                .providers
+                                .iter()
+                                .any(|job| job.provider == *provider)
+                    })
+            })
             .unwrap_or(CONTROL_PLANE_PROVIDER);
-        let selected_by = self.prepare_cargo_selected_by(file);
+        let selected_by = self.prepare_cargo_selected_by(kind, contracts);
         RequiredCaller {
             job_id: prepare_cargo_caller_job_id().to_owned(),
             unit_id: selected_by.first().cloned().unwrap_or_default(),
@@ -3705,11 +4057,13 @@ impl WorkflowIr {
     fn render_prepare_cargo_caller(
         &self,
         output: &mut String,
-        file: &str,
+        kind: UnitKind,
         sample_unit: &str,
         include_policy: bool,
+        contracts: Option<&BTreeMap<String, UnitContract>>,
     ) {
-        let caller = self.prepare_cargo_required_caller(file);
+        let caller = self.prepare_cargo_required_caller(kind, contracts);
+        let prepare_file = prepare_unit_workflow_file(kind);
         let mut needs = vec!["plan".to_owned()];
         if include_policy {
             needs.push("policy".to_owned());
@@ -3736,7 +4090,7 @@ impl WorkflowIr {
         ));
         let _ = writeln!(
             output,
-            "  {}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{file}\n    with:\n      unit: {}\n      provider: control\n      selected_units: ${{{{ needs.plan.outputs.units }}}}\n      selected_unit_ids: ${{{{ needs.plan.outputs.unit_ids }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      full_units: ${{{{ needs.plan.outputs.full_units }}}}\n      plan_digest: ${{{{ needs.plan.outputs.plan_digest }}}}\n      base_sha: ${{{{ needs.plan.outputs.base_sha }}}}\n      head_sha: ${{{{ needs.plan.outputs.head_sha }}}}",
+            "  {}:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    uses: ./.github/workflows/{prepare_file}\n    with:\n      unit: {}\n      provider: control\n      selected_units: ${{{{ needs.plan.outputs.units }}}}\n      selected_unit_ids: ${{{{ needs.plan.outputs.unit_ids }}}}\n      scope: ${{{{ needs.plan.outputs.scope }}}}\n      full_units: ${{{{ needs.plan.outputs.full_units }}}}\n      plan_digest: ${{{{ needs.plan.outputs.plan_digest }}}}\n      base_sha: ${{{{ needs.plan.outputs.base_sha }}}}\n      head_sha: ${{{{ needs.plan.outputs.head_sha }}}}",
             caller.job_id,
             crate::s2::control_job_name("Prepare Cargo"),
             conditions.join(" && "),
@@ -3752,6 +4106,7 @@ impl WorkflowIr {
         caller: &UnitProviderCaller,
         include_policy: bool,
         extra_needs: &[String],
+        contracts: Option<&BTreeMap<String, UnitContract>>,
     ) {
         let provider = caller.provider;
         let mut needs = vec!["plan".to_owned()];
@@ -3759,7 +4114,7 @@ impl WorkflowIr {
             needs.push("policy".to_owned());
         }
         append_unique_needs(&mut needs, extra_needs.iter().cloned());
-        if provider.is_local() && self.kind_file_needs_prepare_cargo(&caller.file) {
+        if provider.is_local() && self.kind_needs_prepare_cargo(unit.kind, contracts) {
             append_unique_needs(&mut needs, [prepare_cargo_caller_job_id().to_owned()]);
         }
         append_unique_needs(
@@ -3773,7 +4128,7 @@ impl WorkflowIr {
         if include_policy {
             conditions.push("needs.policy.result == 'success'".to_owned());
         }
-        if provider.is_local() && self.kind_file_needs_prepare_cargo(&caller.file) {
+        if provider.is_local() && self.kind_needs_prepare_cargo(unit.kind, contracts) {
             conditions.push(
                 "(needs.prepare-cargo.result == 'success' || needs.prepare-cargo.result == 'skipped')"
                     .to_owned(),
@@ -3806,8 +4161,8 @@ impl WorkflowIr {
         );
     }
 
-    /// One reusable-workflow caller per (unit, provider). The kind reusable holds
-    /// one job keyed on `inputs.unit` + `inputs.provider` (D5).
+    /// One reusable-workflow caller per (unit, provider). Its provider-specific
+    /// callee gates one collapsed job on `inputs.unit` + `inputs.provider` (D5).
     pub(crate) fn render_node_callers(
         &self,
         nodes: &[GraphNode],
@@ -3815,18 +4170,19 @@ impl WorkflowIr {
         include_policy: bool,
         contracts: Option<&BTreeMap<String, UnitContract>>,
     ) {
-        let mut prepare_cargo_files = BTreeSet::new();
+        let mut prepare_cargo_kinds = BTreeSet::new();
         let mut previous_local_caller: Option<String> = None;
-        for (unit_id, _job_id, _name, file) in nodes.iter().filter_map(GraphNode::as_unit) {
+        for (unit_id, kind) in nodes.iter().filter_map(GraphNode::as_unit) {
             let Some(unit) = self.units.iter().find(|unit| unit.id == *unit_id) else {
                 continue;
             };
-            if self.kind_file_needs_prepare_cargo(file)
-                && prepare_cargo_files.insert(file.to_owned())
+            debug_assert_eq!(unit.kind, kind, "typed graph kind matches its unit");
+            if self.kind_needs_prepare_cargo(kind, contracts)
+                && prepare_cargo_kinds.insert(kind)
             {
-                self.render_prepare_cargo_caller(output, file, unit_id, include_policy);
+                self.render_prepare_cargo_caller(output, kind, unit_id, include_policy, contracts);
             }
-            for caller in self.unit_provider_callers(unit, file, contracts) {
+            for caller in self.unit_provider_callers(unit, contracts) {
                 let extra_needs = if self.serial_stack_groups && caller.provider.is_local() {
                     previous_local_caller.iter().cloned().collect::<Vec<_>>()
                 } else {
@@ -3838,6 +4194,7 @@ impl WorkflowIr {
                     &caller,
                     include_policy,
                     &extra_needs,
+                    contracts,
                 );
                 if caller.provider.is_local() {
                     previous_local_caller = Some(caller.job_id.clone());
@@ -3858,21 +4215,22 @@ impl WorkflowIr {
         contracts: Option<&BTreeMap<String, UnitContract>>,
     ) -> Vec<RequiredCaller> {
         let mut callers = Vec::new();
-        let mut prepare_cargo_files = BTreeSet::new();
+        let mut prepare_cargo_kinds = BTreeSet::new();
         let mut seen_units = BTreeSet::<&str>::new();
-        for (unit_id, _job_id, _name, file) in nodes.iter().filter_map(GraphNode::as_unit) {
+        for (unit_id, kind) in nodes.iter().filter_map(GraphNode::as_unit) {
             if !seen_units.insert(unit_id) {
                 continue;
             }
             let Some(unit) = self.units.iter().find(|unit| unit.id == *unit_id) else {
                 continue;
             };
-            if self.kind_file_needs_prepare_cargo(file)
-                && prepare_cargo_files.insert(file.to_owned())
+            debug_assert_eq!(unit.kind, kind, "typed graph kind matches its unit");
+            if self.kind_needs_prepare_cargo(kind, contracts)
+                && prepare_cargo_kinds.insert(kind)
             {
-                callers.push(self.prepare_cargo_required_caller(file));
+                callers.push(self.prepare_cargo_required_caller(kind, contracts));
             }
-            for caller in self.unit_provider_callers(unit, file, contracts) {
+            for caller in self.unit_provider_callers(unit, contracts) {
                 callers.push(RequiredCaller {
                     job_id: caller.job_id,
                     unit_id: caller.unit_id.clone(),
@@ -3894,7 +4252,6 @@ impl WorkflowIr {
         output: &mut String,
         include_policy: bool,
         check_name: &str,
-        simulate_failure: bool,
     ) {
         let callers = self.required_callers(nodes, contracts);
         let mut needs = vec!["plan".to_owned()];
@@ -3913,23 +4270,45 @@ impl WorkflowIr {
         let excluded = github_expression("needs.plan.outputs.excluded");
         let _ = write!(
             output,
-            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ always() }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n          PLAN_DIGEST: {plan_digest}\n          EXCLUDED: {excluded}\n{}",
+            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ always() }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n          PLAN_DIGEST: {plan_digest}\n          REPOSITORY_ID: ${{{{ github.repository_id }}}}\n          SOURCE_SHA: ${{{{ needs.plan.outputs.head_sha }}}}\n          RUN_ID: ${{{{ github.run_id }}}}\n          RUN_ATTEMPT: ${{{{ github.run_attempt }}}}\n          EXCLUDED: {excluded}\n{}",
             needs.join(", "),
             self.runs_on_yaml(CONTROL_PLANE_PROVIDER),
             render_required_admission_env(self, &callers),
         );
-        if simulate_failure {
-            let simulate = github_expression("inputs.simulate_failure");
-            let _ = writeln!(output, "          SIMULATE_FAILURE: {simulate}");
-        }
         output.push_str("        shell: bash\n        run: |\n          set -euo pipefail\n");
-        if simulate_failure {
-            output.push_str(
-                "          if [[ \"$SIMULATE_FAILURE\" == true ]]; then\n            echo \"nightly red-to-signal simulation requested\" >&2\n            exit 1\n          fi\n",
-            );
-        }
         output.push_str(
-            "          if [[ -z \"$PLAN_DIGEST\" ]]; then\n            echo \"plan did not freeze a plan digest: the expected set has no identity\" >&2\n            exit 1\n          fi\n          echo \"verdict binds plan digest $PLAN_DIGEST\"\n          result_for_job() {\n            jq -r --arg job \"$1\" '.[$job].result // empty' <<<\"$NEEDS_JSON\"\n          }\n          plan_expects() {\n            [[ \"$(jq -r --arg unit \"$1\" --arg provider \"$2\" '[.[] | select(.unit_id == $unit) | .providers[] | select(. == $provider)] | length' <<<\"$SELECTED_UNITS\")\" -gt 0 ]]\n          }\n",
+            r#"          if [[ -z "$PLAN_DIGEST" ]]; then
+            echo "plan did not freeze a plan digest: the expected set has no identity" >&2
+            exit 1
+          fi
+          echo "verdict binds plan digest $PLAN_DIGEST"
+          result_for_job() {
+            jq -r --arg job "$1" '.[$job].result // empty' <<<"$NEEDS_JSON"
+          }
+          identity_for_job() {
+            jq -r --arg job "$1" '.[$job].outputs.result_identity // empty' <<<"$NEEDS_JSON"
+          }
+          plan_expects() {
+            [[ "$(jq -r --arg unit "$1" --arg provider "$2" '[.[] | select(.unit_id == $unit) | .providers[] | select(. == $provider)] | length' <<<"$SELECTED_UNITS")" -gt 0 ]]
+          }
+          plan_value() {
+            jq -er --arg unit "$1" --arg field "$2" '[.[] | select(.unit_id == $unit)] | if length == 1 then .[0][$field] // empty else error("plan must contain exactly one unit row") end' <<<"$SELECTED_UNITS"
+          }
+          assert_result_identity() {
+            local job_id="$1" unit_id="$2" provider="$3" identity platform command_digest
+            identity="$(identity_for_job "$job_id")"
+            if [[ -z "$identity" ]]; then
+              echo "expected provider result $job_id has no identity record" >&2
+              exit 1
+            fi
+            platform="$(plan_value "$unit_id" platform)"
+            command_digest="$(plan_value "$unit_id" command_digest)"
+            if ! jq -e --arg repository_id "$REPOSITORY_ID" --arg source_sha "$SOURCE_SHA" --arg run_id "$RUN_ID" --arg run_attempt "$RUN_ATTEMPT" --arg plan_digest "$PLAN_DIGEST" --arg unit_id "$unit_id" --arg provider "$provider" --arg platform "$platform" --arg command_digest "$command_digest" '.repository_id == $repository_id and .source_sha == $source_sha and .run_id == $run_id and .run_attempt == $run_attempt and .plan_digest == $plan_digest and .unit_id == $unit_id and .provider == $provider and .platform == $platform and .command_digest == $command_digest' <<<"$identity" >/dev/null; then
+              echo "provider result identity mismatch for $job_id ($provider / $unit_id)" >&2
+              exit 1
+            fi
+          }
+"#,
         );
         // The prerequisite trigger: the unit is expected on any local
         // provider, whose stores the prerequisite warms. The local set is
@@ -4014,8 +4393,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     }
 
     /// The provider jobs a nested unit workflow emits over the universe: every
-    /// provider in canonical order. Only hosted saves caches, and only local
-    /// providers carry the trusted-event gate.
+    /// provider in canonical order. GitHub Actions providers save their
+    /// provider-scoped cache on trusted events; Velnor retains its cache on
+    /// the local builder.
     pub(crate) fn default_provider_jobs(
         providers: &ProviderSet,
         cache_save: bool,
@@ -4024,36 +4404,74 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             .iter()
             .map(|provider| ProviderJob {
                 provider: *provider,
-                cache_save: cache_save && *provider == ProviderId::GithubHosted,
+                cache_save: cache_save && uses_github_actions_cache(*provider),
                 trusted: provider.is_local(),
             })
             .collect()
     }
 
-    /// The `workflow_call` header of a kind reusable: the graph inputs every
+    /// The `workflow_call` header of one provider reusable: the graph inputs every
     /// caller passes plus every per-unit input. The per-unit set is declared
     /// in full for every kind, so a caller can pass a unit's facts without
     /// knowing which of them the callee's collapsed block resolved to a
     /// literal: GitHub rejects a `with:` key the callee does not declare.
     /// `env` is the members' agreed job environment, rendered once at the
-    /// top level so every collapsed lane job of the kind exports it.
+    /// top level so the collapsed provider job exports it.
     fn render_kind_units_header(
+        &self,
         kind: UnitKind,
         members: &[&Unit],
         env: &BTreeMap<String, String>,
+        contracts: Option<&BTreeMap<String, UnitContract>>,
+        provider_filter: Option<ProviderId>,
+        include_result_output: bool,
     ) -> String {
         let mut output = String::from(GENERATED_HEADER);
-        let _ = writeln!(
+        let result_identity_expr = self
+            .collapsed_provider_job_ids(members, contracts, provider_filter)
+            .iter()
+            .map(|job_id| format!("jobs.{job_id}.outputs.result_identity"))
+            .collect::<Vec<_>>()
+            .join(" || ");
+        let result_identity_expr = if result_identity_expr.is_empty() {
+            "''".to_owned()
+        } else {
+            result_identity_expr
+        };
+        let _ = write!(
             output,
             "name: {}\non:\n  workflow_call:\n    inputs:\n      unit:\n        required: true\n        type: string\n      selected_units:\n        required: true\n        type: string\n      selected_unit_ids:\n        required: true\n        type: string\n      scope:\n        required: true\n        type: string\n      full_units:\n        required: true\n        type: string\n      base_sha:\n        required: true\n        type: string\n      head_sha:\n        required: true\n        type: string\n      plan_digest:\n        required: true\n        type: string\n      provider:\n        required: true\n        type: string",
             yaml_scalar(unit_group(kind))
         );
+        if include_result_output {
+            let _ = write!(
+                output,
+                "\n    outputs:\n      result_identity:\n        description: Identity of the provider result that ran for the caller\n        value: ${{{{ {result_identity_expr} }}}}"
+            );
+        }
+        output.push('\n');
         for name in provider_input::ALL {
             // The prepared-tools input is declared only when a member needs
             // it: an unconditional declaration would rewrite every kind
             // header for a feature most repositories never declare.
             if *name == provider_input::PREPARED_TOOLS
                 && !members.iter().any(|unit| !unit.prepared_tools.is_empty())
+            {
+                continue;
+            }
+            if *name == provider_input::APPLE_EXECUTOR
+                && (provider_filter != Some(ProviderId::GithubHosted)
+                    || !self
+                        .collapsed_provider_members(
+                            members,
+                            contracts,
+                            ProviderId::GithubHosted,
+                            None,
+                        )
+                        .iter()
+                        .any(|unit| {
+                            unit.platform == crate::s2::provider::Platform::MacosArm64
+                        }))
             {
                 continue;
             }
@@ -4069,35 +4487,77 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         output
     }
 
-    /// One reusable workflow for every unit of `kind`. Callers pass `unit`,
-    /// `provider`, and the unit's per-unit inputs through `workflow_call`; the
-    /// reusable holds one collapsed step block per provider job, so its size does
-    /// not grow with the number of units of the kind. GitHub loads the callee
-    /// once per caller into one template-memory budget, which is why the
-    /// callee must stay O(1) in units.
+    /// Emit one reusable workflow per configured provider for units of `kind`.
+    /// Callers pass `unit`, `provider`, and the unit's per-unit inputs through
+    /// `workflow_call`; each reusable contains one collapsed job per executor
+    /// or trust class, so its size does not grow with the number of units or
+    /// include other providers' steps. A separate small file holds shared Cargo
+    /// preparation.
     ///
     /// # Errors
     /// Returns a usage error when members of the kind disagree on a fact the
     /// collapsed job renders literally (the Rust toolchain pin, the kind-level
     /// tools, or the cache-save policy).
-    pub(crate) fn render_kind_unit_workflow(
+    pub(crate) fn render_kind_unit_workflows(
         &self,
         kind: UnitKind,
         contracts: Option<&BTreeMap<String, UnitContract>>,
-    ) -> Result<Option<(String, String)>, GeneratorError> {
+    ) -> Result<Vec<(String, String)>, GeneratorError> {
         let members = self
             .units
             .iter()
             .filter(|unit| unit.kind == kind)
             .collect::<Vec<_>>();
         if members.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
         let env = crate::s2::platform::agreed_env(&members, kind)?;
-        let mut output = Self::render_kind_units_header(kind, &members, &env);
-        self.append_provider_cargo_prep_jobs(&mut output, &members, contracts);
-        self.render_collapsed_kind_verify_job(&mut output, &members, contracts)?;
-        Ok(Some((kind_unit_workflow_file(kind), output)))
+        let mut files = Vec::new();
+        for provider in &self.providers {
+            let provider = *provider;
+            let jobs = self.collapsed_provider_verify_jobs(&members, contracts, Some(provider));
+            if jobs.is_empty() {
+                continue;
+            }
+            let mut output = self.render_kind_units_header(
+                kind,
+                &members,
+                &env,
+                contracts,
+                Some(provider),
+                true,
+            );
+            self.render_collapsed_kind_verify_job(
+                &mut output,
+                &members,
+                contracts,
+                Some(provider),
+            )?;
+            files.push((provider_unit_workflow_file(kind, provider), output));
+        }
+        if self.kind_needs_prepare_cargo(kind, contracts) {
+            let mut output =
+                self.render_kind_units_header(kind, &members, &env, contracts, None, false);
+            self.append_provider_cargo_prep_jobs(&mut output, &members, contracts);
+            files.push((prepare_unit_workflow_file(kind), output));
+        }
+        Ok(files)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn render_kind_provider_workflows_for_test(
+        &self,
+        kind: UnitKind,
+        contracts: Option<&BTreeMap<String, UnitContract>>,
+    ) -> Result<Option<String>, GeneratorError> {
+        let files = self.render_kind_unit_workflows(kind, contracts)?;
+        Ok((!files.is_empty()).then(|| {
+            files
+                .into_iter()
+                .map(|(_, content)| content)
+                .collect::<Vec<_>>()
+                .join("\n")
+        }))
     }
 
     fn contract_for(
@@ -4114,7 +4574,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
     /// The job gate of a collapsed provider job: the provider the caller selected, the
     /// unit's membership in the plan's selection, and the provider's admission
     /// predicate. Membership is a single `contains` over `inputs.unit`, never
-    /// an enumeration of the kind's units.
+    /// an enumeration of the kind's units. Hosted executor subclasses append
+    /// their caller flag at the job boundary.
     fn collapsed_provider_gate(
         &self,
         provider: ProviderId,
@@ -4168,35 +4629,53 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             .collect()
     }
 
-    /// Render the collapsed provider jobs of one kind: one job per (provider,
-    /// trust) class that has members. Hosted members share one job; local
-    /// providers split trusted-only members into their own job so the
-    /// trusted-event gate stays per-job.
-    fn render_collapsed_kind_verify_job(
+    fn collapsed_provider_verify_jobs<'a>(
         &self,
-        output: &mut String,
-        members: &[&Unit],
+        members: &[&'a Unit],
         contracts: Option<&BTreeMap<String, UnitContract>>,
-    ) -> Result<(), GeneratorError> {
-        if members.is_empty() {
-            return Ok(());
-        }
-        // Collect (provider, trust split, job id, display name) first so the
-        // owned strings outlive each render call.
-        let mut jobs: Vec<(ProviderId, Vec<&Unit>, String, String)> = Vec::new();
+        provider_filter: Option<ProviderId>,
+    ) -> Vec<(ProviderId, Vec<&'a Unit>, String, String, Option<bool>)> {
+        let mut jobs = Vec::new();
         for provider in &self.providers {
             let provider = *provider;
+            if provider_filter.is_some_and(|selected| selected != provider) {
+                continue;
+            }
             if provider == ProviderId::GithubHosted {
                 let hosted = self.collapsed_provider_members(members, contracts, provider, None);
-                if hosted.is_empty() {
-                    continue;
+                let default = hosted
+                    .iter()
+                    .copied()
+                    .filter(|unit| {
+                        unit.platform != crate::s2::provider::Platform::MacosArm64
+                    })
+                    .collect::<Vec<_>>();
+                let apple = hosted
+                    .iter()
+                    .copied()
+                    .filter(|unit| {
+                        unit.platform == crate::s2::provider::Platform::MacosArm64
+                    })
+                    .collect::<Vec<_>>();
+                let mixed = !default.is_empty() && !apple.is_empty();
+                if !default.is_empty() {
+                    jobs.push((
+                        provider,
+                        default,
+                        "verify-github-hosted".to_owned(),
+                        "GitHub · hosted".to_owned(),
+                        mixed.then_some(false),
+                    ));
                 }
-                jobs.push((
-                    provider,
-                    hosted,
-                    "verify-github-hosted".to_owned(),
-                    "GitHub · hosted".to_owned(),
-                ));
+                if !apple.is_empty() {
+                    jobs.push((
+                        provider,
+                        apple,
+                        "verify-github-hosted-apple".to_owned(),
+                        "GitHub · hosted · Apple".to_owned(),
+                        Some(true),
+                    ));
+                }
                 continue;
             }
             for trusted in [false, true] {
@@ -4215,10 +4694,40 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 } else {
                     provider.as_str().to_owned()
                 };
-                jobs.push((provider, split, job_id, display));
+                jobs.push((provider, split, job_id, display, None));
             }
         }
-        for (provider, split, job_id, display) in &jobs {
+        jobs
+    }
+
+    fn collapsed_provider_job_ids(
+        &self,
+        members: &[&Unit],
+        contracts: Option<&BTreeMap<String, UnitContract>>,
+        provider_filter: Option<ProviderId>,
+    ) -> Vec<String> {
+        self.collapsed_provider_verify_jobs(members, contracts, provider_filter)
+            .into_iter()
+            .map(|(_, _, job_id, _, _)| job_id)
+            .collect()
+    }
+
+    /// Render the collapsed provider jobs of one kind: hosted members split
+    /// across default and Apple executors, while local providers split
+    /// trusted-only members into their own job so the trusted-event gate stays
+    /// per-job.
+    fn render_collapsed_kind_verify_job(
+        &self,
+        output: &mut String,
+        members: &[&Unit],
+        contracts: Option<&BTreeMap<String, UnitContract>>,
+        provider_filter: Option<ProviderId>,
+    ) -> Result<(), GeneratorError> {
+        if members.is_empty() {
+            return Ok(());
+        }
+        let jobs = self.collapsed_provider_verify_jobs(members, contracts, provider_filter);
+        for (provider, split, job_id, display, apple_executor) in &jobs {
             // macOS-platform members only exist on hosted, and need the
             // GitHub-owned macOS image instead of the Linux selector.
             let macos = *provider == ProviderId::GithubHosted
@@ -4231,7 +4740,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 self.runs_on_yaml(*provider)
             };
             self.render_collapsed_provider_verify_job(
-                output, split, contracts, *provider, job_id, display, &runs_on,
+                output,
+                split,
+                contracts,
+                *provider,
+                job_id,
+                display,
+                &runs_on,
+                *apple_executor,
             )?;
         }
         Ok(())
@@ -4246,12 +4762,21 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         );
     }
 
+    /// Record the provider result's run, source, plan, and unit identity for
+    /// the reusable-workflow caller. `always()` preserves diagnostics on a
+    /// failed provider job; the aggregate still rejects its status first.
+    fn render_provider_result_identity_step(output: &mut String) {
+        output.push_str(
+            "      - name: Record provider result identity\n        id: result-identity\n        if: always()\n        shell: bash\n        env:\n          REPOSITORY_ID: ${{ github.repository_id }}\n          SOURCE_SHA: ${{ inputs.head_sha }}\n          RUN_ID: ${{ github.run_id }}\n          RUN_ATTEMPT: ${{ github.run_attempt }}\n          PLAN_DIGEST: ${{ inputs.plan_digest }}\n          UNIT_ID: ${{ inputs.unit }}\n          PROVIDER: ${{ inputs.provider }}\n          SELECTED_UNITS: ${{ inputs.selected_units }}\n          OBSERVED_RUNNER_OS: ${{ runner.os }}\n          OBSERVED_RUNNER_ARCH: ${{ runner.arch }}\n        run: |\n          set -euo pipefail\n          planned_unit=\"$(jq -cer --arg unit \"$UNIT_ID\" --arg provider \"$PROVIDER\" '[.[] | select(.unit_id == $unit and (.providers | index($provider) != null))] | if length == 1 then .[0] else error(\"plan must contain exactly one unit/provider result\") end' <<<\"$SELECTED_UNITS\")\"\n          case \"$OBSERVED_RUNNER_OS/$OBSERVED_RUNNER_ARCH\" in\n            Linux/X64) platform=linux-x64 ;;\n            Linux/ARM64) platform=linux-arm64 ;;\n            macOS/ARM64) platform=macos-arm64 ;;\n            *) echo \"::error::unsupported provider runner platform $OBSERVED_RUNNER_OS/$OBSERVED_RUNNER_ARCH\" >&2; exit 1 ;;\n          esac\n          command_digest=\"$(jq -er '.command_digest // empty' <<<\"$planned_unit\")\"\n          identity=\"$(jq -cn --arg repository_id \"$REPOSITORY_ID\" --arg source_sha \"$SOURCE_SHA\" --arg run_id \"$RUN_ID\" --arg run_attempt \"$RUN_ATTEMPT\" --arg plan_digest \"$PLAN_DIGEST\" --arg unit_id \"$UNIT_ID\" --arg provider \"$PROVIDER\" --arg platform \"$platform\" --arg command_digest \"$command_digest\" '{repository_id:$repository_id,source_sha:$source_sha,run_id:$run_id,run_attempt:$run_attempt,plan_digest:$plan_digest,unit_id:$unit_id,provider:$provider,platform:$platform,command_digest:$command_digest}')\"\n          printf 'value=%s\\n' \"$identity\" >> \"$GITHUB_OUTPUT\"\n",
+        );
+    }
+
     /// One collapsed provider job: the job header, the shared runner setup, and
     /// exactly one step block that reads every unit-specific value from the
     /// caller's inputs.
     #[expect(
         clippy::too_many_arguments,
-        reason = "the job identity (provider, id, display name, runner) is passed explicitly per provider job"
+        reason = "the job identity and executor class are passed explicitly per collapsed provider job"
     )]
     fn render_collapsed_provider_verify_job(
         &self,
@@ -4262,16 +4787,24 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         job_id: &str,
         display_name: &str,
         runs_on: &str,
+        apple_executor: Option<bool>,
     ) -> Result<(), GeneratorError> {
         // Every member of a collapsed job shares one admission class
         // (`collapsed_provider_members` splits local providers by trust), so the
-        // first member's class is the job's.
+        // first member's class is the job's. Hosted Apple grouping is separate
+        // and carried by the caller flag below.
         let gate = self
             .collapsed_provider_gate(provider, ProviderAdmission::for_unit(provider, members[0]));
+        let executor_gate = match apple_executor {
+            Some(true) => format!(" && inputs.{}", provider_input::APPLE_EXECUTOR),
+            Some(false) => format!(" && inputs.{} != true", provider_input::APPLE_EXECUTOR),
+            None => String::new(),
+        };
+        let gate = format!("{gate}{executor_gate}");
         let display_name = yaml_scalar(display_name);
         let _ = writeln!(
             output,
-            "  {job_id}:\n    name: {display_name}\n    if: ${{{{ {gate} }}}}\n    runs-on: {runs_on}\n    timeout-minutes: {}",
+            "  {job_id}:\n    name: {display_name}\n    if: ${{{{ {gate} }}}}\n    runs-on: {runs_on}\n    timeout-minutes: {}\n    outputs:\n      result_identity: ${{{{ steps.result-identity.outputs.value }}}}",
             Self::collapsed_timeout_minutes(members, contracts),
         );
         output.push_str("    steps:\n");
@@ -4298,6 +4831,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         ));
         render_ci_selection_end_marker(output);
         self.render_collapsed_provider_steps(output, provider, members, contracts)?;
+        Self::render_provider_result_identity_step(output);
         output.push('\n');
         Ok(())
     }
@@ -4312,6 +4846,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         provider: ProviderId,
     ) -> ProviderStepFacts {
         let hosted = provider == ProviderId::GithubHosted;
+        let github_actions = uses_github_actions_cache(provider);
         let tools = Self::tools_for_unit(unit, self.mise_present, self.mr_boxington);
         let mise_tools = if hosted {
             if tools.contains(&ToolRequirement::Mise) {
@@ -4352,7 +4887,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 })
             })
             .flatten();
-        let seed = (contract.mutable_mount_seed && hosted)
+        let seed = (contract.mutable_mount_seed && github_actions)
             .then(|| {
                 unit.cache.as_ref().map(|cache| {
                     (
@@ -4395,15 +4930,17 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             cargo_fetch_skip_when_warm,
             cargo_net_offline: cargo_network_is_restricted(unit),
             host_warm_layers: if provider.is_local() {
-                local_host_warm_layers(unit, self)
+                let mut layers = local_host_warm_layers(unit, self);
+                if provider != ProviderId::Velnor {
+                    layers.retain(|layer| *layer != "docker_seed");
+                }
+                layers
             } else {
                 Vec::new()
             },
             policy_runtime: provider.is_local() && unit_runs_workflow_plain_check(unit),
-            candidate_publish: provider == ProviderId::GithubHosted
-                && !self.repository.is_empty()
-                && self.repository == crate::s2::workflow_setup_action_repository()
-                && unit_owns_workflow_crate(unit),
+            apple_executor: hosted
+                && unit.platform == crate::s2::provider::Platform::MacosArm64,
             platform: unit.platform.as_str().to_owned(),
             trust: unit.trust.as_str().to_owned(),
             unit_dependencies: unit.depends_on.clone(),
@@ -4562,10 +5099,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         let policy_runtime = FeatureCoverage::over(&facts, |facts| facts.policy_runtime);
         if !hosted && policy_runtime.any {
             output.push_str(&gated(
-                crate::s2::workflow_pinned_policy_runtime_local(
-                    &self.workflow_revision,
-                    "${{ github.workspace }}",
-                ),
+                crate::s2::workflow_pinned_policy_runtime_local("${{ github.workspace }}"),
                 policy_runtime,
                 provider_input::POLICY_RUNTIME,
             ));
@@ -4749,59 +5283,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             render_ci_cargo_fetch_end_marker(output);
         }
 
-        // The generator's self-check (`--plain --check`) resolves the D19 pin's
-        // closures from local history, but unit checkouts are shallow. Fetch
-        // the pin commit for check-running members before verification.
-        // Local providers provision the pin through the pinned-renderer step,
-        // so only the hosted provider needs this fetch.
-        let check_members: Vec<&&Unit> = members
-            .iter()
-            .filter(|unit| unit_runs_workflow_plain_check(unit))
-            .collect();
-        if hosted && !check_members.is_empty() {
-            let mut cases = String::new();
-            for member in members {
-                if check_members.iter().any(|check| check.id == member.id) {
-                    let _ = writeln!(
-                        cases,
-                        "            {}) : ;;",
-                        crate::s2::shell_quote(&member.id)
-                    );
-                } else {
-                    let _ = writeln!(
-                        cases,
-                        "            {}) exit 0 ;;",
-                        crate::s2::shell_quote(&member.id)
-                    );
-                }
-            }
-            let _ = writeln!(
-                output,
-                "      - name: Fetch D19 pin history\n        env:\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n        run: |\n          set -euo pipefail\n          case \"$CI_UNIT_ID\" in\n{cases}            *) echo \"unknown unit for pin fetch: $CI_UNIT_ID\" >&2; exit 1 ;;\n          esac\n          pin=\"$(sed -n -E 's/^[[:space:]]*revision[[:space:]]*=[[:space:]]*\"([0-9a-f]{{40}})\".*/\\1/p' .github-gen/velnor-workflow.toml | head -n 1)\"\n          test \"$pin\" != '' || {{ echo \"::error::D19 pin missing from .github-gen/velnor-workflow.toml\" >&2; exit 1; }}\n          if ! git cat-file -e \"$pin^{{commit}}\" 2>/dev/null; then\n            git fetch --no-tags --depth 1 \"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY\" \"$pin\"\n          fi",
-            );
-        }
-
         // Verification.
         let checks_started_marker = render_epoch_marker_commands("CHECKS_STARTED", "          ");
         let checks_ended_marker = render_epoch_marker_commands("CHECKS_ENDED", "          ");
         let token_env = docker_build_token_env_for_members(members);
         let _ = writeln!(
             output,
-            "      - name: Run unit checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{checks_env}{token_env}\n        run: |\n          set -o pipefail\n{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
+            "      - name: Run unit checks\n        env:\n          CI_SCOPE: ${{{{ inputs.scope }}}}\n          CI_UNIT_ID: ${{{{ inputs.unit }}}}\n          CI_PROVIDER: ${{{{ inputs.provider }}}}\n          EVENT_NAME: ${{{{ github.event_name }}}}\n          BASE_SHA: ${{{{ inputs.base_sha }}}}\n          HEAD_SHA: ${{{{ inputs.head_sha }}}}\n          VELNOR_SELECTION_FILE: .velnor-ci-selection/velnor-ci-selection{checks_env}{token_env}\n        run: |\n          set -o pipefail\n{checks_started_marker}\n          rc=0\n          velnor-workflow run --config .github/ci/project.toml --scope \"$CI_SCOPE\" --unit \"$CI_UNIT_ID\" --provider \"$CI_PROVIDER\" 2>&1 | tee \"$RUNNER_TEMP/velnor-unit-log.txt\" || rc=$?\n{checks_ended_marker}\n          exit $rc",
         );
-
-        // Stage-1 candidate packaging, after the checks that build the
-        // binary it reuses: only the hosted job of the generator crate's
-        // owning unit publishes, only on pull requests (the steps carry
-        // that event gate themselves), and only on success (no `always()`).
-        let candidate = FeatureCoverage::over(&facts, |facts| facts.candidate_publish);
-        if hosted && candidate.any {
-            output.push_str(&gated(
-                candidate_publish_steps(self.pins.upload_artifact),
-                candidate,
-                provider_input::CANDIDATE_PUBLISH,
-            ));
-        }
 
         // Cache collection.
         if seed.any {
@@ -4877,6 +5366,9 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             .filter(|provider| provider.is_local())
         {
             if !members.iter().any(|unit| {
+                if !cargo_network_is_restricted(unit) || !provider_supports_unit(provider, unit) {
+                    return false;
+                }
                 let contract = contracts
                     .and_then(|contracts| contracts.get(&unit.id))
                     .cloned()
@@ -4957,7 +5449,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         }
     }
 
-    /// The kind reusable's content, for tests that assert on its body.
+    /// Combined provider-specific bodies for tests that assert shared rendering rules.
     #[cfg(test)]
     #[expect(
         clippy::panic,
@@ -4968,9 +5460,8 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         kind: UnitKind,
         contracts: Option<&BTreeMap<String, UnitContract>>,
     ) -> String {
-        self.render_kind_unit_workflow(kind, contracts)
+        self.render_kind_provider_workflows_for_test(kind, contracts)
             .unwrap_or_else(|error| panic!("render {} kind reusable: {error}", kind.label()))
-            .map(|(_, content)| content)
             .unwrap_or_default()
     }
 
@@ -5125,29 +5616,37 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             .to_owned()
     }
 
-    /// A `workflow_dispatch` that selects `provider`, on any ref.
-    ///
-    /// Dispatch is not ref-gated: GitHub only accepts a dispatch from an
-    /// actor with write access and only onto a ref of this repository, which
-    /// is the same authorship a same-repository pull-request head carries.
-    /// The comma-boundary match keeps `github-hosted` from matching inside
-    /// `github-self-hosted` and accepts any subset string the planner's
-    /// strict parse would accept.
+    /// A `workflow_dispatch` that selects `provider`. Branch-selectable
+    /// dispatch is allowed only for GitHub-hosted jobs. Local execution has
+    /// no event/actor allowlist in the repository contract yet, so it stays
+    /// disabled on every dispatch ref.
     fn dispatch_provider_expression(provider: ProviderId) -> String {
+        if provider.is_local() {
+            return "false".to_owned();
+        }
         format!(
             "github.event_name == 'workflow_dispatch' && contains(format(',{{0}},', github.event.inputs.providers), ',{},')",
             provider.as_str()
         )
     }
 
-    /// An automatic event (anything but dispatch) selecting `provider` when
-    /// the automatic set includes it.
+    /// An automatic event selecting `provider` when its set includes it.
+    /// Hosted providers keep automatic event coverage. A local provider may
+    /// run only on a push to the configured default branch: PR workflow YAML
+    /// is PR-controlled, and no trusted broker allowlist exists for manual
+    /// or repository dispatch yet.
     fn automatic_provider_expression(&self, provider: ProviderId) -> String {
-        if self.automatic_providers.contains(&provider) {
-            "github.event_name != 'workflow_dispatch'".to_owned()
-        } else {
-            "false".to_owned()
+        if !self.automatic_providers.contains(&provider) {
+            return "false".to_owned();
         }
+        if provider.is_local() {
+            return format!(
+                "github.repository == '{}' && github.event_name == 'push' && github.ref == 'refs/heads/{}'",
+                self.repository,
+                self.default_branch
+            );
+        }
+        "github.event_name != 'workflow_dispatch'".to_owned()
     }
 
     fn base_sha_expression(&self) -> String {
@@ -5198,44 +5697,6 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
                 } else {
                     event
                 }
-            }
-        }
-    }
-
-    pub(crate) fn render_hierarchy_groups(&self, output: &mut String, include_policy: bool) {
-        let kinds = self
-            .units
-            .iter()
-            .map(|unit| unit.kind)
-            .collect::<BTreeSet<_>>();
-        for kind in kinds {
-            let group_id = stack_group_job_id(kind);
-            let group_name = crate::s2::control_job_name(crate::s2::provider_kind_label(kind));
-            let _ = writeln!(output, "  {group_id}:\n    name: {group_name}");
-            let needs = if include_policy {
-                "[plan, policy]"
-            } else {
-                "[plan]"
-            };
-            let _ = writeln!(
-                output,
-                "    needs: {needs}\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Admit {} jobs\n        run: echo 'group ready'\n",
-                self.runs_on_yaml(CONTROL_PLANE_PROVIDER),
-                unit_group(kind),
-            );
-            for unit in self.units.iter().filter(|unit| unit.kind == kind) {
-                let child_id = unit_group_job_id(unit);
-                let child_label = unit
-                    .label
-                    .strip_prefix("Rust crate (")
-                    .and_then(|value| value.strip_suffix(')'))
-                    .unwrap_or(&unit.label);
-                let child_name = yaml_scalar(child_label);
-                let _ = writeln!(
-                    output,
-                    "  {child_id}:\n    name: {child_name}\n    needs: [{group_id}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Admit runner jobs\n        run: echo 'crate group ready'\n",
-                    self.runs_on_yaml(CONTROL_PLANE_PROVIDER),
-                );
             }
         }
     }
@@ -5561,12 +6022,14 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         if hosted && tools.contains(&ToolRequirement::Mold) {
             output.push_str(&hosted_mold_setup(&self.default_branch, cache_save));
         }
-        if hosted && tools.contains(&ToolRequirement::DockerBuildx) {
+        if provider != ProviderId::Velnor && tools.contains(&ToolRequirement::DockerBuildx) {
             let _ = writeln!(
                 output,
                 "      - name: Expose GitHub Actions runtime\n        uses: {}",
                 self.pins.github_runtime
             );
+        }
+        if hosted && tools.contains(&ToolRequirement::DockerBuildx) {
             let _ = writeln!(
                 output,
                 "      - name: Set up Docker Buildx\n        uses: {}",

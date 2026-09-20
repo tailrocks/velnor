@@ -1,7 +1,6 @@
-//! Structural provider pairing: every selected unit fans out to one caller
-//! per provider in the universe, comparison names stay provider-first, and
-//! automatic gates do not silently drop local providers except the documented
-//! fork-PR trust exclusion.
+//! Structural provider pairing: protected main can fan out to configured
+//! providers, while pull-request and branch-selected workflow YAML stays
+//! hosted-only.
 
 #![expect(clippy::panic, reason = "a test whose setup fails should panic loudly")]
 #![expect(
@@ -28,6 +27,10 @@ struct Generated {
 impl Generated {
     fn workflow(&self, name: &str) -> String {
         fs::read_to_string(self.output.join(".github/workflows").join(name)).unwrap()
+    }
+
+    fn project(&self) -> String {
+        fs::read_to_string(self.output.join(".github/ci/project.toml")).unwrap()
     }
 }
 
@@ -80,14 +83,17 @@ fn write_workflow_config(root: &Path, workflow: &str) {
 
 const HOSTED_SELECTOR: &str = "[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n";
 const SELF_HOSTED_SELECTOR: &str =
-    "[workflow.selectors.github-self-hosted]\nruns_on = [\"example-scale-set\"]\n";
+    "[workflow.selectors.github-self-hosted]\ngroup = \"velnor-trusted\"\nruns_on = [\"example-scale-set\"]\n";
 const VELNOR_SELECTOR: &str =
-    "[workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"example-runner\"]\n";
+    "[workflow.selectors.velnor]\ngroup = \"velnor-trusted\"\nruns_on = [\"self-hosted\", \"example-runner\"]\n";
 
 fn all_providers_config() -> String {
+    // Enable every provider here to exercise the local caller gate; the repo's
+    // production config keeps automatic and default-dispatch providers hosted.
     format!(
-        "providers = [\"github-hosted\", \"github-self-hosted\", \"velnor\"]\n\
+         "providers = [\"github-hosted\", \"github-self-hosted\", \"velnor\"]\n\
          automatic_providers = [\"github-hosted\", \"github-self-hosted\", \"velnor\"]\n\
+         default_dispatch_providers = [\"github-hosted\"]\n\
          \n{HOSTED_SELECTOR}\n{SELF_HOSTED_SELECTOR}\n{VELNOR_SELECTOR}"
     )
 }
@@ -141,6 +147,41 @@ fn job_if(job: &Value) -> String {
         .to_owned()
 }
 
+fn assert_typed_runner_group(workflow: &str, job_id: &str, expected_labels: &[&str]) {
+    let jobs = parse_jobs(workflow);
+    let job = jobs
+        .get(job_id)
+        .unwrap_or_else(|| panic!("missing provider job `{job_id}`"));
+    let runs_on = job
+        .get("runs-on")
+        .unwrap_or_else(|| panic!("provider job `{job_id}` has no runs-on"));
+    let mapping = runs_on.as_mapping().unwrap_or_else(|| {
+        panic!("provider job `{job_id}` must use typed runs-on mapping: {runs_on:?}")
+    });
+    let group_key = Value::String("group".to_owned());
+    assert_eq!(
+        mapping.get(&group_key).and_then(Value::as_str),
+        Some("velnor-trusted"),
+        "provider job `{job_id}` uses the restricted runner group: {runs_on:?}"
+    );
+    let labels_key = Value::String("labels".to_owned());
+    let labels = mapping
+        .get(&labels_key)
+        .and_then(Value::as_sequence)
+        .unwrap_or_else(|| {
+            panic!("provider job `{job_id}` must declare typed runner labels: {runs_on:?}")
+        });
+    let actual_labels = labels
+        .iter()
+        .map(|label| {
+            label.as_str().unwrap_or_else(|| {
+                panic!("provider job `{job_id}` has a non-string label: {label:?}")
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual_labels.as_slice(), expected_labels, "{runs_on:?}");
+}
+
 fn aggregate_provider_caller_id(job_id: &str) -> Option<(&str, &str)> {
     job_id
         .strip_prefix("github-self-hosted-")
@@ -185,65 +226,169 @@ fn assert_aggregate_callers_use_sidebar_names(jobs: &BTreeMap<String, Value>) {
     clippy::too_many_lines,
     reason = "one pairing proof asserts every caller, gate, and name inline"
 )]
-fn all_providers_emit_one_caller_per_unit_per_provider() {
+fn pr_and_branch_selected_aggregates_are_hosted_only() {
     let root = unique_dir("all-trifurcation");
     write_rust_fixture(&root, 3);
     write_workflow_config(&root, &all_providers_config());
     let generated = generate(&root);
-    let rust = generated.workflow("ci-unit-rust.yml");
-    let kind_jobs = parse_jobs(&rust);
-    assert!(kind_jobs.contains_key("verify-github-hosted"));
-    assert!(kind_jobs.contains_key("verify-github-self-hosted"));
-    assert!(kind_jobs.contains_key("verify-velnor"));
+    let hosted_workflow = generated.workflow("ci-unit-rust-github-hosted.yml");
+    let self_hosted_workflow = generated.workflow("ci-unit-rust-github-self-hosted.yml");
+    let velnor_workflow = generated.workflow("ci-unit-rust-velnor.yml");
+    let project = generated.project();
+    for file in [
+        "ci-unit-rust-github-hosted.yml",
+        "ci-unit-rust-github-self-hosted.yml",
+        "ci-unit-rust-velnor.yml",
+        "ci-unit-rust-prepare-cargo.yml",
+    ] {
+        assert!(
+            project.contains(file),
+            "runtime workflow inventory includes `{file}`"
+        );
+    }
+    assert!(
+        !project.contains("ci-unit-rust.yml"),
+        "runtime workflow inventory has no combined provider path"
+    );
+    let hosted_jobs = parse_jobs(&hosted_workflow);
+    let self_hosted_jobs = parse_jobs(&self_hosted_workflow);
+    let velnor_jobs = parse_jobs(&velnor_workflow);
+    assert_eq!(hosted_jobs.len(), 1);
+    assert_eq!(self_hosted_jobs.len(), 1);
+    assert_eq!(velnor_jobs.len(), 1);
+    assert!(hosted_jobs.contains_key("verify-github-hosted"));
+    assert!(self_hosted_jobs.contains_key("verify-github-self-hosted"));
+    assert!(velnor_jobs.contains_key("verify-velnor"));
     assert_eq!(
-        job_name(&kind_jobs["verify-github-hosted"]),
+        job_name(&hosted_jobs["verify-github-hosted"]),
         "GitHub · hosted"
     );
     assert_eq!(
-        job_name(&kind_jobs["verify-github-self-hosted"]),
+        job_name(&self_hosted_jobs["verify-github-self-hosted"]),
         "github-self-hosted"
     );
-    assert_eq!(job_name(&kind_jobs["verify-velnor"]), "velnor");
+    assert_eq!(job_name(&velnor_jobs["verify-velnor"]), "velnor");
 
     let pr_yaml = generated.workflow("ci-pr.yml");
     let pr = parse_jobs(&pr_yaml);
     assert_aggregate_callers_use_sidebar_names(&pr);
 
-    let mut hosted = BTreeSet::new();
-    let mut self_hosted = BTreeSet::new();
-    let mut velnor = BTreeSet::new();
-    for id in pr.keys() {
-        match aggregate_provider_caller_id(id) {
-            Some(("github-hosted", unit)) => {
-                hosted.insert(unit.to_owned());
-            }
-            Some(("github-self-hosted", unit)) => {
-                self_hosted.insert(unit.to_owned());
-            }
-            Some(("velnor", unit)) => {
-                velnor.insert(unit.to_owned());
-            }
-            _ => {}
+    let expected_units = BTreeSet::from([
+        "rust-crate00".to_owned(),
+        "rust-crate01".to_owned(),
+        "rust-crate02".to_owned(),
+    ]);
+    let mut pr_hosted = BTreeSet::new();
+    for (id, job) in &pr {
+        if let Some((provider, unit)) = aggregate_provider_caller_id(id) {
+            assert_eq!(provider, "github-hosted", "PR caller `{id}`: {job:?}");
+            pr_hosted.insert(unit.to_owned());
+            let uses = job
+                .get("uses")
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("PR caller `{id}` is not a reusable workflow: {job:?}"));
+            assert!(
+                uses.ends_with("ci-unit-rust-github-hosted.yml"),
+                "PR caller `{id}` must use the hosted reusable, got {uses}"
+            );
         }
     }
     assert_eq!(
-        hosted,
-        BTreeSet::from([
-            "rust-crate00".to_owned(),
-            "rust-crate01".to_owned(),
-            "rust-crate02".to_owned(),
-        ])
+        pr_hosted, expected_units,
+        "every selected PR unit keeps its hosted caller: {pr:?}"
     );
     assert_eq!(
-        hosted, self_hosted,
-        "every provider must emit the same unit set: {pr:?}"
-    );
-    assert_eq!(
-        hosted, velnor,
-        "every provider must emit the same unit set: {pr:?}"
+        pr.keys()
+            .filter(|id| aggregate_provider_caller_id(id).is_some())
+            .count(),
+        expected_units.len(),
+        "PR graph has exactly one provider caller per unit: {pr:?}"
     );
 
-    let prep = pr.get("prepare-cargo").expect("cargo prep caller");
+    assert!(
+        pr_yaml.contains("pull_request:"),
+        "PR trigger remains: {pr_yaml}"
+    );
+    assert!(
+        pr_yaml.contains("workflow_dispatch:"),
+        "branch-selected dispatch remains available: {pr_yaml}"
+    );
+    assert!(
+        pr_yaml.contains("Comma-separated provider subset of [github-hosted]")
+            && pr_yaml.contains("default: github-hosted"),
+        "branch-selected dispatch exposes the configured hosted choice only: {pr_yaml}"
+    );
+    assert!(
+        !pr_yaml.contains("ci-unit-rust-github-self-hosted.yml")
+            && !pr_yaml.contains("ci-unit-rust-velnor.yml")
+            && !pr_yaml.contains("PROVIDER_ADMITTED_GITHUB_SELF_HOSTED_TRUSTED")
+            && !pr_yaml.contains("PROVIDER_ADMITTED_VELNOR_TRUSTED"),
+        "PR-controlled YAML has no local reusable caller or local result verdict: {pr_yaml}"
+    );
+    assert!(
+        !pr.contains_key("prepare-cargo"),
+        "PR-controlled YAML has no local-provider Cargo preparation caller: {pr:?}"
+    );
+
+    let main_yaml = generated.workflow("ci-main.yml");
+    assert!(
+        main_yaml.contains("on:\n  push:\n    branches: [main]")
+            && !main_yaml.contains("pull_request:")
+            && !main_yaml.contains("workflow_dispatch:"),
+        "local callers live only on the protected default-branch push workflow: {main_yaml}"
+    );
+    let main = parse_jobs(&main_yaml);
+    assert_aggregate_callers_use_sidebar_names(&main);
+    let mut main_hosted = BTreeSet::new();
+    let mut main_self_hosted = BTreeSet::new();
+    let mut main_velnor = BTreeSet::new();
+    for (id, job) in &main {
+        let Some((provider, unit)) = aggregate_provider_caller_id(id) else {
+            continue;
+        };
+        match provider {
+            "github-hosted" => {
+                main_hosted.insert(unit.to_owned());
+            }
+            "github-self-hosted" => {
+                main_self_hosted.insert(unit.to_owned());
+            }
+            "velnor" => {
+                main_velnor.insert(unit.to_owned());
+            }
+            _ => unreachable!("known aggregate provider {provider}"),
+        }
+        if provider != "github-hosted" {
+            let condition = job_if(job);
+            assert!(
+                condition.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'")
+                    && condition.contains("github.event.pull_request.head.repo.fork")
+                    && !condition.contains("workflow_dispatch"),
+                "local caller `{id}` requires the trusted default-branch push: {condition}"
+            );
+        }
+    }
+    assert_eq!(main_hosted, expected_units, "hosted main callers: {main:?}");
+    assert_eq!(
+        main_self_hosted, expected_units,
+        "self-hosted main callers: {main:?}"
+    );
+    assert_eq!(main_velnor, expected_units, "Velnor main callers: {main:?}");
+
+    assert_typed_runner_group(
+        &self_hosted_workflow,
+        "verify-github-self-hosted",
+        &["example-scale-set"],
+    );
+    assert_typed_runner_group(
+        &velnor_workflow,
+        "verify-velnor",
+        &["self-hosted", "example-runner"],
+    );
+
+    let prep = main
+        .get("prepare-cargo")
+        .expect("cargo prep caller on main");
     assert_eq!(job_name(prep), "Control / Prepare Cargo");
     assert!(
         prep.get("with")
@@ -251,10 +396,17 @@ fn all_providers_emit_one_caller_per_unit_per_provider() {
             .and_then(|with| with.get("provider"))
             .and_then(Value::as_str)
             == Some("control"),
-        "prep caller must invoke the kind reusable on the control provider"
+        "prep caller must invoke the dedicated preparation reusable"
+    );
+    assert!(main_yaml.contains("uses: ./.github/workflows/ci-unit-rust-prepare-cargo.yml"));
+    assert!(
+        job_if(prep)
+            .contains("github.event_name == 'push' && github.ref == 'refs/heads/main'"),
+        "local preparation uses the same trusted push gate: {}",
+        job_if(prep)
     );
     assert!(
-        !pr.keys().any(|id| id.ends_with("-prepare-cargo-sources")),
+        !main.keys().any(|id| id.ends_with("-prepare-cargo-sources")),
         "cargo prep must stay one control caller, not per-provider callers"
     );
 
@@ -262,9 +414,11 @@ fn all_providers_emit_one_caller_per_unit_per_provider() {
         "github-self-hosted-prepare-cargo-sources",
         "velnor-prepare-cargo-sources",
     ] {
-        let prep_inner = kind_jobs
+        let prep_workflow = generated.workflow("ci-unit-rust-prepare-cargo.yml");
+        let prep_jobs = parse_jobs(&prep_workflow);
+        let prep_inner = prep_jobs
             .get(job)
-            .unwrap_or_else(|| panic!("cargo prep stays inside the kind reusable: {job}"));
+            .unwrap_or_else(|| panic!("cargo prep is in the dedicated reusable: {job}"));
         assert_eq!(job_name(prep_inner), "prepare-cargo");
         assert!(
             job_if(prep_inner).contains("inputs.provider == 'control'"),
@@ -273,33 +427,66 @@ fn all_providers_emit_one_caller_per_unit_per_provider() {
         );
     }
 
-    for unit in &hosted {
+    for unit in &expected_units {
         assert!(pr.contains_key(&format!("github-hosted-{unit}")));
-        assert!(pr.contains_key(&format!("github-self-hosted-{unit}")));
-        assert!(pr.contains_key(&format!("velnor-{unit}")));
+        assert!(!pr.contains_key(&format!("github-self-hosted-{unit}")));
+        assert!(!pr.contains_key(&format!("velnor-{unit}")));
+        assert!(main.contains_key(&format!("github-hosted-{unit}")));
+        assert!(main.contains_key(&format!("github-self-hosted-{unit}")));
+        assert!(main.contains_key(&format!("velnor-{unit}")));
     }
     // Hostname printouts are not identity (spec §2): no verify job carries
     // the deleted runner-identity step on any provider.
     assert!(
-        !rust.contains("runner identity"),
+        !hosted_workflow.contains("runner identity")
+            && !self_hosted_workflow.contains("runner identity")
+            && !velnor_workflow.contains("runner identity"),
         "no verify job carries a runner-identity step"
     );
 
     assert_eq!(job_name(&pr["plan"]), "Control / Planning");
-    assert_eq!(job_name(&pr["prepare-cargo"]), "Control / Prepare Cargo");
+    assert_eq!(job_name(&main["prepare-cargo"]), "Control / Prepare Cargo");
+    for (provider, expected) in [
+        ("github-hosted", 3),
+        ("github-self-hosted", 3),
+        ("velnor", 3),
+    ] {
+        assert_eq!(
+            pr_yaml
+                .matches(&format!(
+                    "uses: ./.github/workflows/ci-unit-rust-{provider}.yml"
+                ))
+                .count(),
+            if provider == "github-hosted" {
+                expected
+            } else {
+                0
+            },
+            "PR callers remain hosted-only"
+        );
+        assert_eq!(
+            main_yaml
+                .matches(&format!(
+                    "uses: ./.github/workflows/ci-unit-rust-{provider}.yml"
+                ))
+                .count(),
+            expected,
+            "trusted main calls each configured provider reusable"
+        );
+    }
     assert_eq!(
-        pr_yaml
-            .matches("uses: ./.github/workflows/ci-unit-rust.yml")
+        main_yaml
+            .matches("uses: ./.github/workflows/ci-unit-rust-prepare-cargo.yml")
             .count(),
-        10,
-        "prepare-cargo + 3 units x 3 providers must reuse the rust kind workflow"
+        1,
+        "the restricted Cargo source prep has one dedicated trusted-main caller"
     );
 
     let again = generate(&root);
     assert_eq!(
         again.workflow("ci-pr.yml"),
         pr_yaml,
-        "aggregate provider callers must be deterministic"
+        "untrusted aggregate provider callers must be deterministic"
     );
 }
 
@@ -318,14 +505,13 @@ fn hosted_only_emits_only_hosted_callers() {
         !pr.keys().any(|id| id.starts_with("github-self-hosted-")),
         "hosted-only must not emit self-hosted callers"
     );
-    let kind = parse_jobs(&generate(&root).workflow("ci-unit-rust.yml"));
+    let kind = parse_jobs(&generate(&root).workflow("ci-unit-rust-github-hosted.yml"));
     assert!(kind.contains_key("verify-github-hosted"));
-    assert!(!kind.contains_key("verify-github-self-hosted"));
-    assert!(!kind.contains_key("verify-velnor"));
+    assert_eq!(kind.len(), 1, "hosted reusable contains only hosted work");
 }
 
 #[test]
-fn velnor_only_emits_only_velnor_callers() {
+fn velnor_only_keeps_local_callers_off_the_pr_path() {
     let root = unique_dir("velnor-only");
     write_rust_fixture(&root, 2);
     write_workflow_config(
@@ -334,26 +520,39 @@ fn velnor_only_emits_only_velnor_callers() {
             "providers = [\"velnor\"]\nautomatic_providers = [\"velnor\"]\n\n{VELNOR_SELECTOR}"
         ),
     );
-    let pr = parse_jobs(&generate(&root).workflow("ci-pr.yml"));
-    assert!(pr.keys().any(|id| id.starts_with("velnor-rust-")));
-    assert!(!pr.keys().any(|id| aggregate_provider_caller_id(id)
-        .is_some_and(|(provider, _)| provider == "github-hosted")));
-    let kind = parse_jobs(&generate(&root).workflow("ci-unit-rust.yml"));
+    let generated = generate(&root);
+    let pr_yaml = generated.workflow("ci-pr.yml");
+    let pr = parse_jobs(&pr_yaml);
+    assert!(
+        !pr.keys().any(|id| aggregate_provider_caller_id(id).is_some()),
+        "a Velnor-only provider universe cannot put local callers in PR-controlled YAML: {pr:?}"
+    );
+    assert!(
+        !pr_yaml.contains("ci-unit-rust-velnor.yml"),
+        "PR-controlled YAML has no Velnor reusable caller: {pr_yaml}"
+    );
+    let main_yaml = generated.workflow("ci-main.yml");
+    let main = parse_jobs(&main_yaml);
+    assert!(main.keys().any(|id| id.starts_with("velnor-rust-")));
+    assert!(main_yaml.contains("on:\n  push:\n    branches: [main]"));
+    let kind = parse_jobs(&generate(&root).workflow("ci-unit-rust-velnor.yml"));
     assert!(kind.contains_key("verify-velnor"));
-    assert!(!kind.contains_key("verify-github-hosted"));
+    assert_eq!(kind.len(), 1, "Velnor reusable contains only Velnor work");
 }
 
 #[test]
-fn automatic_all_gates_pair_except_fork_pr_trust_exclusion() {
+fn automatic_hosted_dispatch_and_local_push_admission_gates() {
     let root = unique_dir("automatic-all-gates");
     write_rust_fixture(&root, 1);
     write_workflow_config(&root, &all_providers_config());
 
     let generated = generate(&root);
-    let rust = parse_jobs(&generated.workflow("ci-unit-rust.yml"));
-    let hosted_if = job_if(&rust["verify-github-hosted"]);
-    let self_hosted_if = job_if(&rust["verify-github-self-hosted"]);
-    let velnor_if = job_if(&rust["verify-velnor"]);
+    let hosted = parse_jobs(&generated.workflow("ci-unit-rust-github-hosted.yml"));
+    let self_hosted = parse_jobs(&generated.workflow("ci-unit-rust-github-self-hosted.yml"));
+    let velnor = parse_jobs(&generated.workflow("ci-unit-rust-velnor.yml"));
+    let hosted_if = job_if(&hosted["verify-github-hosted"]);
+    let self_hosted_if = job_if(&self_hosted["verify-github-self-hosted"]);
+    let velnor_if = job_if(&velnor["verify-velnor"]);
     assert!(
         hosted_if.contains("inputs.provider == 'github-hosted'"),
         "hosted verify job must require its provider: {hosted_if}"
@@ -366,34 +565,26 @@ fn automatic_all_gates_pair_except_fork_pr_trust_exclusion() {
         velnor_if.contains("inputs.provider == 'velnor'"),
         "Velnor verify job must require its provider: {velnor_if}"
     );
+    assert!(
+        hosted_if.contains("github.event_name != 'workflow_dispatch'")
+            && hosted_if.contains(
+                "contains(format(',{0},', github.event.inputs.providers), ',github-hosted,')"
+            ),
+        "hosted admits automatic events and its configured dispatch choice: {hosted_if}"
+    );
+    let untrusted =
+        "!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))";
     for (provider, gate) in [
-        ("github-hosted", &hosted_if),
         ("github-self-hosted", &self_hosted_if),
         ("velnor", &velnor_if),
     ] {
         assert!(
-            gate.contains("github.event_name != 'workflow_dispatch'"),
-            "{provider} must admit automatic events: {gate}"
-        );
-        assert!(
-            gate.contains(&format!(
-                "contains(format(',{{0}},', github.event.inputs.providers), ',{provider},')"
-            )),
-            "{provider} must admit dispatches selecting it: {gate}"
+            !gate.contains("workflow_dispatch")
+                && gate.contains("github.event_name == 'push' && github.ref == 'refs/heads/main'")
+                && gate.contains(untrusted),
+            "{provider} requires the trusted default-branch push: {gate}"
         );
     }
-    // Fork and bot pull requests are untrusted: local providers exclude them
-    // inline, hosted executes them.
-    let untrusted =
-        "!(github.event_name == 'pull_request' && (github.event.pull_request.head.repo.fork || github.event.pull_request.user.type == 'Bot'))";
-    assert!(
-        self_hosted_if.contains(untrusted),
-        "self-hosted must exclude untrusted PRs: {self_hosted_if}"
-    );
-    assert!(
-        velnor_if.contains(untrusted),
-        "Velnor must exclude untrusted PRs: {velnor_if}"
-    );
     assert!(
         !hosted_if.contains("pull_request.head.repo.fork"),
         "hosted must not exclude fork PRs: {hosted_if}"
@@ -407,9 +598,9 @@ fn automatic_all_gates_pair_except_fork_pr_trust_exclusion() {
     assert_eq!(name_head(&job_name(&pr["plan"])), "Control");
     assert_eq!(job_name(&pr["ci-required"]), "ci-required");
     assert!(pr.contains_key("github-hosted-rust-crate00"));
-    assert!(pr.contains_key("github-self-hosted-rust-crate00"));
-    assert!(pr.contains_key("velnor-rust-crate00"));
-    assert!(pr.contains_key("prepare-cargo"));
+    assert!(!pr.contains_key("github-self-hosted-rust-crate00"));
+    assert!(!pr.contains_key("velnor-rust-crate00"));
+    assert!(!pr.contains_key("prepare-cargo"));
 }
 
 #[test]
@@ -441,7 +632,7 @@ fn swift_is_excluded_from_local_providers_by_platform() {
             "Swift runs hosted-only: {caller}"
         );
     }
-    let swift = parse_jobs(&generated.workflow("ci-unit-swift.yml"));
+    let swift = parse_jobs(&generated.workflow("ci-unit-swift-github-hosted.yml"));
     assert!(
         swift.contains_key("verify-github-hosted"),
         "Swift keeps the collapsed hosted verify job: {swift:?}"
@@ -490,7 +681,7 @@ jobs = ["github-hosted"]
     );
     fs::write(root.join(".github-gen/velnor-workflow.toml"), config).unwrap();
     let generated = generate(&root);
-    let swift = parse_jobs(&generated.workflow("ci-unit-swift.yml"));
+    let swift = parse_jobs(&generated.workflow("ci-unit-swift-github-hosted.yml"));
     assert!(
         swift.contains_key("verify-github-hosted"),
         "explicit hosted opt-out must keep the collapsed hosted verify job: {swift:?}"
@@ -510,7 +701,7 @@ jobs = ["github-hosted"]
     );
     assert!(
         !generated
-            .workflow("ci-unit-swift.yml")
+            .workflow("ci-unit-swift-github-hosted.yml")
             .contains("inputs.unit == '"),
         "swift verify steps must not guard on a unit identity"
     );

@@ -7,13 +7,6 @@
 use crate::s2::provider::{ProviderId, ProviderSet, SelectorMap};
 use crate::s2::ProjectConfig;
 
-/// The runner selector the generator's earliest generated surfaces embedded
-/// before the selectors moved into each repository's generation config.
-/// Static-template adoption replaces it with the declaring repository's own
-/// selector.
-pub(crate) const LEGACY_VELNOR_RUNNER_SELECTOR: &str =
-    "fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]')";
-
 /// The owners that mirror the `velnor-actions` fleet. A reusable workflow
 /// from a fleet mirror, pinned by full commit SHA, is content-addressed
 /// exactly like a SHA-pinned external action; anything else reusable stays
@@ -21,23 +14,6 @@ pub(crate) const LEGACY_VELNOR_RUNNER_SELECTOR: &str =
 /// they live at this admitted boundary instead of the generic engine.
 pub(crate) const FLEET_VELNOR_ACTION_OWNERS: &[&str] =
     &["jackin-project", "tailrocks", "ChainArgos"];
-
-/// Adopted provider-selection `runs-on` shapes, whitespace-normalized for
-/// comparison. Every shape resolves to either the hosted `ubuntu-26.04`
-/// label or the adopting estate's declared local labels; the provider
-/// shapes additionally map every `pull_request` evaluation to the hosted
-/// label, so untrusted pull requests never resolve to the persistent pool.
-/// Selectors reference only the event name and the manual `providers` input,
-/// and matrix shapes reference only the job matrix the repository's own
-/// producer jobs compute from the same trusted inputs. Anything else
-/// dynamic stays rejected.
-pub(crate) const APPROVED_DYNAMIC_RUNNERS: &[&str] = &[
-    "((github.event_name=='workflow_dispatch'&&contains(format(',{0},',inputs.providers),',github-hosted,'))||github.event_name=='pull_request'||github.event_name=='push')&&'ubuntu-26.04'||fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]')",
-    "((github.event_name=='workflow_dispatch'&&!contains(format(',{0},',inputs.providers),',github-self-hosted,'))||github.event_name=='pull_request'||github.event_name=='push')&&'ubuntu-26.04'||fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]')",
-    "((github.event_name=='workflow_dispatch'&&contains(format(',{0},',inputs.providers),',github-hosted,'))||github.event_name=='pull_request'||github.event_name=='merge_group'||github.event_name=='push')&&'ubuntu-26.04'||fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]')",
-    "matrix.config.runner",
-    "fromJSON(matrix.config.runner)",
-];
 
 pub(crate) fn render_apt_package_updater_template(
     template: &str,

@@ -2,9 +2,10 @@
 //!
 //! Generation is a pure function of the repository shape, this config, and the
 //! generator revision. The config lives in the target repository at
-//! `.github-gen/velnor-workflow.toml`, is optional (a repository without one
-//! keeps the generator's default behavior), and is fail-closed: a config that
-//! fails to parse or validate stops generation instead of being ignored.
+//! `.github-gen/velnor-workflow.toml`. Discovery reports absence as `None` for
+//! read-only callers, while production generation requires the file to declare
+//! its provider universe and every provider selector. A config that fails to
+//! parse or validate stops generation instead of being ignored.
 //!
 //! The config is where a repository states everything the generator used to
 //! know for it: its identity, its runner placement, its profile label, its
@@ -14,7 +15,7 @@
 
 pub(crate) mod canonical;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Component, Path};
 
@@ -22,6 +23,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::s2::provider::{parse_provider_set, parse_selectors, ProviderId, ProviderSelector};
 use crate::s2::{content_digest_bytes, GeneratorError};
+
+#[cfg(test)]
+#[path = "release_tasks_tests.rs"]
+mod release_tasks_tests;
 
 /// Location of the repository-owned generation config, relative to the
 /// repository root.
@@ -44,8 +49,8 @@ pub(crate) fn load(path: &Path) -> Result<RepoGenerationConfig, GeneratorError> 
 
 /// Discover the generation config at the repository root.
 ///
-/// A missing config is a valid outcome: repositories without a config keep the
-/// generator's default behavior.
+/// A missing config is returned as `None` so discovery callers can distinguish
+/// absence from malformed input. Production generation rejects that result.
 ///
 /// # Errors
 /// Returns filesystem errors and parse errors with the affected path.
@@ -85,9 +90,9 @@ pub(crate) fn parse(path: &Path, bytes: &[u8]) -> Result<RepoGenerationConfig, G
 
 /// Repository-owned generation config.
 ///
-/// Every override is optional: an absent value means "keep the generator's
-/// current default", which is what makes a repository able to adopt the config
-/// one section at a time.
+/// Most overrides are optional: an absent value keeps the corresponding
+/// generator default. The provider universe and selector rows are required so
+/// runner placement never comes from a production default.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RepoGenerationConfig {
@@ -172,8 +177,7 @@ struct GeneratorSection {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WorkflowSection {
-    /// The provider universe for this repo. Non-empty. Absent keeps the
-    /// generator default (all three providers).
+    /// The provider universe for this repo. Required and non-empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     providers: Option<Vec<String>>,
     /// Providers that run on `pull_request`/`push`/`schedule`. A subset of
@@ -186,10 +190,16 @@ struct WorkflowSection {
     /// (the full universe).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     default_dispatch_providers: Option<Vec<String>>,
-    /// Per-provider `runs-on` routing, keyed by provider ID. The only place
-    /// labels live; local providers need disjoint dedicated selectors.
+    /// Per-provider `runs-on` routing, keyed by provider ID. Exactly one row
+    /// is required for each provider; local providers need disjoint dedicated
+    /// selectors.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     selectors: BTreeMap<String, ProviderSelector>,
+    /// Require every local selector in this repository's provider universe to
+    /// name an explicit GitHub runner group. This keeps a configured local
+    /// label set from falling back to repository-scoped runners.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    require_local_runner_group: Option<bool>,
     /// The repository profile recorded in the generated `project.toml`. A free
     /// label: it describes the surface, it never selects one.
     profile: Option<String>,
@@ -304,10 +314,6 @@ impl MaintenanceSection {
     }
 }
 
-/// The release contract a repository declares for itself. `kind` names the
-/// publisher the renderer implements; every other field is the contract that
-/// publisher renders from, so an incomplete contract is a configuration error
-/// instead of a partially rendered workflow.
 /// One composable scheduled-check profile the repository declares for itself.
 ///
 /// A profile is a named scheduled job: its cadence, its platform, the named
@@ -336,6 +342,12 @@ pub(crate) struct CheckProfileSection {
     env: BTreeMap<String, String>,
 }
 
+/// One named-task job a `kind = "tasks"` release renders into `release.yml`.
+/// Product build, signing, and publication stay in the repository's named
+/// mise tasks. Unspecified modes are tag-only; `validate` opts into the
+/// selected-ref `release-validate.yml` workflow and therefore permits only
+/// hosted runners plus the read-only checkout scope, with no env, environment,
+/// or attestation inputs.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReleaseJobSection {
@@ -350,16 +362,25 @@ pub(crate) struct ReleaseJobSection {
     modes: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     timeout_minutes: Option<i64>,
+    /// GitHub environment with protection rules and scoped secrets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     environment: Option<String>,
+    /// Relative artifact paths attested after the named tasks finish. Globs
+    /// may match one filename only and need a literal extension.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     attest_subjects: Option<Vec<String>>,
+    /// Job-level GitHub permission overrides.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     permissions: BTreeMap<String, String>,
+    /// Environment the named tasks read; values may reference GitHub secrets.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     env: BTreeMap<String, String>,
 }
 
+/// The release contract a repository declares for itself. `kind` names the
+/// publisher the renderer implements; every other field is the contract that
+/// publisher renders from, so an incomplete contract is a configuration error
+/// instead of a partially rendered workflow.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReleaseSection {
@@ -383,6 +404,19 @@ pub(crate) struct ReleaseSection {
     artifact_path: Option<String>,
     description: Option<String>,
     manifest_schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    apt_arches: Vec<String>,
+    signer_fingerprint: Option<String>,
+    passphrase_secret: Option<String>,
+    signing_key_secret: Option<String>,
+    /// Optional source-repository token for reading private artifact attestations.
+    /// It is exposed only to the verifier job and never to the publisher.
+    apt_attestation_secret: Option<String>,
+    keyring_path: Option<String>,
+    apt_origin: Option<String>,
+    apt_identity_dir: Option<String>,
+    apt_feed_url: Option<String>,
+    retention: Option<i64>,
     dockerfile: Option<String>,
     context: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -391,8 +425,9 @@ pub(crate) struct ReleaseSection {
     producer_workflow: Option<String>,
     /// The producer conclusion the publish gate requires (`success`).
     producer_conclusion: Option<String>,
-    /// The dispatch modes the workflows offer. `publish` is never a dispatch
-    /// option: publication stays tag-triggered (or admitted-producer).
+    /// The dispatch modes the workflows offer. Task publishers reject this
+    /// release-level field; their `[[release.job]].modes` split read-only
+    /// selected-ref validation from tag-only publication.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     modes: Vec<String>,
     /// Extra members packaged into each release archive next to the binary.
@@ -419,8 +454,26 @@ pub(crate) struct ReleaseSection {
     registry_username_secret: Option<String>,
     /// The secret holding the registry password. A name, never the value.
     registry_password_secret: Option<String>,
+    /// Named-task jobs. This publisher is config-only because declaration
+    /// rows cannot carry nested job tables.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     job: Vec<ReleaseJobSection>,
+    /// Per-runner attestation subject patterns accepted by the selected
+    /// runner manifest. Empty/unconfigured hosted runners retain the upstream
+    /// action grammar; local task runners must declare their accepted set.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    runner_capabilities: BTreeMap<String, ReleaseRunnerCapabilitySection>,
+}
+
+/// Configured capabilities of one task-release runner. These are target
+/// repository facts: the generic generator validates named-task inputs
+/// against them but does not bake in any runner's manifest contents.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReleaseRunnerCapabilitySection {
+    /// Subject-path patterns accepted by this runner's attestation manifest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    attest_subjects: Vec<String>,
 }
 
 /// One credential the release lane mounts: the setup command that
@@ -811,6 +864,46 @@ impl ReleaseSection {
 
     pub(crate) fn manifest_schema(&self) -> Option<&str> {
         self.manifest_schema.as_deref()
+    }
+
+    pub(crate) fn apt_arches(&self) -> &[String] {
+        &self.apt_arches
+    }
+
+    pub(crate) fn signer_fingerprint(&self) -> Option<&str> {
+        self.signer_fingerprint.as_deref()
+    }
+
+    pub(crate) fn passphrase_secret(&self) -> Option<&str> {
+        self.passphrase_secret.as_deref()
+    }
+
+    pub(crate) fn signing_key_secret(&self) -> Option<&str> {
+        self.signing_key_secret.as_deref()
+    }
+
+    pub(crate) fn apt_attestation_secret(&self) -> Option<&str> {
+        self.apt_attestation_secret.as_deref()
+    }
+
+    pub(crate) fn keyring_path(&self) -> Option<&str> {
+        self.keyring_path.as_deref()
+    }
+
+    pub(crate) fn apt_origin(&self) -> Option<&str> {
+        self.apt_origin.as_deref()
+    }
+
+    pub(crate) fn apt_identity_dir(&self) -> Option<&str> {
+        self.apt_identity_dir.as_deref()
+    }
+
+    pub(crate) fn apt_feed_url(&self) -> Option<&str> {
+        self.apt_feed_url.as_deref()
+    }
+
+    pub(crate) fn retention(&self) -> Option<i64> {
+        self.retention
     }
 
     pub(crate) fn dockerfile(&self) -> Option<&str> {
@@ -1757,7 +1850,10 @@ fn reject_duplicates(owner: &str, values: &[String]) -> Result<(), GeneratorErro
 }
 
 fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
-    use crate::s2::provider::{require_non_empty, require_subset, validate_selector_disjointness};
+    use crate::s2::provider::{
+        require_exact_selectors_for, require_non_empty, require_subset,
+        validate_selector_disjointness,
+    };
     if let Some(branch) = workflow.default_branch.as_deref()
         && !crate::s2::runtime::valid_branch(branch)
     {
@@ -1765,15 +1861,13 @@ fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
             "[workflow] default_branch renders into trigger branches and `github.ref` guards; `{branch}` is outside the branch alphabet"
         )));
     }
-    let universe = workflow
-        .providers
-        .as_deref()
-        .map(|providers| parse_provider_set(providers, "[workflow] providers"))
-        .transpose()?
-        .unwrap_or_else(|| crate::s2::provider::ProviderId::ALL.into_iter().collect());
-    if workflow.providers.is_some() {
-        require_non_empty(&universe, "[workflow] providers")?;
-    }
+    let providers = workflow.providers.as_deref().ok_or_else(|| {
+        GeneratorError::usage(
+            "[workflow] providers is required: declare the repository's provider universe explicitly",
+        )
+    })?;
+    let universe = parse_provider_set(providers, "[workflow] providers")?;
+    require_non_empty(&universe, "[workflow] providers")?;
     if let Some(automatic) = workflow.automatic_providers.as_deref() {
         let automatic = parse_provider_set(automatic, "[workflow] automatic_providers")?;
         require_subset(
@@ -1793,7 +1887,21 @@ fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
         )?;
     }
     let selectors = parse_selectors(&workflow.selectors)?;
+    require_exact_selectors_for(&selectors, &universe)?;
     validate_selector_disjointness(&selectors)?;
+    if workflow.require_local_runner_group.unwrap_or(false) {
+        for provider in [ProviderId::GithubSelfHosted, ProviderId::Velnor] {
+            if universe.contains(&provider)
+                && selectors
+                    .get(&provider)
+                    .is_some_and(|selector| selector.group.is_none())
+            {
+                return Err(GeneratorError::usage(format!(
+                    "[workflow.selectors.{provider}] requires a static group because [workflow] require_local_runner_group is true"
+                )));
+            }
+        }
+    }
     if workflow.templates.is_some() {
         return Err(GeneratorError::usage(
             "[workflow] templates is not supported; imported workflow bodies are not a generation input",
@@ -2170,6 +2278,11 @@ fn validate_static_files(rows: &[StaticFileSection]) -> Result<(), GeneratorErro
                 "[[static_file]] source must be a repository-relative path, found `{source}`"
             )));
         }
+        if Path::new(source) == Path::new(file) {
+            return Err(GeneratorError::usage(format!(
+                "[[static_file]] source and file resolve to the same repository path `{file}`; copy from a distinct source path"
+            )));
+        }
         let duplicate = rows
             .iter()
             .filter(|other| other.file.as_deref() == Some(file))
@@ -2191,7 +2304,11 @@ fn is_contained_repository_path(path: &str) -> bool {
     !path.is_empty()
         && !path.starts_with('/')
         && !path.contains('\\')
-        && !path.split('/').any(|segment| segment == "..")
+        && !path.contains(':')
+        && !path.bytes().any(|byte| byte.is_ascii_control())
+        && path
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
 }
 
 /// The publishers the renderer implements, and the contract fields each one
@@ -2206,36 +2323,6 @@ const RELEASE_KINDS: &[&str] = &[
     "docker",
     "tasks",
 ];
-
-/// The modes a typed release job gates on. validate runs only on workflow
-/// dispatch; publish runs only on tag pushes. Empty runs on both.
-pub(crate) const RELEASE_JOB_MODES: &[&str] = &["validate", "publish"];
-
-/// GitHub permission scopes accepted by a typed release job.
-pub(crate) const RELEASE_JOB_PERMISSIONS: &[&str] = &[
-    "actions",
-    "attestations",
-    "checks",
-    "contents",
-    "deployments",
-    "discussions",
-    "id-token",
-    "issues",
-    "models",
-    "packages",
-    "pages",
-    "pull-requests",
-    "repository-projects",
-    "security-events",
-    "statuses",
-];
-
-/// Permission levels accepted by a typed release job.
-pub(crate) const RELEASE_JOB_PERMISSION_LEVELS: &[&str] = &["read", "write", "none"];
-
-// Keep this in lockstep with the Velnor runner's
-// `actions/attest-build-provenance` capability contract.
-const VELNOR_ATTESTATION_SUBJECTS: &[&str] = &["dist/*.tar.gz", "dist/l2-subject.json"];
 
 /// The OCI platforms the `docker` publisher builds. Native builders exist
 /// for exactly these; anything else fails closed instead of silently
@@ -2632,81 +2719,6 @@ fn valid_check_profile_env_key(key: &str) -> bool {
         && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
-/// The release events on which one named-task job can run. An omitted mode
-/// means both dispatch validation and tag publication.
-fn release_job_events(row: &ReleaseJobSection) -> (bool, bool) {
-    let modes = row.modes.as_deref().unwrap_or_default();
-    if modes.is_empty() {
-        (true, true)
-    } else {
-        (
-            modes.iter().any(|mode| mode == "validate"),
-            modes.iter().any(|mode| mode == "publish"),
-        )
-    }
-}
-
-/// Reject cycles before a release job graph reaches GitHub Actions. GitHub
-/// does not report a useful configuration error for a cycle; it leaves every
-/// member waiting forever, so generation must fail with the actual cycle.
-fn validate_release_job_cycles(rows: &[ReleaseJobSection]) -> Result<(), GeneratorError> {
-    fn visit(
-        node: &str,
-        graph: &BTreeMap<String, Vec<String>>,
-        visiting: &mut BTreeSet<String>,
-        visited: &mut BTreeSet<String>,
-        stack: &mut Vec<String>,
-    ) -> Result<(), GeneratorError> {
-        if visited.contains(node) {
-            return Ok(());
-        }
-        if visiting.contains(node) {
-            let start = stack.iter().position(|entry| entry == node).unwrap_or(0);
-            let mut cycle = stack[start..].to_vec();
-            cycle.push(node.to_owned());
-            return Err(GeneratorError::usage(format!(
-                "[[release.job]] dependency cycle: {}",
-                cycle.join(" -> ")
-            )));
-        }
-
-        visiting.insert(node.to_owned());
-        stack.push(node.to_owned());
-        if let Some(needs) = graph.get(node) {
-            for dependency in needs {
-                // Unknown dependencies are reported by validate_release_jobs
-                // before this graph check. Keeping this guard makes the
-                // helper total when unit-tested directly.
-                if graph.contains_key(dependency) {
-                    visit(dependency, graph, visiting, visited, stack)?;
-                }
-            }
-        }
-        stack.pop();
-        visiting.remove(node);
-        visited.insert(node.to_owned());
-        Ok(())
-    }
-
-    let graph = rows
-        .iter()
-        .map(|row| {
-            (
-                row.id.as_deref().unwrap_or_default().to_owned(),
-                row.needs.clone().unwrap_or_default(),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-
-    let mut visiting = BTreeSet::new();
-    let mut visited = BTreeSet::new();
-    let mut stack = Vec::new();
-    for node in graph.keys() {
-        visit(node, &graph, &mut visiting, &mut visited, &mut stack)?;
-    }
-    Ok(())
-}
-
 fn validate_check_profile_cron(id: &str, schedule: &str) -> Result<(), GeneratorError> {
     if schedule.contains(['\n', '\r']) {
         return Err(GeneratorError::usage(format!(
@@ -2849,8 +2861,10 @@ impl RepoGenerationConfig {
 
     fn validate_release(&self) -> Result<(), GeneratorError> {
         let release = &self.release;
-        validate_release_jobs(&self.workflow, release)?;
         validate_release_bindings(release)?;
+        validate_release_apt(release)?;
+        validate_release_runner_capabilities(release)?;
+        validate_release_jobs(&self.workflow, release)?;
         if release.enabled != Some(true) {
             return Ok(());
         }
@@ -2894,15 +2908,9 @@ impl RepoGenerationConfig {
                         .is_some_and(|value| !value.is_empty())
             }
             "apt" => {
-                release
-                    .package
-                    .as_deref()
-                    .is_some_and(|value| !value.is_empty())
-                    && release
-                        .consumer_repository
-                        .as_deref()
-                        .is_some_and(|value| !value.is_empty())
+                crate::s2::apt::AptContract::resolve_input(release_apt_contract(release)).is_ok()
             }
+            "tasks" => !release.job.is_empty(),
             "docker" => {
                 release
                     .image
@@ -2918,7 +2926,6 @@ impl RepoGenerationConfig {
                         .as_deref()
                         .is_none_or(is_contained_repository_path)
             }
-            "tasks" => !release.job.is_empty(),
             _ => false,
         };
         if complete {
@@ -3211,6 +3218,93 @@ pub(crate) fn is_release_mode(value: &str) -> bool {
     RELEASE_MODES.contains(&value)
 }
 
+/// Modes a task-publisher job can select. `validate` opts into a separate
+/// read-only selected-ref dispatcher; `publish` runs only on tag pushes. An
+/// omitted or empty mode is tag-only.
+pub(crate) const RELEASE_JOB_MODES: &[&str] = &["validate", "publish"];
+
+/// GitHub permission scopes accepted in `[[release.job]]` overrides.
+pub(crate) const RELEASE_JOB_PERMISSIONS: &[&str] = &[
+    "actions",
+    "attestations",
+    "artifact-metadata",
+    "checks",
+    "contents",
+    "deployments",
+    "discussions",
+    "id-token",
+    "issues",
+    "models",
+    "packages",
+    "pages",
+    "pull-requests",
+    "repository-projects",
+    "security-events",
+    "statuses",
+];
+
+/// Permission levels accepted in task-publisher job overrides.
+pub(crate) const RELEASE_JOB_PERMISSION_LEVELS: &[&str] = &["read", "write", "none"];
+
+/// Project the schema-2 release section into the shared typed APT contract.
+fn release_apt_contract(release: &ReleaseSection) -> crate::s2::apt::AptContractInput<'_> {
+    crate::s2::apt::AptContractInput {
+        kind: release.kind.as_deref().unwrap_or_default(),
+        source_repository: release.source_repository.as_deref().unwrap_or_default(),
+        package: release.package.as_deref().unwrap_or_default(),
+        binary: release.binary.as_deref().unwrap_or_default(),
+        consumer_repository: release.consumer_repository.as_deref().unwrap_or_default(),
+        manifest_schema: release.manifest_schema.as_deref().unwrap_or_default(),
+        signer_fingerprint: release.signer_fingerprint.as_deref().unwrap_or_default(),
+        passphrase_secret: release.passphrase_secret.as_deref().unwrap_or_default(),
+        signing_key_secret: release.signing_key_secret.as_deref().unwrap_or_default(),
+        apt_attestation_secret: release
+            .apt_attestation_secret
+            .as_deref()
+            .unwrap_or_default(),
+        keyring_path: release.keyring_path.as_deref().unwrap_or_default(),
+        apt_origin: release.apt_origin.as_deref().unwrap_or_default(),
+        apt_identity_dir: release.apt_identity_dir.as_deref().unwrap_or_default(),
+        apt_feed_url: release.apt_feed_url.as_deref().unwrap_or_default(),
+        preview_source_ref: crate::s2::apt::PREVIEW_SOURCE_REF,
+        description: release.description.as_deref().unwrap_or_default(),
+        apt_arches: &release.apt_arches,
+        retention: release.retention.unwrap_or_default(),
+    }
+}
+
+/// Reject APT-only fields on another publisher and validate the complete
+/// typed contract whenever the configured APT release is enabled.
+fn validate_release_apt(release: &ReleaseSection) -> Result<(), GeneratorError> {
+    let has_apt_fields = !release.apt_arches.is_empty()
+        || release.apt_feed_url.is_some()
+        || release.apt_identity_dir.is_some()
+        || release.apt_origin.is_some()
+        || release.keyring_path.is_some()
+        || release.passphrase_secret.is_some()
+        || release.retention.is_some()
+        || release.signer_fingerprint.is_some()
+        || release.signing_key_secret.is_some()
+        || release.apt_attestation_secret.is_some();
+    let kind = release.kind.as_deref().unwrap_or_default();
+    if has_apt_fields && kind != "apt" {
+        return Err(GeneratorError::usage(format!(
+            "[release] APT contract fields render only for kind `apt`, not `{kind}`"
+        )));
+    }
+    if let Some(secret) = release.apt_attestation_secret.as_deref()
+        && !crate::s2::apt::valid_secret_ref(secret)
+    {
+        return Err(GeneratorError::usage(
+            "[release] apt_attestation_secret must be an uppercase environment secret identifier, never a value",
+        ));
+    }
+    if release.enabled == Some(true) && kind == "apt" {
+        crate::s2::apt::AptContract::resolve_input(release_apt_contract(release))?;
+    }
+    Ok(())
+}
+
 /// Validate the shape of the release event bindings, modes, archive
 /// contract, and credential pairs. Shape errors fail closed whether or not
 /// the contract is enabled: a typo'd mode or an unpaired credential must
@@ -3319,11 +3413,9 @@ fn validate_release_registry(release: &ReleaseSection) -> Result<(), GeneratorEr
     Ok(())
 }
 
-/// Tarball bindings (producer bindings, dispatch modes, archive contracts,
-/// credential pairings) render only for the `rust-binary` and `native`
-/// publishers. Declaring them on any other kind is a usage error, not a
-/// silent omission: a typo'd `modes` on a `docker` contract must fail the
-/// generation, never drop the publisher.
+/// Producer, archive, and credential bindings render only for the
+/// `rust-binary` and `native` publishers. Named-task event gates live on each
+/// job; release-level dispatch modes are unsupported for that publisher.
 fn validate_release_binding_kind(release: &ReleaseSection) -> Result<(), GeneratorError> {
     let kind = release.kind.as_deref().unwrap_or_default();
     let registry_auth = release.registry.is_some()
@@ -3344,27 +3436,25 @@ fn validate_release_binding_kind(release: &ReleaseSection) -> Result<(), Generat
     if kind.is_empty() || matches!(kind, "rust-binary" | "native") {
         return Ok(());
     }
-    if kind == "tasks" {
-        let unsupported = release.producer_workflow.is_some()
-            || release.producer_conclusion.is_some()
-            || release.archive_checksum.is_some()
-            || release.archive_retention_days.is_some()
-            || !release.archive_members.is_empty()
-            || !release.credential.is_empty();
-        if unsupported {
-            return Err(GeneratorError::usage(
-                "[release] producer bindings, archive contracts, and credential pairings render only for rust-binary or native, not tasks",
-            ));
-        }
-        return Ok(());
-    }
-    let bound = release.producer_workflow.is_some()
-        || !release.modes.is_empty()
+    let publisher_bindings = release.producer_workflow.is_some()
         || release.archive_checksum.is_some()
         || release.archive_retention_days.is_some()
         || !release.archive_members.is_empty()
         || !release.credential.is_empty();
-    if bound {
+    if kind == "tasks" {
+        if !release.modes.is_empty() {
+            return Err(GeneratorError::usage(
+                "[release] top-level `modes` are unsupported for kind `tasks`; use `[[release.job]].modes` to select tag publishing or read-only validation",
+            ));
+        }
+        if publisher_bindings {
+            return Err(GeneratorError::usage(
+                "[release] producer bindings, archive contracts, and credential pairings are unsupported for kind `tasks`; the named tasks own those operations",
+            ));
+        }
+        return Ok(());
+    }
+    if publisher_bindings || !release.modes.is_empty() {
         return Err(GeneratorError::usage(format!(
             "[release] producer bindings, modes, archive contracts, and credential pairings render only for kind `rust-binary` or `native`, not `{kind}`"
         )));
@@ -3442,12 +3532,37 @@ fn validate_release_bindings(release: &ReleaseSection) -> Result<(), GeneratorEr
     Ok(())
 }
 
-/// Whether `value` is a portable archive member name: a bare file name over
-/// the portable asset alphabet, never a path.
-/// Validate the typed named-task release graph. Tasks are repository-owned
-/// commands, but job identity, dependencies, runner aliases, mode gates, and
-/// execution metadata are generator-owned structure and fail closed here.
-#[allow(clippy::too_many_lines)]
+/// Validate named-task release jobs against their event lanes and the
+/// repository's explicit provider universe.
+fn validate_release_runner_capabilities(release: &ReleaseSection) -> Result<(), GeneratorError> {
+    for (runner, capability) in &release.runner_capabilities {
+        if !matches!(runner.as_str(), "github" | "macos" | "velnor") {
+            return Err(GeneratorError::usage(format!(
+                "[release.runner_capabilities.{runner}] names an unknown task-release runner; expected github, macos, or velnor"
+            )));
+        }
+        if capability.attest_subjects.is_empty() {
+            return Err(GeneratorError::usage(format!(
+                "[release.runner_capabilities.{runner}] must declare at least one attest_subjects pattern"
+            )));
+        }
+        let mut seen = BTreeSet::new();
+        for subject in &capability.attest_subjects {
+            if !valid_attest_subject(subject) {
+                return Err(GeneratorError::usage(format!(
+                    "[release.runner_capabilities.{runner}] attest_subjects pattern `{subject}` is not a valid relative artifact path or one-file glob"
+                )));
+            }
+            if !seen.insert(subject) {
+                return Err(GeneratorError::usage(format!(
+                    "[release.runner_capabilities.{runner}] repeats attest_subjects pattern `{subject}`"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_release_jobs(
     workflow: &WorkflowSection,
     release: &ReleaseSection,
@@ -3458,221 +3573,423 @@ fn validate_release_jobs(
     let kind = release.kind.as_deref().unwrap_or_default();
     if kind != "tasks" {
         return Err(GeneratorError::usage(format!(
-            "[[release.job]] rows render only for kind tasks, not {kind}; other publishers own their job graph"
+            "[[release.job]] rows render only for kind `tasks`, not `{kind}`; publishers with their own job graph take no sibling jobs"
         )));
     }
+
     let mut ids = BTreeSet::new();
     for row in &release.job {
         let id = row.id.as_deref().unwrap_or_default();
         if id.is_empty() {
             return Err(GeneratorError::usage(
-                "[[release.job]] is missing id; name the job the row renders",
+                "[[release.job]] is missing `id`; name the job the row renders",
             ));
         }
         if !valid_check_profile_id(id) {
             return Err(GeneratorError::usage(format!(
-                "[[release.job]] {id} is not a job id; use letters, digits, - and _ starting with a letter or _"
+                "[[release.job]] {id} is not a job id; use letters, digits, `-`, and `_` starting with a letter or `_"
             )));
         }
-        if !ids.insert(id.to_owned()) {
+        if id == "admit-release" {
+            return Err(GeneratorError::usage(
+                "[[release.job]] id `admit-release` is reserved for the generated release admission job",
+            ));
+        }
+        if !ids.insert(id) {
             return Err(GeneratorError::usage(format!(
                 "[[release.job]] {id} is declared twice; job ids must be unique"
             )));
         }
     }
-    let providers = workflow
-        .providers
-        .as_deref()
-        .map(|values| parse_provider_set(values, "[workflow] providers"))
-        .transpose()?
-        .unwrap_or_else(|| ProviderId::ALL.into_iter().collect());
-    // The repository config may override scan defaults, but omitted selectors
-    // still resolve to those defaults before rendering. Validate release
-    // runner choices against the same effective map so a valid config can
-    // never render `runs-on:` empty.
-    let mut selectors = crate::s2::scan::default_selectors();
-    selectors.extend(parse_selectors(&workflow.selectors)?);
     for row in &release.job {
-        let id = row.id.as_deref().unwrap_or_default();
-        if let Some(name) = row.name.as_deref()
-            && (name.is_empty() || name.contains(['\n', '\r']))
-        {
-            return Err(GeneratorError::usage(format!(
-                "[[release.job]] {id} name must be one non-empty line"
-            )));
-        }
-        let Some(tasks) = row.tasks.as_deref() else {
-            return Err(GeneratorError::usage(format!(
-                "[[release.job]] {id} is missing tasks; name the mise tasks the job runs"
-            )));
-        };
-        if tasks.is_empty() {
-            return Err(GeneratorError::usage(format!(
-                "[[release.job]] {id} declares empty tasks; name the mise tasks the job runs"
-            )));
-        }
-        for task in tasks {
-            if !valid_check_profile_task(task) {
+        validate_release_job_row(
+            workflow,
+            release,
+            row,
+            row.id.as_deref().unwrap_or_default(),
+            &ids,
+        )?;
+    }
+    validate_release_job_cycles(&release.job)?;
+    validate_release_job_event_dependencies(&release.job, "validate")?;
+    validate_release_job_event_dependencies(&release.job, "publish")?;
+    Ok(())
+}
+
+fn release_job_in_event(row: &ReleaseJobSection, event: &str) -> bool {
+    let modes = row.modes.as_deref().unwrap_or_default();
+    match event {
+        "validate" => modes.iter().any(|mode| mode == "validate"),
+        // An omitted per-job mode means publication only. Validation is
+        // opt-in because dispatch checks out the caller-selected ref.
+        "publish" => modes.is_empty() || modes.iter().any(|mode| mode == "publish"),
+        _ => false,
+    }
+}
+
+fn validate_release_job_event_dependencies(
+    jobs: &[ReleaseJobSection],
+    event: &str,
+) -> Result<(), GeneratorError> {
+    for job in jobs.iter().filter(|job| release_job_in_event(job, event)) {
+        let id = job.id.as_deref().unwrap_or_default();
+        for dependency in job.needs.as_deref().unwrap_or_default() {
+            let target = jobs
+                .iter()
+                .find(|candidate| candidate.id.as_deref() == Some(dependency.as_str()));
+            if target.is_none_or(|target| !release_job_in_event(target, event)) {
                 return Err(GeneratorError::usage(format!(
-                    "[[release.job]] {id} names task {task}, which is not a plain task reference"
-                )));
-            }
-        }
-        if let Some(needs) = row.needs.as_deref() {
-            for dependency in needs {
-                if dependency == id {
-                    return Err(GeneratorError::usage(format!(
-                        "[[release.job]] {id} needs itself; a job cannot wait on its own completion"
-                    )));
-                }
-                if !ids.contains(dependency) {
-                    return Err(GeneratorError::usage(format!(
-                        "[[release.job]] {id} needs {dependency}, which no job declares"
-                    )));
-                }
-            }
-        }
-        let runner = row.runner.as_deref().unwrap_or("github");
-        let (provider, needs_selector) = match runner {
-            "github" => (ProviderId::GithubHosted, true),
-            // macOS is a fixed GitHub-hosted label, so it needs the hosted
-            // provider but not its Linux selector.
-            "macos" => (ProviderId::GithubHosted, false),
-            "velnor" => (ProviderId::Velnor, true),
-            _ => {
-                return Err(GeneratorError::usage(format!(
-                    "[[release.job]] {id} runner must be one of github, macos, velnor; found {runner}"
-                )));
-            }
-        };
-        if !providers.contains(&provider) {
-            return Err(GeneratorError::usage(format!(
-                "[[release.job]] {id} runner `{runner}` selects {provider}, but [workflow] providers does not include that lane"
-            )));
-        }
-        if needs_selector && !selectors.contains_key(&provider) {
-            return Err(GeneratorError::usage(format!(
-                "[[release.job]] {id} runner `{runner}` selects {provider}, but no selector supplies its runs-on labels"
-            )));
-        }
-        if let Some(modes) = row.modes.as_deref() {
-            for mode in modes {
-                if !RELEASE_JOB_MODES.contains(&mode.as_str()) {
-                    return Err(GeneratorError::usage(format!(
-                        "[[release.job]] {id} modes must be one of {}, found {mode}",
-                        RELEASE_JOB_MODES.join(", ")
-                    )));
-                }
-            }
-        }
-        if let Some(timeout) = row.timeout_minutes
-            && (timeout < 1 || u32::try_from(timeout).is_err())
-        {
-            return Err(GeneratorError::usage(format!(
-                "[[release.job]] {id} timeout_minutes must be a positive number of minutes, found {timeout}"
-            )));
-        }
-        if let Some(environment) = row.environment.as_deref()
-            && (environment.is_empty() || environment.contains(['\n', '\r']))
-        {
-            return Err(GeneratorError::usage(format!(
-                "[[release.job]] {id} environment must be one non-empty line"
-            )));
-        }
-        if let Some(subjects) = row.attest_subjects.as_deref() {
-            for subject in subjects {
-                if subject.is_empty() || subject.contains(['\n', '\r']) {
-                    return Err(GeneratorError::usage(format!(
-                        "[[release.job]] {id} attest_subjects must be one non-empty line per subject"
-                    )));
-                }
-            }
-            if runner == "velnor"
-                && (subjects.len() != 1
-                    || !VELNOR_ATTESTATION_SUBJECTS.contains(&subjects[0].as_str()))
-            {
-                return Err(GeneratorError::usage(format!(
-                    "[[release.job]] {id} runner `velnor` supports exactly one attest_subjects value from {}; found [{}]",
-                    VELNOR_ATTESTATION_SUBJECTS.join(", "),
-                    subjects.join(", "),
-                )));
-            }
-        }
-        for (scope, level) in &row.permissions {
-            if !RELEASE_JOB_PERMISSIONS.contains(&scope.as_str()) {
-                return Err(GeneratorError::usage(format!(
-                    "[[release.job]] {id} permissions names {scope}, which is not a job permission scope"
-                )));
-            }
-            if !RELEASE_JOB_PERMISSION_LEVELS.contains(&level.as_str()) {
-                return Err(GeneratorError::usage(format!(
-                    "[[release.job]] {id} permissions {scope} must be one of {}, found {level}",
-                    RELEASE_JOB_PERMISSION_LEVELS.join(", ")
-                )));
-            }
-        }
-        if row
-            .attest_subjects
-            .as_deref()
-            .is_some_and(|subjects| !subjects.is_empty())
-        {
-            for (scope, required) in [("id-token", "write"), ("attestations", "write")] {
-                if let Some(level) = row.permissions.get(scope)
-                    && level != required
-                {
-                    return Err(GeneratorError::usage(format!(
-                        "[[release.job]] {id} attest_subjects requires permissions.{scope} = {required}, found {level}"
-                    )));
-                }
-            }
-        }
-        if row
-            .permissions
-            .get("contents")
-            .is_some_and(|level| level == "none")
-        {
-            return Err(GeneratorError::usage(format!(
-                "[[release.job]] {id} permissions cannot set contents = none; checkout requires contents: read"
-            )));
-        }
-        if let Some(needs) = row.needs.as_deref() {
-            let (runs_validate, runs_publish) = release_job_events(row);
-            for dependency in needs {
-                let Some(dependency_row) = release
-                    .job
-                    .iter()
-                    .find(|candidate| candidate.id.as_deref() == Some(dependency.as_str()))
-                else {
-                    // The earlier reference check returns this same config
-                    // error before this mode check in normal validation.
-                    continue;
-                };
-                let (dependency_validate, dependency_publish) = release_job_events(dependency_row);
-                if (runs_validate && !dependency_validate) || (runs_publish && !dependency_publish)
-                {
-                    return Err(GeneratorError::usage(format!(
-                        "[[release.job]] {id} needs {dependency}, but their release modes do not overlap for every event; a gated dependency would silently skip this job"
-                    )));
-                }
-            }
-        }
-        for (key, value) in &row.env {
-            if !valid_check_profile_env_key(key) {
-                return Err(GeneratorError::usage(format!(
-                    "[[release.job]] {id} env name {key} is not a shell identifier"
-                )));
-            }
-            if value.contains(['\n', '\r']) {
-                return Err(GeneratorError::usage(format!(
-                    "[[release.job]] {id} env {key} must be one line"
+                    "[[release.job]] {id} needs `{dependency}`, which is not present in the {event} workflow; dependencies must be included in every event lane that uses them"
                 )));
             }
         }
     }
-    validate_release_job_cycles(&release.job)?;
     Ok(())
 }
 
+fn validate_release_job_cycles(jobs: &[ReleaseJobSection]) -> Result<(), GeneratorError> {
+    let mut indegree = BTreeMap::<String, usize>::new();
+    let mut dependents = BTreeMap::<String, Vec<String>>::new();
+    for row in jobs {
+        let id = row.id.as_deref().unwrap_or_default().to_owned();
+        indegree.insert(id.clone(), 0);
+        dependents.entry(id).or_default();
+    }
+    for row in jobs {
+        let id = row.id.as_deref().unwrap_or_default().to_owned();
+        for dependency in row.needs.as_deref().unwrap_or_default() {
+            if let Some(count) = indegree.get_mut(&id) {
+                *count += 1;
+            }
+            dependents
+                .entry(dependency.clone())
+                .or_default()
+                .push(id.clone());
+        }
+    }
+    let roots = indegree
+        .iter()
+        .filter_map(|(id, count)| (*count == 0).then_some(id.clone()))
+        .collect::<Vec<_>>();
+    let mut ready = VecDeque::from(roots);
+    let mut visited = 0;
+    while let Some(id) = ready.pop_front() {
+        visited += 1;
+        if let Some(children) = dependents.get(&id) {
+            for child in children {
+                let became_ready = indegree.get_mut(child).is_some_and(|count| {
+                    *count -= 1;
+                    *count == 0
+                });
+                if became_ready {
+                    ready.push_back(child.clone());
+                }
+            }
+        }
+    }
+    if visited != jobs.len() {
+        let id = indegree
+            .iter()
+            .find_map(|(id, count)| (*count > 0).then_some(id.as_str()))
+            .unwrap_or("unknown");
+        return Err(GeneratorError::usage(format!(
+            "[[release.job]] dependency cycle includes `{id}`; task job dependencies must form a DAG"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_release_job_row(
+    workflow: &WorkflowSection,
+    release: &ReleaseSection,
+    row: &ReleaseJobSection,
+    id: &str,
+    ids: &BTreeSet<&str>,
+) -> Result<(), GeneratorError> {
+    if let Some(name) = row.name.as_deref()
+        && (name.is_empty() || name.contains(['\n', '\r']))
+    {
+        return Err(GeneratorError::usage(format!(
+            "[[release.job]] {id} name must be one non-empty line"
+        )));
+    }
+    match row.tasks.as_deref() {
+        None => {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} is missing `tasks`; name the mise tasks the job runs"
+            )));
+        }
+        Some(tasks) if tasks.is_empty() => {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} declares an empty tasks; name the mise tasks the job runs"
+            )));
+        }
+        Some(tasks) => {
+            for task in tasks {
+                if !valid_check_profile_task(task) {
+                    return Err(GeneratorError::usage(format!(
+                        "[[release.job]] {id} names task `{task}`, which is not a plain task reference; use names such as build-release without whitespace or shell syntax"
+                    )));
+                }
+            }
+        }
+    }
+    if let Some(needs) = row.needs.as_deref() {
+        let mut seen = BTreeSet::new();
+        for dependency in needs {
+            if dependency == id {
+                return Err(GeneratorError::usage(format!(
+                    "[[release.job]] {id} needs itself; a job cannot wait on its own completion"
+                )));
+            }
+            if !seen.insert(dependency) {
+                return Err(GeneratorError::usage(format!(
+                    "[[release.job]] {id} needs `{dependency}` more than once"
+                )));
+            }
+            if !ids.contains(dependency.as_str()) {
+                let known = ids.iter().copied().collect::<Vec<_>>().join(", ");
+                return Err(GeneratorError::usage(format!(
+                    "[[release.job]] {id} needs `{dependency}`, which no job declares; declared jobs: {known}"
+                )));
+            }
+        }
+    }
+
+    let runner = row.runner.as_deref().unwrap_or("github");
+    let provider = match runner {
+        "github" | "macos" => ProviderId::GithubHosted,
+        "velnor" => ProviderId::Velnor,
+        _ => {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} runner must be one of: github, macos, velnor; found `{runner}`"
+            )));
+        }
+    };
+    if !workflow
+        .providers
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .any(|declared| declared == provider.as_str())
+    {
+        return Err(GeneratorError::usage(format!(
+            "[[release.job]] {id} runs on {runner}, but [workflow] providers does not include `{provider}`"
+        )));
+    }
+
+    if let Some(modes) = row.modes.as_deref() {
+        let mut seen = BTreeSet::new();
+        for mode in modes {
+            if !RELEASE_JOB_MODES.contains(&mode.as_str()) {
+                return Err(GeneratorError::usage(format!(
+                    "[[release.job]] {id} modes must be one of {}, found `{mode}`; validate runs on dispatch drills, publish on tag pushes",
+                    RELEASE_JOB_MODES.join(", ")
+                )));
+            }
+            if !seen.insert(mode) {
+                return Err(GeneratorError::usage(format!(
+                    "[[release.job]] {id} modes repeats `{mode}`"
+                )));
+            }
+        }
+    }
+    if let Some(timeout) = row.timeout_minutes
+        && (timeout < 1 || u32::try_from(timeout).is_err())
+    {
+        return Err(GeneratorError::usage(format!(
+            "[[release.job]] {id} timeout_minutes must be a positive number of minutes, found {timeout}"
+        )));
+    }
+    if let Some(environment) = row.environment.as_deref()
+        && !valid_release_environment(environment)
+    {
+        return Err(GeneratorError::usage(format!(
+            "[[release.job]] {id} environment must be a literal identifier using letters, digits, `.`, `_`, and `-`; expressions and control characters are forbidden"
+        )));
+    }
+    if let Some(subjects) = row.attest_subjects.as_deref() {
+        let mut seen = BTreeSet::new();
+        for subject in subjects {
+            if subject.is_empty() || subject.contains(['\n', '\r']) {
+                return Err(GeneratorError::usage(format!(
+                    "[[release.job]] {id} attest_subjects must be one non-empty line per subject"
+                )));
+            }
+            if !valid_attest_subject(subject) {
+                return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} attest subject `{subject}` must be a relative artifact path without traversal; a glob may match one filename with a literal extension, such as `artifacts/*.tar.gz`"
+            )));
+            }
+            match release.runner_capabilities.get(runner) {
+                Some(capability) if !capability.attest_subjects.contains(subject) => {
+                    return Err(GeneratorError::usage(format!(
+                        "[[release.job]] {id} runner `{runner}` does not admit attestation subject `{subject}`; choose one of {} from [release.runner_capabilities.{runner}].attest_subjects",
+                        capability.attest_subjects.join(", ")
+                    )));
+                }
+                None if provider.is_local() => {
+                    return Err(GeneratorError::usage(format!(
+                        "[[release.job]] {id} runner `{runner}` is local and has no declared attestation subject contract; add [release.runner_capabilities.{runner}].attest_subjects"
+                    )));
+                }
+                _ => {}
+            }
+            if !seen.insert(subject) {
+                return Err(GeneratorError::usage(format!(
+                    "[[release.job]] {id} repeats attest subject `{subject}`"
+                )));
+            }
+        }
+    }
+    for (scope, level) in &row.permissions {
+        if !RELEASE_JOB_PERMISSIONS.contains(&scope.as_str()) {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} permissions names `{scope}`, which is not a job permission scope; use one of {}",
+                RELEASE_JOB_PERMISSIONS.join(", ")
+            )));
+        }
+        if !RELEASE_JOB_PERMISSION_LEVELS.contains(&level.as_str()) {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} permissions `{scope}` must be one of {}, found `{level}`",
+                RELEASE_JOB_PERMISSION_LEVELS.join(", ")
+            )));
+        }
+    }
+    if row
+        .permissions
+        .get("contents")
+        .is_some_and(|level| level == "none")
+    {
+        return Err(GeneratorError::usage(format!(
+            "[[release.job]] {id} permissions.contents cannot be `none`; every release job checks out the repository and needs at least `contents: read`"
+        )));
+    }
+    if row
+        .attest_subjects
+        .as_deref()
+        .is_some_and(|subjects| !subjects.is_empty())
+    {
+        for permission in ["id-token", "attestations"] {
+            if row.permissions.get(permission).map(String::as_str) != Some("write") {
+                return Err(GeneratorError::usage(format!(
+                    "[[release.job]] {id} sets attest_subjects, which requires `permissions.{permission} = \"write\"`"
+                )));
+            }
+        }
+    }
+    for (key, value) in &row.env {
+        if key == "VELNOR_RELEASE_TAG" {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} env `{key}` is reserved for the validated release-tag output"
+            )));
+        }
+        if !valid_check_profile_env_key(key) {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} env names `{key}`, which is not an environment name; use shell identifiers such as DEVELOPER_DIR"
+            )));
+        }
+        if value.contains(['\n', '\r']) {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} env `{key}` must be one line"
+            )));
+        }
+    }
+    if row
+        .modes
+        .as_deref()
+        .is_some_and(|modes| modes.iter().any(|mode| mode == "validate"))
+    {
+        if runner == "velnor" {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} selects `validate`, but selected-ref task code cannot run on the Velnor privileged runner"
+            )));
+        }
+        if row.environment.is_some() {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} selects `validate`, but validation jobs cannot attach a GitHub environment or its secrets"
+            )));
+        }
+        if row.attest_subjects.as_deref().is_some_and(|subjects| !subjects.is_empty()) {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} selects `validate`, but selected-ref jobs cannot attest artifacts"
+            )));
+        }
+        if !row.env.is_empty() {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} selects `validate`, but selected-ref jobs cannot receive configured env values or secrets"
+            )));
+        }
+        if row
+            .permissions
+            .iter()
+            .any(|(scope, level)| scope != "contents" || level != "read")
+        {
+            return Err(GeneratorError::usage(format!(
+                "[[release.job]] {id} selects `validate`, but selected-ref jobs may declare only `permissions.contents = \"read\"`; writes and other scopes are forbidden"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn valid_attest_subject(subject: &str) -> bool {
+    if subject.starts_with('/') || subject.contains('\\') || subject.contains(':') {
+        return false;
+    }
+    let components = subject.split('/').collect::<Vec<_>>();
+    if components.is_empty()
+        || components
+            .iter()
+            .any(|component| component.is_empty() || *component == "." || *component == "..")
+    {
+        return false;
+    }
+    let plain_filename = |component: &str| {
+        component.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'+')
+        })
+    };
+    for directory in &components[..components.len() - 1] {
+        if !plain_filename(directory) {
+            return false;
+        }
+    }
+    let Some(filename) = components.last().copied() else {
+        return false;
+    };
+    let wildcard_count = filename.bytes().filter(|byte| *byte == b'*').count();
+    if filename
+        .bytes()
+        .any(|byte| matches!(byte, b'?' | b'[' | b']' | b'{' | b'}' | b'!' | b','))
+    {
+        return false;
+    }
+    match wildcard_count {
+        0 => plain_filename(filename),
+        1 => {
+            let Some((prefix, suffix)) = filename.split_once('*') else {
+                return false;
+            };
+            suffix.starts_with('.')
+                && suffix[1..].bytes().any(|byte| byte.is_ascii_alphanumeric())
+                && plain_filename(prefix)
+                && plain_filename(suffix)
+        }
+        _ => false,
+    }
+}
+
+fn valid_release_environment(environment: &str) -> bool {
+    let mut bytes = environment.bytes();
+    bytes.next().is_some_and(|first| first.is_ascii_alphanumeric())
+        && environment.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+        })
+}
+
+/// Whether `value` is a portable archive member name: a bare file name over
+/// the portable asset alphabet, never a path.
 fn is_archive_member(value: &str) -> bool {
     !value.is_empty()
         && value
@@ -3774,7 +4091,7 @@ mod tests {
     fn docker_context_names_are_typed_unique_and_reserved_names_fail() {
         let root = scanned_root("docker-context-names");
         let duplicate = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [[units]]\nid = \"docker\"\nkind = \"docker\"\n\n\
              [[units.docker_contexts]]\nname = \"checkout\"\npath = \".\"\n\n\
              [[units.docker_contexts]]\nname = \"checkout\"\npath = \".\"\n",
@@ -3786,7 +4103,7 @@ mod tests {
         assert!(error.to_string().contains("more than once"), "{error}");
 
         let reserved = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [[units]]\nid = \"docker\"\nkind = \"docker\"\n\n\
              [[units.docker_contexts]]\nname = \"velnor-cache-seed\"\npath = \".\"\n",
         );
@@ -3796,7 +4113,7 @@ mod tests {
         );
         assert!(error.to_string().contains("reserved"), "{error}");
         let invalid = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [[units]]\nid = \"docker\"\nkind = \"docker\"\n\n\
              [[units.docker_contexts]]\nname = \"Checkout\"\npath = \".\"\n",
         );
@@ -3815,7 +4132,7 @@ mod tests {
     fn docker_context_paths_reject_missing_directories() {
         let root = scanned_root("docker-context-missing");
         let missing = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [[units]]\nid = \"docker\"\nkind = \"docker\"\n\n\
              [[units.docker_contexts]]\nname = \"checkout\"\npath = \"missing\"\n",
         );
@@ -3850,7 +4167,7 @@ mod tests {
         );
 
         let valid = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [[units]]\nid = \"docker\"\nkind = \"docker\"\n\n\
              [[units.docker_contexts]]\nname = \"checkout\"\npath = \"inside-link\"\n",
         );
@@ -3860,7 +4177,7 @@ mod tests {
         );
 
         let escaping = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [[units]]\nid = \"docker\"\nkind = \"docker\"\n\n\
              [[units.docker_contexts]]\nname = \"checkout\"\npath = \"escape-link\"\n",
         );
@@ -3874,7 +4191,7 @@ mod tests {
         );
 
         let traversal = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [[units]]\nid = \"docker\"\nkind = \"docker\"\n\n\
              [[units.docker_contexts]]\nname = \"checkout\"\npath = \"../outside\"\n",
         );
@@ -3904,93 +4221,89 @@ mod tests {
     }
 
     fn config_for(text: &str) -> RepoGenerationConfig {
+        let text = complete_test_provider_contract(text);
         must(
-            toml::from_str::<RepoGenerationConfig>(text),
+            toml::from_str::<RepoGenerationConfig>(&text),
             "parse config under test",
         )
     }
 
-    fn tasks_release_config(workflow: &str, jobs: &str) -> RepoGenerationConfig {
-        config_for(&format!(
-            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n{workflow}\n\n[release]\nenabled = true\nkind = \"tasks\"\n\n{jobs}\n"
-        ))
-    }
-
-    fn tasks_release_validation_error(workflow: &str, jobs: &str) -> String {
-        must_fail(
-            tasks_release_config(workflow, jobs).validate(&[], &[], &BTreeSet::new()),
-            "tasks release config must fail",
+    fn config_for_raw(text: &str) -> RepoGenerationConfig {
+        must(
+            toml::from_str::<RepoGenerationConfig>(text),
+            "parse raw config under test",
         )
-        .to_string()
     }
 
-    #[test]
-    fn release_job_rejects_explicit_contents_none() {
-        let error = tasks_release_validation_error(
-            "",
-            "[[release.job]]\nid = \"build\"\ntasks = [\"build\"]\n\n[release.job.permissions]\ncontents = \"none\"\n",
-        );
-        assert!(error.contains("contents = none"), "{error}");
-        assert!(
-            error.contains("checkout requires contents: read"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn release_job_rejects_attestation_permission_downgrade() {
-        let error = tasks_release_validation_error(
-            "",
-            "[[release.job]]\nid = \"sign\"\ntasks = [\"sign\"]\nattest_subjects = [\"dist/*.tar.gz\"]\n\n[release.job.permissions]\nid-token = \"read\"\n",
-        );
-        assert!(
-            error.contains("attest_subjects requires permissions.id-token = write"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn release_job_rejects_velnor_attestation_subject_outside_capability() {
-        let error = tasks_release_validation_error(
-            "[workflow]\nproviders = [\"velnor\"]\n",
-            "[[release.job]]\nid = \"sign\"\ntasks = [\"sign\"]\nrunner = \"velnor\"\nattest_subjects = [\"dist/app.zip\"]\n",
-        );
-        assert!(error.contains("runner `velnor`"), "{error}");
-        assert!(error.contains("dist/*.tar.gz"), "{error}");
-        assert!(error.contains("dist/l2-subject.json"), "{error}");
-    }
-
-    #[test]
-    fn release_job_rejects_runner_outside_provider_universe() {
-        let error = tasks_release_validation_error(
-            "[workflow]\nproviders = [\"velnor\"]\n",
-            "[[release.job]]\nid = \"build\"\ntasks = [\"build\"]\nrunner = \"github\"\n",
-        );
-        assert!(
-            error.contains("runner `github` selects github-hosted"),
-            "{error}"
-        );
-        assert!(error.contains("does not include that lane"), "{error}");
-    }
-
-    #[test]
-    fn release_job_rejects_dependency_cycles() {
-        let error = tasks_release_validation_error(
-            "",
-            "[[release.job]]\nid = \"build\"\ntasks = [\"build\"]\nneeds = [\"publish\"]\n\n[[release.job]]\nid = \"publish\"\ntasks = [\"publish\"]\nneeds = [\"build\"]\n",
-        );
-        assert!(error.contains("dependency cycle"), "{error}");
-        assert!(error.contains("build -> publish -> build"), "{error}");
-    }
-
-    #[test]
-    fn release_job_rejects_mode_incompatible_dependency() {
-        let error = tasks_release_validation_error(
-            "",
-            "[[release.job]]\nid = \"validate\"\ntasks = [\"validate\"]\nmodes = [\"validate\"]\n\n[[release.job]]\nid = \"publish\"\ntasks = [\"publish\"]\nmodes = [\"publish\"]\nneeds = [\"validate\"]\n",
-        );
-        assert!(error.contains("modes do not overlap"), "{error}");
-        assert!(error.contains("silently skip"), "{error}");
+    /// Older unrelated config tests omit routing inputs. Give those fixtures
+    /// an explicit provider contract while keeping absence/missing-selector
+    /// tests on `config_for_raw` so they exercise the production contract.
+    fn complete_test_provider_contract(text: &str) -> String {
+        let Ok(mut value) = toml::from_str::<toml::Value>(text) else {
+            return text.to_owned();
+        };
+        let Some(root) = value.as_table_mut() else {
+            return text.to_owned();
+        };
+        if root.get("schema").and_then(toml::Value::as_integer) != Some(2) {
+            return text.to_owned();
+        }
+        let workflow = root
+            .entry("workflow")
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        let Some(workflow) = workflow.as_table_mut() else {
+            return text.to_owned();
+        };
+        if !workflow.contains_key("providers") {
+            workflow.insert(
+                "providers".to_owned(),
+                toml::Value::Array(
+                    ProviderId::ALL
+                        .iter()
+                        .map(|provider| toml::Value::String(provider.as_str().to_owned()))
+                        .collect(),
+                ),
+            );
+        }
+        let Some(provider_values) = workflow.get("providers").and_then(toml::Value::as_array)
+        else {
+            return toml::to_string(&value).unwrap_or_else(|_| text.to_owned());
+        };
+        let provider_ids = provider_values
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .filter(|value| ProviderId::parse(value).is_ok())
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        let selectors = workflow
+            .entry("selectors")
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        let Some(selectors) = selectors.as_table_mut() else {
+            return toml::to_string(&value).unwrap_or_else(|_| text.to_owned());
+        };
+        for provider in provider_ids {
+            if selectors.contains_key(&provider) {
+                continue;
+            }
+            let runs_on = match ProviderId::parse(&provider) {
+                Ok(ProviderId::GithubHosted) => vec!["ubuntu-24.04"],
+                Ok(ProviderId::GithubSelfHosted) => vec!["bastion-scale-set"],
+                Ok(ProviderId::Velnor) => vec!["self-hosted", "velnor-native"],
+                Err(_) => continue,
+            };
+            let mut row = toml::map::Map::new();
+            row.insert(
+                "runs_on".to_owned(),
+                toml::Value::Array(
+                    runs_on
+                        .into_iter()
+                        .map(|label| toml::Value::String(label.to_owned()))
+                        .collect(),
+                ),
+            );
+            selectors.insert(provider, toml::Value::Table(row));
+        }
+        toml::to_string(&value).unwrap_or_else(|_| text.to_owned())
     }
 
     /// A test-owned `package-update.yml` body: the grant rules are validated
@@ -4045,9 +4358,8 @@ mod tests {
              actionlint_config_variables_null = true\n\
              \n\
              [[declare]]\n\
-             primitive = \"rust-crate\"\n\
+             primitive = \"rust-crate-pipeline\"\n\
              units = [\"{unit}\"]\n\
-             file = \"rust-crate.yml\"\n\
              [declare.args]\n\
              targets = [\"x86_64-unknown-linux-gnu\"]\n\
              channel = \"stable\"\n\
@@ -4082,7 +4394,7 @@ mod tests {
         assert_eq!(canonical, repeated, "canonical form must be stable");
         // Both declarations survive, each carrying its own row fields.
         assert!(
-            canonical.contains("\"primitive\":\"rust-crate\""),
+            canonical.contains("\"primitive\":\"rust-crate-pipeline\""),
             "{canonical}"
         );
         assert!(
@@ -4310,11 +4622,12 @@ mod tests {
 
     #[test]
     fn workflow_dispatch_and_automatic_provider_defaults_are_optional() {
-        let config = config_for("schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n");
+        let config =
+            config_for_raw("schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n");
         assert_eq!(config.automatic_providers(), None);
         assert_eq!(config.default_dispatch_providers(), None);
         let declared = config_for(
-            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nautomatic_providers = [\"velnor\"]\ndefault_dispatch_providers = [\"github-hosted\"]\n",
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"github-hosted\", \"github-self-hosted\", \"velnor\"]\nautomatic_providers = [\"velnor\"]\ndefault_dispatch_providers = [\"github-hosted\"]\n",
         );
         assert_eq!(
             declared.automatic_providers(),
@@ -4348,14 +4661,65 @@ mod tests {
     }
 
     #[test]
-    fn workflow_providers_is_optional_without_changing_canonical_shape() {
-        let config = config_for("schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n");
+    fn required_local_runner_groups_reject_label_only_selectors() {
+        let mut workflow = WorkflowSection {
+            providers: Some(vec!["github-hosted".to_owned(), "velnor".to_owned()]),
+            require_local_runner_group: Some(true),
+            ..WorkflowSection::default()
+        };
+        workflow.selectors = BTreeMap::from([
+            (
+                "github-hosted".to_owned(),
+                ProviderSelector {
+                    runs_on: vec!["ubuntu-24.04".to_owned()],
+                    group: None,
+                },
+            ),
+            (
+                "velnor".to_owned(),
+                ProviderSelector {
+                    runs_on: vec!["self-hosted".to_owned(), "runner".to_owned()],
+                    group: None,
+                },
+            ),
+        ]);
+        let error = must_fail(
+            validate_workflow(&workflow),
+            "label-only local selector",
+        );
+        assert!(error.to_string().contains("requires a static group"), "{error}");
+
+        workflow
+            .selectors
+            .get_mut("velnor")
+            .expect("Velnor selector")
+            .group = Some("trusted-pool".to_owned());
+        must(
+            validate_workflow(&workflow),
+            "local selector with required runner group",
+        );
+    }
+
+    #[test]
+    fn workflow_providers_must_be_declared_without_changing_canonical_shape() {
+        let config =
+            config_for_raw("schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n");
         assert_eq!(config.providers(), None);
         let canonical = must(
             config.canonical_json(),
-            "canonicalize default workflow config",
+            "canonicalize workflow config without providers",
         );
         assert!(!canonical.contains("\"providers\""), "{canonical}");
+        let error = must_fail(
+            config.validate(&[], &[], &BTreeSet::new()),
+            "omitted provider universe must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("[workflow] providers is required"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -4400,6 +4764,37 @@ mod tests {
     }
 
     #[test]
+    fn provider_contract_requires_exact_selector_rows() {
+        let missing = config_for_raw(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"github-hosted\"]\n",
+        );
+        let error = must_fail(
+            missing.validate(&[], &[], &BTreeSet::new()),
+            "missing provider selector must fail",
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("[workflow.selectors.github-hosted] is required"),
+            "{error}"
+        );
+
+        let extra = config_for_raw(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"github-hosted\"]\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\n[workflow.selectors.velnor]\nruns_on = [\"velnor-native\"]\n",
+        );
+        let error = must_fail(
+            extra.validate(&[], &[], &BTreeSet::new()),
+            "selector outside the provider universe must fail",
+        );
+        assert!(
+            error.to_string().contains(
+                "[workflow.selectors.velnor] is declared but `velnor` is not in [workflow] providers"
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn workflow_automatic_providers_must_stay_inside_the_universe() {
         let subset = config_for(
             "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nproviders = [\"github-hosted\", \"velnor\"]\nautomatic_providers = [\"github-hosted\"]\n",
@@ -4430,7 +4825,8 @@ mod tests {
 
     #[test]
     fn workflow_selectors_route_each_provider_and_reject_empty_labels() {
-        let config = config_for("schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n");
+        let config =
+            config_for_raw("schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n");
         assert!(config.selectors().is_empty());
         let canonical = must(
             config.canonical_json(),
@@ -4623,7 +5019,7 @@ mod tests {
         let available = shape.unit_ids().collect::<Vec<_>>().join(", ");
         let config = config_for(
             "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
-             [[declare]]\nprimitive = \"rust-crate\"\nunits = [\"not-a-unit\"]\nfile = \"rust.yml\"\n",
+             [[declare]]\nprimitive = \"rust-crate-pipeline\"\nunits = [\"not-a-unit\"]\n",
         );
         let error = must_some_error(
             config
@@ -4843,7 +5239,7 @@ mod tests {
         for file in ["../escape.yml", "nested/deep.yml", "workflow.yaml", ".yml"] {
             let config = config_for(&format!(
                 "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
-                 [[declare]]\nprimitive = \"rust-crate\"\nfile = \"{file}\"\n"
+                 [[declare]]\nprimitive = \"rust-crate-pipeline\"\nfile = \"{file}\"\n"
             ));
             let error = must_some_error(
                 config
@@ -4858,7 +5254,7 @@ mod tests {
         }
         let separator = config_for(concat!(
             "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n",
-            "[[declare]]\nprimitive = \"rust-crate\"\nfile = 'back\\slash.yml'\n",
+            "[[declare]]\nprimitive = \"rust-crate-pipeline\"\nfile = 'back\\slash.yml'\n",
         ));
         let error = must_some_error(
             separator
@@ -4922,7 +5318,7 @@ mod tests {
         let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
         let opaque = config_for(
             "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
-             [[declare]]\nprimitive = \"rust-crate\"\nfile = \"rust.yml\"\n\
+             [[declare]]\nprimitive = \"rust-crate-pipeline\"\n\
              [declare.args]\nanything = { goes = [\"here\", 3, true] }\n",
         );
         must(
@@ -4931,7 +5327,7 @@ mod tests {
         );
         let float = config_for(
             "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
-             [[declare]]\nprimitive = \"rust-crate\"\nfile = \"rust.yml\"\n\
+             [[declare]]\nprimitive = \"rust-crate-pipeline\"\n\
              [declare.args]\nratio = 1.5\n",
         );
         let error = must_some_error(
@@ -5046,7 +5442,7 @@ mod tests {
     }
 
     #[test]
-    fn discovery_reads_the_repository_root_and_ignores_absence() {
+    fn discovery_reports_absence_without_applying_generation_defaults() {
         let root = scanned_root("discovery");
         assert!(must(discover(&root), "discover absent config").is_none());
         let path = root.join(GENERATION_CONFIG_PATH);
@@ -5236,7 +5632,7 @@ mod tests {
         let github_only = config_for(&check_profile_config(
             "[[check_profile]]\nid = \"fleet\"\nschedule = \"23 2 * * *\"\nrunner = \"velnor\"\ntasks = [\"check-fleet\"]\n\n\
              [workflow]\nproviders = [\"github-hosted\"]\n\n\
-             [workflow.selectors.velnor]\nruns_on = [\"self-hosted\"]\n",
+             [workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n",
         ));
         let error = must_fail(
             github_only.validate(&[], &[], &BTreeSet::new()),
@@ -5247,9 +5643,13 @@ mod tests {
             "{error}"
         );
 
-        let unrouted = config_for(&check_profile_config(
-            "[[check_profile]]\nid = \"fleet\"\nschedule = \"23 2 * * *\"\nrunner = \"velnor\"\ntasks = [\"check-fleet\"]\n",
-        ));
+        let unrouted_text = format!(
+            "{}\n[workflow]\nproviders = [\"velnor\"]\n",
+            check_profile_config(
+                "[[check_profile]]\nid = \"fleet\"\nschedule = \"23 2 * * *\"\nrunner = \"velnor\"\ntasks = [\"check-fleet\"]\n",
+            )
+        );
+        let unrouted = config_for_raw(&unrouted_text);
         let error = must_fail(
             unrouted.validate(&[], &[], &BTreeSet::new()),
             "a Velnor profile without a selector must fail",
@@ -5295,7 +5695,7 @@ mod tests {
 
     fn docs_config_text(body: &str) -> String {
         format!(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[docs]\nenabled = true\n{body}\n{DOCS_DECLARE}",
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[docs]\nenabled = true\n{body}\n{DOCS_DECLARE}",
         )
     }
 
@@ -5316,7 +5716,7 @@ mod tests {
         let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
         let error = must_fail(
             config_for(
-                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
                  [docs]\nenabled = true\nreason = \"test\"\nsite_url = \"https://docs.example.com\"\n\
                  site_dir = \"site\"\nbuild_commands = [\"mise run docs:build\"]\n\
                  spell_commands = [\"mise run docs:spell\"]\n",
@@ -5416,7 +5816,7 @@ mod tests {
     fn docs_unknown_field_fails_closed() {
         let error = must_some_error(
             toml::from_str::<RepoGenerationConfig>(
-                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
                  [docs]\nenabled = true\nreason = \"test\"\nunknown = true\n",
             )
             .err(),
@@ -5482,7 +5882,7 @@ mod tests {
         ] {
             let error = must_fail(
                 config_for(&format!(
-                    "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n{release}"
+                    "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n{release}"
                 ))
                 .validate(&unit_ids, &[], &BTreeSet::new()),
                 name,
@@ -5503,7 +5903,7 @@ mod tests {
         let shape = shape_for(&root);
         let unit_ids = shape.unit_ids().map(str::to_owned).collect::<Vec<_>>();
         let parsed = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [release]\nenabled = true\nkind = \"rust-binary\"\npackage = \"example\"\n\
              binary = \"example\"\ntargets = [\"x86_64-unknown-linux-gnu\"]\n\
              producer_workflow = \"CI\"\nproducer_conclusion = \"success\"\n\
@@ -5538,7 +5938,7 @@ mod tests {
     /// naming the gap.
     #[test]
     fn release_registry_auth_must_be_a_complete_docker_triple() {
-        let base = "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nenabled = true\n";
+        let base = "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[release]\nenabled = true\n";
         let contract = "kind = \"docker\"\nimage = \"example/app\"\nplatforms = [\"linux/amd64\", \"linux/arm64\"]\n";
         let triple = "registry = \"docker.io\"\nregistry_username_secret = \"REGISTRY_USERNAME\"\nregistry_password_secret = \"REGISTRY_PASSWORD\"\n";
         let valid = config_for(&format!("{base}{contract}{triple}"));
@@ -5813,7 +6213,7 @@ mod tests {
     #[test]
     fn maintenance_overrides_must_be_shaped() {
         let valid = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [maintenance]\nschedule = \"17 4 * * *\"\nproducers = [\"ci-main.yml\"]\nmax_deletes = 50\n",
         );
         must(
@@ -5837,7 +6237,7 @@ mod tests {
             ("oversized bound", "max_deletes = 5001\n"),
         ] {
             let config = config_for(&format!(
-                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[maintenance]\n{body}"
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[maintenance]\n{body}"
             ));
             let error = must_fail(
                 config.validate(&[], &[], &BTreeSet::new()),
@@ -5854,7 +6254,7 @@ mod tests {
     fn maintenance_unknown_field_fails_closed() {
         let error = must_some_error(
             toml::from_str::<RepoGenerationConfig>(
-                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
                  [maintenance]\nschedule = \"17 4 * * *\"\nunknown = true\n",
             )
             .err(),
@@ -5866,7 +6266,7 @@ mod tests {
     #[test]
     fn policy_dco_requires_the_external_dco_check() {
         let enforced = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [policy]\ndco_required = true\nruleset_external_status_checks = [\"DCO\"]\n",
         );
         must(
@@ -5874,7 +6274,7 @@ mod tests {
             "DCO required with the DCO check",
         );
         let unenforced = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [policy]\ndco_required = true\n",
         );
         let error = must_fail(
@@ -5892,7 +6292,7 @@ mod tests {
     #[test]
     fn policy_action_pin_admission_names_the_reviewed_allowlist() {
         let admitted = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [policy]\naction_pin_admission = \"reviewed-allowlist\"\n",
         );
         must(
@@ -5900,7 +6300,7 @@ mod tests {
             "the reviewed allowlist admission",
         );
         let invented = config_for(
-            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n\
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n\
              [policy]\naction_pin_admission = \"strict\"\n",
         );
         let error = must_fail(
@@ -5911,5 +6311,154 @@ mod tests {
             error.to_string().contains("must be `reviewed-allowlist`"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn apt_release_fields_form_one_typed_fail_closed_contract() {
+        let valid = "enabled = true\n\
+                     kind = \"apt\"\n\
+                     package = \"velnor\"\n\
+                     binary = \"velnor\"\n\
+                     source_repository = \"example/velnor\"\n\
+                     consumer_repository = \"example/apt\"\n\
+                     manifest_schema = \"example.test/apt-v1\"\n\
+                     apt_arches = [\"amd64\", \"arm64\"]\n\
+                     signer_fingerprint = \"0123456789ABCDEF0123456789ABCDEF01234567\"\n\
+                     passphrase_secret = \"APT_PASSPHRASE\"\n\
+                     signing_key_secret = \"APT_SIGNING_KEY\"\n\
+                     apt_attestation_secret = \"SOURCE_ATTESTATION_TOKEN\"\n\
+                     apt_feed_url = \"https://feed.example.test/apt\"\n\
+                     retention = 1\n";
+        let release: ReleaseSection = must(toml::from_str(valid), "parse typed APT release");
+        must(
+            validate_release_apt(&release),
+            "complete typed APT release must validate",
+        );
+        assert_eq!(release.apt_arches(), ["amd64", "arm64"]);
+        assert_eq!(
+            release.signer_fingerprint(),
+            Some("0123456789ABCDEF0123456789ABCDEF01234567")
+        );
+        assert_eq!(release.passphrase_secret(), Some("APT_PASSPHRASE"));
+        assert_eq!(release.signing_key_secret(), Some("APT_SIGNING_KEY"));
+        assert_eq!(
+            release.apt_attestation_secret(),
+            Some("SOURCE_ATTESTATION_TOKEN")
+        );
+        assert_eq!(
+            release.apt_feed_url(),
+            Some("https://feed.example.test/apt")
+        );
+        assert_eq!(release.retention(), Some(1));
+        let public_source = valid.replace(
+            "apt_attestation_secret = \"SOURCE_ATTESTATION_TOKEN\"\n",
+            "",
+        );
+        let public_release: ReleaseSection =
+            must(toml::from_str(&public_source), "parse public APT release");
+        must(
+            validate_release_apt(&public_release),
+            "public APT attestations need no configured source token",
+        );
+        assert_eq!(public_release.apt_attestation_secret(), None);
+
+        for (name, modified, expected) in [
+            (
+                "partial architecture set",
+                valid.replace(
+                    "apt_arches = [\"amd64\", \"arm64\"]",
+                    "apt_arches = [\"amd64\"]",
+                ),
+                "exactly `amd64` and `arm64`",
+            ),
+            (
+                "unsafe secret value",
+                valid.replace("APT_SIGNING_KEY", "literal-private-key"),
+                "environment secret",
+            ),
+            (
+                "unsafe attestation secret identifier",
+                valid.replace(
+                    "apt_attestation_secret = \"SOURCE_ATTESTATION_TOKEN\"",
+                    "apt_attestation_secret = \"source token\"",
+                ),
+                "apt_attestation_secret",
+            ),
+            (
+                "insecure feed URL",
+                valid.replace(
+                    "https://feed.example.test/apt",
+                    "http://feed.example.test/apt",
+                ),
+                "https URL",
+            ),
+            (
+                "unsupported retention",
+                valid.replace("retention = 1", "retention = 2"),
+                "retention",
+            ),
+        ] {
+            let release: ReleaseSection = must(toml::from_str(&modified), name);
+            let error = must_fail(validate_release_apt(&release), name);
+            assert!(error.to_string().contains(expected), "{name}: {error}");
+        }
+
+        let other_kind = valid.replace("kind = \"apt\"", "kind = \"native\"");
+        let release: ReleaseSection = must(toml::from_str(&other_kind), "parse non-APT release");
+        let error = must_fail(
+            validate_release_apt(&release),
+            "APT-only fields on another publisher must fail",
+        );
+        assert!(error.to_string().contains("only for kind `apt`"), "{error}");
+    }
+
+    #[test]
+    fn static_file_paths_reject_aliases_and_self_copy() {
+        let valid = StaticFileSection {
+            file: Some(".github/actions/example/action.yml".to_owned()),
+            source: Some("actions/example/action.yml".to_owned()),
+        };
+        assert!(validate_static_files(std::slice::from_ref(&valid)).is_ok());
+
+        for (label, file, source, expected) in [
+            (
+                "dot source segment",
+                ".github/actions/example/action.yml",
+                "actions/./example/action.yml",
+                "source must be a repository-relative path",
+            ),
+            (
+                "repeated source slash",
+                ".github/actions/example/action.yml",
+                "actions//example/action.yml",
+                "source must be a repository-relative path",
+            ),
+            (
+                "repeated target slash",
+                ".github//actions/example/action.yml",
+                "actions/example/action.yml",
+                "file must be a repository-relative path",
+            ),
+            (
+                "dot target segment",
+                ".github/./actions/example/action.yml",
+                "actions/example/action.yml",
+                "file must be a repository-relative path",
+            ),
+            (
+                "self copy",
+                ".github/actions/example/action.yml",
+                ".github/actions/example/action.yml",
+                "source and file resolve to the same repository path",
+            ),
+        ] {
+            let row = StaticFileSection {
+                file: Some(file.to_owned()),
+                source: Some(source.to_owned()),
+            };
+            let error =
+                must_fail(validate_static_files(std::slice::from_ref(&row)), label).to_string();
+            assert!(error.contains(expected), "{label}: {error}");
+        }
     }
 }

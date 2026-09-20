@@ -63,10 +63,9 @@ fn copy_tree(source: &Path, destination: &Path) {
     }
 }
 
-/// A promotable consumer tree: the synthetic workspace with an old pin,
-/// committed clean.
+/// A promotable schema-2 consumer tree with an old pin, committed clean.
 fn promotable_tree(root: &Path, old_pin: &str) -> PathBuf {
-    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/synthetic-workspace");
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures-s2/promote-trust");
     let repo = root.join("consumer");
     copy_tree(&source, &repo);
     fs::write(
@@ -111,6 +110,28 @@ fn own_closure() -> String {
 }
 
 const OLD_PIN: &str = "0000000000000000000000000000000000000000";
+
+#[test]
+fn generation_cli_rejects_the_retired_runners_alias() {
+    let outcome = binary()
+        .args([
+            "--runners",
+            "both",
+            "--plain",
+            "/path/that/is/not/read/before/cli-validation",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !outcome.status.success(),
+        "the retired runner selector must fail before scanning"
+    );
+    assert!(
+        String::from_utf8_lossy(&outcome.stderr).contains("--runners"),
+        "CLI error names the removed option: {}",
+        String::from_utf8_lossy(&outcome.stderr)
+    );
+}
 
 #[test]
 fn promote_commits_pin_metadata_and_tree_atomically() {
@@ -222,8 +243,6 @@ fn promote_advances_a_committed_prior_render() {
             "--plain",
             "--default-branch",
             "main",
-            "--runners",
-            "both",
             repo.to_str().unwrap(),
         ])
         .output()

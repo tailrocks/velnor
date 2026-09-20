@@ -159,24 +159,28 @@ mod tests {
         Capabilities, ExclusionReason, ObservedOutcome, Platform, ProviderSet, ResultIdentity,
         SelectorMap, TrustReq,
     };
+    use std::collections::BTreeMap;
 
     fn selectors() -> SelectorMap {
         SelectorMap::from([
             (
                 ProviderId::GithubHosted,
                 ProviderSelector {
+                    group: None,
                     runs_on: vec!["ubuntu-24.04".to_owned()],
                 },
             ),
             (
                 ProviderId::GithubSelfHosted,
                 ProviderSelector {
+                    group: None,
                     runs_on: vec!["velnor-official".to_owned()],
                 },
             ),
             (
                 ProviderId::Velnor,
                 ProviderSelector {
+                    group: None,
                     runs_on: vec!["velnor-native".to_owned()],
                 },
             ),
@@ -213,6 +217,7 @@ mod tests {
             run_id: "42".to_owned(),
             run_attempt: "1".to_owned(),
             plan_digest,
+            platforms: BTreeMap::from([("rust-a".to_owned(), Platform::LinuxX64)]),
             command_digests: digests,
         };
         (frozen, run)
@@ -359,6 +364,24 @@ mod tests {
     }
 
     #[test]
+    fn wrong_or_unplanned_platform_fails() {
+        let (frozen, run) = frozen_single();
+        let mut observed = all_green(&run);
+        observed[0].identity.platform = Platform::MacosArm64;
+        let classes = failure_classes(&frozen.verdict(&observed, &run));
+        assert!(classes.contains(&"identity-mismatch"), "{classes:?}");
+        assert!(classes.contains(&"missing"), "{classes:?}");
+
+        let mut run_without_platform = run.clone();
+        run_without_platform.platforms.clear();
+        let classes = failure_classes(
+            &frozen.verdict(&all_green(&run_without_platform), &run_without_platform),
+        );
+        assert!(classes.contains(&"identity-mismatch"), "{classes:?}");
+        assert!(classes.contains(&"missing"), "{classes:?}");
+    }
+
+    #[test]
     fn wrong_provider_report_fails() {
         let plan = fanout(
             &[planned("rust-a")],
@@ -377,6 +400,7 @@ mod tests {
             run_id: "42".to_owned(),
             run_attempt: "1".to_owned(),
             plan_digest,
+            platforms: BTreeMap::from([("rust-a".to_owned(), Platform::LinuxX64)]),
             command_digests: digests,
         };
         // A local lane claims the hosted-only unit: wrong provider, and the

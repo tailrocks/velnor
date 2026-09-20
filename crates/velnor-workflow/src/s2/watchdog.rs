@@ -607,7 +607,7 @@ impl OutageDetector {
                 });
             }
         }
-        for provider in ProviderId::LOCAL {
+        for provider in ProviderId::ALL.into_iter().filter(|provider| provider.is_local()) {
             let silent = self
                 .last_health
                 .get(&provider)
