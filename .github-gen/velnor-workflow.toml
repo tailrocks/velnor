@@ -12,7 +12,7 @@ repository = "tailrocks/velnor"
 # Gate bootstrap: base-owned Policy checks the base renderer, while Rust CI
 # checks this branch's renderer. A base-policy trust-role change must reconcile
 # them before the pin promotion can pass both required checks.
-revision = "0dc79895ff1c5e88be7c3822c437e1c5b5282e12"
+revision = "284cd33a24cc9bd5ca8ddf3a97c231f4f23d4146"
 
 [scan]
 exclude = ["migrations/**"]
