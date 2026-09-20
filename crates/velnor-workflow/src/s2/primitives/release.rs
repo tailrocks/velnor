@@ -880,6 +880,15 @@ fn release_watch_paths(config: &ProjectConfig) -> String {
     }
     paths.insert(".github/ci/**".to_owned());
     paths.insert(".github/workflows/preview.yml".to_owned());
+    for file in &config.workflow_files {
+        if file.starts_with("native-product")
+            && Path::new(file)
+                .extension()
+                .is_some_and(|extension| extension == "yml")
+        {
+            paths.insert(format!(".github/workflows/{file}"));
+        }
+    }
     let mut output = String::new();
     for path in paths {
         let _ = writeln!(output, "      - {}", yaml_scalar(&path));
@@ -2012,6 +2021,16 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
         r#"            archive_components="$(jq -s --arg target "$target" --argjson artifacts "$(jq -s '.' "$artifact_file")" '[.[] | select(.target == $target) | . as $component | ($artifacts[] | select(.target == $target and .kind == "binary" and .name == ($component.binary + "-" + $target))) | {name:$component.name,crate:$component.crate,crate_version:$component.version,release_version:$product_version,source_commit:$source_commit,binary_sha256:.sha256}] | sort_by(.name)' "$component_file")"
             jq -S -n --arg schema "$archive_manifest_schema" --argjson components "$archive_components""#,
     );
+    if let Some(start) = output.find("            archive_components=\"$(jq -s --arg target") {
+        let end = output[start..]
+            .find('\n')
+            .map_or(output.len(), |offset| start + offset);
+        output.replace_range(
+            start..end,
+            r#"            artifact_json="$(jq -s '.' "$artifact_file")"
+            archive_components="$(jq -S --arg target "$target" --arg release_version "$product_version" --arg source_commit "$source_commit" --argjson artifacts "$artifact_json" '[.components[] | select((.targets | index($target)) != null) | . as $component | ($artifacts[] | select(.target == $target and .kind == "binary" and .name == ($component.binary + "-" + $target))) as $artifact | {name:$component.name,crate:$component.crate,crate_version:$component.version,release_version:$release_version,source_commit:$source_commit,binary_sha256:$artifact.sha256,feature:$component.feature,identity:$component.identity}] | sort_by(.name)' product-component-contract.json)""#,
+        );
+    }
     output = output.replace(
         "parent_manifest_id:$parent_manifest_id,components:[]}",
         "parent_manifest_id:$parent_manifest_id,components:$components}",
@@ -2050,7 +2069,7 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
         for line in block.lines() {
             let _ = writeln!(indented, "          {}", line.trim_start());
         }
-        indented
+        indented.replace("\"$contract\")", "product-component-contract.json)")
     };
     output = output.replace(
         "          sha256sum product-assets/product-manifest.json > product-assets/product-manifest.json.sha256\n",
@@ -2059,6 +2078,173 @@ fn render_native_product_steps(release: &ReleaseSpec) -> String {
     output = output.replace(
         "          subject-path: product-assets/*\n",
         "          subject-path: product-assets/*\n      - name: Verify native product attestations before publication\n        env:\n          GH_TOKEN: ${{ github.token }}\n        run: |\n          set -euo pipefail\n          for subject in product-assets/*; do\n            gh attestation verify \"$subject\" --repo \"$GITHUB_REPOSITORY\"\n          done\n",
+    );
+    output = output.replace(
+        "          contract=\"$PRODUCT_CONTRACT\"\n",
+        r#"          contract="$PRODUCT_CONTRACT"
+          source_component_contract=".github/ci/native-product-contract.json"
+          test -s "$source_component_contract" || { echo '::error::source native product component contract is missing' >&2; exit 1; }
+          cargo metadata --locked --no-deps --format-version 1 > product-cargo-metadata.json
+          jq -S --slurpfile metadata product-cargo-metadata.json '
+            . as $source
+            | [
+                $source.components[] as $component
+                | ($metadata[0].packages | map(select(.name == $component.crate))) as $packages
+                | if ($packages | length) != 1 then error("native product component crate is not unique") else
+                    $component + {version:$packages[0].version,targets:$source.targets}
+                  end
+              ] as $components
+            | $source + {components:$components}
+          ' "$source_component_contract" > product-component-contract.json
+          jq -e --slurpfile source "$source_component_contract" '
+            .schema == $source[0].schema and
+            .product_id == $source[0].product_id and
+            .channel == $source[0].channel and
+            .manifest_schema == $source[0].manifest_schema and
+            .archive_component == $source[0].archive_component and
+            .archive_identity_schema == $source[0].archive_identity_schema and
+            .archive_manifest_schema == $source[0].archive_manifest_schema and
+            .targets == $source[0].targets and
+            .blocked_targets == $source[0].blocked_targets and
+            (.components | map({name,crate,binary,feature,identity,targets}) | sort_by(.name)) ==
+            ($source[0].components | map({name,crate,binary,feature,identity,targets}) | sort_by(.name))
+          ' "$contract" >/dev/null || { echo '::error::downloaded native product contract differs from source contract' >&2; exit 1; }
+"#,
+    );
+    output = output.replace(
+        "            --artifacts product-payload\n",
+        "            --artifacts product-payload\n            --component-contract product-component-contract.json\n",
+    );
+    output = output.replace(
+        "              --artifacts \"$product_payload\"\n",
+        "              --artifacts \"$product_payload\"\n              --component-contract product-component-contract.json\n",
+    );
+    if let Some(position) =
+        output.find("          product_version=\"$(jq -er '.version' \"$contract\")\"")
+    {
+        output.insert_str(
+            position,
+            r#"          source_component_contract=".github/ci/native-product-contract.json"
+          test -s "$source_component_contract" || { echo '::error::source native product component contract is missing' >&2; exit 1; }
+          cargo metadata --locked --no-deps --format-version 1 > product-cargo-metadata.json
+          jq -S --slurpfile metadata product-cargo-metadata.json '
+            . as $source
+            | [
+                $source.components[] as $component
+                | ($metadata[0].packages | map(select(.name == $component.crate))) as $packages
+                | if ($packages | length) != 1 then error("native product component crate is not unique") else
+                    $component + {version:$packages[0].version,targets:$source.targets}
+                  end
+              ] as $components
+            | $source + {components:$components}
+          ' "$source_component_contract" > product-component-contract.json
+          jq -e --slurpfile source "$source_component_contract" '
+            .schema == $source[0].schema and
+            .product_id == $source[0].product_id and
+            .channel == $source[0].channel and
+            .manifest_schema == $source[0].manifest_schema and
+            .archive_component == $source[0].archive_component and
+            .archive_identity_schema == $source[0].archive_identity_schema and
+            .archive_manifest_schema == $source[0].archive_manifest_schema and
+            .targets == $source[0].targets and
+            .blocked_targets == $source[0].blocked_targets and
+            (.components | map({name,crate,binary,feature,identity,targets}) | sort_by(.name)) ==
+            ($source[0].components | map({name,crate,binary,feature,identity,targets}) | sort_by(.name))
+          ' "$contract" >/dev/null || { echo '::error::downloaded native product contract differs from source contract' >&2; exit 1; }
+"#,
+        );
+    }
+    output = output.replace(
+        "          archive_prefix=\"$(jq -er --arg name \"$archive_component\" '.components[] | select(.name == $name) | .binary' \"$contract\")\"\n",
+        "          archive_prefix=\"$(jq -er --arg name \"$archive_component\" '.components[] | select(.name == $name) | .binary' product-component-contract.json)\"\n",
+    );
+    output = output.replace(
+        "          expected_targets=\"$(jq -c '.targets | sort' \"$contract\")\"\n          expected_components=\"$(jq -c '[.components[].name] | sort' \"$contract\")\"\n",
+        "          expected_targets=\"$(jq -c '.targets | sort' product-component-contract.json)\"\n          expected_components=\"$(jq -c '[.components[].name] | sort' product-component-contract.json)\"\n",
+    );
+    output = output.replace(
+        "          expected_components=\"$(jq -c '[.components[].name] | sort' product-component-contract.json)\"\n",
+        "          expected_components=\"$(jq -c '[.components[].name] | sort' product-component-contract.json)\"\n          jq -e '(.targets | type == \"array\" and all(.[]; type == \"string\" and test(\"^[a-z0-9][a-z0-9._-]*$\"))) and (.components | type == \"array\" and all(.[]; (.name | test(\"^[a-z0-9][a-z0-9._-]*$\")) and (.crate | test(\"^[a-z0-9][a-z0-9._-]*$\")) and (.binary | test(\"^[a-z0-9][a-z0-9._-]*$\")))) and ((.components | map(.binary) | length) == (.components | map(.binary) | unique | length))' product-component-contract.json >/dev/null || { echo '::error::native product contract contains unsafe or duplicate names' >&2; exit 1; }\n",
+    );
+    if let Some(start) = output.find("          actual_targets=\"$(find native-product") {
+        let end = output[start..]
+            .find('\n')
+            .map_or(output.len(), |offset| start + offset);
+        output.replace_range(
+            start..end,
+            r#"          : > native-product-target-census.txt
+          while IFS= read -r target; do
+            case "$target" in
+              ''|*[!a-z0-9._-]*) echo "::error::unsafe native product target name: $target" >&2; exit 1 ;;
+            esac
+            test -f "native-product/components-$target.jsonl" && test ! -L "native-product/components-$target.jsonl" || { echo "::error::missing or linked native product component rows: $target" >&2; exit 1; }
+            test -f "native-product/artifacts-$target.jsonl" && test ! -L "native-product/artifacts-$target.jsonl" || { echo "::error::missing or linked native product artifact rows: $target" >&2; exit 1; }
+            printf '%s\n' "$target" >> native-product-target-census.txt
+          done < <(jq -r '.[]' <<<"$expected_targets")
+          actual_targets="$(jq -Rsc 'split("\n") | map(select(length > 0)) | sort' native-product-target-census.txt)""#,
+        );
+    }
+    output = output.replace(
+        "          contracts=(native-product/product-contract-*.json)\n",
+        "          contracts=(native-product/product-contract-*.json)\n          for candidate in \"${contracts[@]}\"; do\n            test -f \"$candidate\" && test ! -L \"$candidate\" || { echo \"::error::native product contract is missing or linked: $candidate\" >&2; exit 1; }\n            case \"$candidate\" in native-product/product-contract-*.json) ;; *) echo \"::error::native product contract name is unsafe: $candidate\" >&2; exit 1 ;; esac\n          done\n",
+    );
+    if let Some(start) = output.find("          actual_components=\"$(find native-product") {
+        let end = output[start..]
+            .find('\n')
+            .map_or(output.len(), |offset| start + offset);
+        output.replace_range(
+            start..end,
+            r#"          : > native-product-component-census.jsonl
+          while IFS= read -r target; do cat "native-product/components-$target.jsonl" >> native-product-component-census.jsonl; done < <(jq -r '.[]' <<<"$expected_targets")
+          actual_components="$(jq -s '[.[] | .name] | unique | sort' native-product-component-census.jsonl)""#,
+        );
+    }
+    output = output.replace(
+        "            component_file=\"$(find native-product -type f -name \"components-$target.jsonl\" -print -quit)\"\n            artifact_file=\"$(find native-product -type f -name \"artifacts-$target.jsonl\" -print -quit)\"\n",
+        "            component_file=\"native-product/components-$target.jsonl\"\n            artifact_file=\"native-product/artifacts-$target.jsonl\"\n",
+    );
+    output = output.replace(
+        "            test -s \"$component_file\" && test -s \"$artifact_file\" || { echo \"::error::missing rows for $target\" >&2; exit 1; }\n",
+        r#"            test -s "$component_file" && test -s "$artifact_file" || { echo "::error::missing rows for $target" >&2; exit 1; }
+            jq -e --arg target "$target" --slurpfile expected product-component-contract.json '
+              (map({name,crate,binary,version,feature,identity,target}) | sort_by(.name)) ==
+              ($expected[0].components | map(. + {target:$target}) | map({name,crate,binary,version,feature,identity,target}) | sort_by(.name))
+              and all(.[]; (keys | sort) == ["binary","crate","feature","identity","name","target","version"])
+            ' "$component_file" >/dev/null || { echo "::error::native product component rows differ from source contract for $target" >&2; exit 1; }
+            jq -e --arg target "$target" --slurpfile expected product-component-contract.json '
+              (map(.name) | sort) == ($expected[0].components | map(.binary + "-" + $target) | sort)
+              and all(.[]; .name as $name |
+                (keys | sort) == ["kind","name","sha256","size","target"] and
+                .target == $target and .kind == "binary" and
+                (.sha256 | test("^[0-9a-f]{64}$")) and
+                (.size | numbers and . > 0) and
+                any($expected[0].components[]; (.binary + "-" + $target) == $name)
+              )
+            ' "$artifact_file" >/dev/null || { echo "::error::native product artifact rows differ from source contract for $target" >&2; exit 1; }
+"#,
+    );
+    output = output.replace(
+        "              source=\"$(find native-product -type f -name \"$asset\" -print -quit)\"\n              test -f \"$source\" || { echo \"::error::missing native sibling $asset\" >&2; exit 1; }\n",
+        "              source=\"native-product/$asset\"\n              test -f \"$source\" && test ! -L \"$source\" || { echo \"::error::missing or linked native sibling $asset\" >&2; exit 1; }\n",
+    );
+    output = output.replace(
+        "            while IFS= read -r row; do binary=\"$(jq -er '.binary' <<<\"$row\")\"; cp -- \"product-assets/$binary-$target\" \"$archive_dir/$binary\"; done < <(jq -c '.[]' \"$component_file\")\n",
+        "            while IFS= read -r component; do\n              binary=\"$(jq -er --arg name \"$component\" '.components[] | select(.name == $name) | .binary' product-component-contract.json)\"\n              test -f \"product-assets/$binary-$target\" && test ! -L \"product-assets/$binary-$target\" || { echo \"::error::missing or linked archive sibling $binary-$target\" >&2; exit 1; }\n              cp -- \"product-assets/$binary-$target\" \"$archive_dir/$binary\"\n            done < <(jq -r '.components[].name' product-component-contract.json)\n",
+    );
+    if let Some(start) =
+        output.find("          actual_components=\"$(jq -s 'sort_by(.name,.target)")
+    {
+        let end = output[start..]
+            .find('\n')
+            .map_or(output.len(), |offset| start + offset);
+        output.replace_range(
+            start..end,
+            "          actual_components=\"$(jq -s 'sort_by(.name,.target) | group_by(.name) | map(if (map({crate,version,binary,feature,identity}) | unique | length) != 1 then error(\\\"component identity differs across targets\\\") else {name:.[0].name,crate:.[0].crate,version:.[0].version,binary:.[0].binary,feature:.[0].feature,identity:.[0].identity,targets:(map(.target) | sort)} end) | sort_by(.name)' product-component-rows.jsonl)\"\n          jq -e --argjson actual \"$actual_components\" '($actual | sort_by(.name)) == (.components | sort_by(.name))' product-component-contract.json >/dev/null || { echo '::error::grouped component identity differs from source contract' >&2; exit 1; }",
+        );
+    }
+    output = output.replace(
+        r#"error(\"component identity differs across targets\")"#,
+        r#"error("component identity differs across targets")"#,
     );
     output
 }
@@ -2160,13 +2346,16 @@ fn render_native_publish_job(
               ([.artifacts[].name] | index("product-manifest.json") | not) and
               ([.artifacts[].name] | index("product-manifest.json.sha256") | not)
             ' "$tmp/product-manifest.json" >/dev/null
-            product_contract="${{ steps.product-release.outputs.contract }}"
+            product_contract="product-component-contract.json"
             product_payload="$tmp/product-payload"
             mkdir -p "$product_payload"
             gh attestation verify "$tmp/product-manifest.json" --repo "$GITHUB_REPOSITORY"
             gh attestation verify "$tmp/product-manifest.json.sha256" --repo "$GITHUB_REPOSITORY"
             while IFS= read -r name; do
               test -n "$name"
+              case "$name" in
+                ''|*[!a-zA-Z0-9._-]*|/*|../*|*/../*|*/..) echo "::error::published product asset name is unsafe: $name" >&2; exit 1 ;;
+              esac
               gh release download "$tag" --pattern "$name" --dir "$product_dir" --clobber >/dev/null 2>&1 \
                 || { echo "::error::published product is missing $name" >&2; exit 1; }
               gh attestation verify "$product_dir/$name" --repo "$GITHUB_REPOSITORY"
@@ -2176,6 +2365,7 @@ fn render_native_publish_job(
               --manifest "$tmp/product-manifest.json"
               --checksum "$tmp/product-manifest.json.sha256"
               --artifacts "$product_payload"
+              --component-contract product-component-contract.json
               --schema "$(jq -er '.schema' "$tmp/product-manifest.json")"
               --product-id "$(jq -er '.product_id' "$tmp/product-manifest.json")"
               --channel stable
@@ -2314,13 +2504,23 @@ fn policy_enforcement_step() -> &'static str {
 /// exactly this identity), then the rolling `preview` release is replaced
 /// atomically under its `Preview <version>` title. A monotonicity guard
 /// refuses to move the lane backward when a superseded run re-publishes.
-fn render_preview_publish_job(config: &ProjectConfig, release: &ReleaseSpec, sign: bool) -> String {
+#[allow(clippy::too_many_lines)]
+fn render_preview_publish_job(
+    config: &ProjectConfig,
+    release: &ReleaseSpec,
+    sign: bool,
+    native_product: bool,
+) -> String {
     let download = ActionPin::DownloadArtifact.reference();
-    let needs = if sign {
-        "identity, debian, sign-deb"
-    } else {
-        "identity, debian"
-    };
+    let checkout = ActionPin::Checkout.reference();
+    let mut needs = vec!["identity", "debian"];
+    if sign {
+        needs.push("sign-deb");
+    }
+    if native_product {
+        needs.push("native-product-build");
+    }
+    let needs = needs.join(", ");
     let binary = yaml_scalar(&release.binary);
     let arches = deb_architectures(&release.targets).unwrap_or_default();
     let arch_list = arches
@@ -2355,6 +2555,75 @@ fn render_preview_publish_job(config: &ProjectConfig, release: &ReleaseSpec, sig
         ));
     }
     let expected_assets = expected_assets.join(",\n                ");
+    let native_product_handoff = if native_product {
+        r#"      - name: Checkout source-bound native product contract
+        uses: {checkout}
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Download source-bound native product preview builds
+        uses: {download}
+        with:
+          pattern: native-product-*
+          path: native-product
+          merge-multiple: true
+      - name: Verify source-bound native product preview handoff
+        run: |
+          set -euo pipefail
+          source_contract=".github/ci/native-product-preview-contract.json"
+          test -f "$source_contract" && test ! -L "$source_contract" || { echo '::error::source native product preview contract is missing or linked' >&2; exit 1; }
+          shopt -s nullglob
+          contracts=(native-product/product-contract-*.json)
+          test "${#contracts[@]}" -eq 4 || { echo '::error::native product preview requires four target contracts' >&2; exit 1; }
+          for candidate in "${contracts[@]}"; do
+            test -f "$candidate" && test ! -L "$candidate" || { echo "::error::native product preview contract is missing or linked: $candidate" >&2; exit 1; }
+            case "${candidate#native-product/}" in product-contract-*.json) ;; *) echo "::error::native product preview contract name is unsafe: $candidate" >&2; exit 1 ;; esac
+          done
+          contract="${contracts[0]}"
+          for candidate in "${contracts[@]}"; do cmp -- "$contract" "$candidate" || { echo '::error::native product preview contracts disagree' >&2; exit 1; }; done
+          jq -e --slurpfile source "$source_contract" '
+            .schema == $source[0].schema and
+            .product_id == $source[0].product_id and
+            .channel == $source[0].channel and
+            .manifest_schema == $source[0].manifest_schema and
+            .archive_component == $source[0].archive_component and
+            .archive_identity_schema == $source[0].archive_identity_schema and
+            .archive_manifest_schema == $source[0].archive_manifest_schema and
+            .targets == $source[0].targets and
+            .blocked_targets == $source[0].blocked_targets and
+            (.components | map({name,crate,binary,feature,identity,targets}) | sort_by(.name)) ==
+            ($source[0].components | map({name,crate,binary,feature,identity,targets}) | sort_by(.name))
+          ' "$contract" >/dev/null || { echo '::error::native product preview contract differs from source configuration' >&2; exit 1; }
+          blocked_targets="$(jq -c '.blocked_targets // []' "$contract")"
+          [ "$blocked_targets" = '[]' ] || { echo '::error::native product preview has blocked targets; publication is blocked' >&2; exit 1; }
+          expected_targets="$(jq -c '.targets | sort' "$contract")"
+          : > native-product-preview-targets.txt
+          while IFS= read -r target; do
+            case "$target" in ''|*[!a-z0-9._-]*) echo "::error::unsafe native product preview target: $target" >&2; exit 1 ;; esac
+            component_file="native-product/components-$target.jsonl"
+            artifact_file="native-product/artifacts-$target.jsonl"
+            test -f "$component_file" && test ! -L "$component_file" || { echo "::error::missing native product preview components: $target" >&2; exit 1; }
+            test -f "$artifact_file" && test ! -L "$artifact_file" || { echo "::error::missing native product preview artifacts: $target" >&2; exit 1; }
+            jq -e -s --arg target "$target" --slurpfile expected "$contract" '
+              (map({name,crate,binary,version,feature,identity,target}) | sort_by(.name)) ==
+              ($expected[0].components | map(. + {target:$target}) | map({name,crate,binary,version,feature,identity,target}) | sort_by(.name)) and
+              all(.[]; (keys | sort) == ["binary","crate","feature","identity","name","target","version"])
+            ' "$component_file" >/dev/null || { echo "::error::native product preview component rows differ for $target" >&2; exit 1; }
+            jq -e -s --arg target "$target" --slurpfile expected "$contract" '
+              (map(.name) | sort) == ($expected[0].components | map(.binary + "-" + $target) | sort) and
+              all(.[]; (keys | sort) == ["kind","name","sha256","size","target"] and .target == $target and .kind == "binary" and (.sha256 | test("^[0-9a-f]{64}$")) and (.size | numbers and . > 0))
+            ' "$artifact_file" >/dev/null || { echo "::error::native product preview artifact rows differ for $target" >&2; exit 1; }
+            printf '%s\n' "$target" >> native-product-preview-targets.txt
+          done < <(jq -r '.[]' <<<"$expected_targets")
+          actual_targets="$(jq -Rsc 'split("\n") | map(select(length > 0)) | sort' native-product-preview-targets.txt)"
+          [ "$actual_targets" = "$expected_targets" ] || { echo '::error::native product preview target handoff is incomplete' >&2; exit 1; }
+"#
+        .replace("{checkout}", checkout)
+        .replace("{download}", download)
+    } else {
+        String::new()
+    };
     let manifest_step = if release.manifest_schema.is_empty() {
         "      - name: Assemble consumer release manifest\n        run: |\n          echo '::error::native preview with a package consumer needs manifest_schema; declare the consumer manifest schema URN' >&2\n          exit 1\n"
             .to_owned()
@@ -2372,6 +2641,12 @@ fn render_preview_publish_job(config: &ProjectConfig, release: &ReleaseSpec, sig
         runner = selected_runner(config),
         count = arches.len(),
         package = release.package,
+    )
+    .replace(
+        "          path: preview-metadata\n      - name: Assemble independent checksums\n",
+        &format!(
+            "          path: preview-metadata\n{native_product_handoff}      - name: Assemble independent checksums\n"
+        ),
     )
 }
 
@@ -2400,6 +2675,11 @@ fn inject_preview_triggers(output: &str, config: &ProjectConfig, release: &Relea
 fn render_native_preview(config: &ProjectConfig, release: &ReleaseSpec) -> String {
     let mut jobs = render_preview_identity_job(config, release);
     jobs.push('\n');
+    let native_product = native_product_preview_workflow_file(config);
+    if let Some(file) = native_product {
+        jobs.push_str(&render_native_product_preview_build_job(file));
+        jobs.push('\n');
+    }
     let guest_job = render_guest_payload_job(config, release, true);
     if let Some(guest_job) = &guest_job {
         jobs.push_str(guest_job);
@@ -2423,6 +2703,7 @@ fn render_native_preview(config: &ProjectConfig, release: &ReleaseSpec) -> Strin
         config,
         release,
         sign_job.is_some(),
+        native_product.is_some(),
     ));
     let output = format!(
         "{GENERATED_HEADER}name: Preview\nrun-name: Preview · ${{{{ github.event_name }}}} · ${{{{ github.ref_name }}}}\n\non:\n  push:\n    branches: [{}]\n    paths:\n{paths}  workflow_dispatch:\n\nconcurrency:\n  group: preview-${{{{ github.repository }}}}\n  cancel-in-progress: false\n\npermissions:\n  contents: read\n\njobs:\n{jobs}",
@@ -4285,9 +4566,29 @@ fn native_product_workflow_file(config: &ProjectConfig) -> Option<&str> {
         })
 }
 
+fn native_product_preview_workflow_file(config: &ProjectConfig) -> Option<&str> {
+    config
+        .workflow_files
+        .iter()
+        .map(String::as_str)
+        .find(|file| {
+            file.starts_with("native-product")
+                && file.contains("preview")
+                && Path::new(file)
+                    .extension()
+                    .is_some_and(|extension| extension == "yml")
+        })
+}
+
 fn render_native_product_build_job(file: &str) -> String {
     format!(
         "  native-product-build:\n    name: Build source-bound native product\n    needs: [admit-provider, verify, build]\n    uses: ./.github/workflows/{file}\n    permissions:\n      contents: read\n"
+    )
+}
+
+fn render_native_product_preview_build_job(file: &str) -> String {
+    format!(
+        "  native-product-build:\n    name: Build source-bound native preview product\n    needs: [identity]\n    uses: ./.github/workflows/{file}\n    permissions:\n      contents: read\n"
     )
 }
 

@@ -21,6 +21,15 @@ use crate::s2::{
 /// offers a macOS 27 Intel image; no fallback image is valid.
 pub(crate) const MACOS_ARM64_RUNNER: &str = "xcode-27";
 const PRODUCT_MANIFEST_FILE: &str = "product-manifest.json";
+pub(crate) const PRODUCT_COMPONENT_CONTRACT_SCHEMA: &str = "velnor.native-product-contract/v1";
+
+pub(crate) fn product_component_contract_file(channel: &str) -> &'static str {
+    if channel == "preview" {
+        ".github/ci/native-product-preview-contract.json"
+    } else {
+        ".github/ci/native-product-contract.json"
+    }
+}
 
 pub(crate) fn is_native_product_side(primitive: &str) -> bool {
     primitive == NATIVE_PRODUCT
@@ -98,11 +107,29 @@ impl Primitive for NativeProduct {
             &blocked_targets,
             &components,
         );
+        let contract = render_component_contract(
+            &product_id,
+            &channel,
+            &archive_component,
+            &archive_identity_schema,
+            &archive_manifest_schema,
+            &manifest_schema,
+            &targets,
+            &blocked_targets,
+            &components,
+        )?;
         Ok(Rendered {
-            files: std::iter::once((
-                std::path::PathBuf::from(".github/workflows").join(file),
-                content,
-            ))
+            files: [
+                (
+                    std::path::PathBuf::from(".github/workflows").join(file),
+                    content,
+                ),
+                (
+                    std::path::PathBuf::from(product_component_contract_file(&channel)),
+                    contract,
+                ),
+            ]
+            .into_iter()
             .collect(),
             ..Rendered::default()
         })
@@ -167,6 +194,44 @@ fn parse_components(
             })
         })
         .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_component_contract(
+    product_id: &str,
+    channel: &str,
+    archive_component: &str,
+    archive_identity_schema: &str,
+    archive_manifest_schema: &str,
+    manifest_schema: &str,
+    targets: &[String],
+    blocked_targets: &[String],
+    components: &[Component],
+) -> Result<String, GeneratorError> {
+    let value = serde_json::json!({
+        "schema": PRODUCT_COMPONENT_CONTRACT_SCHEMA,
+        "product_id": product_id,
+        "channel": channel,
+        "manifest_schema": manifest_schema,
+        "archive_component": archive_component,
+        "archive_identity_schema": archive_identity_schema,
+        "archive_manifest_schema": archive_manifest_schema,
+        "targets": targets,
+        "blocked_targets": blocked_targets,
+        "components": components.iter().map(|component| serde_json::json!({
+            "name": component.name,
+            "crate": component.package,
+            "binary": component.binary,
+            "feature": component.feature,
+            "identity": component.identity,
+            "targets": targets,
+        })).collect::<Vec<_>>(),
+    });
+    let mut output = serde_json::to_string_pretty(&value).map_err(|error| {
+        GeneratorError::usage(format!("render native product component contract: {error}"))
+    })?;
+    output.push('\n');
+    Ok(output)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -278,7 +343,11 @@ fn validate_product_contract(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::uninlined_format_args
+)]
 fn render_workflow(
     ctx: &RenderCtx<'_>,
     product_id: &str,
@@ -322,32 +391,22 @@ fn render_workflow(
 
     let mut build_steps = String::new();
     for component in components {
-        let package = shell_quote(&component.package);
-        let binary = shell_quote(&component.binary);
-        let feature = component
-            .feature
-            .as_deref()
-            .map(|feature| format!(" --features {}", shell_quote(feature)))
-            .unwrap_or_default();
-        let identity_arg = if component.identity == "revision" {
-            "--revision"
-        } else {
-            "--version"
-        };
-        let identity_check = if component.identity == "revision" {
-            "          [ \"$identity\" = \"$SOURCE_COMMIT\" ] || { echo \"::error::component source revision differs from checkout\" >&2; exit 1; }\n"
-                .to_owned()
-        } else {
-            "          reported_version=\"${identity%% *}\"\n          [ \"$reported_version\" = \"$component_version\" ] || { echo \"::error::component version differs from Cargo metadata\" >&2; exit 1; }\n".to_owned()
-        };
+        let component_name = shell_quote(&component.name);
         let _ = write!(
             build_steps,
-            "          package={package}\n          binary={binary}\n          component_version=\"$(jq -er --arg package \"$package\" '.packages[] | select(.name == $package) | .version' cargo-metadata.json)\"\n          case \"$component_version\" in ''|development|unknown|*[^0-9A-Za-z.+~-]*) echo '::error::component Cargo version is not publishable' >&2; exit 1 ;; esac\n          CARGO_INCREMENTAL=0 VELNOR_RELEASE_BUILD=1 cargo build --locked --release --no-default-features --package \"$package\" --bin \"$binary\"{feature} --target \"$TARGET\"\n          compiled=\"target/$TARGET/release/$binary\"\n          test -x \"$compiled\" || {{ echo \"::error::typed sibling binary is missing\" >&2; exit 1; }}\n          case \"$TARGET\" in\n            x86_64-unknown-linux-gnu) file \"$compiled\" | grep -Eq 'ELF 64-bit.*x86-64' ;;\n            aarch64-unknown-linux-gnu) file \"$compiled\" | grep -Eq 'ELF 64-bit.*ARM aarch64' ;;\n            aarch64-apple-darwin) file \"$compiled\" | grep -Eq 'Mach-O 64-bit.*arm64' ;;\n            x86_64-apple-darwin) file \"$compiled\" | grep -Eq 'Mach-O 64-bit.*x86_64' ;;\n            *) false ;;\n          esac || {{ echo \"::error::compiled sibling architecture does not match $TARGET\" >&2; exit 1; }}\n          identity=\"$(\"$compiled\" {identity_arg} 2>&1 || true)\"\n          case \"$identity\" in *development*|*unknown*|'') echo '::error::publishable component has development/unknown identity' >&2; exit 1 ;; esac\n{identity_check}          asset=\"$binary-$TARGET\"\n          cp \"$compiled\" \"dist/$TARGET/$asset\"\n          cp \"$compiled\" \"dist/$TARGET/package/$binary\"\n          digest=\"$(sha256sum \"dist/$TARGET/$asset\" | awk '{{print $1}}')\"\n          size=\"$(stat -c%s \"dist/$TARGET/$asset\" 2>/dev/null || stat -f%z \"dist/$TARGET/$asset\")\"\n          jq -cn --arg name \"$asset\" --arg target \"$TARGET\" --arg sha256 \"$digest\" --argjson size \"$size\" '{{name:$name,target:$target,kind:\"binary\",sha256:$sha256,size:$size}}' >> \"dist/$TARGET/artifacts-$TARGET.jsonl\"\n          jq -cn --arg name {name} --arg crate \"$package\" --arg version \"$component_version\" --arg binary {binary} --arg target \"$TARGET\" '{{name:$name,crate:$crate,version:$version,binary:$binary,target:$target}}' >> \"dist/$TARGET/components-$TARGET.jsonl\"\n",
-            name = shell_quote(&component.name),
-            identity_arg = identity_arg,
-            identity_check = identity_check,
+            "          component=\"$(jq -er --arg name {component_name} '.[] | select(.name == $name)' <<<\"$COMPONENTS_JSON\")\"\n          package=\"$(jq -er '.crate' <<<\"$component\")\"\n          binary=\"$(jq -er '.binary' <<<\"$component\")\"\n          component_feature=\"$(jq -r '.feature // empty' <<<\"$component\")\"\n          component_identity=\"$(jq -er '.identity' <<<\"$component\")\"\n          component_version=\"$(jq -er '.version' <<<\"$component\")\"\n          component_targets=\"$(jq -c '.targets | sort' <<<\"$component\")\"\n          [ \"$component_targets\" = \"$(jq -c 'sort' <<<\"$TARGETS_JSON\")\" ] || {{ echo '::error::component target contract is malformed' >&2; exit 1; }}\n          case \"$component_version\" in ''|development|unknown|*[^0-9A-Za-z.+~-]*) echo '::error::component Cargo version is not publishable' >&2; exit 1 ;; esac\n          feature_args=()\n          if [ -n \"$component_feature\" ]; then feature_args+=(--features \"$component_feature\"); fi\n          CARGO_INCREMENTAL=0 VELNOR_RELEASE_BUILD=1 cargo build --locked --release --no-default-features --package \"$package\" --bin \"$binary\" ${{feature_args[@]}} --target \"$TARGET\"\n          compiled=\"target/$TARGET/release/$binary\"\n          test -x \"$compiled\" || {{ echo \"::error::typed sibling binary is missing\" >&2; exit 1; }}\n          case \"$TARGET\" in\n            x86_64-unknown-linux-gnu) file \"$compiled\" | grep -Eq 'ELF 64-bit.*x86-64' ;;\n            aarch64-unknown-linux-gnu) file \"$compiled\" | grep -Eq 'ELF 64-bit.*ARM aarch64' ;;\n            aarch64-apple-darwin) file \"$compiled\" | grep -Eq 'Mach-O 64-bit.*arm64' ;;\n            x86_64-apple-darwin) file \"$compiled\" | grep -Eq 'Mach-O 64-bit.*x86_64' ;;\n            *) false ;;\n          esac || {{ echo \"::error::compiled sibling architecture does not match $TARGET\" >&2; exit 1; }}\n          identity_args=(--version)\n          [ \"$component_identity\" = revision ] && identity_args=(--revision)\n          identity=\"$(\"$compiled\" ${{identity_args[@]}} 2>&1 || true)\"\n          case \"$identity\" in *development*|*unknown*|'') echo '::error::publishable component has development/unknown identity' >&2; exit 1 ;; esac\n          if [ \"$component_identity\" = revision ]; then\n            [ \"$identity\" = \"$SOURCE_COMMIT\" ] || {{ echo \"::error::component source revision differs from checkout\" >&2; exit 1; }}\n          else\n            reported_version=\"${{identity%% *}}\"\n            [ \"$reported_version\" = \"$component_version\" ] || {{ echo \"::error::component version differs from Cargo metadata\" >&2; exit 1; }}\n          fi\n          asset=\"$binary-$TARGET\"\n          cp \"$compiled\" \"dist/$TARGET/$asset\"\n          cp \"$compiled\" \"dist/$TARGET/package/$binary\"\n          digest=\"$(sha256sum \"dist/$TARGET/$asset\" | awk '{{print $1}}')\"\n          size=\"$(stat -c%s \"dist/$TARGET/$asset\" 2>/dev/null || stat -f%z \"dist/$TARGET/$asset\")\"\n          jq -cn --arg name \"$asset\" --arg target \"$TARGET\" --arg sha256 \"$digest\" --argjson size \"$size\" '{{name:$name,target:$target,kind:\"binary\",sha256:$sha256,size:$size}}' >> \"dist/$TARGET/artifacts-$TARGET.jsonl\"\n          jq -cn --arg name {component_name} --arg crate \"$package\" --arg version \"$component_version\" --arg binary \"$binary\" --arg target \"$TARGET\" --arg feature \"$component_feature\" --arg identity \"$component_identity\" '{{name:$name,crate:$crate,version:$version,binary:$binary,target:$target,feature:(if $feature == \"\" then null else $feature end),identity:$identity}}' >> \"dist/$TARGET/components-$TARGET.jsonl\"\n",
+            component_name = component_name,
         );
     }
+    build_steps = build_steps
+        .replace(
+            " ${feature_args[@]} --target",
+            " \"${feature_args[@]}\" --target",
+        )
+        .replace(
+            "\"$compiled\" ${identity_args[@]} 2>&1",
+            "\"$compiled\" \"${identity_args[@]}\" 2>&1",
+        );
 
     let components_json = format!(
         "[{}]",
@@ -412,6 +471,10 @@ fn render_workflow(
         "never mutates provider releases or publishes a competing product.",
     );
     output = output.replace(
+        "      - name: Build and verify typed sibling inventory\n",
+        "      - name: Materialize independent component contract\n        run: |\n          set -euo pipefail\n          COMPONENTS_JSON=\"$(jq -cS --slurpfile metadata cargo-metadata.json --argjson targets \"$TARGETS_JSON\" '[.[] as $component | ($metadata[0].packages | map(select(.name == $component.crate))) as $packages | if ($packages | length) != 1 then error(\"component crate is not unique\") else $component + {version:$packages[0].version,targets:$targets} end]' <<<\"$COMPONENTS_JSON\")\"\n          jq -e 'all(.[]; (keys | sort) == [\"binary\",\"crate\",\"feature\",\"identity\",\"name\",\"targets\",\"version\"] and (.version | type == \"string\") and (.targets | type == \"array\"))' <<<\"$COMPONENTS_JSON\" >/dev/null\n          printf 'COMPONENTS_JSON=%s\\n' \"$COMPONENTS_JSON\" >> \"$GITHUB_ENV\"\n          printf '%s\\n' \"$COMPONENTS_JSON\" > components.json\n      - name: Build and verify typed sibling inventory\n",
+    );
+    output = output.replace(
         "          test -z \"$(git status --porcelain)\" || { echo '::error::native product checkout is dirty' >&2; exit 1; }\n",
         r#"          test -z "$(git status --porcelain)" || { echo '::error::native product checkout is dirty' >&2; exit 1; }
           [ "$SOURCE_REPOSITORY" = "$GITHUB_REPOSITORY" ] || { echo '::error::configured source repository differs from event repository' >&2; exit 1; }
@@ -425,6 +488,16 @@ fn render_workflow(
           remote_repository="${remote_repository%.git}"
           [ "$remote_repository" = "$SOURCE_REPOSITORY" ] || { echo '::error::checkout origin differs from configured source repository' >&2; exit 1; }
 "#,
+    );
+    output = output.replace(
+        "__disabled_legacy_native_binary_row__",
+        "          jq -cn --arg name \"$asset\" --arg target \"$TARGET\" --arg sha256 \"$digest\" --argjson size \"$size\" '{name:$name,target:$target,kind:\"binary\",sha256:$sha256,size:$size}' >> \"dist/$TARGET/artifacts-$TARGET.jsonl\"\n\
+          component_feature=\"$(jq -r --arg crate \"$package\" --arg binary \"$binary\" '.[] | select(.crate == $crate and .binary == $binary) | .feature // empty' <<<\"$COMPONENTS_JSON\")\"\n\
+          component_identity=\"$(jq -er --arg crate \"$package\" --arg binary \"$binary\" '.[] | select(.crate == $crate and .binary == $binary) | .identity' <<<\"$COMPONENTS_JSON\")\"\n",
+    );
+    output = output.replace(
+        "__disabled_legacy_native_component_row__",
+        " --arg target \"$TARGET\" --arg feature \"$component_feature\" --arg identity \"$component_identity\" '{name:$name,crate:$crate,version:$version,binary:$binary,target:$target,feature:(if $feature == \"\" then null else $feature end),identity:$identity}' >> \"dist/$TARGET/components-$TARGET.jsonl\"\n",
     );
     output
 }

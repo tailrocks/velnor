@@ -5539,6 +5539,7 @@ fn add_owner_runtime_products_file(config: &mut ProjectConfig) {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn generated_files_with_surface(
     config: &ProjectConfig,
     surface: Option<&primitives::Surface>,
@@ -5616,6 +5617,17 @@ fn generated_files_with_surface(
         };
         if let Some(content) = content {
             files.insert(path, content);
+        }
+    }
+    // Native-product declarations also emit a source-owned typed component
+    // contract.  It is not a workflow, but the release publisher checks out
+    // this exact generated file as its independent expectation before it
+    // touches downloaded product rows.
+    if let Some(surface) = surface {
+        for (path, content) in &surface.files {
+            if !path.starts_with(".github/workflows") {
+                files.insert(path.clone(), content.clone());
+            }
         }
     }
     for (name, template) in &config.workflow_templates {

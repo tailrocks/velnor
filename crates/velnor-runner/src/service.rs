@@ -378,23 +378,26 @@ pub struct ReleaseVerifyProductArgs {
     #[arg(long)]
     pub checksum: Option<PathBuf>,
     #[arg(long)]
-    pub schema: Option<String>,
+    pub schema: String,
     #[arg(long)]
-    pub product_id: Option<String>,
+    pub product_id: String,
     #[arg(long)]
-    pub channel: Option<String>,
+    pub channel: String,
     #[arg(long)]
-    pub version: Option<String>,
+    pub version: String,
     #[arg(long)]
-    pub source_repository: Option<String>,
+    pub source_repository: String,
     #[arg(long)]
-    pub source_ref: Option<String>,
+    pub source_ref: String,
     #[arg(long)]
-    pub source_commit: Option<String>,
+    pub source_commit: String,
     #[arg(long)]
-    pub release_tag: Option<String>,
+    pub release_tag: String,
     #[arg(long)]
-    pub release_id: Option<String>,
+    pub release_id: String,
+    /// Independently generated typed product component contract.
+    #[arg(long)]
+    pub component_contract: PathBuf,
     #[arg(long = "target", action = clap::ArgAction::Append)]
     pub targets: Vec<String>,
     #[arg(long = "component", action = clap::ArgAction::Append)]
@@ -583,6 +586,7 @@ fwd_release!(
         source_commit,
         release_tag,
         release_id,
+        component_contract,
         targets,
         components
     }

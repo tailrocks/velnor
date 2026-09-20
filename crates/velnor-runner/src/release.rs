@@ -1657,66 +1657,69 @@ fn verify_product_command(args: ReleaseVerifyProductArgs) -> Result<()> {
         expected_digest.as_ref().map(Sha256Hex::as_str),
     )
     .map_err(|error| anyhow::anyhow!("verify product manifest: {error}"))?;
+    let component_contract_bytes = fs::read(&args.component_contract).with_context(|| {
+        format!(
+            "read native product component contract {}",
+            args.component_contract.display()
+        )
+    })?;
+    let component_contract = crate::product::NativeProductContract::from_bytes(
+        &component_contract_bytes,
+    )
+    .map_err(|error| anyhow::anyhow!("verify native product component contract: {error}"))?;
     crate::product::publication_identity().context("verify product publication identity")?;
     for (field, expected, actual) in [
-        (
-            "schema",
-            args.schema.as_deref(),
-            Some(manifest.schema.as_str()),
-        ),
+        ("schema", args.schema.as_str(), manifest.schema.as_str()),
         (
             "product_id",
-            args.product_id.as_deref(),
-            Some(manifest.product_id.as_str()),
+            args.product_id.as_str(),
+            manifest.product_id.as_str(),
         ),
-        (
-            "channel",
-            args.channel.as_deref(),
-            Some(manifest.channel.as_str()),
-        ),
-        (
-            "version",
-            args.version.as_deref(),
-            Some(manifest.version.as_str()),
-        ),
+        ("channel", args.channel.as_str(), manifest.channel.as_str()),
+        ("version", args.version.as_str(), manifest.version.as_str()),
         (
             "source_repository",
-            args.source_repository.as_deref(),
-            Some(manifest.source_repository.as_str()),
+            args.source_repository.as_str(),
+            manifest.source_repository.as_str(),
         ),
         (
             "source_ref",
-            args.source_ref.as_deref(),
-            Some(manifest.source_ref.as_str()),
+            args.source_ref.as_str(),
+            manifest.source_ref.as_str(),
         ),
         (
             "source_commit",
-            args.source_commit.as_deref(),
-            Some(manifest.source_commit.as_str()),
+            args.source_commit.as_str(),
+            manifest.source_commit.as_str(),
         ),
         (
             "release_tag",
-            args.release_tag.as_deref(),
-            Some(manifest.release_tag.as_str()),
+            args.release_tag.as_str(),
+            manifest.release_tag.as_str(),
         ),
         (
             "release_id",
-            args.release_id.as_deref(),
-            Some(manifest.release_id.as_str()),
+            args.release_id.as_str(),
+            manifest.release_id.as_str(),
         ),
     ] {
-        if expected.is_some() && expected != actual {
+        if expected != actual {
             bail!("product manifest {field} differs from the publisher identity");
         }
     }
     if args.targets.is_empty() || args.components.is_empty() {
         bail!("product verification requires typed target and component profiles");
     }
+    if args.targets != component_contract.targets
+        || args.components != component_contract.component_names()
+    {
+        bail!("product verification profile differs from the typed component contract");
+    }
     manifest
-        .verify_profile(&args.targets, &args.components)
-        .map_err(|error| anyhow::anyhow!("verify product profile: {error}"))?;
+        .verify_typed_profile(&component_contract)
+        .map_err(|error| anyhow::anyhow!("verify product typed profile: {error}"))?;
     manifest
-        .verify_artifacts(&args.artifacts)
+        .verify_artifacts_with_contract(&args.artifacts, Some(&component_contract))
         .map_err(|error| anyhow::anyhow!("verify product artifacts: {error}"))?;
     println!("{}", manifest.digest());
     Ok(())

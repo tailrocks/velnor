@@ -7,8 +7,9 @@
 //! bytes it is part of.  Publishers keep that digest in a sibling checksum or
 //! release record instead.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Read;
 use std::path::{Component, Path};
 
 use anyhow::{bail, Result};
@@ -24,6 +25,8 @@ pub const PRODUCT_MANIFEST_SCHEMA: &str = "velnor.product-manifest/v1";
 pub const PRODUCT_MANIFEST_FILE: &str = "product-manifest.json";
 /// The external digest sidecar for [`PRODUCT_MANIFEST_FILE`].
 pub const PRODUCT_MANIFEST_DIGEST_FILE: &str = "product-manifest.json.sha256";
+/// The source-generated typed component contract consumed by the publisher.
+pub const PRODUCT_COMPONENT_CONTRACT_SCHEMA: &str = "velnor.native-product-contract/v1";
 
 /// The immutable application release identity and complete artifact inventory.
 ///
@@ -70,7 +73,42 @@ pub struct ApplicationComponent {
     pub crate_name: String,
     pub version: String,
     pub binary: String,
+    pub feature: Option<String>,
+    pub identity: String,
     pub targets: Vec<String>,
+}
+
+/// One component declaration independently generated from the native-product
+/// source configuration and Cargo metadata.  Downloaded component rows are
+/// never accepted as this contract.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProductComponentContract {
+    pub name: String,
+    #[serde(rename = "crate")]
+    pub crate_name: String,
+    pub binary: String,
+    pub feature: Option<String>,
+    pub identity: String,
+    pub version: String,
+    pub targets: Vec<String>,
+}
+
+/// The typed producer configuration that binds rows, manifests, and archive
+/// payloads to one source-owned component map.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeProductContract {
+    pub schema: String,
+    pub product_id: String,
+    pub channel: String,
+    pub manifest_schema: String,
+    pub archive_component: String,
+    pub archive_identity_schema: String,
+    pub archive_manifest_schema: String,
+    pub targets: Vec<String>,
+    pub blocked_targets: Vec<String>,
+    pub components: Vec<ProductComponentContract>,
 }
 
 /// The exact field-level failure from a producer or consumer check.  Error
@@ -107,6 +145,93 @@ pub enum ApplicationManifestError {
     NonCanonical,
     #[error("application manifest digest does not match its bytes")]
     Digest,
+    #[error("native product component contract is invalid or disagrees with the manifest")]
+    Contract,
+}
+
+impl NativeProductContract {
+    /// Parse and validate the independently generated source contract.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ApplicationManifestError> {
+        let contract: Self =
+            serde_json::from_slice(bytes).map_err(|_| ApplicationManifestError::Contract)?;
+        contract.verify()?;
+        Ok(contract)
+    }
+
+    /// Validate the contract's complete target/component census and identity
+    /// modes before any downloaded row can be used as a path.
+    pub fn verify(&self) -> Result<(), ApplicationManifestError> {
+        if self.schema != PRODUCT_COMPONENT_CONTRACT_SCHEMA
+            || !safe_slug(&self.product_id)
+            || (self.channel != "stable" && self.channel != "preview")
+            || !safe_schema(&self.manifest_schema)
+            || !safe_schema(&self.archive_identity_schema)
+            || !safe_schema(&self.archive_manifest_schema)
+            || !safe_slug(&self.archive_component)
+            || self.targets.is_empty()
+        {
+            return Err(ApplicationManifestError::Contract);
+        }
+        let expected_targets = self
+            .targets
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let blocked_targets = self
+            .blocked_targets
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if expected_targets.len() != self.targets.len()
+            || blocked_targets.len() != self.blocked_targets.len()
+            || blocked_targets
+                .iter()
+                .any(|target| !expected_targets.contains(target))
+        {
+            return Err(ApplicationManifestError::Contract);
+        }
+        if self.targets.iter().any(|target| !supported_target(target)) {
+            return Err(ApplicationManifestError::Contract);
+        }
+        let mut names = BTreeSet::new();
+        let mut binaries = BTreeSet::new();
+        for component in &self.components {
+            if !names.insert(component.name.as_str())
+                || !safe_slug(&component.name)
+                || !safe_slug(&component.crate_name)
+                || !safe_basename(&component.binary)
+                || !safe_version(&component.version)
+                || component.version == "development"
+                || component.version == "unknown"
+                || !matches!(component.identity.as_str(), "version" | "revision")
+                || component
+                    .feature
+                    .as_deref()
+                    .is_some_and(|feature| feature != "release-build")
+            {
+                return Err(ApplicationManifestError::Contract);
+            }
+            let component_targets = component
+                .targets
+                .iter()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
+            if component_targets != expected_targets
+                || component_targets.len() != component.targets.len()
+                || component
+                    .targets
+                    .iter()
+                    .any(|target| !supported_target(target))
+                || !binaries.insert(component.binary.as_str())
+            {
+                return Err(ApplicationManifestError::Contract);
+            }
+        }
+        if self.components.is_empty() || !names.contains(self.archive_component.as_str()) {
+            return Err(ApplicationManifestError::Contract);
+        }
+        Ok(())
+    }
 }
 
 impl ApplicationManifest {
@@ -243,6 +368,11 @@ impl ApplicationManifest {
                 || !safe_version(&component.version)
                 || matches!(component.version.as_str(), "development" | "unknown")
                 || !safe_basename(&component.binary)
+                || component
+                    .feature
+                    .as_deref()
+                    .is_some_and(|feature| feature != "release-build")
+                || !matches!(component.identity.as_str(), "version" | "revision")
                 || component.targets.is_empty()
             {
                 return Err(ApplicationManifestError::Field("components"));
@@ -403,6 +533,61 @@ impl ApplicationManifest {
         Ok(())
     }
 
+    /// Verify the complete source-owned component declaration, including
+    /// crate, binary, component version, identity mode, feature, and target
+    /// coverage.  The name-only profile remains available to non-product
+    /// callers; publication always uses this stronger contract.
+    pub fn verify_typed_profile(
+        &self,
+        contract: &NativeProductContract,
+    ) -> std::result::Result<(), ApplicationManifestError> {
+        contract.verify()?;
+        self.verify_profile(&contract.targets, &contract.component_names())?;
+        if self.schema != contract.manifest_schema
+            || self.product_id != contract.product_id
+            || self.channel != contract.channel
+        {
+            return Err(ApplicationManifestError::Contract);
+        }
+        let expected = contract
+            .components
+            .iter()
+            .map(|component| (component.name.as_str(), component))
+            .collect::<BTreeMap<_, _>>();
+        let actual = self
+            .components
+            .iter()
+            .map(|component| (component.name.as_str(), component))
+            .collect::<BTreeMap<_, _>>();
+        if expected.len() != actual.len() {
+            return Err(ApplicationManifestError::Contract);
+        }
+        for (name, expected) in expected {
+            let Some(actual) = actual.get(name) else {
+                return Err(ApplicationManifestError::Contract);
+            };
+            if actual.crate_name != expected.crate_name
+                || actual.binary != expected.binary
+                || actual.version != expected.version
+                || actual.feature != expected.feature
+                || actual.identity != expected.identity
+                || actual
+                    .targets
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>()
+                    != expected
+                        .targets
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<BTreeSet<_>>()
+            {
+                return Err(ApplicationManifestError::Contract);
+            }
+        }
+        Ok(())
+    }
+
     /// Verify canonical bytes and the optional externally supplied digest.
     pub fn verify_bytes(
         bytes: &[u8],
@@ -424,7 +609,21 @@ impl ApplicationManifest {
     /// or truncated bytes.  This is intentionally a filesystem-only check;
     /// it never starts a daemon, installs a package, or runs a product binary.
     pub fn verify_artifacts(&self, root: &Path) -> Result<(), ApplicationManifestError> {
+        self.verify_artifacts_with_contract(root, None)
+    }
+
+    /// Verify payload bytes and archives against the optional independent
+    /// contract.  Publication supplies the contract; the `None` form keeps
+    /// the structural verifier reusable for existing package checks.
+    pub fn verify_artifacts_with_contract(
+        &self,
+        root: &Path,
+        contract: Option<&NativeProductContract>,
+    ) -> Result<(), ApplicationManifestError> {
         self.verify()?;
+        if let Some(contract) = contract {
+            self.verify_typed_profile(contract)?;
+        }
         let expected_names: BTreeSet<&str> = self
             .artifacts
             .iter()
@@ -471,10 +670,19 @@ impl ApplicationManifest {
             if artifact.kind == "binary" {
                 verify_binary_architecture(&path, &artifact.target)?;
             } else if matches!(artifact.kind.as_str(), "archive" | "homebrew-archive") {
-                verify_archive_members(&path, self, &artifact.target)?;
+                verify_archive_members(&path, self, &artifact.target, contract)?;
             }
         }
         Ok(())
+    }
+}
+
+impl NativeProductContract {
+    pub(crate) fn component_names(&self) -> Vec<String> {
+        self.components
+            .iter()
+            .map(|component| component.name.clone())
+            .collect()
     }
 }
 
@@ -483,10 +691,54 @@ impl ApplicationManifest {
 /// and the two typed identity documents.  Refuse paths, duplicate members,
 /// links, directories, and undeclared files before any consumer can extract
 /// the archive.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArchiveIdentity {
+    schema: String,
+    product_id: String,
+    channel: String,
+    version: String,
+    source_repository: String,
+    source_ref: String,
+    source_commit: String,
+    release_tag: String,
+    parent_manifest_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArchiveComponent {
+    name: String,
+    #[serde(rename = "crate")]
+    crate_name: String,
+    crate_version: String,
+    release_version: String,
+    source_commit: String,
+    binary_sha256: String,
+    feature: Option<String>,
+    identity: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArchiveManifest {
+    schema: String,
+    product_id: String,
+    channel: String,
+    version: String,
+    source_repository: String,
+    source_ref: String,
+    source_commit: String,
+    release_tag: String,
+    parent_manifest_id: String,
+    components: Vec<ArchiveComponent>,
+}
+
 fn verify_archive_members(
     path: &Path,
     manifest: &ApplicationManifest,
     target: &str,
+    contract: Option<&NativeProductContract>,
 ) -> std::result::Result<(), ApplicationManifestError> {
     let expected = manifest
         .components
@@ -501,10 +753,32 @@ fn verify_archive_members(
         .chain(["identity.json", "manifest.json"])
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
+    let expected_binary_artifacts = manifest
+        .components
+        .iter()
+        .filter(|component| {
+            component
+                .targets
+                .iter()
+                .any(|candidate| candidate == target)
+        })
+        .map(|component| {
+            let name = format!("{}-{target}", component.binary);
+            let artifact = manifest.artifacts.iter().find(|artifact| {
+                artifact.kind == "binary" && artifact.target == target && artifact.name == name
+            });
+            (component.binary.as_str(), artifact)
+        })
+        .collect::<BTreeMap<_, _>>();
+    if expected_binary_artifacts.values().any(Option::is_none) {
+        return Err(ApplicationManifestError::ArchiveUnsafe);
+    }
     let file = fs::File::open(path).map_err(|_| ApplicationManifestError::ArtifactMissing)?;
     let decoder = GzDecoder::new(file);
     let mut archive = tar::Archive::new(decoder);
     let mut actual = BTreeSet::new();
+    let mut identity_bytes = None;
+    let mut manifest_bytes = None;
     for entry in archive
         .entries()
         .map_err(|_| ApplicationManifestError::ArchiveUnsafe)?
@@ -523,17 +797,142 @@ fn verify_archive_members(
         if components.next().is_some() {
             return Err(ApplicationManifestError::ArchiveUnsafe);
         }
-        let Some(name) = name.to_str() else {
+        let Some(name) = name.to_str().map(str::to_owned) else {
             return Err(ApplicationManifestError::ArchiveUnsafe);
         };
         if !actual.insert(name.to_owned()) {
             return Err(ApplicationManifestError::ArchiveUnsafe);
         }
+        let mut bytes = Vec::new();
+        entry
+            .take(usize::MAX as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| ApplicationManifestError::ArchiveUnsafe)?;
+        match name.as_str() {
+            "identity.json" => identity_bytes = Some(bytes),
+            "manifest.json" => manifest_bytes = Some(bytes),
+            binary => {
+                let Some(Some(artifact)) = expected_binary_artifacts.get(binary) else {
+                    return Err(ApplicationManifestError::ArchiveUnsafe);
+                };
+                if bytes.len() as u64 != artifact.size
+                    || hex_lower(&Sha256::digest(&bytes)) != artifact.sha256
+                {
+                    return Err(ApplicationManifestError::ArchiveUnsafe);
+                }
+            }
+        }
     }
-    if actual == expected {
+    if actual != expected || identity_bytes.is_none() || manifest_bytes.is_none() {
+        Err(ApplicationManifestError::ArchiveUnsafe)
+    } else if let Some(contract) = contract {
+        let identity: ArchiveIdentity = serde_json::from_slice(
+            identity_bytes
+                .as_deref()
+                .ok_or(ApplicationManifestError::ArchiveUnsafe)?,
+        )
+        .map_err(|_| ApplicationManifestError::ArchiveUnsafe)?;
+        let archive_manifest: ArchiveManifest = serde_json::from_slice(
+            manifest_bytes
+                .as_deref()
+                .ok_or(ApplicationManifestError::ArchiveUnsafe)?,
+        )
+        .map_err(|_| ApplicationManifestError::ArchiveUnsafe)?;
+        let identity_matches = identity.schema == contract.archive_identity_schema
+            && identity.product_id == manifest.product_id
+            && identity.channel == manifest.channel
+            && identity.version == manifest.version
+            && identity.source_repository == manifest.source_repository
+            && identity.source_ref == manifest.source_ref
+            && identity.source_commit == manifest.source_commit
+            && identity.release_tag == manifest.release_tag
+            && identity.parent_manifest_id == manifest.release_id;
+        let manifest_matches = archive_manifest.schema == contract.archive_manifest_schema
+            && archive_manifest.product_id == manifest.product_id
+            && archive_manifest.channel == manifest.channel
+            && archive_manifest.version == manifest.version
+            && archive_manifest.source_repository == manifest.source_repository
+            && archive_manifest.source_ref == manifest.source_ref
+            && archive_manifest.source_commit == manifest.source_commit
+            && archive_manifest.release_tag == manifest.release_tag
+            && archive_manifest.parent_manifest_id == manifest.release_id;
+        if !identity_matches || !manifest_matches {
+            return Err(ApplicationManifestError::ArchiveUnsafe);
+        }
+        let expected_components = manifest
+            .components
+            .iter()
+            .filter(|component| {
+                component
+                    .targets
+                    .iter()
+                    .any(|candidate| candidate == target)
+            })
+            .map(|component| {
+                let binary_sha256 = manifest
+                    .artifacts
+                    .iter()
+                    .find(|artifact| {
+                        artifact.kind == "binary"
+                            && artifact.target == target
+                            && artifact.name == format!("{}-{target}", component.binary)
+                    })
+                    .map(|artifact| artifact.sha256.clone());
+                (
+                    component.name.clone(),
+                    (
+                        component.crate_name.clone(),
+                        component.version.clone(),
+                        component.feature.clone(),
+                        component.identity.clone(),
+                        binary_sha256,
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let actual_components = archive_manifest
+            .components
+            .into_iter()
+            .map(|component| {
+                (
+                    component.name,
+                    (
+                        component.crate_name,
+                        component.crate_version,
+                        component.feature,
+                        component.identity,
+                        Some(component.binary_sha256),
+                        component.release_version,
+                        component.source_commit,
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let expected_components = expected_components
+            .into_iter()
+            .map(
+                |(name, (crate_name, version, feature, identity, binary_sha256))| {
+                    (
+                        name,
+                        (
+                            crate_name,
+                            version,
+                            feature,
+                            identity,
+                            binary_sha256,
+                            manifest.version.clone(),
+                            manifest.source_commit.clone(),
+                        ),
+                    )
+                },
+            )
+            .collect::<BTreeMap<_, _>>();
+        if actual_components != expected_components {
+            return Err(ApplicationManifestError::ArchiveUnsafe);
+        }
         Ok(())
     } else {
-        Err(ApplicationManifestError::ArchiveUnsafe)
+        Ok(())
     }
 }
 
@@ -609,6 +1008,15 @@ fn safe_slug(value: &str) -> bool {
     !value.is_empty()
         && value.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b'_')
+        })
+}
+
+fn safe_schema(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'.' | b'-' | b'/' | b'_')
         })
 }
 
@@ -732,7 +1140,7 @@ mod tests {
     fn manifest() -> ApplicationManifest {
         let binary = x86_elf();
         let archive = archive_bytes(&[
-            ("runner", b"binary"),
+            ("runner", &binary),
             ("identity.json", b"{}"),
             ("manifest.json", b"{}"),
         ]);
@@ -748,7 +1156,7 @@ mod tests {
             release_id: "123456789".to_owned(),
             artifacts: vec![
                 ApplicationArtifact {
-                    name: "runner".to_owned(),
+                    name: "runner-x86_64-unknown-linux-gnu".to_owned(),
                     target: "x86_64-unknown-linux-gnu".to_owned(),
                     kind: "binary".to_owned(),
                     sha256: hex_lower(&Sha256::digest(&binary)),
@@ -774,9 +1182,60 @@ mod tests {
                 crate_name: "runner".to_owned(),
                 version: "0.1.0".to_owned(),
                 binary: "runner".to_owned(),
+                feature: None,
+                identity: "version".to_owned(),
                 targets: vec!["x86_64-unknown-linux-gnu".to_owned()],
             }],
         }
+    }
+
+    fn component_contract() -> NativeProductContract {
+        NativeProductContract {
+            schema: PRODUCT_COMPONENT_CONTRACT_SCHEMA.to_owned(),
+            product_id: "example".to_owned(),
+            channel: "stable".to_owned(),
+            manifest_schema: PRODUCT_MANIFEST_SCHEMA.to_owned(),
+            archive_component: "runner".to_owned(),
+            archive_identity_schema: "velnor.identity/v1".to_owned(),
+            archive_manifest_schema: "velnor.archive/v1".to_owned(),
+            targets: vec!["x86_64-unknown-linux-gnu".to_owned()],
+            blocked_targets: Vec::new(),
+            components: vec![ProductComponentContract {
+                name: "runner".to_owned(),
+                crate_name: "runner".to_owned(),
+                binary: "runner".to_owned(),
+                feature: None,
+                identity: "version".to_owned(),
+                version: "0.1.0".to_owned(),
+                targets: vec!["x86_64-unknown-linux-gnu".to_owned()],
+            }],
+        }
+    }
+
+    #[test]
+    fn typed_component_contract_binds_crate_binary_version_feature_identity_and_targets() {
+        let value = manifest();
+        let contract = component_contract();
+        assert_eq!(value.verify_typed_profile(&contract), Ok(()));
+
+        let mut mismatch = contract.clone();
+        mismatch.components[0].crate_name = "other".to_owned();
+        assert_eq!(
+            value.verify_typed_profile(&mismatch),
+            Err(ApplicationManifestError::Contract)
+        );
+        mismatch = contract.clone();
+        mismatch.components[0].version = "0.2.0".to_owned();
+        assert_eq!(
+            value.verify_typed_profile(&mismatch),
+            Err(ApplicationManifestError::Contract)
+        );
+        mismatch = contract;
+        mismatch.components[0].identity = "revision".to_owned();
+        assert_eq!(
+            value.verify_typed_profile(&mismatch),
+            Err(ApplicationManifestError::Contract)
+        );
     }
 
     #[test]
@@ -898,11 +1357,11 @@ mod tests {
             nanos
         ));
         assert!(fs::create_dir_all(&root).is_ok());
-        assert!(fs::write(root.join("runner"), x86_elf()).is_ok());
+        assert!(fs::write(root.join("runner-x86_64-unknown-linux-gnu"), x86_elf()).is_ok());
         assert!(fs::write(
             root.join("runner-x86_64-unknown-linux-gnu.tar.gz"),
             archive_bytes(&[
-                ("runner", b"binary"),
+                ("runner", &x86_elf()),
                 ("identity.json", b"{}"),
                 ("manifest.json", b"{}"),
             ])
@@ -910,10 +1369,41 @@ mod tests {
         .is_ok());
         assert!(fs::write(root.join("runner-x86_64-unknown-linux-gnu.deb"), b"deb").is_ok());
         assert!(value.verify_artifacts(&root).is_ok());
-        assert!(fs::write(root.join("runner"), b"changed").is_ok());
+        assert!(fs::write(root.join("runner-x86_64-unknown-linux-gnu"), b"changed").is_ok());
         assert_eq!(
             value.verify_artifacts(&root),
             Err(ApplicationManifestError::ArtifactSize)
+        );
+        assert!(fs::remove_dir_all(root).is_ok());
+    }
+
+    #[test]
+    fn archive_member_bytes_must_match_the_sibling_binary_digest() {
+        let mut value = manifest();
+        let mut altered = x86_elf();
+        altered[31] = 1;
+        let archive = archive_bytes(&[
+            ("runner", &altered),
+            ("identity.json", b"{}"),
+            ("manifest.json", b"{}"),
+        ]);
+        value.artifacts[1].sha256 = hex_lower(&Sha256::digest(&archive));
+        value.artifacts[1].size = archive.len() as u64;
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let root = std::env::temp_dir().join(format!(
+            "velnor-product-archive-digest-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        assert!(fs::create_dir_all(&root).is_ok());
+        assert!(fs::write(root.join("runner-x86_64-unknown-linux-gnu"), x86_elf()).is_ok());
+        assert!(fs::write(root.join("runner-x86_64-unknown-linux-gnu.tar.gz"), archive).is_ok());
+        assert!(fs::write(root.join("runner-x86_64-unknown-linux-gnu.deb"), b"deb").is_ok());
+        assert_eq!(
+            value.verify_artifacts(&root),
+            Err(ApplicationManifestError::ArchiveUnsafe)
         );
         assert!(fs::remove_dir_all(root).is_ok());
     }
@@ -937,7 +1427,7 @@ mod tests {
             nanos
         ));
         assert!(fs::create_dir_all(&root).is_ok());
-        assert!(fs::write(root.join("runner"), x86_elf()).is_ok());
+        assert!(fs::write(root.join("runner-x86_64-unknown-linux-gnu"), x86_elf()).is_ok());
         assert!(fs::write(
             root.join("runner-x86_64-unknown-linux-gnu.tar.gz"),
             unsafe_archive
