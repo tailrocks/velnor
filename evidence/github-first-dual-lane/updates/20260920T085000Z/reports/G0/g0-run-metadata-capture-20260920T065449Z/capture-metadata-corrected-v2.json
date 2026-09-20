@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "g0-untrusted-raw-run-metadata-childgraph-capture",
+  "status": "raw_observation_only_not_gate",
+  "started_at_utc": "2026-09-20T06:54:56Z",
+  "finished_at_utc": "2026-09-20T07:58:56Z",
+  "read_only": true,
+  "no_dispatch_or_source_mutation": true,
+  "scope": {
+    "repository_count": 32,
+    "canonical_index_path": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/fleet/workload-contract-index-20260920T000017Z.json",
+    "canonical_index_sha256": "75000aca431f4e195a39f605eea846bc0ba6aed58e3bbc38e94e42009b12b269"
+  },
+  "historical_source_capture": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/fleet/g0-current-workflow-ruleset-raw-capture-20260920T052347Z",
+  "script": {
+    "path": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/g0-run-metadata-capture-20260920T062830Z.sh",
+    "sha256": "7f31393a7f177b540d82cdab28cc056362f623f839c4eb098a4cbc0e434b51f8"
+  },
+  "request_count": 2335,
+  "request_error_count": 10,
+  "unique_action_runs": 392,
+  "raw_triplets": {
+    "body": 2335,
+    "http": 2335,
+    "stderr": 2335
+  },
+  "checks": {
+    "fresh_filter": "all",
+    "paginated": true
+  },
+  "logs": {
+    "api_called": false,
+    "archives_downloaded": false,
+    "availability": "not fetched; run logs_url link presence must be derived"
+  },
+  "identity_reconciliation": "identity/reconciliation.json",
+  "unknown_policy": "errors,absent runs,non-actions checks,missing logs,empty artifacts,child references, and churn remain explicit; no execution result is inferred",
+  "provenance_correction": {
+    "kind": "successor_correction",
+    "reason": "embedded collector path pointed at nonexistent G0/fleet location; raw capture unchanged",
+    "original_capture_metadata_script_path": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/fleet/g0-run-metadata-capture-20260920T062830Z.sh",
+    "original_capture_metadata_script_sha256": "",
+    "actual_script_path": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/g0-run-metadata-capture-20260920T062830Z.sh",
+    "actual_script_sha256": "7f31393a7f177b540d82cdab28cc056362f623f839c4eb098a4cbc0e434b51f8"
+  }
+}

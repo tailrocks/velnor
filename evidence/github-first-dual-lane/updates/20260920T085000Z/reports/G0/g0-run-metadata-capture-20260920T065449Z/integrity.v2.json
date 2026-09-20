@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "g0-run-metadata-integrity-index",
+  "status": "raw_observation_only_not_gate",
+  "capture_path": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/g0-run-metadata-capture-20260920T065449Z",
+  "collector": {
+    "path": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/g0-run-metadata-capture-20260920T062830Z.sh",
+    "sha256": "7f31393a7f177b540d82cdab28cc056362f623f839c4eb098a4cbc0e434b51f8"
+  },
+  "summarizer": {
+    "path": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/g0-run-metadata-summary-20260920T065449Z.sh",
+    "sha256": "7494ad7c215ca4965749ef42f1b81465ddf08247d1b32219d7bc277265375ed7"
+  },
+  "raw_manifests": {
+    "request_ledger_sha256": "a541d2b1bc506c7b0b6f555fb8a91458f63aff1f549e188f908b2fd896e7b307",
+    "issues_sha256": "74bed084242023679fb38d80a33a1709b531de8d150d5f70fc0c3688eed33457",
+    "run_observations_sha256": "abb83e32b70ac00e16ab4b48d0f84165113d4811822433327b6ef06f30101359",
+    "child_graph_sha256": "0e8ba80815a2906899e468c53272e00f69f136b54a28e4c53e9f0b78f10f91ed"
+  },
+  "counts": {
+    "scope_repositories": 32,
+    "targets": 172,
+    "check_records": 3882,
+    "unique_action_runs": 392,
+    "run_details": 392,
+    "attempts": 392,
+    "job_records": 3882,
+    "artifact_records": 162,
+    "status_records": 2,
+    "workflow_directory_404": 10
+  },
+  "logs": {
+    "run_rows": 392,
+    "logs_url_present": 392,
+    "log_api_called": false,
+    "archives_downloaded": false,
+    "availability": "unknown_not_fetched"
+  },
+  "unknowns": [
+    "workflow-directory 404s are retained and not success",
+    "runner OS absent from job API; labels preserved without OS inference",
+    "API head SHA is not asserted as local checkout",
+    "run/job conclusions are observations, not execution/gate proof",
+    "historical-to-successor and successor-before-to-after churn are separate",
+    "before-successor exploratory manual logs request streamed one historical sample to stdout but was not retained; successor ledger has zero logs endpoints"
+  ]
+}

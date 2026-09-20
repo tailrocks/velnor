@@ -1,0 +1,86 @@
+{
+  "$schema": "velnor.external-evidence-checkpoint.v1",
+  "attestation": "none",
+  "gate_status": "not-evaluated",
+  "captured_at_utc": "2026-09-20T08:53:31Z",
+  "source_capture_cutoff_utc": "2026-09-20T08:50:00Z",
+  "ref": "refs/heads/evidence/github-first-dual-lane-20260919T181508Z",
+  "repository": "tailrocks/velnor",
+  "publication_owner": "/root",
+  "records_owner": "/root/g0_records",
+  "original_evidence_root": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence",
+  "source_base_revision": "abe9ad82a2d4d01b706bbc6122ab6ccb150faad9",
+  "parent_checkpoint_commit": "c391d96a3d1e3cc434f83c5481949f25bdbe49d6",
+  "stability": {
+    "selected_paths_are_regular_non_symlinks": true,
+    "source_hash_reads": 2,
+    "source_hash_reads_match": true,
+    "destination_hash_and_size_reconciliation": "pass",
+    "source_tree_modified": false,
+    "included_file_count": 48,
+    "included_source_bytes": 3034649,
+    "included_groups": {
+      "G0": {"files": 39, "bytes": 2964223},
+      "G1": {"files": 9, "bytes": 70426}
+    },
+    "exact_manifest": "INVENTORY.tsv"
+  },
+  "included_scope": [
+    "G0 run-metadata bounded review/report/corrected metadata/integrity-v2/raw inventory manifest",
+    "28-file real GitHub API corpus with manifest and relationship report",
+    "checker provider-raw and mapper corpus independent reviews",
+    "native f378 review and signer design plus independent review",
+    "2719 predecessor and 907 successor records reviews",
+    "bootstrap 358 plus f5 addendum and containment research/design review"
+  ],
+  "real_api_corpus": {
+    "manifest_sha256": "d2c66c7bb61dfa6a0ddf4ea336feb8704b1c137aaba6031c2930ca58f5fae2bb",
+    "independent_review_sha256": "3a1e02a9b8ac0efad921fc596712071c3e65c9e9809f38ddebf9cdcddcc76106",
+    "raw_file_count": 28,
+    "raw_bytes": 969403,
+    "pre_copy_manifest_rehash": "pass"
+  },
+  "g0_capture_raw_exclusion": {
+    "capture_root": "G0/g0-run-metadata-capture-20260920T065449Z",
+    "capture_root_kib_approx": 225468,
+    "capture_root_file_count": 7037,
+    "raw_subtree_kib_approx": 115952,
+    "raw_subtree_file_count": 7005,
+    "raw_manifest_included": true,
+    "raw_manifest_sha256": "6cc98c2886ad23a72bd17cf72f0fb5cea9038da8f01090579360affe62d53637",
+    "raw_bodies_http_stderr_copied": false,
+    "exclusion_reason": "full capture exceeds bounded checkpoint size; inventory/review retained"
+  },
+  "excluded_scope": [
+    "live writers and moving capture trees",
+    "checker/hosted WIP",
+    "full G0 raw bodies, HTTP envelopes, stderr logs, and large derived summaries",
+    "credentials and auth tokens",
+    "builds, targets, archives, repository clones, .git metadata, and __pycache__",
+    "paths newer than the 2026-09-20T08:50:00Z cutoff"
+  ],
+  "raw_byte_attributes": {
+    "new_rules": [
+      "evidence/github-first-dual-lane/updates/**/reports/G0/real-api-fixture-corpus-*/raw/** -text -filter",
+      "evidence/github-first-dual-lane/updates/**/reports/G0/g0-run-metadata-capture-*/raw-manifest.json -text -filter"
+    ],
+    "prior_rules_preserved": true
+  },
+  "validation": {
+    "json_and_ndjson_parse": "pass before push; rechecked from committed object",
+    "high_confidence_secret_scan": "pass (no token/private-key matches)",
+    "real_api_manifest_rehash": "pass (28/28)",
+    "source_destination_hash_reconciliation": "pass",
+    "fresh_committed_object_checkout": "rechecked before push",
+    "attestation": "none",
+    "gate_status": "not-evaluated"
+  },
+  "no_mutations": [
+    "source repository",
+    "GitHub authority/rulesets",
+    "workflow dispatch",
+    "release/publication",
+    "merge",
+    "gate state"
+  ]
+}

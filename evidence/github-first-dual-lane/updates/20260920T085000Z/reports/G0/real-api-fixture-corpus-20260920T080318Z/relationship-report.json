@@ -1,0 +1,456 @@
+{
+  "schema_version": "real-github-api-relationship-report.v1",
+  "evidence_kind": "raw-provider-derived-index",
+  "status": "read_only_source_corpus_not_gate",
+  "selected_velnor_run": {
+    "repository": "tailrocks/velnor",
+    "run_id": 35493166478,
+    "run_attempt": 1,
+    "run_attempt_source": "run.body and attempt.body both expose 1; artifact workflow_run.run_attempt is null and is not inferred",
+    "head_sha": "df9fb272c025f76cc8711560209afcdfd6cc4e00",
+    "workflow_id": 347892207,
+    "check_suite_id": 96108227551,
+    "status": "completed",
+    "conclusion": "success",
+    "event": "pull_request",
+    "actor": "donbeave",
+    "triggering_actor": "donbeave",
+    "run_body": "raw/velnor/run-35493166478/run.body",
+    "attempt_body": "raw/velnor/run-35493166478/attempt-1/attempt.body"
+  },
+  "run_attempt_relationship": {
+    "endpoint_path": "/repos/tailrocks/velnor/actions/runs/35493166478/attempts/1",
+    "run_id": 35493166478,
+    "attempt_run_attempt": 1,
+    "same_head_sha": true,
+    "same_workflow": true,
+    "raw_jobs_endpoint": "/repos/tailrocks/velnor/actions/runs/35493166478/attempts/1/jobs?per_page=100&page=1",
+    "raw_artifacts_endpoint": "/repos/tailrocks/velnor/actions/runs/35493166478/artifacts?per_page=100&page=1"
+  },
+  "jobs_relationship": {
+    "total_count": 68,
+    "item_count": 68,
+    "page_count": 1,
+    "page_numbers": [
+      1
+    ],
+    "complete_page": true,
+    "run_ids": [
+      35493166478
+    ],
+    "run_attempts": [
+      1
+    ],
+    "ids": [
+      106031464296,
+      106031517794,
+      106031517796,
+      106031517824,
+      106031517843,
+      106031517903,
+      106031517906,
+      106031517925,
+      106031517945,
+      106031517969,
+      106031518010,
+      106031518037,
+      106031518045,
+      106031518055,
+      106031518085,
+      106031518096,
+      106031518111,
+      106031518147,
+      106031518175,
+      106031518189,
+      106031518207,
+      106031518289,
+      106031518296,
+      106031518304,
+      106031518317,
+      106031518318,
+      106031518355,
+      106031518370,
+      106031518383,
+      106031518397,
+      106031518405,
+      106031518488,
+      106031518507,
+      106031518510,
+      106031518514,
+      106031518517,
+      106031518522,
+      106031518524,
+      106031518528,
+      106031518542,
+      106031518545,
+      106031518562,
+      106031518563,
+      106031518574,
+      106031518607,
+      106031518612,
+      106031518622,
+      106031518628,
+      106031518658,
+      106031518659,
+      106031518665,
+      106031518673,
+      106031518695,
+      106031518698,
+      106031518724,
+      106031518732,
+      106031518738,
+      106031518767,
+      106031518861,
+      106031519046,
+      106031519105,
+      106031519418,
+      106031519633,
+      106031519840,
+      106031520047,
+      106031520071,
+      106032605768,
+      106032614717
+    ],
+    "conclusions": [
+      {
+        "conclusion": "skipped",
+        "count": 48
+      },
+      {
+        "conclusion": "success",
+        "count": 20
+      }
+    ],
+    "raw_body": "raw/velnor/run-35493166478/attempt-1/jobs/page-0001.body"
+  },
+  "artifacts_relationship": {
+    "total_count": 2,
+    "item_count": 2,
+    "page_count": 1,
+    "page_numbers": [
+      1
+    ],
+    "complete_page": true,
+    "ids": [
+      10600190671,
+      10599742367
+    ],
+    "artifacts": [
+      {
+        "id": 10600190671,
+        "name": "velnor-workflow-runtime-325719f1e05d3d46322c9fd3eeb9ad545e175638-Linux-X64",
+        "size_in_bytes": 8357269,
+        "expired": false,
+        "expired_at": null,
+        "digest": "sha256:df99809a9d4d27662a49a537c3999fe8027a166e02845823e3ef4c27e8597ae1",
+        "workflow_run_id": 35493166478,
+        "workflow_run_attempt": null
+      },
+      {
+        "id": 10599742367,
+        "name": "velnor-workflow-candidate-a67d55386f0034c7-Linux-X64",
+        "size_in_bytes": 41447288,
+        "expired": false,
+        "expired_at": null,
+        "digest": "sha256:c45010fc570f27e5f1ed72ea6c947ef3a6d29771c48be7260096333f776cc49a",
+        "workflow_run_id": 35493166478,
+        "workflow_run_attempt": null
+      }
+    ],
+    "raw_body": "raw/velnor/run-35493166478/artifacts/page-0001.body"
+  },
+  "velnor_checks_relationship": {
+    "repository": "tailrocks/velnor",
+    "commit_sha": "df9fb272c025f76cc8711560209afcdfd6cc4e00",
+    "total_count": 70,
+    "item_count": 70,
+    "page_count": 1,
+    "page_numbers": [
+      1
+    ],
+    "complete_page": true,
+    "ids": [
+      106032614717,
+      106032605768,
+      106031520071,
+      106031520047,
+      106031519840,
+      106031519633,
+      106031519418,
+      106031519105,
+      106031519046,
+      106031518861,
+      106031518767,
+      106031518738,
+      106031518732,
+      106031518724,
+      106031518698,
+      106031518695,
+      106031518673,
+      106031518665,
+      106031518659,
+      106031518658,
+      106031518628,
+      106031518622,
+      106031518612,
+      106031518607,
+      106031518574,
+      106031518563,
+      106031518562,
+      106031518545,
+      106031518542,
+      106031518528,
+      106031518524,
+      106031518522,
+      106031518517,
+      106031518514,
+      106031518510,
+      106031518507,
+      106031518488,
+      106031518405,
+      106031518397,
+      106031518383,
+      106031518370,
+      106031518355,
+      106031518318,
+      106031518317,
+      106031518304,
+      106031518296,
+      106031518289,
+      106031518207,
+      106031518189,
+      106031518175,
+      106031518147,
+      106031518111,
+      106031518096,
+      106031518085,
+      106031518055,
+      106031518045,
+      106031518037,
+      106031518010,
+      106031517969,
+      106031517945,
+      106031517925,
+      106031517906,
+      106031517903,
+      106031517843,
+      106031517824,
+      106031517796,
+      106031517794,
+      106031464296,
+      106031459740,
+      106031458188
+    ],
+    "check_suite_ids": [
+      96108219979,
+      96108224766,
+      96108227551
+    ],
+    "app_counts": [
+      {
+        "app": "dco-2",
+        "count": 1
+      },
+      {
+        "app": "github-actions",
+        "count": 69
+      }
+    ],
+    "dco": [
+      {
+        "id": 106031458188,
+        "name": "DCO",
+        "status": "completed",
+        "conclusion": "success",
+        "head_sha": "df9fb272c025f76cc8711560209afcdfd6cc4e00",
+        "app_slug": "dco-2",
+        "app_id": 974774,
+        "check_suite_id": 96108219979
+      }
+    ],
+    "github_actions_ids": [
+      106032614717,
+      106032605768,
+      106031520071,
+      106031520047,
+      106031519840,
+      106031519633,
+      106031519418,
+      106031519105,
+      106031519046,
+      106031518861,
+      106031518767,
+      106031518738,
+      106031518732,
+      106031518724,
+      106031518698,
+      106031518695,
+      106031518673,
+      106031518665,
+      106031518659,
+      106031518658,
+      106031518628,
+      106031518622,
+      106031518612,
+      106031518607,
+      106031518574,
+      106031518563,
+      106031518562,
+      106031518545,
+      106031518542,
+      106031518528,
+      106031518524,
+      106031518522,
+      106031518517,
+      106031518514,
+      106031518510,
+      106031518507,
+      106031518488,
+      106031518405,
+      106031518397,
+      106031518383,
+      106031518370,
+      106031518355,
+      106031518318,
+      106031518317,
+      106031518304,
+      106031518296,
+      106031518289,
+      106031518207,
+      106031518189,
+      106031518175,
+      106031518147,
+      106031518111,
+      106031518096,
+      106031518085,
+      106031518055,
+      106031518045,
+      106031518037,
+      106031518010,
+      106031517969,
+      106031517945,
+      106031517925,
+      106031517906,
+      106031517903,
+      106031517843,
+      106031517824,
+      106031517796,
+      106031517794,
+      106031464296,
+      106031459740
+    ],
+    "conclusion_counts": [
+      {
+        "conclusion": "failure",
+        "count": 1
+      },
+      {
+        "conclusion": "skipped",
+        "count": 48
+      },
+      {
+        "conclusion": "success",
+        "count": 21
+      }
+    ],
+    "raw_body": "raw/velnor/commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/check-runs/page-0001.body"
+  },
+  "velnor_statuses_relationship": {
+    "endpoint": "/repos/tailrocks/velnor/commits/df9fb272c025f76cc8711560209afcdfd6cc4e00/statuses?per_page=100&page=1",
+    "raw_value": [],
+    "status_count": 0,
+    "raw_body": "raw/velnor/commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/statuses/page-0001.body"
+  },
+  "separate_sonar_provider_fixture": {
+    "repository": "jackin-project/homebrew-tap",
+    "commit_sha": "c501e90d014c207234ed94ea41f7a1c9b6ea0c7c",
+    "total_count": 6,
+    "item_count": 6,
+    "page_count": 1,
+    "page_numbers": [
+      1
+    ],
+    "complete_page": true,
+    "ids": [
+      105978737907,
+      105978726703,
+      105978687297,
+      105978471119,
+      105978437858,
+      105978437802
+    ],
+    "app_counts": [
+      {
+        "app": "github-actions",
+        "count": 5
+      },
+      {
+        "app": "sonarqubecloud",
+        "count": 1
+      }
+    ],
+    "sonar": [
+      {
+        "id": 105978471119,
+        "name": "SonarCloud Code Analysis",
+        "status": "completed",
+        "conclusion": "failure",
+        "head_sha": "c501e90d014c207234ed94ea41f7a1c9b6ea0c7c",
+        "details_url": "https://sonarcloud.io/dashboard?id=jackin-project_homebrew-tap&branch=main",
+        "app_slug": "sonarqubecloud",
+        "app_id": 12526,
+        "check_suite_id": 96059348318,
+        "output_title": "Quality Gate failed"
+      }
+    ],
+    "raw_body": "raw/homebrew-tap/commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-runs/page-0001.body",
+    "relation_to_velnor": "separate provider-positive fixture; not a check on Velnor run 35493166478"
+  },
+  "repository_owner_relationship": {
+    "repository": {
+      "full_name": "tailrocks/velnor",
+      "id": 1255367013
+    },
+    "owner": {
+      "login": "tailrocks",
+      "id": 78806509,
+      "type": "Organization"
+    },
+    "organization": {
+      "login": "tailrocks",
+      "id": 78806509,
+      "type": "Organization"
+    },
+    "raw_repository": "raw/metadata/tailrocks-velnor/repository.body",
+    "raw_org": "raw/metadata/org-tailrocks.response",
+    "raw_user": "raw/metadata/user-tailrocks.response"
+  },
+  "unknowns": [
+    {
+      "key": "velnor_sonar_check",
+      "status": "absent_in_selected_raw_page",
+      "detail": "No SonarCloud check name or sonarqubecloud app appears in the complete 70-check Velnor response. The Homebrew Sonar record is intentionally separate."
+    },
+    {
+      "key": "artifact_workflow_run_attempt",
+      "status": "api_omits_value",
+      "detail": "Both artifact records expose workflow_run.id=35493166478 and workflow_run.run_attempt=null; no attempt value is invented."
+    },
+    {
+      "key": "velnor_statuses",
+      "status": "empty_api_response",
+      "detail": "The selected commit statuses endpoint is a complete [] response; checks are represented by check-runs instead."
+    },
+    {
+      "key": "pagination",
+      "status": "complete_single_page",
+      "detail": "All paginated selected connections have no Link header and total_count equals array length where applicable; no page was silently dropped."
+    },
+    {
+      "key": "live_authority",
+      "status": "not_claimed",
+      "detail": "Captured bytes are historical read-only provider fixtures, not current gate truth."
+    }
+  ]
+}
+

@@ -1,0 +1,29 @@
+HTTP/2.0 200 OK
+Access-Control-Allow-Origin: *
+Access-Control-Expose-Headers: ETag, Link, Location, Retry-After, X-GitHub-OTP, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Used, X-RateLimit-Resource, X-RateLimit-Reset, X-OAuth-Scopes, X-Accepted-OAuth-Scopes, X-Poll-Interval, X-GitHub-Media-Type, X-GitHub-SSO, X-GitHub-Request-Id, Deprecation, Sunset, Warning
+Cache-Control: private, max-age=60, s-maxage=60
+Content-Security-Policy: default-src 'none'
+Content-Type: application/json; charset=utf-8
+Date: Sun, 20 Sep 2026 07:53:43 GMT
+Etag: W/"576bbe3c0c751e09643eab97ca2d551ac9d8c70f8a078ee4a334ad10d3444d2d"
+Referrer-Policy: origin-when-cross-origin, strict-origin-when-cross-origin
+Server: github.com
+Strict-Transport-Security: max-age=31536000; includeSubdomains; preload
+Vary: Accept, Authorization, Cookie, X-GitHub-OTP,Accept-Encoding, Accept, X-Requested-With
+X-Accepted-Oauth-Scopes: 
+X-Content-Type-Options: nosniff
+X-Frame-Options: deny
+X-Github-Api-Version-Selected: 2022-11-28
+X-Github-Edge-Region: southeastasia
+X-Github-Media-Type: github.v3; format=json
+X-Github-Request-Id: 5F0D:2B8A85:1BB5C32:1D2C6E3:6AAF9106
+X-Oauth-Client-Id: 178c6fc778ccc68e1d6a
+X-Oauth-Scopes: admin:org, delete_repo, gist, repo, workflow
+X-Ratelimit-Limit: 5000
+X-Ratelimit-Remaining: 4111
+X-Ratelimit-Reset: 1789893532
+X-Ratelimit-Resource: core
+X-Ratelimit-Used: 889
+X-Xss-Protection: 0
+
+{"total_count":2,"artifacts":[{"id":10600190671,"node_id":"MDg6QXJ0aWZhY3QxMDYwMDE5MDY3MQ==","name":"velnor-workflow-runtime-325719f1e05d3d46322c9fd3eeb9ad545e175638-Linux-X64","size_in_bytes":8357269,"url":"https://api.github.com/repos/tailrocks/velnor/actions/artifacts/10600190671","archive_download_url":"https://api.github.com/repos/tailrocks/velnor/actions/artifacts/10600190671/zip","expired":false,"digest":"sha256:df99809a9d4d27662a49a537c3999fe8027a166e02845823e3ef4c27e8597ae1","created_at":"2026-09-20T06:02:22Z","updated_at":"2026-09-20T06:02:22Z","expires_at":"2026-09-27T06:02:20Z","workflow_run":{"id":35493166478,"repository_id":1255367013,"head_repository_id":1255367013,"head_branch":"codex/ci-performance-campaign","head_sha":"df9fb272c025f76cc8711560209afcdfd6cc4e00"}},{"id":10599742367,"node_id":"MDg6QXJ0aWZhY3QxMDU5OTc0MjM2Nw==","name":"velnor-workflow-candidate-a67d55386f0034c7-Linux-X64","size_in_bytes":41447288,"url":"https://api.github.com/repos/tailrocks/velnor/actions/artifacts/10599742367","archive_download_url":"https://api.github.com/repos/tailrocks/velnor/actions/artifacts/10599742367/zip","expired":false,"digest":"sha256:c45010fc570f27e5f1ed72ea6c947ef3a6d29771c48be7260096333f776cc49a","created_at":"2026-09-20T06:11:57Z","updated_at":"2026-09-20T06:11:57Z","expires_at":"2026-09-21T06:11:52Z","workflow_run":{"id":35493166478,"repository_id":1255367013,"head_repository_id":1255367013,"head_branch":"codex/ci-performance-campaign","head_sha":"df9fb272c025f76cc8711560209afcdfd6cc4e00"}}]}

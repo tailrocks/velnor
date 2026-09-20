@@ -1,0 +1,369 @@
+{
+  "schema_version": "real-github-api-fixture-corpus.v1",
+  "artifact_kind": "immutable_real_github_api_fixture_corpus",
+  "corpus_created_at_utc": "2026-09-20T08:03:18Z",
+  "status": "read_only_source_corpus_not_gate",
+  "scope": {
+    "primary": "one authentic tailrocks/velnor run/attempt with jobs, artifacts, DCO, GitHub Actions checks",
+    "provider_positive": "one separate authentic jackin-project/homebrew-tap SonarCloud check response",
+    "intended_consumers": [
+      "g0_checker",
+      "g3_distribution_consumers"
+    ],
+    "excluded": [
+      "workflow dispatch",
+      "source edits",
+      "rollout",
+      "gate/live-authority claim",
+      "credential material"
+    ]
+  },
+  "auth": {
+    "principal": "donbeave",
+    "principal_source": "local gh auth status at capture time; raw Velnor run actor and triggering_actor also identify donbeave",
+    "credential_policy": "no Authorization header, bearer token, or token value copied",
+    "observed_oauth_scopes": [
+      "admin:org",
+      "delete_repo",
+      "gist",
+      "repo",
+      "workflow"
+    ],
+    "observed_client_id": "178c6fc778ccc68e1d6a"
+  },
+  "integrity": {
+    "hash_algorithm": "SHA-256",
+    "raw_bytes_policy": "raw body/header/stderr files copied without JSON reshaping; direct metadata captures retain the combined response envelope",
+    "raw_file_count": 28,
+    "relationship_report": "relationship-report.json",
+    "readme": "README.md"
+  },
+  "source_captures": [
+    {
+      "role": "Velnor run, attempt, jobs, artifacts, checks, statuses, repository metadata",
+      "root": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/g0-run-metadata-capture-20260920T065449Z"
+    },
+    {
+      "role": "Homebrew Sonar/check provider-positive capture",
+      "root": "/Users/donbeave/Projects/tailrocks/velnor-project/dual-lane-evidence/G0/fleet/g0-current-workflow-ruleset-raw-capture-20260920T051900Z"
+    },
+    {
+      "role": "Direct read-only org/user metadata fetch",
+      "root": "/private/tmp/velnor-real-api-meta.HBe7IM",
+      "command": "gh api --method GET --include orgs/tailrocks and users/tailrocks"
+    }
+  ],
+  "request_records": [
+    {
+      "id": "velnor-run",
+      "repository": "tailrocks/velnor",
+      "method": "GET",
+      "url": "https://api.github.com/repos/tailrocks/velnor/actions/runs/35493166478",
+      "status": 200,
+      "source_request_id": "runs-tailrocks_velnor-run-35493166478-1",
+      "captured_at_utc": "2026-09-20T07:53:35Z/2026-09-20T07:53:36Z",
+      "page": 1,
+      "has_next": false,
+      "link_header": "absent",
+      "raw": {
+        "http": "raw/velnor/run-35493166478/run.http",
+        "body": "raw/velnor/run-35493166478/run.body",
+        "stderr": "raw/velnor/run-35493166478/run.stderr"
+      }
+    },
+    {
+      "id": "velnor-attempt-1",
+      "repository": "tailrocks/velnor",
+      "method": "GET",
+      "url": "https://api.github.com/repos/tailrocks/velnor/actions/runs/35493166478/attempts/1",
+      "status": 200,
+      "source_request_id": "attempts-tailrocks_velnor-run-35493166478-attempt-1-1",
+      "captured_at_utc": "2026-09-20T07:53:36Z/2026-09-20T07:53:38Z",
+      "page": 1,
+      "has_next": false,
+      "link_header": "absent",
+      "raw": {
+        "http": "raw/velnor/run-35493166478/attempt-1/attempt.http",
+        "body": "raw/velnor/run-35493166478/attempt-1/attempt.body",
+        "stderr": "raw/velnor/run-35493166478/attempt-1/attempt.stderr"
+      }
+    },
+    {
+      "id": "velnor-jobs-attempt-1",
+      "repository": "tailrocks/velnor",
+      "method": "GET",
+      "url": "https://api.github.com/repos/tailrocks/velnor/actions/runs/35493166478/attempts/1/jobs?per_page=100&page=1",
+      "status": 200,
+      "source_request_id": "jobs-tailrocks_velnor-run-35493166478-attempt-1-jobs-1",
+      "captured_at_utc": "2026-09-20T07:53:38Z/2026-09-20T07:53:41Z",
+      "page": 1,
+      "has_next": false,
+      "link_header": "absent",
+      "raw": {
+        "http": "raw/velnor/run-35493166478/attempt-1/jobs/page-0001.http",
+        "body": "raw/velnor/run-35493166478/attempt-1/jobs/page-0001.body",
+        "stderr": "raw/velnor/run-35493166478/attempt-1/jobs/page-0001.stderr"
+      }
+    },
+    {
+      "id": "velnor-artifacts",
+      "repository": "tailrocks/velnor",
+      "method": "GET",
+      "url": "https://api.github.com/repos/tailrocks/velnor/actions/runs/35493166478/artifacts?per_page=100&page=1",
+      "status": 200,
+      "source_request_id": "artifacts-tailrocks_velnor-run-35493166478-artifacts-1",
+      "captured_at_utc": "2026-09-20T07:53:42Z/2026-09-20T07:53:43Z",
+      "page": 1,
+      "has_next": false,
+      "link_header": "absent",
+      "raw": {
+        "http": "raw/velnor/run-35493166478/artifacts/page-0001.http",
+        "body": "raw/velnor/run-35493166478/artifacts/page-0001.body",
+        "stderr": "raw/velnor/run-35493166478/artifacts/page-0001.stderr"
+      }
+    },
+    {
+      "id": "velnor-check-runs",
+      "repository": "tailrocks/velnor",
+      "method": "GET",
+      "url": "https://api.github.com/repos/tailrocks/velnor/commits/df9fb272c025f76cc8711560209afcdfd6cc4e00/check-runs?per_page=100&filter=all&page=1",
+      "status": 200,
+      "source_request_id": "checks-fresh-tailrocks_velnor-check-runs-pr-head-968-df9fb272c025f76cc8711560209afcdfd6cc4e00-1",
+      "captured_at_utc": "2026-09-20T07:11:11Z/2026-09-20T07:11:12Z",
+      "page": 1,
+      "has_next": false,
+      "link_header": "absent",
+      "raw": {
+        "http": "raw/velnor/commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/check-runs/page-0001.http",
+        "body": "raw/velnor/commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/check-runs/page-0001.body",
+        "stderr": "raw/velnor/commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/check-runs/page-0001.stderr"
+      }
+    },
+    {
+      "id": "velnor-statuses",
+      "repository": "tailrocks/velnor",
+      "method": "GET",
+      "url": "https://api.github.com/repos/tailrocks/velnor/commits/df9fb272c025f76cc8711560209afcdfd6cc4e00/statuses?per_page=100&page=1",
+      "status": 200,
+      "source_request_id": "checks-fresh-tailrocks_velnor-statuses-pr-head-968-df9fb272c025f76cc8711560209afcdfd6cc4e00-1",
+      "captured_at_utc": "2026-09-20T07:11:13Z/2026-09-20T07:11:14Z",
+      "page": 1,
+      "has_next": false,
+      "link_header": "absent",
+      "raw": {
+        "http": "raw/velnor/commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/statuses/page-0001.http",
+        "body": "raw/velnor/commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/statuses/page-0001.body",
+        "stderr": "raw/velnor/commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/statuses/page-0001.stderr"
+      }
+    },
+    {
+      "id": "homebrew-check-runs-with-sonar",
+      "repository": "jackin-project/homebrew-tap",
+      "method": "GET",
+      "url": "https://api.github.com/repos/jackin-project/homebrew-tap/commits/c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-runs?per_page=100&filter=latest&page=1",
+      "status": 200,
+      "source_request_id": "checks-jackin-project_homebrew-tap-check-runs-default-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c-1",
+      "captured_at_utc": "2026-09-20T05:20:17Z/2026-09-20T05:20:18Z",
+      "page": 1,
+      "has_next": false,
+      "link_header": "absent",
+      "raw": {
+        "http": "raw/homebrew-tap/commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-runs/page-0001.http",
+        "body": "raw/homebrew-tap/commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-runs/page-0001.body",
+        "stderr": "raw/homebrew-tap/commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-runs/page-0001.stderr"
+      }
+    },
+    {
+      "id": "velnor-repository",
+      "repository": "tailrocks/velnor",
+      "method": "GET",
+      "url": "https://api.github.com/repos/tailrocks/velnor",
+      "status": 200,
+      "source_request_id": "identity-after-tailrocks_velnor-repository-1",
+      "captured_at_utc": "2026-09-20T07:58:42Z/2026-09-20T07:58:43Z",
+      "page": 1,
+      "has_next": false,
+      "link_header": "absent",
+      "raw": {
+        "http": "raw/metadata/tailrocks-velnor/repository.http",
+        "body": "raw/metadata/tailrocks-velnor/repository.body",
+        "stderr": "raw/metadata/tailrocks-velnor/repository.stderr"
+      }
+    },
+    {
+      "id": "tailrocks-org",
+      "repository": "tailrocks",
+      "method": "GET",
+      "url": "https://api.github.com/orgs/tailrocks",
+      "status": 200,
+      "captured_at_utc": "2026-09-20T08:03:18Z",
+      "page": 1,
+      "has_next": false,
+      "link_header": "absent",
+      "raw": {
+        "response": "raw/metadata/org-tailrocks.response",
+        "stderr": "raw/metadata/org-tailrocks.stderr"
+      },
+      "capture_command": "gh api --method GET --include orgs/tailrocks"
+    },
+    {
+      "id": "tailrocks-user",
+      "repository": "tailrocks",
+      "method": "GET",
+      "url": "https://api.github.com/users/tailrocks",
+      "status": 200,
+      "captured_at_utc": "2026-09-20T08:03:18Z",
+      "page": 1,
+      "has_next": false,
+      "link_header": "absent",
+      "raw": {
+        "response": "raw/metadata/user-tailrocks.response",
+        "stderr": "raw/metadata/user-tailrocks.stderr"
+      },
+      "capture_command": "gh api --method GET --include users/tailrocks"
+    }
+  ],
+  "raw_files": [
+    {
+      "path": "raw/homebrew-tap/commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-runs/page-0001.body",
+      "sha256": "c241e54220d3a3c04d5761e100be507b9c2dfec15772414b898a90957b7551b5",
+      "bytes": 21716
+    },
+    {
+      "path": "raw/homebrew-tap/commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-runs/page-0001.http",
+      "sha256": "129bba3c22d678c1c750ad7d4f36ff015bd681a8ff795031270344d0c6f53733",
+      "bytes": 23134
+    },
+    {
+      "path": "raw/homebrew-tap/commit-c501e90d014c207234ed94ea41f7a1c9b6ea0c7c/check-runs/page-0001.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "raw/metadata/org-tailrocks.response",
+      "sha256": "ca3204e61925f0c7e0f74625f4cf7a1cee2c46fd7557480145bc8e2d40734d43",
+      "bytes": 4185
+    },
+    {
+      "path": "raw/metadata/org-tailrocks.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "raw/metadata/tailrocks-velnor/repository.body",
+      "sha256": "6c2c53de7f4e7799b81cf761af765aa907c0c18915804fe62c25bcaf9de56e44",
+      "bytes": 6964
+    },
+    {
+      "path": "raw/metadata/tailrocks-velnor/repository.http",
+      "sha256": "0f8f0517e871f5654d52d9b12bd8bcc635cb5baf9fff773130d1e1db8780647f",
+      "bytes": 8432
+    },
+    {
+      "path": "raw/metadata/tailrocks-velnor/repository.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "raw/metadata/user-tailrocks.response",
+      "sha256": "dee64b6e2c40c391bed5c476e22ef4bb159a661a3ae485d21e49bd1c6303a1b6",
+      "bytes": 2710
+    },
+    {
+      "path": "raw/metadata/user-tailrocks.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "raw/velnor/commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/check-runs/page-0001.body",
+      "sha256": "2f30395551e7bfad2f0271dfeaa09bd4768da3905dfa1a42785aa12d6388bf57",
+      "bytes": 252800
+    },
+    {
+      "path": "raw/velnor/commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/check-runs/page-0001.http",
+      "sha256": "12a237cb9042c786ca28fb8d10970d1d7fa7b5e4d93936b8297135600f784386",
+      "bytes": 254217
+    },
+    {
+      "path": "raw/velnor/commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/check-runs/page-0001.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "raw/velnor/commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/statuses/page-0001.body",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "bytes": 2
+    },
+    {
+      "path": "raw/velnor/commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/statuses/page-0001.http",
+      "sha256": "89f5e19df3e192dcffefdd0fe77a8a504f655e0ca60963947b448a7a45fa9cb8",
+      "bytes": 1453
+    },
+    {
+      "path": "raw/velnor/commit-df9fb272c025f76cc8711560209afcdfd6cc4e00/statuses/page-0001.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "raw/velnor/run-35493166478/artifacts/page-0001.body",
+      "sha256": "7abeb5ab6ba79e4d085d70bacb67bd1357adb7fb0ab9811933bdf2a6f0a5c171",
+      "bytes": 1532
+    },
+    {
+      "path": "raw/velnor/run-35493166478/artifacts/page-0001.http",
+      "sha256": "70032e08aedd6e06b554155f3f022184d26887f4f9e28962cfad55c3841f5627",
+      "bytes": 2950
+    },
+    {
+      "path": "raw/velnor/run-35493166478/artifacts/page-0001.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "raw/velnor/run-35493166478/attempt-1/attempt.body",
+      "sha256": "9837c6d5b687cfb1979b7bd9f547e1eec69536bdfb08bcf435dcd6444f820405",
+      "bytes": 13678
+    },
+    {
+      "path": "raw/velnor/run-35493166478/attempt-1/attempt.http",
+      "sha256": "e98b9cd205a87c7fbc342eb1df838f015abf9d22f7c069fd8807536429662520",
+      "bytes": 15096
+    },
+    {
+      "path": "raw/velnor/run-35493166478/attempt-1/attempt.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "raw/velnor/run-35493166478/attempt-1/jobs/page-0001.body",
+      "sha256": "b9937bad52729f233fed821f81ed5d2e8526eefdc049f462dea5d20aefcfdec9",
+      "bytes": 165193
+    },
+    {
+      "path": "raw/velnor/run-35493166478/attempt-1/jobs/page-0001.http",
+      "sha256": "3de967c1933e2592857a8e96f15481640e399b2984f65dbd527ada950a7236b8",
+      "bytes": 166611
+    },
+    {
+      "path": "raw/velnor/run-35493166478/attempt-1/jobs/page-0001.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    {
+      "path": "raw/velnor/run-35493166478/run.body",
+      "sha256": "40bf9508b2a024d6813c498b225caf255f02390d27d00dcf390bbee19294aa10",
+      "bytes": 13656
+    },
+    {
+      "path": "raw/velnor/run-35493166478/run.http",
+      "sha256": "a730b011b40cde5d9b54599ed2261b522ff378eab4a6221ea82940ac2fcb1fb7",
+      "bytes": 15074
+    },
+    {
+      "path": "raw/velnor/run-35493166478/run.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    }
+  ]
+}
+

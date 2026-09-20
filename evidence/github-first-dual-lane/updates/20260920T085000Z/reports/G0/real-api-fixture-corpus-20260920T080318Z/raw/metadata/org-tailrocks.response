@@ -1,0 +1,30 @@
+HTTP/2.0 200 OK
+Access-Control-Allow-Origin: *
+Access-Control-Expose-Headers: ETag, Link, Location, Retry-After, X-GitHub-OTP, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Used, X-RateLimit-Resource, X-RateLimit-Reset, X-OAuth-Scopes, X-Accepted-OAuth-Scopes, X-Poll-Interval, X-GitHub-Media-Type, X-GitHub-SSO, X-GitHub-Request-Id, Deprecation, Sunset, Warning
+Cache-Control: private, max-age=60, s-maxage=60
+Content-Security-Policy: default-src 'none'
+Content-Type: application/json; charset=utf-8
+Date: Sun, 20 Sep 2026 08:03:18 GMT
+Etag: W/"1b31baac7419355e7d15ec7e6185d9c247991d6b4615d29b4e72668171dee85d"
+Last-Modified: Sat, 12 Sep 2026 03:52:34 GMT
+Referrer-Policy: origin-when-cross-origin, strict-origin-when-cross-origin
+Server: github.com
+Strict-Transport-Security: max-age=31536000; includeSubdomains; preload
+Vary: Accept, Authorization, Cookie, X-GitHub-OTP,Accept-Encoding, Accept, X-Requested-With
+X-Accepted-Oauth-Scopes: admin:org, read:org, repo, user, write:org
+X-Content-Type-Options: nosniff
+X-Frame-Options: deny
+X-Github-Api-Version-Selected: 2022-11-28
+X-Github-Edge-Region: southeastasia
+X-Github-Media-Type: github.v3; format=json
+X-Github-Request-Id: 7033:202500:1C3CB81:1DB5AA4:6AAF9345
+X-Oauth-Client-Id: 178c6fc778ccc68e1d6a
+X-Oauth-Scopes: admin:org, delete_repo, gist, repo, workflow
+X-Ratelimit-Limit: 5000
+X-Ratelimit-Remaining: 3983
+X-Ratelimit-Reset: 1789891785
+X-Ratelimit-Resource: core
+X-Ratelimit-Used: 1017
+X-Xss-Protection: 0
+
+{"login":"tailrocks","id":78806509,"node_id":"MDEyOk9yZ2FuaXphdGlvbjc4ODA2NTA5","url":"https://api.github.com/orgs/tailrocks","repos_url":"https://api.github.com/orgs/tailrocks/repos","events_url":"https://api.github.com/orgs/tailrocks/events","hooks_url":"https://api.github.com/orgs/tailrocks/hooks","issues_url":"https://api.github.com/orgs/tailrocks/issues","members_url":"https://api.github.com/orgs/tailrocks/members{/member}","public_members_url":"https://api.github.com/orgs/tailrocks/public_members{/member}","avatar_url":"https://avatars.githubusercontent.com/u/78806509?v=4","description":"","name":"tailrocks","company":null,"blog":"https://tailrocks.com","location":null,"email":null,"twitter_username":null,"is_verified":false,"has_organization_projects":true,"has_repository_projects":true,"public_repos":35,"public_gists":0,"followers":4,"following":0,"html_url":"https://github.com/tailrocks","created_at":"2021-02-09T14:43:08Z","updated_at":"2026-09-12T03:52:34Z","archived_at":null,"type":"Organization","total_private_repos":4,"owned_private_repos":4,"private_gists":0,"disk_usage":258606,"collaborators":1,"billing_email":"thetailrocks@gmail.com","default_repository_permission":"read","members_can_create_repositories":true,"two_factor_requirement_enabled":false,"members_allowed_repository_creation_type":"all","members_can_create_public_repositories":true,"members_can_create_private_repositories":true,"members_can_create_internal_repositories":false,"members_can_create_pages":true,"members_can_fork_private_repositories":false,"web_commit_signoff_required":false,"deploy_keys_enabled_for_repositories":false,"members_can_delete_repositories":true,"members_can_change_repo_visibility":true,"members_can_invite_outside_collaborators":true,"members_can_delete_issues":false,"display_commenter_full_name_setting_enabled":false,"readers_can_create_discussions":true,"members_can_create_teams":true,"members_can_view_dependency_insights":true,"default_repository_branch":"main","members_can_create_public_pages":true,"members_can_create_private_pages":true,"plan":{"name":"free","space":976562499,"private_repos":10000,"filled_seats":1,"seats":0},"advanced_security_enabled_for_new_repositories":false,"dependabot_alerts_enabled_for_new_repositories":false,"dependabot_security_updates_enabled_for_new_repositories":false,"dependency_graph_enabled_for_new_repositories":false,"secret_scanning_enabled_for_new_repositories":false,"secret_scanning_push_protection_enabled_for_new_repositories":false,"secret_scanning_push_protection_custom_link_enabled":false,"secret_scanning_push_protection_custom_link":null,"secret_scanning_validity_checks_enabled":false}
