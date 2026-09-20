@@ -189,12 +189,15 @@ not knowing the remote's answer is exactly the case where retrying is the only
 correct move.
 
 An entry whose budget is spent is *abandoned*: the payload is removed and the
-slot freed, GitHub is never told the job finished, and the run service will
-time the job out. The terminal state is proven from the journal rather than
-asserted by a caller, and the reason is preserved permanently as one of "the
-run service permanently refused this completion payload", "the durable
-completion send budget is spent", or "the completion resolution deadline
-passed".
+slot freed, and the reason is preserved in the journal. A permanent refusal is
+an explicit response. If transport retries or the resolution deadline expire
+without acknowledgement, the Run Service may already have accepted the
+payload before its response was lost; GitHub's outcome is unknown until
+checked. If the Run Service did not receive it, it may time out the job. Local
+abandonment records Velnor's local budget decision; check GitHub's job state
+for the remote outcome. Reasons include "the run service permanently refused
+this completion payload", "the durable completion send budget is spent", or
+"the completion resolution deadline passed".
 
 This guarantee applies to completion intent. Bounded logs, telemetry, and
 normal operational projections have weaker retention and may not be rebuilt
@@ -213,7 +216,7 @@ after service recreation.
 | Job cancellation | Active broker cancellation is matched to the job; Velnor cancels execution and reports terminal state. | Cancellation is not equivalent to a normal successful completion. |
 | Progress upload failure | Continue execution when safe; retain bounded local evidence. | GitHub's live log/timeline can lag or be incomplete even while local execution continues. |
 | Completion request failure | Retry transient failures under a bounded budget; preserve the outbox until acknowledgement, terminal remote observation, or budget exhaustion. | Inspect outbox age and remote job state before retrying manually. |
-| Completion budget exhausted | Abandon the entry, free the slot, record the reason in the journal. | GitHub was never told; it will time the job out. Read the journal's unresolvable completions. |
+| Completion budget exhausted | Stop local retries, abandon the entry, free the slot, and record the reason in the journal. | Delivery may be unconfirmed and the remote outcome unknown. Check the journal reason and GitHub job state before acting. |
 | Process crash after completion staging | Replay the exact outbox payload during recovery. | A staged completion is stronger evidence than an in-memory success message. |
 
 ## Cancellation semantics: Velnor versus upstream

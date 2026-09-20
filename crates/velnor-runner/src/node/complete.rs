@@ -9,7 +9,10 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use velnor_control::journal::{payload_checksum, Event, JobRecord, Journal};
+use velnor_control::journal::{
+    payload_checksum, AcquisitionLossProof, AcquisitionLossSource, Event, JobRecord, Journal,
+    NativePermitLease,
+};
 use velnor_model::{Generation, JobId, JobPhase2, SlotId};
 
 use super::cleanup;
@@ -264,10 +267,11 @@ fn record_attempt_failure(
 /// both still within budget: the terminal state has to be provable from
 /// durable state, never asserted by the caller.
 ///
-/// GitHub is told nothing further. By definition the payload could not be
-/// delivered, and the send claim is deliberately left standing so this can
-/// never turn into a second terminal send. The run service times the job out
-/// on its own side; the node stops holding the slot hostage for it.
+/// No further send is attempted. A prior request may have reached the Run
+/// Service before transport failed, so its remote outcome is unknown. The send
+/// claim stays standing to prevent a second terminal send. If the remote did
+/// not receive the payload, it may time the job out; the node releases the slot
+/// instead of holding it indefinitely.
 ///
 /// # Errors
 /// Journal write failure, or removing the abandoned payload.
@@ -288,7 +292,8 @@ pub fn abandon_unresolvable_completion(
     }
     eprintln!(
         "Error: completion for job {} generation {} is unresolvable and was abandoned: {reason}. \
-         GitHub was never told this job finished; it will time the job out. \
+         The remote outcome is unknown; a prior send may have reached the Run Service. \
+         No further send will be attempted. \
          The slot is released and the event is preserved in the journal.",
         job_id.0, generation.0
     );
@@ -353,25 +358,52 @@ pub enum AcquisitionVerdict {
     Indeterminate,
 }
 
-/// Record the *intent* to acquire, before the call to GitHub.
+/// Record a native acquisition intent together with the exact permit lease
+/// that was acquired before `acquirejob`.
 ///
-/// This is what closes the window in which a crash between `acquirejob`
-/// returning 200 and the durable marker left no local record at all — no
-/// renewal, no completion, and a job lost until its lease expired. The row it
-/// writes occupies the slot but is explicitly not ownership.
-pub fn intend_acquisition(
+/// A repeated write for the same request is idempotent only when its slot and
+/// immutable permit identity still match. Missing legacy correlation or a
+/// different lease is ambiguous and remains fenced.
+pub fn intend_acquisition_with_permit(
     journal: &mut Journal,
     job_id: &JobId,
     slot_id: &SlotId,
     message_id: &str,
+    runner_request_id: &str,
     run_service_url: &str,
     now: u64,
+    permit_lease: NativePermitLease,
 ) -> anyhow::Result<Generation> {
+    if runner_request_id.is_empty()
+        || permit_lease.holder.is_empty()
+        || permit_lease.ledger_path.is_empty()
+        || permit_lease.generation == 0
+    {
+        anyhow::bail!("native acquisition intent has incomplete request or permit identity");
+    }
     let state = journal.materialized_state()?;
-    if let Some(job) = state.jobs.iter().find(|job| job.job_id == *job_id) {
-        // Already recorded, provisionally or otherwise: reuse its generation so
-        // a retry of the same message does not fork the row.
+    if let Some(job) = state
+        .jobs
+        .iter()
+        .find(|job| job.runner_request_id == runner_request_id)
+    {
+        if job.slot_id != *slot_id
+            || job.permit_lease.as_ref() != Some(&permit_lease)
+            || !job.provisional
+        {
+            anyhow::bail!(
+                "runner request {} already has a different or active journal owner",
+                runner_request_id
+            );
+        }
         return Ok(job.generation);
+    }
+    if state.jobs.iter().any(|job| job.job_id == *job_id) {
+        anyhow::bail!(
+            "native acquisition intent {} conflicts with existing job row {}",
+            runner_request_id,
+            job_id.0
+        );
     }
     let slot = state
         .slots
@@ -379,53 +411,44 @@ pub fn intend_acquisition(
         .find(|slot| slot.slot_id == *slot_id)
         .ok_or_else(|| anyhow::anyhow!("slot {} is missing from the journal", slot_id.0))?;
     let generation = slot.generation;
-    let outcome = journal.apply(Event::JobAcquisitionIntended {
+    let outcome = journal.apply(Event::JobAcquisitionIntendedWithPermit {
         slot_id: slot_id.clone(),
         job_id: job_id.clone(),
         generation,
         message_id: message_id.to_string(),
+        runner_request_id: runner_request_id.to_owned(),
         run_service_url: run_service_url.to_string(),
         intended_unix: now,
+        permit_lease,
     })?;
     if outcome.rejected {
         anyhow::bail!(
-            "acquisition intent rejected for {} on {} (slot must still be Ready)",
-            job_id.0,
+            "native acquisition intent rejected for {} on {} (slot must still be Ready)",
+            runner_request_id,
             slot_id.0
         );
     }
     Ok(generation)
 }
 
-/// Retarget a provisional row onto the identity the acquire reply named.
-///
-/// The broker message that opens an acquisition names no plan, and `renewjob`
-/// needs one, so a row created before the call cannot be probed. This is the
-/// moment that changes: the 200 carries the run-service plan and job id, and
-/// recording them makes the row recoverable for the first time.
-///
-/// It is deliberately one event. Dropping the message-keyed row and creating
-/// the job-keyed one would free the slot in between and destroy the very
-/// evidence this mechanism exists to keep — the same lost-acquisition window,
-/// a few microseconds wide instead of a network round trip.
-///
-/// The row stays provisional; `confirm_acquisition` promotes it.
-///
-/// # Errors
-/// Journal write failure, or a rejection: the row is gone, already owned, at a
-/// different generation, or the acquired identity is already taken.
-pub fn resolve_acquisition(
+/// Retarget an acquisition only while its immutable native permit association
+/// still matches the provisional row.
+pub fn resolve_acquisition_for_request_with_permit(
     journal: &mut Journal,
     provisional_job_id: &JobId,
     acquired_job_id: &JobId,
     plan_id: &str,
     generation: Generation,
+    runner_request_id: &str,
+    permit_lease: NativePermitLease,
 ) -> anyhow::Result<()> {
     let outcome = journal.apply(Event::JobAcquisitionResolved {
         provisional_job_id: provisional_job_id.clone(),
         acquired_job_id: acquired_job_id.clone(),
         plan_id: plan_id.to_string(),
         generation,
+        runner_request_id: Some(runner_request_id.to_owned()),
+        permit_lease: Some(permit_lease),
     })?;
     if outcome.rejected {
         anyhow::bail!(
@@ -438,85 +461,182 @@ pub fn resolve_acquisition(
     Ok(())
 }
 
-/// Rebuild an acquisition row that `resolve_acquisition` cannot find, from the
-/// identity the acquire reply named.
-///
-/// The provisional row is crash *bookkeeping*, not a precondition of the job:
-/// it exists so that a crash inside the acquire window leaves evidence. When
-/// the acquire reply came back 200 the runner provably holds the job, so a row
-/// that went missing anyway — the slot journal was created or repopulated by
-/// another process between the intent and the resolve — must be rebuilt, never
-/// treated as a reason to give the job up. Writing it ends at the same state
-/// `intend_acquisition` + `resolve_acquisition` normally produce: one
-/// provisional row keyed by the acquired identity, carrying the plan that makes
-/// it probeable, occupying the slot.
-///
-/// The rebuild is deliberately two events, not one new event type: the interim
-/// state (provisional, no plan) is one that already exists in the log, so
-/// recovery and every reader keep seeing shapes they already understand.
-///
-/// Already-recorded rows are adopted, never forked or rewritten, for the same
-/// reason `intend_acquisition` reuses a retried message's generation: a row for
-/// the acquired identity that already carries a plan, or that `JobOwned` has
-/// already promoted, *is* the evidence this function exists to write. Only a
-/// provisional row still missing its plan — the state a crash between the two
-/// writes below leaves — is finished off rather than restarted.
-///
-/// Returns `true` when a row was written and `false` when the journal already
-/// held the acquired identity, so callers can tell a genuine rebuild from an
-/// adoption they never need to announce.
-///
-/// # Errors
-/// Journal write failure, or a rejection: the journal holds a state this
-/// recovery must not overwrite (a slot that is not `Ready` has a claim on it
-/// that nothing here has proven false).
-pub fn reintend_resolved_acquisition(
+/// Rebuild a confirmed acquisition while preserving its exact native permit
+/// lease. Existing rows must already carry the same lease; redelivery may not
+/// attach a new or guessed permit to old journal state.
+pub fn reintend_resolved_acquisition_with_permit(
     journal: &mut Journal,
     acquired_job_id: &JobId,
     slot_id: &SlotId,
-    message_id: &str,
+    runner_request_id: &str,
     plan_id: &str,
     run_service_url: &str,
     now: u64,
+    permit_lease: NativePermitLease,
 ) -> anyhow::Result<bool> {
-    let state = journal.materialized_state()?;
-    match state.jobs.iter().find(|job| job.job_id == *acquired_job_id) {
-        // Ownership supersedes recovery: promote nothing, fork nothing.
-        Some(job) if !job.provisional || !job.plan_id.is_empty() => return Ok(false),
-        // A crash between the intent and the resolve below leaves exactly this
-        // row: keyed by the acquired identity but planless, so no `renewjob`
-        // call can be built for it and startup recovery would abandon it. Give
-        // it the plan instead of starting the rebuild over.
-        Some(job) => {
-            resolve_acquisition(
-                journal,
-                acquired_job_id,
-                acquired_job_id,
-                plan_id,
-                job.generation,
-            )?;
-            return Ok(true);
-        }
-        None => {}
+    if permit_lease.holder.is_empty()
+        || permit_lease.ledger_path.is_empty()
+        || permit_lease.generation == 0
+    {
+        anyhow::bail!("native acquisition rebuild has incomplete permit identity");
     }
-    let generation = intend_acquisition(
+    reintend_resolved_acquisition_inner(
         journal,
         acquired_job_id,
         slot_id,
-        message_id,
+        runner_request_id,
+        plan_id,
         run_service_url,
         now,
-    )?;
-    // Provisional and acquired identities are the same job here, so this is a
-    // plan write, not a retarget of somebody else's row: the reducer's
-    // `target_taken` guard is defined to be false when the two names match.
-    resolve_acquisition(
-        journal,
-        acquired_job_id,
-        acquired_job_id,
-        plan_id,
-        generation,
-    )?;
+        permit_lease,
+    )
+}
+
+fn reintend_resolved_acquisition_inner(
+    journal: &mut Journal,
+    acquired_job_id: &JobId,
+    slot_id: &SlotId,
+    runner_request_id: &str,
+    plan_id: &str,
+    run_service_url: &str,
+    now: u64,
+    permit_lease: NativePermitLease,
+) -> anyhow::Result<bool> {
+    let state = journal.materialized_state()?;
+    match state.jobs.iter().find(|job| job.job_id == *acquired_job_id) {
+        // An owned row can be adopted only when the original request mapping
+        // is already durable. A legacy row with unknown correlation cannot be
+        // guessed from the acquired job ID during broker redelivery.
+        Some(job) if !job.provisional => {
+            if job.runner_request_id == runner_request_id
+                && job.permit_lease.as_ref() == Some(&permit_lease)
+            {
+                if job.slot_id != *slot_id {
+                    anyhow::bail!(
+                        "owned job {} is recorded on slot {} but acquisition redelivery names slot {}",
+                        acquired_job_id.0,
+                        job.slot_id.0,
+                        slot_id.0
+                    );
+                }
+                return Ok(false);
+            }
+            anyhow::bail!(
+                "owned job {} cannot be correlated to runner request {} (stored correlation is {})",
+                acquired_job_id.0,
+                runner_request_id,
+                if job.runner_request_id.is_empty() {
+                    "unknown"
+                } else {
+                    job.runner_request_id.as_str()
+                }
+            );
+        }
+        Some(job) => {
+            if job.runner_request_id.is_empty()
+                || job.runner_request_id != runner_request_id
+                || job.permit_lease.as_ref() != Some(&permit_lease)
+            {
+                anyhow::bail!(
+                    "resolved provisional job {} cannot be adopted for runner request {} (stored correlation is {})",
+                    acquired_job_id.0,
+                    runner_request_id,
+                    if job.runner_request_id.is_empty() {
+                        "unknown"
+                    } else {
+                        job.runner_request_id.as_str()
+                    }
+                );
+            }
+            if job.slot_id != *slot_id {
+                anyhow::bail!(
+                    "resolved provisional job {} is recorded on slot {} but acquisition redelivery names slot {}",
+                    acquired_job_id.0,
+                    job.slot_id.0,
+                    slot_id.0
+                );
+            }
+            let needs_repair = job.plan_id.is_empty();
+            resolve_acquisition_for_request_with_permit(
+                journal,
+                acquired_job_id,
+                acquired_job_id,
+                if job.plan_id.is_empty() {
+                    plan_id
+                } else {
+                    &job.plan_id
+                },
+                job.generation,
+                runner_request_id,
+                permit_lease.clone(),
+            )?;
+            return Ok(needs_repair);
+        }
+        None => {}
+    }
+    // A planless request-keyed intent can still exist if this runner journal
+    // received the intent before the acquire 200. Finish that row directly;
+    // do not create a second job identity for the same permit holder.
+    if let Some(job) = state
+        .jobs
+        .iter()
+        .find(|job| job.runner_request_id == runner_request_id)
+    {
+        if !job.provisional || job.slot_id != *slot_id {
+            anyhow::bail!(
+                "runner request {} already maps to non-rebuildable job {} on slot {}",
+                runner_request_id,
+                job.job_id.0,
+                job.slot_id.0
+            );
+        }
+        if job.permit_lease.as_ref() != Some(&permit_lease) {
+            anyhow::bail!(
+                "runner request {} has no matching durable native permit lease",
+                runner_request_id
+            );
+        }
+        resolve_acquisition_for_request_with_permit(
+            journal,
+            &job.job_id,
+            acquired_job_id,
+            plan_id,
+            job.generation,
+            runner_request_id,
+            permit_lease.clone(),
+        )?;
+        return Ok(true);
+    }
+
+    // The run service already confirmed this job. Persist one probeable row in
+    // one journal transaction; a two-event intent+resolve sequence leaves a
+    // planless crash window that startup could otherwise abandon.
+    let slot = state
+        .slots
+        .iter()
+        .find(|slot| slot.slot_id == *slot_id)
+        .ok_or_else(|| anyhow::anyhow!("slot {} is missing from the journal", slot_id.0))?;
+    let probe_deadline_unix =
+        now.saturating_add(velnor_control::journal::ACQUISITION_RESOLUTION_SECONDS);
+    let event = Event::JobAcquisitionRebuiltWithPermit {
+        slot_id: slot_id.clone(),
+        job_id: acquired_job_id.clone(),
+        generation: slot.generation,
+        runner_request_id: runner_request_id.to_owned(),
+        plan_id: plan_id.to_owned(),
+        run_service_url: run_service_url.to_owned(),
+        probe_deadline_unix,
+        permit_lease,
+    };
+    let outcome = journal.apply(event)?;
+    if outcome.rejected {
+        anyhow::bail!(
+            "acquired job {} could not be durably rebuilt for request {} on slot {}",
+            acquired_job_id.0,
+            runner_request_id,
+            slot_id.0
+        );
+    }
     Ok(true)
 }
 
@@ -532,7 +652,7 @@ pub fn confirm_acquisition(
         slot_id: slot_id.clone(),
         attempt: 1,
         generation,
-        worker: format!("velnor-job@{}", job_id.0),
+        worker: format!("wait-{}", slot_id.0),
         accepted_unix: 0,
     })?;
     if owned.rejected {
@@ -541,21 +661,46 @@ pub fn confirm_acquisition(
     Ok(())
 }
 
-/// Drop a provisional row the probe proved is not ours.
+/// Drop a provisional row after exact evidence proves its acquire did not
+/// produce an owned job or was never sent.
 pub fn abandon_acquisition(
     journal: &mut Journal,
     job_id: &JobId,
     generation: Generation,
+    proof: AcquisitionLossProof,
     reason: &str,
 ) -> anyhow::Result<()> {
     let lost = journal.apply(Event::JobAcquisitionLost {
         job_id: job_id.clone(),
         generation,
         reason: reason.to_string(),
+        proof: Some(proof),
     })?;
     if lost.rejected {
         anyhow::bail!(
-            "JobAcquisitionLost rejected for {} — only a provisional row may be abandoned",
+            "JobAcquisitionLost rejected for {} — exact proof is required for a provisional row",
+            job_id.0
+        );
+    }
+    Ok(())
+}
+
+/// Persist exact proof that a provisional acquisition was never sent or was
+/// confirmed gone. Keep the row until its native permit lease is released.
+pub fn record_acquisition_loss_proof(
+    journal: &mut Journal,
+    job_id: &JobId,
+    generation: Generation,
+    proof: AcquisitionLossProof,
+) -> anyhow::Result<()> {
+    let recorded = journal.apply(Event::JobAcquisitionLossProofRecorded {
+        job_id: job_id.clone(),
+        generation,
+        proof,
+    })?;
+    if recorded.rejected {
+        anyhow::bail!(
+            "JobAcquisitionLossProofRecorded rejected for {} — exact provisional permit proof is required",
             job_id.0
         );
     }
@@ -568,8 +713,8 @@ pub struct ResolvedAcquisition {
     pub job_id: JobId,
     /// What the run service said, or `Indeterminate` when it was never asked.
     pub verdict: AcquisitionVerdict,
-    /// The row was dropped and its slot freed: either the probe proved the job
-    /// is not ours, or the row ran out of durable probe budget.
+    /// The row was dropped after both the run service proved it was not ours
+    /// and the exact native permit lease was durably released.
     pub abandoned: bool,
 }
 
@@ -583,7 +728,8 @@ pub struct ResolvedAcquisition {
 ///
 /// An indeterminate probe leaves the row untouched: promoting a job we may not
 /// own would let two runners publish for it, and dropping one we do own would
-/// strand it until the lease expired.
+/// strand it until the lease expired. A planless intent and an exhausted probe
+/// budget are ambiguous for the same reason; neither is terminal evidence.
 ///
 /// # The probe is bounded, and it has to be
 ///
@@ -597,18 +743,29 @@ pub struct ResolvedAcquisition {
 /// one acquisition can ever cause at `MAX_ACQUISITION_PROBES`.
 ///
 /// A row the acquire reply never named carries no plan id, so no `renewjob`
-/// call can be built for it at all. It is abandoned immediately rather than
-/// holding a slot for a deadline no probe could ever meet.
+/// call can be built for it. It stays provisional and retains its permit
+/// lease; a lost acquire reply is ambiguous and must never free capacity by
+/// inference. Likewise, a spent probe budget ends renewal attempts, not the
+/// durable ownership fence.
+///
+/// `release_exact_permit` must release the recorded holder from the recorded
+/// ledger at the recorded immutable lease generation. A persisted
+/// `AcquireJobNotSent` and `AcquireJobNotFound` proofs are replayed before any
+/// network probe; release is idempotent, and the provisional row remains until
+/// the terminal event lands.
 ///
 /// # Errors
-/// Journal read or write failure.
-pub fn resolve_provisional_acquisitions<P>(
+/// Journal read or write failure, missing permit evidence for a `NotOurs`
+/// verdict, or failure to durably release the exact permit lease.
+pub fn resolve_provisional_acquisitions<P, R>(
     journal: &mut Journal,
     now: u64,
     mut probe: P,
+    mut release_exact_permit: R,
 ) -> anyhow::Result<Vec<ResolvedAcquisition>>
 where
     P: FnMut(&JobRecord) -> AcquisitionVerdict,
+    R: FnMut(&AcquisitionLossProof) -> anyhow::Result<()>,
 {
     let state = journal.materialized_state()?;
     let pending: Vec<JobRecord> = state
@@ -622,14 +779,21 @@ where
         let job_id = row.job_id.clone();
         let generation = row.generation;
 
-        // Nothing to renew: the acquire reply never named a plan, so this row
-        // can never be settled. Keeping it only holds the slot.
-        if row.plan_id.is_empty() {
+        // The proof was persisted before release. Replay it idempotently
+        // before considering planless-intent or probe-budget handling.
+        if let Some(proof) = row.acquisition_loss_proof.clone() {
+            release_exact_permit(&proof).with_context(|| {
+                format!(
+                    "replay exact native permit release for acquisition {} generation {}",
+                    job_id.0, proof.permit_lease.generation
+                )
+            })?;
             abandon_acquisition(
                 journal,
                 &job_id,
                 generation,
-                "the acquire reply never named a job, so no renewal can prove ownership",
+                proof,
+                "replayed durable run-service acquisition-loss proof",
             )?;
             resolved.push(ResolvedAcquisition {
                 job_id,
@@ -639,18 +803,26 @@ where
             continue;
         }
 
-        // Budget first, so a spent row costs no further lease renewal.
-        if row.probe_budget_exhausted(now) {
-            abandon_acquisition(
-                journal,
-                &job_id,
-                generation,
-                "the acquisition probe budget is spent; the run service will time the job out",
-            )?;
+        // Nothing to renew: the acquire reply never named a plan. That does
+        // not prove the remote rejected the request; retain the row and its
+        // permit pointer so terminal evidence can resolve it later.
+        if row.plan_id.is_empty() {
             resolved.push(ResolvedAcquisition {
                 job_id,
                 verdict: AcquisitionVerdict::Indeterminate,
-                abandoned: true,
+                abandoned: false,
+            });
+            continue;
+        }
+
+        // Budget first, so a spent row costs no further lease renewal. The
+        // exhausted budget is local retry evidence only; it cannot release an
+        // uncertain remote assignment or its host permit.
+        if row.probe_budget_exhausted(now) {
+            resolved.push(ResolvedAcquisition {
+                job_id,
+                verdict: AcquisitionVerdict::Indeterminate,
+                abandoned: false,
             });
             continue;
         }
@@ -662,10 +834,27 @@ where
                 false
             }
             AcquisitionVerdict::NotOurs => {
+                let permit_lease = row.permit_lease.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "run service proved acquisition {} is not ours, but its exact native permit lease is unknown; retaining the recovery row",
+                        job_id.0
+                    )
+                })?;
+                let proof = AcquisitionLossProof {
+                    source: AcquisitionLossSource::RenewJobNotOurs,
+                    permit_lease: permit_lease.clone(),
+                };
+                release_exact_permit(&proof).with_context(|| {
+                    format!(
+                        "release exact native permit {} generation {} before abandoning acquisition {}",
+                        permit_lease.holder, permit_lease.generation, job_id.0
+                    )
+                })?;
                 abandon_acquisition(
                     journal,
                     &job_id,
                     generation,
+                    proof,
                     "run service reports the job is not held by this runner",
                 )?;
                 true
@@ -826,8 +1015,11 @@ fn commit_intent(
     Ok(Some(durable))
 }
 
-/// Atomically claim the one permitted terminal send for this job generation.
-/// A second caller, including a replay, fails closed before transport.
+/// Create the durable send claim for this job generation.
+///
+/// A new caller cannot create a second claim. After proving the previous
+/// waiter dead, recovery may reissue transport under this existing claim; a
+/// transport error leaves the remote outcome unknown.
 fn claim_completion_send(
     journal: &mut Journal,
     job_id: &JobId,
@@ -902,6 +1094,9 @@ mod tests {
     fn prime_owned(journal: &mut Journal, job_id: &JobId) -> Generation {
         let g = Generation::INITIAL;
         let slot = SlotId("scope-1".into());
+        let runner_request_id = format!("request-{}", job_id.0);
+        let provisional_job_id = JobId(runner_request_id.clone());
+        let permit_lease = test_native_permit_lease(&runner_request_id);
         for event in [
             Event::ControlLive,
             Event::JournalWritable,
@@ -937,17 +1132,32 @@ mod tests {
                 slot_id: slot.clone(),
                 generation: g,
             },
-            Event::JobAcquisitionIntended {
+            Event::JobAcquisitionIntendedWithPermit {
                 slot_id: slot.clone(),
-                job_id: job_id.clone(),
+                job_id: provisional_job_id.clone(),
                 generation: g,
-                message_id: "msg-1".into(),
+                message_id: "message-1".into(),
+                runner_request_id: runner_request_id.clone(),
                 run_service_url: "https://run.example/run".into(),
                 intended_unix: 1_000,
+                permit_lease: permit_lease.clone(),
             },
         ] {
             assert!(!journal.apply(event).unwrap().rejected);
         }
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionResolved {
+                    provisional_job_id,
+                    acquired_job_id: job_id.clone(),
+                    plan_id: "plan-1".into(),
+                    generation: g,
+                    runner_request_id: Some(runner_request_id),
+                    permit_lease: Some(permit_lease),
+                })
+                .unwrap()
+                .rejected
+        );
         assert!(
             !journal
                 .apply(Event::JobOwned {
@@ -966,16 +1176,29 @@ mod tests {
 
     /// Own a job through the acquisition path: intend, resolve, confirm.
     fn own_next_job(journal: &mut Journal, job_id: &JobId, slot_id: &SlotId) -> Generation {
-        let generation = intend_acquisition(
+        let runner_request_id = job_id.0.clone();
+        let permit_lease = test_native_permit_lease(&runner_request_id);
+        let generation = intend_acquisition_with_permit(
             journal,
             job_id,
             slot_id,
             "msg-1",
+            &runner_request_id,
             RUN_SERVICE_URL,
             INTENDED_UNIX,
+            permit_lease.clone(),
         )
         .unwrap();
-        resolve_acquisition(journal, job_id, job_id, "plan-1", generation).unwrap();
+        resolve_acquisition_for_request_with_permit(
+            journal,
+            job_id,
+            job_id,
+            "plan-1",
+            generation,
+            &runner_request_id,
+            permit_lease,
+        )
+        .unwrap();
         confirm_acquisition(journal, job_id, slot_id, generation).unwrap();
         generation
     }
@@ -1028,27 +1251,47 @@ mod tests {
     /// durable and the acquire reply has named the job, so the row carries the
     /// plan `renewjob` needs.
     fn intend_and_retarget(journal: &mut Journal, slot: &SlotId, message: &str, job: &JobId) {
-        intend_acquisition(
+        let permit_lease = test_native_permit_lease(message);
+        intend_acquisition_with_permit(
             journal,
             &JobId(message.to_owned()),
             slot,
             message,
+            message,
             RUN_SERVICE_URL,
             INTENDED_UNIX,
+            permit_lease.clone(),
         )
         .unwrap();
-        resolve_acquisition(
+        let generation = journal.materialized_state().unwrap().slots[0].generation;
+        resolve_acquisition_for_request_with_permit(
             journal,
             &JobId(message.to_owned()),
             job,
             "plan-1",
-            journal.materialized_state().unwrap().slots[0].generation,
+            generation,
+            message,
+            permit_lease,
         )
         .unwrap();
     }
 
     const RUN_SERVICE_URL: &str = "https://run.example/run";
     const INTENDED_UNIX: u64 = 1_000;
+
+    fn test_native_permit_lease(request_id: &str) -> NativePermitLease {
+        NativePermitLease {
+            holder: crate::permit_guard::native_permit_holder(
+                "https://github.com/tailrocks/fixture",
+                request_id,
+            ),
+            ledger_path: std::env::temp_dir()
+                .join(format!("velnor-permit-ledger-{request_id}.db"))
+                .to_string_lossy()
+                .into_owned(),
+            generation: 1,
+        }
+    }
 
     /// A crash between `acquirejob` returning 200 and the durable marker used
     /// to leave no local record at all: no renewal, no completion, and the job
@@ -1075,10 +1318,15 @@ mod tests {
         );
 
         let mut probed = Vec::new();
-        let resolved = resolve_provisional_acquisitions(&mut journal, INTENDED_UNIX, |row| {
-            probed.push((row.plan_id.clone(), row.run_service_url.clone()));
-            AcquisitionVerdict::Owned
-        })
+        let resolved = resolve_provisional_acquisitions(
+            &mut journal,
+            INTENDED_UNIX,
+            |row| {
+                probed.push((row.plan_id.clone(), row.run_service_url.clone()));
+                AcquisitionVerdict::Owned
+            },
+            |_| Ok(()),
+        )
         .unwrap();
         assert_eq!(
             probed,
@@ -1102,6 +1350,254 @@ mod tests {
     }
 
     #[test]
+    fn native_acquisition_resolution_requires_exact_request_and_permit() {
+        let dir = tmp("native-acquisition-exact-resolution");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let (slot_id, generation) = prime_ready_slot(&mut journal);
+        let runner_request_id = "native-request-1";
+        let provisional_job_id = JobId(runner_request_id.to_owned());
+        let acquired_job_id = JobId("run-service-job-1".to_owned());
+        let permit_lease = test_native_permit_lease(runner_request_id);
+        intend_acquisition_with_permit(
+            &mut journal,
+            &provisional_job_id,
+            &slot_id,
+            "broker-message-1",
+            runner_request_id,
+            RUN_SERVICE_URL,
+            INTENDED_UNIX,
+            permit_lease.clone(),
+        )
+        .unwrap();
+
+        let wrong_request = resolve_acquisition_for_request_with_permit(
+            &mut journal,
+            &provisional_job_id,
+            &acquired_job_id,
+            "plan-1",
+            generation,
+            "different-request",
+            permit_lease.clone(),
+        )
+        .unwrap_err();
+        assert!(wrong_request
+            .to_string()
+            .contains("acquisition retarget rejected"));
+
+        let mut wrong_permit = permit_lease.clone();
+        wrong_permit.holder.push_str("-replacement");
+        let mismatched_permit = resolve_acquisition_for_request_with_permit(
+            &mut journal,
+            &provisional_job_id,
+            &acquired_job_id,
+            "plan-1",
+            generation,
+            runner_request_id,
+            wrong_permit,
+        )
+        .unwrap_err();
+        assert!(mismatched_permit
+            .to_string()
+            .contains("acquisition retarget rejected"));
+
+        let unresolved = journal.materialized_state().unwrap();
+        assert_eq!(unresolved.jobs.len(), 1);
+        assert_eq!(unresolved.jobs[0].job_id, provisional_job_id);
+        assert!(unresolved.jobs[0].provisional);
+        assert!(unresolved.jobs[0].plan_id.is_empty());
+        assert_eq!(unresolved.jobs[0].runner_request_id, runner_request_id);
+        assert_eq!(
+            unresolved.jobs[0].permit_lease.as_ref(),
+            Some(&permit_lease)
+        );
+
+        resolve_acquisition_for_request_with_permit(
+            &mut journal,
+            &provisional_job_id,
+            &acquired_job_id,
+            "plan-1",
+            generation,
+            runner_request_id,
+            permit_lease.clone(),
+        )
+        .unwrap();
+        let resolved = journal.materialized_state().unwrap();
+        assert_eq!(resolved.jobs.len(), 1);
+        assert_eq!(resolved.jobs[0].job_id, acquired_job_id);
+        assert!(resolved.jobs[0].provisional);
+        assert_eq!(resolved.jobs[0].plan_id, "plan-1");
+        assert_eq!(resolved.jobs[0].runner_request_id, runner_request_id);
+        assert_eq!(resolved.jobs[0].permit_lease.as_ref(), Some(&permit_lease));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn native_reintent_rebuild_preserves_exact_permit_lease() {
+        let dir = tmp("native-acquisition-reintent-rebuild");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let (slot_id, generation) = prime_ready_slot(&mut journal);
+        let runner_request_id = "native-rebuild-request-1";
+        let acquired_job_id = JobId("run-service-rebuilt-job-1".to_owned());
+        let permit_lease = test_native_permit_lease(runner_request_id);
+
+        assert!(
+            reintend_resolved_acquisition_with_permit(
+                &mut journal,
+                &acquired_job_id,
+                &slot_id,
+                runner_request_id,
+                "plan-rebuilt-1",
+                RUN_SERVICE_URL,
+                INTENDED_UNIX,
+                permit_lease.clone(),
+            )
+            .unwrap(),
+            "a confirmed acquisition absent from the journal must be rebuilt"
+        );
+        let rebuilt = journal.materialized_state().unwrap();
+        assert_eq!(rebuilt.jobs.len(), 1);
+        let row = &rebuilt.jobs[0];
+        assert_eq!(row.job_id, acquired_job_id);
+        assert_eq!(row.slot_id, slot_id);
+        assert_eq!(row.generation, generation);
+        assert!(row.provisional);
+        assert_eq!(row.runner_request_id, runner_request_id);
+        assert_eq!(row.plan_id, "plan-rebuilt-1");
+        assert_eq!(row.run_service_url, RUN_SERVICE_URL);
+        assert_eq!(row.permit_lease.as_ref(), Some(&permit_lease));
+        assert_eq!(
+            row.probe_deadline_unix,
+            INTENDED_UNIX.saturating_add(ACQUISITION_RESOLUTION_SECONDS)
+        );
+
+        assert!(
+            !reintend_resolved_acquisition_with_permit(
+                &mut journal,
+                &acquired_job_id,
+                &slot_id,
+                runner_request_id,
+                "plan-rebuilt-1",
+                RUN_SERVICE_URL,
+                INTENDED_UNIX,
+                permit_lease.clone(),
+            )
+            .unwrap(),
+            "redelivery with the same request and exact lease must adopt the existing row"
+        );
+
+        let mut mismatched_lease = permit_lease.clone();
+        mismatched_lease.holder.push_str("-replacement");
+        let mismatch = reintend_resolved_acquisition_with_permit(
+            &mut journal,
+            &acquired_job_id,
+            &slot_id,
+            runner_request_id,
+            "plan-rebuilt-1",
+            RUN_SERVICE_URL,
+            INTENDED_UNIX,
+            mismatched_lease,
+        )
+        .unwrap_err();
+        assert!(mismatch
+            .to_string()
+            .contains("resolved provisional job run-service-rebuilt-job-1 cannot be adopted"));
+
+        let unchanged = journal.materialized_state().unwrap();
+        assert_eq!(unchanged.jobs.len(), 1);
+        assert_eq!(unchanged.jobs[0].job_id, acquired_job_id);
+        assert_eq!(unchanged.jobs[0].runner_request_id, runner_request_id);
+        assert_eq!(unchanged.jobs[0].permit_lease.as_ref(), Some(&permit_lease));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn native_reintent_rejects_wrong_slot_without_mutating_existing_rows() {
+        let wrong_slot = SlotId("scope-2".to_owned());
+
+        let owned_dir = tmp("native-reintent-owned-wrong-slot");
+        let mut owned_journal = Journal::open(owned_dir.join("journal.db")).unwrap();
+        let owned_job_id = JobId("guid-owned".to_owned());
+        prime_owned(&mut owned_journal, &owned_job_id);
+        let owned_request_id = "request-guid-owned";
+        let owned_permit = test_native_permit_lease(owned_request_id);
+        let before_owned = owned_journal.materialized_state().unwrap();
+
+        let owned_error = reintend_resolved_acquisition_with_permit(
+            &mut owned_journal,
+            &owned_job_id,
+            &wrong_slot,
+            owned_request_id,
+            "plan-1",
+            RUN_SERVICE_URL,
+            INTENDED_UNIX,
+            owned_permit,
+        )
+        .unwrap_err();
+        assert!(owned_error
+            .to_string()
+            .contains("acquisition redelivery names slot"));
+        drop(owned_journal);
+        let after_owned = Journal::open(owned_dir.join("journal.db"))
+            .unwrap()
+            .materialized_state()
+            .unwrap();
+        assert_eq!(after_owned, before_owned);
+        std::fs::remove_dir_all(owned_dir).ok();
+
+        let provisional_dir = tmp("native-reintent-provisional-wrong-slot");
+        let mut provisional_journal = Journal::open(provisional_dir.join("journal.db")).unwrap();
+        let (slot_id, generation) = prime_ready_slot(&mut provisional_journal);
+        let request_id = "native-wrong-slot-request";
+        let provisional_job_id = JobId(request_id.to_owned());
+        let acquired_job_id = JobId("run-service-wrong-slot-job".to_owned());
+        let permit_lease = test_native_permit_lease(request_id);
+        intend_acquisition_with_permit(
+            &mut provisional_journal,
+            &provisional_job_id,
+            &slot_id,
+            "message-wrong-slot",
+            request_id,
+            RUN_SERVICE_URL,
+            INTENDED_UNIX,
+            permit_lease.clone(),
+        )
+        .unwrap();
+        resolve_acquisition_for_request_with_permit(
+            &mut provisional_journal,
+            &provisional_job_id,
+            &acquired_job_id,
+            "plan-1",
+            generation,
+            request_id,
+            permit_lease.clone(),
+        )
+        .unwrap();
+        let before_provisional = provisional_journal.materialized_state().unwrap();
+
+        let provisional_error = reintend_resolved_acquisition_with_permit(
+            &mut provisional_journal,
+            &acquired_job_id,
+            &wrong_slot,
+            request_id,
+            "plan-1",
+            RUN_SERVICE_URL,
+            INTENDED_UNIX,
+            permit_lease,
+        )
+        .unwrap_err();
+        assert!(provisional_error
+            .to_string()
+            .contains("acquisition redelivery names slot"));
+        drop(provisional_journal);
+        let after_provisional = Journal::open(provisional_dir.join("journal.db"))
+            .unwrap()
+            .materialized_state()
+            .unwrap();
+        assert_eq!(after_provisional, before_provisional);
+        std::fs::remove_dir_all(provisional_dir).ok();
+    }
+
+    #[test]
     fn a_job_another_runner_holds_is_dropped_and_the_slot_freed() {
         let dir = tmp("acquire-window-not-ours");
         let job = JobId("guid-1".into());
@@ -1112,9 +1608,17 @@ mod tests {
         }
 
         let mut journal = restart(&dir);
-        let resolved = resolve_provisional_acquisitions(&mut journal, INTENDED_UNIX, |_| {
-            AcquisitionVerdict::NotOurs
-        })
+        let expected_lease = test_native_permit_lease("msg-1");
+        let resolved = resolve_provisional_acquisitions(
+            &mut journal,
+            INTENDED_UNIX,
+            |_| AcquisitionVerdict::NotOurs,
+            |proof| {
+                assert_eq!(&proof.permit_lease, &expected_lease);
+                assert_eq!(proof.source, AcquisitionLossSource::RenewJobNotOurs);
+                Ok(())
+            },
+        )
         .unwrap();
         assert_eq!(
             resolved,
@@ -1128,6 +1632,175 @@ mod tests {
             journal.materialized_state().unwrap().jobs.is_empty(),
             "the slot is freed for the next job"
         );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn failed_permit_release_retains_the_pointer_and_retry_completes_cleanup() {
+        let dir = tmp("acquire-release-failure-replay");
+        let job = JobId("guid-1".into());
+        let permit_lease = test_native_permit_lease("msg-1");
+        {
+            let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+            let (slot, _) = prime_ready_slot(&mut journal);
+            intend_and_retarget(&mut journal, &slot, "msg-1", &job);
+        }
+
+        let mut journal = restart(&dir);
+        let release_failed = resolve_provisional_acquisitions(
+            &mut journal,
+            INTENDED_UNIX,
+            |_| AcquisitionVerdict::NotOurs,
+            |proof| {
+                assert_eq!(&proof.permit_lease, &permit_lease);
+                assert_eq!(proof.source, AcquisitionLossSource::RenewJobNotOurs);
+                anyhow::bail!("injected permit ledger failure")
+            },
+        );
+        assert!(release_failed.is_err());
+        let state = journal.materialized_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        assert!(state.jobs[0].provisional);
+        assert_eq!(state.jobs[0].permit_lease.as_ref(), Some(&permit_lease));
+
+        let retried = resolve_provisional_acquisitions(
+            &mut journal,
+            INTENDED_UNIX,
+            |_| AcquisitionVerdict::NotOurs,
+            |proof| {
+                assert_eq!(&proof.permit_lease, &permit_lease);
+                assert_eq!(proof.source, AcquisitionLossSource::RenewJobNotOurs);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(retried.len(), 1);
+        assert!(retried[0].abandoned);
+        assert!(journal.materialized_state().unwrap().jobs.is_empty());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn recorded_acquire_not_sent_proof_replays_after_release_failure_without_probe() {
+        let dir = tmp("acquire-not-sent-release-replay");
+        let job_id = JobId("request-1".into());
+        let permit_lease = test_native_permit_lease("request-1");
+        let proof = AcquisitionLossProof {
+            source: AcquisitionLossSource::AcquireJobNotSent,
+            permit_lease: permit_lease.clone(),
+        };
+        {
+            let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+            let (slot, generation) = prime_ready_slot(&mut journal);
+            intend_acquisition_with_permit(
+                &mut journal,
+                &job_id,
+                &slot,
+                "request-1",
+                "request-1",
+                RUN_SERVICE_URL,
+                INTENDED_UNIX,
+                permit_lease.clone(),
+            )
+            .unwrap();
+            record_acquisition_loss_proof(&mut journal, &job_id, generation, proof.clone())
+                .unwrap();
+        }
+
+        let mut journal = restart(&dir);
+        let mut probes = 0;
+        let release_failed = resolve_provisional_acquisitions(
+            &mut journal,
+            INTENDED_UNIX,
+            |_| {
+                probes += 1;
+                panic!("a durable not-sent proof must bypass renewjob")
+            },
+            |recorded| {
+                assert_eq!(recorded, &proof);
+                anyhow::bail!("injected eligible-release failure")
+            },
+        );
+        assert!(release_failed.is_err());
+        let state = journal.materialized_state().unwrap();
+        assert_eq!(probes, 0);
+        assert_eq!(state.jobs.len(), 1);
+        assert!(state.jobs[0].provisional);
+        assert_eq!(state.jobs[0].acquisition_loss_proof.as_ref(), Some(&proof));
+        drop(journal);
+
+        let mut journal = restart(&dir);
+        let replayed = resolve_provisional_acquisitions(
+            &mut journal,
+            INTENDED_UNIX,
+            |_| panic!("recorded not-sent proof must replay without probing"),
+            |recorded| {
+                assert_eq!(recorded, &proof);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            replayed,
+            vec![ResolvedAcquisition {
+                job_id,
+                verdict: AcquisitionVerdict::Indeterminate,
+                abandoned: true,
+            }]
+        );
+        assert!(journal.materialized_state().unwrap().jobs.is_empty());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_legacy_not_ours_verdict_without_permit_identity_stays_fenced() {
+        let dir = tmp("acquire-legacy-no-permit");
+        let job = JobId("guid-1".into());
+        {
+            let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+            let (slot, generation) = prime_ready_slot(&mut journal);
+            let provisional_job_id = JobId("msg-1".into());
+            assert!(
+                !journal
+                    .apply(Event::JobAcquisitionIntended {
+                        slot_id: slot,
+                        job_id: provisional_job_id.clone(),
+                        generation,
+                        message_id: "msg-1".into(),
+                        runner_request_id: Some("msg-1".into()),
+                        run_service_url: RUN_SERVICE_URL.into(),
+                        intended_unix: INTENDED_UNIX,
+                    })
+                    .unwrap()
+                    .rejected
+            );
+            assert!(
+                !journal
+                    .apply(Event::JobAcquisitionResolved {
+                        provisional_job_id,
+                        acquired_job_id: job.clone(),
+                        plan_id: "plan-1".into(),
+                        generation,
+                        runner_request_id: Some("msg-1".into()),
+                        permit_lease: None,
+                    })
+                    .unwrap()
+                    .rejected
+            );
+        }
+
+        let mut journal = restart(&dir);
+        let outcome = resolve_provisional_acquisitions(
+            &mut journal,
+            INTENDED_UNIX,
+            |_| AcquisitionVerdict::NotOurs,
+            |_| unreachable!("unknown legacy permit identity cannot be released"),
+        );
+        assert!(outcome.is_err());
+        let state = journal.materialized_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        assert!(state.jobs[0].provisional);
+        assert!(state.jobs[0].permit_lease.is_none());
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1146,9 +1819,12 @@ mod tests {
         }
 
         let mut journal = restart(&dir);
-        let resolved = resolve_provisional_acquisitions(&mut journal, INTENDED_UNIX, |_| {
-            AcquisitionVerdict::Indeterminate
-        })
+        let resolved = resolve_provisional_acquisitions(
+            &mut journal,
+            INTENDED_UNIX,
+            |_| AcquisitionVerdict::Indeterminate,
+            |_| unreachable!("indeterminate verdict must not release a permit"),
+        )
         .unwrap();
         assert_eq!(
             resolved,
@@ -1176,7 +1852,7 @@ mod tests {
     /// remotely, `Err` locally. Without a bound, every restart would renew a
     /// job this node never manages to run. Assert the renewals stop.
     #[test]
-    fn the_probe_is_bounded_by_attempts_and_then_frees_the_slot() {
+    fn the_probe_budget_bounds_renewals_but_keeps_uncertain_ownership_fenced() {
         let dir = tmp("acquire-probe-bounded");
         let job = JobId("guid-1".into());
         let mut journal = Journal::open(dir.join("journal.db")).unwrap();
@@ -1186,20 +1862,27 @@ mod tests {
         let mut renewals = 0u32;
         // Far more restarts than the budget allows.
         for _ in 0..(MAX_ACQUISITION_PROBES * 4) {
-            resolve_provisional_acquisitions(&mut journal, INTENDED_UNIX, |_| {
-                renewals += 1;
-                AcquisitionVerdict::Indeterminate
-            })
+            resolve_provisional_acquisitions(
+                &mut journal,
+                INTENDED_UNIX,
+                |_| {
+                    renewals += 1;
+                    AcquisitionVerdict::Indeterminate
+                },
+                |_| unreachable!("indeterminate verdict must not release a permit"),
+            )
             .unwrap();
         }
         assert_eq!(
             renewals, MAX_ACQUISITION_PROBES,
             "the lease is renewed at most MAX_ACQUISITION_PROBES times, ever"
         );
-        assert!(
-            journal.materialized_state().unwrap().jobs.is_empty(),
-            "a row that spent its budget releases the slot"
+        assert_eq!(
+            journal.materialized_state().unwrap().jobs.len(),
+            1,
+            "a spent local probe budget does not prove the remote lease is gone"
         );
+        assert!(journal.materialized_state().unwrap().jobs[0].provisional);
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1222,42 +1905,51 @@ mod tests {
                 probes += 1;
                 AcquisitionVerdict::Owned
             },
+            |_| unreachable!("a skipped probe cannot release a permit"),
         )
         .unwrap();
         assert_eq!(probes, 0, "a row past its deadline is not probed at all");
         assert_eq!(resolved.len(), 1);
-        assert!(resolved[0].abandoned);
-        assert!(journal.materialized_state().unwrap().jobs.is_empty());
+        assert!(!resolved[0].abandoned);
+        assert_eq!(journal.materialized_state().unwrap().jobs.len(), 1);
         std::fs::remove_dir_all(dir).ok();
     }
 
     /// A crash before the acquire reply was read leaves a row keyed by the
-    /// broker message, with no plan. No `renewjob` call can be built for it, so
-    /// holding the slot for a six-hour deadline buys nothing; the event log
-    /// keeps the evidence and the slot goes back to work.
+    /// broker message, with no plan. That does not prove the acquire failed:
+    /// the reply may have been lost after remote assignment. Keep both the
+    /// correlation and exact host lease until authoritative evidence appears.
     #[test]
-    fn a_row_the_reply_never_named_is_abandoned_without_a_probe() {
+    fn a_planless_row_keeps_its_exact_permit_without_a_probe() {
         let dir = tmp("acquire-window-unnamed");
+        let permit_lease = test_native_permit_lease("msg-1");
         {
             let mut journal = Journal::open(dir.join("journal.db")).unwrap();
             let (slot, _) = prime_ready_slot(&mut journal);
-            intend_acquisition(
+            intend_acquisition_with_permit(
                 &mut journal,
                 &JobId("msg-1".into()),
                 &slot,
                 "msg-1",
+                "msg-1",
                 RUN_SERVICE_URL,
                 INTENDED_UNIX,
+                permit_lease.clone(),
             )
             .unwrap();
         }
 
         let mut journal = restart(&dir);
         let mut probes = 0u32;
-        let resolved = resolve_provisional_acquisitions(&mut journal, INTENDED_UNIX, |_| {
-            probes += 1;
-            AcquisitionVerdict::Owned
-        })
+        let resolved = resolve_provisional_acquisitions(
+            &mut journal,
+            INTENDED_UNIX,
+            |_| {
+                probes += 1;
+                AcquisitionVerdict::Owned
+            },
+            |_| unreachable!("a planless row cannot yield a release verdict"),
+        )
         .unwrap();
         assert_eq!(probes, 0, "there is nothing to renew");
         assert_eq!(
@@ -1265,10 +1957,12 @@ mod tests {
             vec![ResolvedAcquisition {
                 job_id: JobId("msg-1".into()),
                 verdict: AcquisitionVerdict::Indeterminate,
-                abandoned: true,
+                abandoned: false,
             }]
         );
-        assert!(journal.materialized_state().unwrap().jobs.is_empty());
+        let state = journal.materialized_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        assert_eq!(state.jobs[0].permit_lease.as_ref(), Some(&permit_lease));
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1279,26 +1973,156 @@ mod tests {
         let job = JobId("msg-1".into());
         let mut journal = Journal::open(dir.join("journal.db")).unwrap();
         let (slot, _) = prime_ready_slot(&mut journal);
-        let first = intend_acquisition(
+        let other_slot = SlotId("scope-2".into());
+        assert!(
+            !journal
+                .apply(Event::DesiredCapacity { ready: 2 })
+                .unwrap()
+                .rejected
+        );
+        for event in [
+            Event::PermitReserved {
+                slot_id: other_slot.clone(),
+                generation: Generation::INITIAL,
+            },
+            Event::ExecutorProven {
+                slot_id: other_slot.clone(),
+                generation: Generation::INITIAL,
+            },
+            Event::SessionLive {
+                slot_id: other_slot.clone(),
+                generation: Generation::INITIAL,
+            },
+            Event::RegistrationIntended {
+                slot_id: other_slot.clone(),
+                generation: Generation::INITIAL,
+            },
+            Event::Registered {
+                slot_id: other_slot.clone(),
+                generation: Generation::INITIAL,
+            },
+            Event::ReadyAttempt {
+                slot_id: other_slot.clone(),
+                generation: Generation::INITIAL,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        let permit_lease = test_native_permit_lease(&job.0);
+        let first = intend_acquisition_with_permit(
             &mut journal,
             &job,
             &slot,
             "msg-1",
+            &job.0,
             RUN_SERVICE_URL,
             INTENDED_UNIX,
+            permit_lease.clone(),
         )
         .unwrap();
-        let second = intend_acquisition(
+        let second = intend_acquisition_with_permit(
             &mut journal,
             &job,
             &slot,
             "msg-1",
+            &job.0,
             RUN_SERVICE_URL,
             INTENDED_UNIX,
+            permit_lease.clone(),
         )
         .unwrap();
         assert_eq!(first, second);
-        assert_eq!(journal.materialized_state().unwrap().jobs.len(), 1);
+        let stable_state = journal.materialized_state().unwrap();
+
+        let other_request_id = "other-request";
+        let distinct_request_with_same_lease = intend_acquisition_with_permit(
+            &mut journal,
+            &JobId(other_request_id.to_owned()),
+            &other_slot,
+            "other-message",
+            other_request_id,
+            RUN_SERVICE_URL,
+            INTENDED_UNIX,
+            permit_lease.clone(),
+        )
+        .unwrap_err();
+        assert!(distinct_request_with_same_lease
+            .to_string()
+            .contains("native acquisition intent rejected"));
+
+        let wrong_slot = intend_acquisition_with_permit(
+            &mut journal,
+            &job,
+            &SlotId("scope-2".into()),
+            "msg-1",
+            &job.0,
+            RUN_SERVICE_URL,
+            INTENDED_UNIX,
+            permit_lease.clone(),
+        )
+        .unwrap_err();
+        assert!(wrong_slot
+            .to_string()
+            .contains("already has a different or active journal owner"));
+
+        let mut wrong_lease = permit_lease.clone();
+        wrong_lease.holder.push_str("-replacement");
+        let mismatched_lease = intend_acquisition_with_permit(
+            &mut journal,
+            &job,
+            &slot,
+            "msg-1",
+            &job.0,
+            RUN_SERVICE_URL,
+            INTENDED_UNIX,
+            wrong_lease,
+        )
+        .unwrap_err();
+        assert!(mismatched_lease
+            .to_string()
+            .contains("already has a different or active journal owner"));
+
+        let mut wrong_ledger_path = permit_lease.clone();
+        wrong_ledger_path.ledger_path.push_str(".replacement");
+        let mismatched_ledger_path = intend_acquisition_with_permit(
+            &mut journal,
+            &job,
+            &slot,
+            "msg-1",
+            &job.0,
+            RUN_SERVICE_URL,
+            INTENDED_UNIX,
+            wrong_ledger_path,
+        )
+        .unwrap_err();
+        assert!(mismatched_ledger_path
+            .to_string()
+            .contains("already has a different or active journal owner"));
+
+        let mut wrong_lease_generation = permit_lease.clone();
+        wrong_lease_generation.generation += 1;
+        let mismatched_generation = intend_acquisition_with_permit(
+            &mut journal,
+            &job,
+            &slot,
+            "msg-1",
+            &job.0,
+            RUN_SERVICE_URL,
+            INTENDED_UNIX,
+            wrong_lease_generation,
+        )
+        .unwrap_err();
+        assert!(mismatched_generation
+            .to_string()
+            .contains("already has a different or active journal owner"));
+
+        let state = journal.materialized_state().unwrap();
+        assert_eq!(state, stable_state);
+        assert_eq!(state.jobs.len(), 1);
+        assert_eq!(state.jobs[0].job_id, job);
+        assert_eq!(state.jobs[0].slot_id, slot);
+        assert_eq!(state.jobs[0].generation, first);
+        assert_eq!(state.jobs[0].permit_lease.as_ref(), Some(&permit_lease));
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1309,46 +2133,93 @@ mod tests {
         Journal::open(dir.join("journal.db")).unwrap()
     }
 
-    /// A rebuild is two writes, so it can itself be interrupted: the crash
-    /// leaves a provisional row keyed by the acquired identity with no plan, and
-    /// a planless row is exactly the one startup recovery abandons. Retrying the
-    /// rebuild must finish that row, not fork a second one beside it.
+    /// A planless request-keyed intent can survive a process restart. Redelivery
+    /// resolves that exact row onto the acquired job without losing correlation.
     #[test]
-    fn a_rebuild_picks_up_where_an_interrupted_one_stopped() {
-        let dir = tmp("rebuild-interrupted");
-        let job = JobId("guid-1".into());
+    fn a_planless_known_request_row_is_resolved_on_redelivery() {
+        let dir = tmp("planless-request-redelivery");
+        let acquired_job = JobId("guid-1".into());
+        let request_job = JobId("request-1".into());
+        let permit_lease = test_native_permit_lease(&request_job.0);
         {
             let mut journal = Journal::open(dir.join("journal.db")).unwrap();
             let (slot, _) = prime_ready_slot(&mut journal);
-            // The intent half of the rebuild, without the resolve.
-            intend_acquisition(
+            intend_acquisition_with_permit(
                 &mut journal,
-                &job,
+                &request_job,
                 &slot,
-                "request-1",
+                "broker-message-1",
+                &request_job.0,
                 RUN_SERVICE_URL,
                 INTENDED_UNIX,
+                permit_lease.clone(),
             )
             .unwrap();
         }
 
         let mut journal = restart(&dir);
-        reintend_resolved_acquisition(
+        reintend_resolved_acquisition_with_permit(
             &mut journal,
-            &job,
+            &acquired_job,
             &SlotId("scope-1".into()),
             "request-1",
             "plan-1",
             RUN_SERVICE_URL,
             INTENDED_UNIX,
+            permit_lease.clone(),
         )
         .unwrap();
 
         let state = journal.materialized_state().unwrap();
-        assert_eq!(state.jobs.len(), 1, "the interrupted row is finished");
+        assert_eq!(state.jobs.len(), 1, "the request row is resolved in place");
+        assert_eq!(state.jobs[0].job_id, acquired_job);
         assert_eq!(state.jobs[0].plan_id, "plan-1");
         assert_eq!(state.jobs[0].run_service_url, RUN_SERVICE_URL);
+        assert_eq!(state.jobs[0].runner_request_id, "request-1");
         assert!(state.jobs[0].provisional, "still not ownership");
+        assert_eq!(state.jobs[0].permit_lease.as_ref(), Some(&permit_lease));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_missing_provisional_row_rebuilds_atomically_and_survives_restart() {
+        let dir = tmp("rebuild-missing-provisional");
+        let acquired_job = JobId("run-service-job-1".into());
+        let permit_lease = test_native_permit_lease("request-1");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        prime_ready_slot(&mut journal);
+        // The 200 already exists; a drain that arrived after acquisition must
+        // not reject recording the known ownership.
+        journal.set_admission_blocked(1).unwrap();
+
+        assert!(reintend_resolved_acquisition_with_permit(
+            &mut journal,
+            &acquired_job,
+            &SlotId("scope-1".into()),
+            "request-1",
+            "plan-1",
+            RUN_SERVICE_URL,
+            INTENDED_UNIX,
+            permit_lease.clone(),
+        )
+        .unwrap());
+        let state = journal.materialized_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        assert_eq!(state.jobs[0].job_id, acquired_job);
+        assert_eq!(state.jobs[0].runner_request_id, "request-1");
+        assert_eq!(state.jobs[0].plan_id, "plan-1");
+        assert_eq!(state.jobs[0].permit_lease.as_ref(), Some(&permit_lease));
+
+        drop(journal);
+        let recovered = restart(&dir);
+        let state = recovered.materialized_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        assert_eq!(state.jobs[0].job_id, acquired_job);
+        assert_eq!(state.jobs[0].runner_request_id, "request-1");
+        assert_eq!(state.jobs[0].plan_id, "plan-1");
+        assert_eq!(state.jobs[0].permit_lease.as_ref(), Some(&permit_lease));
+        assert!(state.jobs[0].provisional);
+        assert_eq!(state.slots[0].phase, SlotPhase2::Assigned);
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1362,14 +2233,15 @@ mod tests {
         let slot = SlotId("scope-1".into());
         let generation = prime_owned(&mut journal, &job);
 
-        reintend_resolved_acquisition(
+        reintend_resolved_acquisition_with_permit(
             &mut journal,
             &job,
             &slot,
-            "request-1",
+            "request-guid-1",
             "plan-1",
             RUN_SERVICE_URL,
             INTENDED_UNIX,
+            test_native_permit_lease("request-guid-1"),
         )
         .unwrap();
 
@@ -1377,7 +2249,79 @@ mod tests {
         assert_eq!(state.jobs.len(), 1);
         assert!(!state.jobs[0].provisional);
         assert_eq!(state.jobs[0].generation, generation);
+        assert_eq!(state.jobs[0].runner_request_id, "request-guid-1");
         assert!(state.outbox.iter().all(|row| row.job_id != job));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn proofless_legacy_self_resolution_stays_provisional_and_rejects_redelivery() {
+        let dir = tmp("rebuild-unknown-owned-correlation");
+        let acquired_job = JobId("run-service-job-1".into());
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let (slot_id, generation) = prime_ready_slot(&mut journal);
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntended {
+                    slot_id: slot_id.clone(),
+                    job_id: acquired_job.clone(),
+                    generation,
+                    message_id: "request-1".into(),
+                    runner_request_id: None,
+                    run_service_url: RUN_SERVICE_URL.into(),
+                    intended_unix: INTENDED_UNIX,
+                })
+                .unwrap()
+                .rejected
+        );
+        let resolution = journal
+            .apply(Event::JobAcquisitionResolved {
+                provisional_job_id: acquired_job.clone(),
+                acquired_job_id: acquired_job.clone(),
+                plan_id: "plan-1".into(),
+                generation,
+                runner_request_id: None,
+                permit_lease: None,
+            })
+            .unwrap();
+        assert!(
+            resolution.rejected,
+            "a self-resolve without request proof is ambiguous"
+        );
+        let state = journal.materialized_state().unwrap();
+        assert!(state.jobs[0].provisional);
+        assert!(state.jobs[0].plan_id.is_empty());
+        assert_eq!(state.jobs[0].runner_request_id, acquired_job.0);
+        assert!(
+            journal
+                .apply(Event::JobOwned {
+                    job_id: acquired_job.clone(),
+                    slot_id: slot_id.clone(),
+                    attempt: 1,
+                    generation,
+                    worker: "worker-1".into(),
+                    accepted_unix: INTENDED_UNIX,
+                })
+                .unwrap()
+                .rejected,
+            "an unproven legacy acquisition cannot be promoted into ownership"
+        );
+
+        let error = reintend_resolved_acquisition_with_permit(
+            &mut journal,
+            &acquired_job,
+            &slot_id,
+            "request-1",
+            "plan-1",
+            RUN_SERVICE_URL,
+            INTENDED_UNIX,
+            test_native_permit_lease("request-1"),
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("stored correlation is run-service-job-1"));
+        assert_eq!(journal.materialized_state().unwrap().jobs.len(), 1);
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1764,13 +2708,15 @@ mod tests {
         let state = journal.load_state().unwrap();
         assert_eq!(state.jobs[0].phase, JobPhase2::Completing);
         assert_eq!(state.slots[0].phase, SlotPhase2::Assigned);
-        let rejected = intend_acquisition(
+        let rejected = intend_acquisition_with_permit(
             &mut journal,
             &JobId("job-2".into()),
             &SlotId("scope-1".into()),
             "msg-2",
+            "msg-2",
             RUN_SERVICE_URL,
             INTENDED_UNIX,
+            test_native_permit_lease("msg-2"),
         )
         .unwrap_err();
         assert!(
@@ -2107,13 +3053,15 @@ mod tests {
         let mut journal = Journal::open(dir.join("journal.db")).unwrap();
         let job_id = JobId("already".into());
         let _ = prime_owned(&mut journal, &job_id);
-        let error = intend_acquisition(
+        let error = intend_acquisition_with_permit(
             &mut journal,
             &JobId("other".into()),
             &SlotId("scope-1".into()),
             "msg-other",
+            "msg-other",
             RUN_SERVICE_URL,
             INTENDED_UNIX,
+            test_native_permit_lease("msg-other"),
         )
         .unwrap_err();
         assert!(

@@ -439,6 +439,18 @@ impl FilesystemCoordinator {
         Self::lock(run_root, true)
     }
 
+    pub(crate) fn require_exclusive_for(&self, run_root: &Path) -> Result<()> {
+        let expected_path = run_root.join("filesystem-coordinator.lock");
+        if !self.exclusive || self.path != expected_path {
+            bail!(
+                "filesystem coordinator {} is not an exclusive lock for run root {}",
+                self.path.display(),
+                run_root.display()
+            );
+        }
+        Ok(())
+    }
+
     fn lock(run_root: &Path, exclusive: bool) -> Result<Self> {
         fs::create_dir_all(run_root)?;
         let path = run_root.join("filesystem-coordinator.lock");
@@ -1048,6 +1060,22 @@ mod tests {
         fs::remove_dir_all(other).unwrap();
         drop(outer);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn coordinator_proof_requires_exclusive_lock_for_exact_run_root() {
+        let root_path = root("coordinator-proof");
+        let other = root("coordinator-proof-other");
+        let exclusive = FilesystemCoordinator::lock_exclusive(&root_path).unwrap();
+        assert!(exclusive.require_exclusive_for(&root_path).is_ok());
+        assert!(exclusive.require_exclusive_for(&other).is_err());
+        drop(exclusive);
+
+        let shared = FilesystemCoordinator::lock_shared(&root_path).unwrap();
+        assert!(shared.require_exclusive_for(&root_path).is_err());
+        drop(shared);
+        fs::remove_dir_all(root_path).unwrap();
+        fs::remove_dir_all(other).ok();
     }
 
     #[test]

@@ -2101,6 +2101,8 @@ pub(crate) struct DockerJobEngine<R> {
     /// Credential-bearing native adapters enforce this independently of
     /// Docker-socket availability; cache paths resolve under it.
     trust_scope: String,
+    #[cfg(test)]
+    buildkit_run_root: Option<PathBuf>,
     /// Identity of the step currently executing — lets native adapters stream
     /// their output to the live feed (GitHub streams every step live, not
     /// just `run:` steps).
@@ -2157,6 +2159,8 @@ where
             job_timeout_minutes: None,
             secret_masks: Vec::new(),
             trust_scope: "untrusted".to_string(),
+            #[cfg(test)]
+            buildkit_run_root: None,
             live_step: None,
             job_environment_started: false,
             docker_lease: None,
@@ -2191,6 +2195,19 @@ where
     pub fn with_trust_scope(mut self, trust_scope: impl Into<String>) -> Self {
         self.trust_scope = trust_scope.into();
         self
+    }
+
+    fn buildkit_run_root(&self) -> Option<PathBuf> {
+        #[cfg(test)]
+        {
+            self.buildkit_run_root
+                .clone()
+                .or_else(crate::buildkit::claims_run_root)
+        }
+        #[cfg(not(test))]
+        {
+            crate::buildkit::claims_run_root()
+        }
     }
 
     pub fn with_workflow_env(mut self, env: Vec<(String, String)>) -> Self {
@@ -5159,7 +5176,8 @@ where
             tier,
             container.repository.as_deref(),
         );
-        let run_root = crate::buildkit::claims_run_root()
+        let run_root = self
+            .buildkit_run_root()
             .ok_or_else(|| anyhow::anyhow!("setup-buildx requires configured Velnor storage"))?;
         let temp = state
             .temp_host
@@ -19494,6 +19512,7 @@ type=sha,format=long,prefix=,enable=true"
             codes: vec![0, 0, 1],
         })
         .with_trust_scope("trusted");
+        executor.buildkit_run_root = Some(temp.join("run"));
         let spec = container(&temp);
 
         let results = executor
@@ -28614,6 +28633,7 @@ fi"#
             timeout_minutes: None,
         }];
         let mut executor = DockerJobEngine::inert(RecordingRunner::default());
+        executor.buildkit_run_root = Some(temp.join("run"));
 
         let results = executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)

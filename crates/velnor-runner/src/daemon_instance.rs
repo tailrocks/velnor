@@ -165,7 +165,8 @@ pub fn resolve_in(etc: &Path, drop_in_root: &Path, selector: &str) -> Result<Dae
     if selector.is_empty() {
         bail!("instance selector is empty");
     }
-    if etc.join(format!("{selector}.env")).is_file() {
+    let direct_env = etc.join(format!("{selector}.env"));
+    if direct_env.is_file() && instance_name_of_env_file(&direct_env).as_deref() == Some(selector) {
         return resolve_instance_in(etc, drop_in_root, selector);
     }
     let instances = enumerate_in(etc, drop_in_root)?;
@@ -204,7 +205,7 @@ pub fn resolve_in(etc: &Path, drop_in_root: &Path, selector: &str) -> Result<Dae
 fn instance_name_of_env_file(path: &Path) -> Option<String> {
     let file_name = path.file_name()?.to_str()?;
     let stem = file_name.strip_suffix(".env")?;
-    if stem.is_empty() || stem.contains('.') || stem.contains('/') {
+    if stem.is_empty() || stem.contains('.') || stem.contains('/') || is_secrets_file(path) {
         return None;
     }
     Some(stem.to_owned())
@@ -635,6 +636,7 @@ mod tests {
         )
         .unwrap();
         fs::write(etc.join("dogfood.secrets.env"), "GITHUB_TOKEN=ghp_secret\n").unwrap();
+        fs::write(etc.join("secrets.env"), "GITHUB_TOKEN=ghp_host_secret\n").unwrap();
         fs::write(etc.join("dogfood.env.bak-persist"), "VELNOR_NAME=stale\n").unwrap();
         fs::write(
             etc.join("velnor.env"),
@@ -746,6 +748,13 @@ mod tests {
             .map(|instance| instance.instance)
             .collect();
         assert_eq!(names, ["dogfood", "fixture", "velnor"]);
+        let bare_secrets = resolve_in(&etc, &drop_ins, "secrets")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            bare_secrets.contains("no packaged daemon instance secrets"),
+            "credential file was treated as a daemon instance: {bare_secrets}"
+        );
 
         // A host without /etc/velnor has no packaged instances.
         assert!(enumerate_in(&root.join("missing"), &drop_ins)

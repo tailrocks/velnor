@@ -8,7 +8,8 @@
 //! "never latest" rule structural, not procedural.
 //!
 //! The runner container:
-//! * joins its DinD's network namespace (`--network container:<dind>`),
+//! * joins its DinD's network namespace by inspected ID
+//!   (`--network container:<dind-id>`),
 //!   so inner ports can never collide across workers and no bridge
 //!   attachment is needed on the runner side;
 //! * mounts the state dir, workspace volume, and tool/file-command dirs
@@ -496,6 +497,10 @@ impl RunnerSpec {
         &self.state_dir
     }
 
+    pub(crate) fn jit_config(&self) -> &str {
+        &self.jit_config
+    }
+
     /// Write the JIT blob to a private host-only `0600` env file for
     /// `--env-file`. The path is a sibling of the bind-mounted state dir,
     /// never inside the runner-visible mount.
@@ -510,67 +515,9 @@ impl RunnerSpec {
         }
         self.scrub_jit_env_files()?;
         let path = self.jit_env_file_path()?;
-        let dir = path.parent().context("JIT env file path has no parent")?;
-        let mut builder = std::fs::DirBuilder::new();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        match builder.create(dir) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("create private JIT env file dir {}", dir.display()));
-            }
-        }
-        let metadata = std::fs::symlink_metadata(dir)
-            .with_context(|| format!("inspect private JIT env file dir {}", dir.display()))?;
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            anyhow::bail!(
-                "refusing JIT env file dir {}: not a real directory",
-                dir.display()
-            );
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-                .with_context(|| format!("restrict private JIT env file dir {}", dir.display()))?;
-        }
         let contents = format!("{JIT_CONFIG_ENV}={}\n", self.jit_config);
-        let write_result = (|| -> std::io::Result<()> {
-            use std::io::Write;
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options.open(&path)?;
-            file.write_all(contents.as_bytes())?;
-            file.sync_all()?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-            }
-            Ok(())
-        })();
-        if let Err(error) = write_result {
-            return match self.scrub_jit_env_files() {
-                Ok(()) => {
-                    Err(error).with_context(|| format!("write JIT env file {}", path.display()))
-                }
-                Err(scrub_error) => anyhow::bail!(
-                    "write JIT env file {} failed: {error}; cleanup failed: {scrub_error:#}",
-                    path.display()
-                ),
-            };
-        }
-        Ok(path)
+        super::create_owner_only_file_next_to(&self.state_dir, contents.as_bytes())
+            .with_context(|| format!("write host-only JIT env file {}", path.display()))
     }
 
     fn jit_env_file_path(&self) -> Result<PathBuf> {
@@ -588,35 +535,62 @@ impl RunnerSpec {
             .join(JIT_ENV_FILE))
     }
 
-    /// Remove both current host-only files and the legacy env file that
-    /// older provisioners placed inside the runner-visible state mount.
+    /// Remove the deterministic host-only JIT directory, including
+    /// crash-left atomic-write temporaries.
     fn scrub_jit_env_files(&self) -> Result<()> {
-        let external = self.jit_env_file_path()?;
-        if let Some(dir) = external.parent() {
-            scrub_private_env_dir(dir)?;
+        super::remove_owner_only_file_next_to(&self.state_dir)
+            .context("scrub host-only JIT file directory")
+    }
+
+    /// Scrub the old state-mounted file once during recovery. Descriptor-
+    /// relative unlink removes a final symlink itself and never follows it.
+    fn scrub_legacy_jit_env_file(&self) -> Result<()> {
+        #[cfg(unix)]
+        {
+            use std::ffi::OsStr;
+
+            let state_dir = super::secure_fs::open_absolute_directory(&self.state_dir)
+                .with_context(|| {
+                    format!(
+                        "open worker state dir {} for legacy JIT cleanup",
+                        self.state_dir.display()
+                    )
+                })?;
+            super::secure_fs::remove_file_at(&state_dir, OsStr::new(JIT_ENV_FILE)).with_context(
+                || format!("unlink legacy JIT env file in {}", self.state_dir.display()),
+            )?;
         }
-        remove_secret_file(&self.state_dir.join(JIT_ENV_FILE))?;
+        #[cfg(not(unix))]
+        {
+            let path = self.state_dir.join(JIT_ENV_FILE);
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("unlink legacy JIT env file {}", path.display()));
+                }
+            }
+        }
         Ok(())
     }
 
-    pub(crate) fn scrub_jit_env_files_for_state(state_dir: &Path) -> Result<()> {
-        let parent = state_dir
-            .parent()
-            .context("worker state dir has no parent for private JIT env file")?;
-        let state_name = state_dir
-            .file_name()
-            .context("worker state dir has no final path component")?
-            .to_string_lossy();
-        let external_dir = parent.join(format!(".velnor-jit-{state_name}"));
-        scrub_private_env_dir(&external_dir)?;
-        remove_secret_file(&state_dir.join(JIT_ENV_FILE))?;
-        Ok(())
+    fn scrub_jit_env_files_for_recovery(&self) -> Result<()> {
+        let legacy = self.scrub_legacy_jit_env_file();
+        let host_only = self.scrub_jit_env_files();
+        match (legacy, host_only) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(legacy_error), Err(host_error)) => anyhow::bail!(
+                "legacy JIT cleanup failed: {legacy_error:#}; host-only JIT cleanup failed: {host_error:#}"
+            ),
+        }
     }
 
     /// `docker create` argv for the runner container.
     ///
     /// Invariants (proven by unit tests on this vector):
-    /// * `--network container:<dind>`: the runner shares ONLY its own
+    /// * `--network container:<dind-id>`: the runner shares ONLY its own
     ///   DinD's network namespace — no bridge, no published ports, no
     ///   way to observe another worker's inner ports;
     /// * state dir, workspace, tool cache, and file-command dirs mount
@@ -625,13 +599,17 @@ impl RunnerSpec {
     /// * App keys never appear, and the JIT blob never appears in argv:
     ///   it travels via `--env-file` only.
     #[must_use]
-    pub fn create_args_with_env_file(&self, env_file: &Path) -> Vec<String> {
+    pub fn create_args_with_env_file(
+        &self,
+        env_file: &Path,
+        dind_container_id: &str,
+    ) -> Vec<String> {
         let mut args = vec![
             "create".to_string(),
             "--name".to_string(),
             self.identity.runner_container(),
             "--network".to_string(),
-            format!("container:{}", self.identity.dind_container()),
+            format!("container:{dind_container_id}"),
             "--env-file".to_string(),
             env_file.display().to_string(),
             "--env".to_string(),
@@ -659,34 +637,6 @@ impl RunnerSpec {
     }
 }
 
-fn scrub_private_env_dir(dir: &Path) -> Result<()> {
-    let metadata = match std::fs::symlink_metadata(dir) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(error).with_context(|| format!("inspect JIT env dir {}", dir.display()))
-        }
-    };
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        anyhow::bail!(
-            "refusing JIT cleanup of {}: not a real directory",
-            dir.display()
-        );
-    }
-    remove_secret_file(&dir.join(JIT_ENV_FILE))?;
-    std::fs::remove_dir(dir)
-        .with_context(|| format!("remove private JIT env dir {}", dir.display()))?;
-    Ok(())
-}
-
-fn remove_secret_file(path: &Path) -> Result<()> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).with_context(|| format!("scrub secret file {}", path.display())),
-    }
-}
-
 impl WorkerIdentity {
     fn runner_name(&self) -> &str {
         self.ownership().runner_name()
@@ -702,6 +652,52 @@ pub enum RunnerProvision {
     Created,
 }
 
+/// Docker resources whose create request can outlive the CLI response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DockerCreateTarget {
+    Network,
+    Dind,
+    DindDataVolume,
+    WorkspaceVolume,
+    Runner,
+}
+
+impl DockerCreateTarget {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Network => "network",
+            Self::Dind => "dind",
+            Self::DindDataVolume => "dind-data-volume",
+            Self::WorkspaceVolume => "workspace-volume",
+            Self::Runner => "runner",
+        }
+    }
+
+    pub(crate) fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "network" => Some(Self::Network),
+            "dind" => Some(Self::Dind),
+            "dind-data-volume" => Some(Self::DindDataVolume),
+            "workspace-volume" => Some(Self::WorkspaceVolume),
+            "runner" => Some(Self::Runner),
+            _ => None,
+        }
+    }
+}
+
+/// Durable handoffs around Docker resource creation and runner startup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DockerLifecycleEvent {
+    /// Persist intent before calling Docker; the Engine may accept the
+    /// request even if the client later loses its response.
+    BeforeCreateRequest(DockerCreateTarget),
+    /// A success response, exact-target-verified rejection, or adoption of
+    /// the exact owned object settled the request.
+    CreateResolved(DockerCreateTarget),
+    /// Persist the startup deadline before the Docker start request.
+    BeforeStart,
+}
+
 /// Ensure the runner container exists and is started, adopting on retry.
 ///
 /// Same contract as [`super::dind::ensure_dind`]: missing → write the
@@ -710,62 +706,138 @@ pub enum RunnerProvision {
 /// start; present → ownership labels must match, then idempotent start.
 /// Call only after the DinD daemon is ready: the runner joins the
 /// daemon's network namespace, so creating it first would fail against a
-/// missing namespace.
+/// missing namespace. `dind_container_id` must be the immutable ID returned
+/// by DinD inspection after validating all expected ownership labels.
 pub(crate) fn ensure_runner(
     runner: &mut dyn WorkerRunner,
     spec: &RunnerSpec,
-    before_start: &mut dyn FnMut() -> Result<()>,
+    dind_container_id: &str,
+    lifecycle_event: &mut dyn FnMut(DockerLifecycleEvent) -> Result<()>,
 ) -> Result<RunnerProvision> {
-    // A prior process may have died after writing the env file. Scrub both
-    // the host-only location and the legacy mounted path before inspecting
-    // or adopting any runner container.
-    spec.scrub_jit_env_files()?;
+    // A prior process may have died after writing either JIT file. Remove
+    // the legacy state-mounted path once, then scrub host-only files before
+    // inspecting or adopting any runner container.
+    spec.scrub_jit_env_files_for_recovery()?;
+    super::dind::ensure_workspace_volume(runner, spec.identity(), lifecycle_event)
+        .context("ensure runner workspace volume")?;
     let name = spec.identity().runner_container();
-    let inspect = runner
-        .run(
-            "docker",
-            &[
-                "inspect".to_string(),
-                "--format".to_string(),
-                "{{.Id}}".to_string(),
-                "--".to_string(),
-                name.clone(),
-            ],
-        )
-        .with_context(|| format!("inspect runner container {name}"))?;
-    if inspect.stdout.trim().is_empty() {
+    if let Some(existing_id) =
+        super::dind::inspect_owned_container(runner, spec.identity(), ROLE_RUNNER)?
+    {
+        // Exact ownership resolves any pending create attempt. Runtime
+        // validation below decides whether this container is safe to start.
+        lifecycle_event(DockerLifecycleEvent::CreateResolved(
+            DockerCreateTarget::Runner,
+        ))
+        .context("resolve existing runner create intent")?;
+        if !super::dind::validate_runner_runtime(
+            runner,
+            spec.identity(),
+            spec.image(),
+            spec.state_dir(),
+            &existing_id,
+            dind_container_id,
+            spec.identity().ownership().runner_name(),
+            // JIT configs are regenerated for pre-start retries. Verify the
+            // required env key exists, but do not compare its rotated value.
+            None,
+        )? {
+            anyhow::bail!("runner container {name} disappeared during spec validation");
+        }
+        lifecycle_event(DockerLifecycleEvent::BeforeStart)
+            .context("persist runner startup deadline")?;
+        let started = runner
+            .run_timeout(
+                "docker",
+                &["start".to_string(), "--".to_string(), existing_id],
+                super::dind::DIND_INSPECT_OPERATION_TIMEOUT,
+            )
+            .with_context(|| format!("start runner container {name}"))?;
+        if started.code != 0 {
+            anyhow::bail!(
+                "start runner container {name} exited {}: {}",
+                started.code,
+                started.stderr.trim()
+            );
+        }
+        return Ok(RunnerProvision::Adopted);
+    }
+
+    {
         let env_file = spec.write_env_file()?;
-        let created = runner.run("docker", &spec.create_args_with_env_file(&env_file));
+        if let Err(intent_error) = lifecycle_event(DockerLifecycleEvent::BeforeCreateRequest(
+            DockerCreateTarget::Runner,
+        ))
+        .context("persist runner create intent")
+        {
+            return match spec.scrub_jit_env_files() {
+                Ok(()) => Err(intent_error),
+                Err(scrub_error) => anyhow::bail!(
+                    "persist runner create intent failed: {intent_error:#}; JIT env cleanup failed: {scrub_error:#}"
+                ),
+            };
+        }
+        let created = runner.run(
+            "docker",
+            &spec.create_args_with_env_file(&env_file, dind_container_id),
+        );
+        // Persist confirmed outcomes before cleanup can fail. A daemon error
+        // alone is ambiguous: inspect the exact target and settle only when
+        // it is owned or absent, leaving foreign name conflicts pending.
+        let resolution = match &created {
+            Ok(output) => settle_runner_create_result(runner, spec, output, lifecycle_event),
+            Err(_) => Ok(()),
+        };
         // Scrubbing is part of the create boundary. Never start/adopt the
         // runner if the secret file could not be removed.
         let scrubbed = spec.scrub_jit_env_files();
-        let created = match (created, scrubbed) {
-            (Ok(output), Ok(())) => output,
-            (Err(create_error), Ok(())) => {
-                return Err(create_error)
-                    .with_context(|| format!("create runner container {name}"));
-            }
-            (Ok(_), Err(scrub_error)) => {
-                anyhow::bail!("scrub JIT env file after create of runner {name}: {scrub_error:#}");
-            }
-            (Err(create_error), Err(scrub_error)) => {
-                anyhow::bail!(
-                    "create runner container {name} failed: {create_error:#}; JIT env cleanup failed: {scrub_error:#}"
-                );
+        let created = match (created, resolution, scrubbed) {
+            (Ok(output), Ok(()), Ok(())) if output.code == 0 => output,
+            (created, resolution, scrubbed) => {
+                let mut failures = Vec::new();
+                match created {
+                    Ok(output) if output.code != 0 => failures.push(format!(
+                        "create runner container {name} exited {}: {}",
+                        output.code,
+                        output.stderr.trim()
+                    )),
+                    Err(error) => {
+                        failures.push(format!("create runner container {name} failed: {error:#}"))
+                    }
+                    Ok(_) => {}
+                }
+                if let Err(error) = resolution {
+                    failures.push(format!("resolve runner create outcome failed: {error:#}"));
+                }
+                if let Err(error) = scrubbed {
+                    failures.push(format!(
+                        "scrub JIT env file after create of runner {name}: {error:#}"
+                    ));
+                }
+                anyhow::bail!("{}", failures.join("; "));
             }
         };
-        if created.code != 0 {
-            anyhow::bail!(
-                "create runner container {name} exited {}: {}",
-                created.code,
-                created.stderr.trim()
-            );
+        let created_id = super::dind::parse_container_id(&created.stdout)
+            .with_context(|| format!("create runner container {name} returned an empty id"))?;
+        if !super::dind::validate_runner_runtime(
+            runner,
+            spec.identity(),
+            spec.image(),
+            spec.state_dir(),
+            &created_id,
+            dind_container_id,
+            spec.identity().ownership().runner_name(),
+            Some(spec.jit_config()),
+        )? {
+            anyhow::bail!("created runner {name} disappeared during spec validation");
         }
-        before_start().context("persist runner startup deadline")?;
+        lifecycle_event(DockerLifecycleEvent::BeforeStart)
+            .context("persist runner startup deadline")?;
         let started = runner
-            .run(
+            .run_timeout(
                 "docker",
-                &["start".to_string(), "--".to_string(), name.clone()],
+                &["start".to_string(), "--".to_string(), created_id],
+                super::dind::DIND_INSPECT_OPERATION_TIMEOUT,
             )
             .with_context(|| format!("start runner container {name}"))?;
         if started.code != 0 {
@@ -777,23 +849,57 @@ pub(crate) fn ensure_runner(
         }
         return Ok(RunnerProvision::Created);
     }
+}
 
-    super::dind::verify_container_ownership(runner, &name, &spec.identity().ownership().as_str())?;
-    before_start().context("persist runner startup deadline")?;
-    let started = runner
-        .run(
-            "docker",
-            &["start".to_string(), "--".to_string(), name.clone()],
-        )
-        .with_context(|| format!("start runner container {name}"))?;
-    if started.code != 0 {
-        anyhow::bail!(
-            "start runner container {name} exited {}: {}",
-            started.code,
-            started.stderr.trim()
-        );
+fn settle_runner_create_result(
+    runner: &mut dyn WorkerRunner,
+    spec: &RunnerSpec,
+    created: &super::WorkerOutput,
+    lifecycle_event: &mut dyn FnMut(DockerLifecycleEvent) -> Result<()>,
+) -> Result<()> {
+    if created.code == 0 {
+        let created_id = super::dind::parse_container_id(&created.stdout)
+            .context("create runner container returned an empty immutable ID")?;
+        if !super::dind::validate_owned_container_id(
+            runner,
+            spec.identity(),
+            ROLE_RUNNER,
+            &created_id,
+        )? {
+            anyhow::bail!(
+                "created runner {} disappeared before settlement",
+                spec.identity().runner_container()
+            );
+        }
+        return lifecycle_event(DockerLifecycleEvent::CreateResolved(
+            DockerCreateTarget::Runner,
+        ))
+        .context("record runner create settlement");
     }
-    Ok(RunnerProvision::Adopted)
+    if !docker_explicitly_rejected_create(&created.stderr) {
+        // A transport/process failure or unrecognized response may follow
+        // an accepted request. Keep the durable intent for exact recovery.
+        return Ok(());
+    }
+
+    // A daemon error alone cannot distinguish a genuine rejection from a
+    // same-name foreign resource that raced after the initial inspect.
+    // This exact-name inspect also verifies every ownership label when
+    // present. Only owned or absent targets can settle the pending intent.
+    // Ownership/absence resolves the create attempt; runtime validation is
+    // reserved for adoption before any start request.
+    super::dind::inspect_owned_container(runner, spec.identity(), ROLE_RUNNER)?;
+    lifecycle_event(DockerLifecycleEvent::CreateResolved(
+        DockerCreateTarget::Runner,
+    ))
+    .context("record runner create settlement")
+}
+
+pub(super) fn docker_explicitly_rejected_create(stderr: &str) -> bool {
+    stderr
+        .lines()
+        .map(str::trim_start)
+        .any(|line| line.starts_with("Error response from daemon:"))
 }
 
 /// Runner connectivity: what the supervisor observed.
@@ -807,40 +913,42 @@ pub enum RunnerConnection {
     Down,
 }
 
-/// Parse `docker logs` for the runner's connected marker.
+/// Parse `docker logs` for the runner session-established marker.
 ///
-/// The official runner prints `Connected to GitHub` once the JIT
-/// registration completes; that line is the connected signal. (The exact
-/// marker is re-verified by the live canary; absence reads as Starting,
-/// never as Connected.)
+/// In pinned Runner v2.337.0, `Connected to GitHub` precedes
+/// `CreateAgentSessionAsync`/`CreateSessionAsync`. `Listening for Jobs`
+/// follows successful session creation and is the first reliable marker.
 #[must_use]
 pub fn parse_connected_marker(logs: &str) -> bool {
-    logs.lines()
-        .any(|line| line.contains("Connected to GitHub"))
+    logs.lines().any(|line| line.contains("Listening for Jobs"))
 }
 
-/// Classify runner connectivity: running state + connected marker.
+/// Classify runner connectivity for a previously ownership-verified
+/// immutable container ID.
 ///
 /// * Not running (or missing) → [`RunnerConnection::Down`].
 /// * Running without the marker → [`RunnerConnection::Starting`].
 /// * Running with the marker → [`RunnerConnection::Connected`].
-pub(crate) fn runner_connection(
+pub(crate) fn runner_connection_by_id(
     runner: &mut dyn WorkerRunner,
-    identity: &WorkerIdentity,
+    runner_id: &str,
 ) -> Result<RunnerConnection> {
-    let name = identity.runner_container();
     // Raw calls (not the `Docker` facade): connectivity needs inspect +
     // logs back-to-back on one runner borrow, and the facade owns its
     // borrow for its whole lifetime.
     let running = runner
-        .run("docker", &crate::docker::client::running_args(&name))
-        .with_context(|| format!("inspect runner container {name}"))?;
+        .run_timeout(
+            "docker",
+            &crate::docker::client::running_args(runner_id),
+            super::dind::DIND_INSPECT_OPERATION_TIMEOUT,
+        )
+        .with_context(|| format!("inspect runner container {runner_id}"))?;
     if running.code != 0 {
         if crate::docker::client::daemon_reports_missing(&running.stderr) {
             return Ok(RunnerConnection::Down);
         }
         anyhow::bail!(
-            "inspect runner container {name} exited {}: {}",
+            "inspect runner container {runner_id} exited {}: {}",
             running.code,
             running.stderr.trim()
         );
@@ -849,20 +957,21 @@ pub(crate) fn runner_connection(
         return Ok(RunnerConnection::Down);
     }
     let logs = runner
-        .run(
+        .run_timeout(
             "docker",
             &[
                 "logs".to_string(),
                 "--tail".to_string(),
                 "50".to_string(),
                 "--".to_string(),
-                name.clone(),
+                runner_id.to_string(),
             ],
+            super::dind::DIND_INSPECT_OPERATION_TIMEOUT,
         )
-        .with_context(|| format!("read runner container logs {name}"))?;
+        .with_context(|| format!("read runner container logs {runner_id}"))?;
     if logs.code != 0 {
         anyhow::bail!(
-            "read runner container logs {name} exited {}: {}",
+            "read runner container logs {runner_id} exited {}: {}",
             logs.code,
             logs.stderr.trim()
         );
@@ -885,12 +994,15 @@ pub(crate) fn runner_connection(
     reason = "tests may panic"
 )]
 mod tests {
-    use super::super::ownership::OwnershipId;
+    use super::super::dind::{WORKER_VOLUME_LABEL, WORKER_VOLUME_NAME_LABEL};
+    use super::super::ownership::{OwnershipId, WORKER_ROLE_LABEL};
     use super::super::WorkerOutput;
     use super::*;
     use std::collections::VecDeque;
 
     const RUNNER_REF: &str = "ghcr.io/actions/actions-runner@sha256:e5496277be5d09bc968b3d64911b74e219ac4a3f2edce956a3ecf9271bea1ef4";
+    const DIND_ID: &str = "deadbeef";
+    const RUNNER_ID: &str = "cafe";
 
     struct ScriptRunner {
         results: VecDeque<WorkerOutput>,
@@ -932,6 +1044,108 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    struct BreakJitUnlinkRunner {
+        env_file: Option<PathBuf>,
+        swapped_path: Option<PathBuf>,
+        displaced_root: Option<PathBuf>,
+        swap_state_parent: bool,
+        create_result: Option<WorkerOutput>,
+        runtime_results: VecDeque<WorkerOutput>,
+        seen: Vec<Vec<String>>,
+    }
+
+    #[cfg(unix)]
+    impl BreakJitUnlinkRunner {
+        fn cleanup(mut self, state_dir: &Path) {
+            std::fs::remove_file(self.swapped_path.take().expect("swapped path"))
+                .expect("remove injected symlink");
+            std::fs::remove_dir_all(self.displaced_root.take().expect("displaced path"))
+                .expect("remove displaced directory");
+            if !self.swap_state_parent {
+                std::fs::remove_dir_all(state_dir.parent().expect("state parent"))
+                    .expect("remove test state root");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl WorkerRunner for BreakJitUnlinkRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<WorkerOutput> {
+            assert_eq!(program, "docker");
+            self.seen.push(args.to_vec());
+            match args.first().map(String::as_str) {
+                Some("volume") => match args.get(1).map(String::as_str) {
+                    Some("inspect") if args.iter().any(|arg| arg == "{{json .}}") => Ok(
+                        ScriptRunner::ok(&owned_workspace_volume_snapshot(&identity())),
+                    ),
+                    Some("inspect") => Ok(ScriptRunner::ok(&owned_workspace_volume_inspect(
+                        &identity(),
+                    ))),
+                    Some("ls") => Ok(ScriptRunner::ok(&owned_workspace_volume_list(&identity()))),
+                    other => Err(anyhow::anyhow!(
+                        "unexpected docker volume command {other:?}"
+                    )),
+                },
+                Some("container") if args.get(1).is_some_and(|arg| arg == "ls") => self
+                    .runtime_results
+                    .pop_front()
+                    .ok_or_else(|| anyhow::anyhow!("missing scripted runner claim listing")),
+                Some("image") if args.get(1).is_some_and(|arg| arg == "inspect") => self
+                    .runtime_results
+                    .pop_front()
+                    .ok_or_else(|| anyhow::anyhow!("missing scripted runner image inspect")),
+                Some("inspect") if args.iter().any(|arg| arg == "{{json .}}") => self
+                    .runtime_results
+                    .pop_front()
+                    .ok_or_else(|| anyhow::anyhow!("missing scripted runner inspect")),
+                Some("inspect") if args.iter().any(|arg| arg.contains(".Config.Labels")) => {
+                    let runner_name = identity().runner_container();
+                    if args
+                        .last()
+                        .is_some_and(|reference| reference == &runner_name)
+                    {
+                        Ok(ScriptRunner::fail(1, "Error: No such container: runner"))
+                    } else {
+                        Ok(ScriptRunner::ok(&owned_container_inspect(
+                            &identity(),
+                            "container",
+                            ROLE_RUNNER,
+                        )))
+                    }
+                }
+                Some("inspect") => Ok(ScriptRunner::fail(1, "Error: No such container: runner")),
+                Some("create") => {
+                    let env_file = args
+                        .windows(2)
+                        .find(|pair| pair[0] == "--env-file")
+                        .map(|pair| PathBuf::from(&pair[1]))
+                        .expect("create argv has --env-file");
+                    let private_jit_dir = env_file.parent().unwrap().to_path_buf();
+                    let swapped_path = if self.swap_state_parent {
+                        private_jit_dir.parent().unwrap().to_path_buf()
+                    } else {
+                        private_jit_dir
+                    };
+                    let displaced_root = swapped_path.with_file_name(format!(
+                        "{}.moved",
+                        swapped_path.file_name().unwrap().to_string_lossy()
+                    ));
+                    std::fs::rename(&swapped_path, &displaced_root)?;
+                    std::os::unix::fs::symlink(&displaced_root, &swapped_path)?;
+                    self.env_file = Some(env_file);
+                    self.swapped_path = Some(swapped_path);
+                    self.displaced_root = Some(displaced_root);
+                    Ok(self
+                        .create_result
+                        .take()
+                        .unwrap_or_else(|| ScriptRunner::ok("container\n")))
+                }
+                other => Err(anyhow::anyhow!("unexpected docker command {other:?}")),
+            }
+        }
+    }
+
     fn identity() -> WorkerIdentity {
         WorkerIdentity::new(super::super::ownership::OwnershipId::bind(
             7,
@@ -939,10 +1153,147 @@ mod tests {
         ))
     }
 
+    fn owned_container_inspect(identity: &WorkerIdentity, id: &str, role: &str) -> String {
+        let mut labels = identity.labels();
+        labels.insert(WORKER_ROLE_LABEL.to_string(), role.to_string());
+        format!("{id}\n{}", serde_json::to_string(&labels).unwrap())
+    }
+
+    fn owned_workspace_volume_inspect(identity: &WorkerIdentity) -> String {
+        let name = identity.workspace_volume();
+        let mut labels = identity.labels();
+        labels.insert(WORKER_VOLUME_LABEL.to_string(), "workspace".to_string());
+        labels.insert(WORKER_VOLUME_NAME_LABEL.to_string(), name.clone());
+        format!("{name}\n{}", serde_json::to_string(&labels).unwrap())
+    }
+
+    fn owned_workspace_volume_list(identity: &WorkerIdentity) -> String {
+        format!("{}\n", identity.workspace_volume())
+    }
+
+    fn owned_workspace_volume_snapshot(identity: &WorkerIdentity) -> String {
+        let name = identity.workspace_volume();
+        let mut labels = identity.labels();
+        labels.insert(WORKER_VOLUME_LABEL.to_string(), "workspace".to_string());
+        labels.insert(WORKER_VOLUME_NAME_LABEL.to_string(), name.clone());
+        serde_json::json!({
+            "Name": name,
+            "Driver": "local",
+            "Options": null,
+            "Labels": labels
+        })
+        .to_string()
+    }
+
+    fn runner_runtime_outputs(
+        spec: &RunnerSpec,
+        runner_id: &str,
+        dind_id: &str,
+    ) -> Vec<WorkerOutput> {
+        std::fs::create_dir_all(spec.state_dir().join("buildkit-cache")).unwrap();
+        let state_dir = std::fs::canonicalize(spec.state_dir()).unwrap();
+        let cache_dir = std::fs::canonicalize(spec.state_dir().join("buildkit-cache")).unwrap();
+        let mut labels = spec.identity().labels();
+        labels.insert(WORKER_ROLE_LABEL.to_string(), ROLE_RUNNER.to_string());
+        labels.insert(RUNNER_SOURCE_LABEL.to_string(), RUNNER_SOURCE.to_string());
+        let workspace = spec.identity().workspace_volume();
+        let container = serde_json::json!({
+            "Id": runner_id,
+            "Image": "sha256:runner-image",
+            "Name": format!("/{}", spec.identity().runner_container()),
+            "Config": {
+                "Image": spec.image().reference(),
+                "Labels": labels,
+                "Env": [
+                    format!("{}={}", RUNNER_NAME_ENV, spec.identity().ownership().runner_name()),
+                    format!("DOCKER_HOST=unix://{DIND_SOCKET}"),
+                    format!("RUNNER_WORK_FOLDER={RUNNER_WORK_DIR}"),
+                    format!("{JIT_CONFIG_ENV}={}", spec.jit_config())
+                ],
+                "Cmd": null,
+                "Entrypoint": null,
+                "User": "",
+                "WorkingDir": "",
+                "ExposedPorts": null,
+                "Volumes": null,
+                "StopSignal": null,
+                "Healthcheck": null,
+                "Shell": null
+            },
+            "HostConfig": {
+                "NetworkMode": format!("container:{dind_id}"),
+                "Privileged": false,
+                "PortBindings": null,
+                "CapAdd": null,
+                "CapDrop": null,
+                "Devices": null,
+                "SecurityOpt": null,
+                "AutoRemove": false,
+                "RestartPolicy": {"Name": "no", "MaximumRetryCount": 0},
+                "PublishAllPorts": false,
+                "ReadonlyRootfs": false
+            },
+            "Mounts": [
+                {
+                    "Type": "bind",
+                    "Source": state_dir,
+                    "Destination": STATE_MOUNT,
+                    "RW": true
+                },
+                {
+                    "Type": "volume",
+                    "Source": "/var/lib/docker/volumes/workspace/_data",
+                    "Destination": RUNNER_WORK_DIR,
+                    "Name": workspace,
+                    "RW": true
+                },
+                {
+                    "Type": "volume",
+                    "Source": "/var/lib/docker/volumes/workspace/_data",
+                    "Destination": TOOL_CACHE_DIR,
+                    "Name": spec.identity().workspace_volume(),
+                    "RW": true
+                },
+                {
+                    "Type": "bind",
+                    "Source": cache_dir,
+                    "Destination": BUILDKIT_CACHE_DIR,
+                    "RW": true
+                }
+            ],
+            "State": {"Running": false},
+            "NetworkSettings": {"Networks": {}}
+        });
+        let image = serde_json::json!({
+            "Id": "sha256:runner-image",
+            "Config": {
+                "Labels": {RUNNER_SOURCE_LABEL: RUNNER_SOURCE},
+                "Env": [],
+                "Entrypoint": null,
+                "User": "",
+                "WorkingDir": "",
+                "ExposedPorts": null,
+                "Volumes": null,
+                "StopSignal": null,
+                "Healthcheck": null,
+                "Shell": null,
+                "Cmd": null
+            }
+        });
+        vec![
+            ScriptRunner::ok(&format!("{runner_id}\n")),
+            ScriptRunner::ok(&container.to_string()),
+            ScriptRunner::ok(&image.to_string()),
+        ]
+    }
+
     fn temp_state(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("velnor-runner-{name}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        let temp = std::env::temp_dir().canonicalize().unwrap();
+        let root = temp.join(format!("velnor-runner-{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let state = root.join("worker");
+        std::fs::create_dir(&state).unwrap();
+        state
     }
 
     #[test]
@@ -1025,10 +1376,9 @@ mod tests {
             "jit-blob",
         );
         let env_file_path = spec.jit_env_file_path().unwrap();
-        let args = spec.create_args_with_env_file(&env_file_path);
+        let args = spec.create_args_with_env_file(&env_file_path, DIND_ID);
         assert!(args.contains(&"--network".to_string()));
-        assert!(args
-            .contains(&"container:velnor-scaleset-dind-s7-velnor-set-0007-2ad92676".to_string()));
+        assert!(args.contains(&format!("container:{DIND_ID}")));
         for forbidden in [
             "-p",
             "--publish",
@@ -1094,6 +1444,7 @@ mod tests {
         assert!(!rendered.contains("live-jit-blob-bytes"), "{rendered}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn jit_env_file_carries_the_image_input() {
         let state = temp_state("env-file");
@@ -1118,9 +1469,40 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&env_file).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "JIT env file has mode {mode:o}");
+            let private_dir_mode = std::fs::metadata(env_file.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(
+                private_dir_mode, 0o700,
+                "JIT env directory has mode {private_dir_mode:o}"
+            );
         }
-        RunnerSpec::scrub_jit_env_files_for_state(&state).unwrap();
-        std::fs::remove_dir_all(&state).unwrap();
+        spec.scrub_jit_env_files().unwrap();
+        std::fs::remove_dir_all(state.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn jit_env_cleanup_removes_crash_left_atomic_write_temporaries() {
+        let state = temp_state("env-file-temp-cleanup");
+        let spec = RunnerSpec::new(
+            identity(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            &state,
+            "private-jit-blob",
+        );
+        let env_file = spec.write_env_file().unwrap();
+        let private_dir = env_file.parent().unwrap();
+        let temp = private_dir.join(".velnor-write-crash.tmp");
+        std::fs::write(&temp, b"crash-left-jit-secret").unwrap();
+
+        spec.scrub_jit_env_files().unwrap();
+
+        assert!(!private_dir.exists());
+        assert!(!temp.exists());
+        std::fs::remove_dir_all(state.parent().unwrap()).unwrap();
     }
 
     #[test]
@@ -1135,7 +1517,7 @@ mod tests {
             );
             assert!(spec.write_env_file().is_err());
         }
-        std::fs::remove_dir_all(&state).unwrap();
+        std::fs::remove_dir_all(state.parent().unwrap()).unwrap();
     }
 
     #[test]
@@ -1147,7 +1529,7 @@ mod tests {
             "jit-blob",
         );
         let args = spec
-            .create_args_with_env_file(&spec.jit_env_file_path().unwrap())
+            .create_args_with_env_file(&spec.jit_env_file_path().unwrap(), DIND_ID)
             .join("\n");
         // Same guest paths the DinD side mounts (dind.rs STATE_MOUNT etc.).
         for guest in [
@@ -1248,29 +1630,42 @@ mod tests {
     }
 
     #[test]
+    fn docker_create_targets_roundtrip_durable_names() {
+        for target in [
+            DockerCreateTarget::Network,
+            DockerCreateTarget::Dind,
+            DockerCreateTarget::DindDataVolume,
+            DockerCreateTarget::WorkspaceVolume,
+            DockerCreateTarget::Runner,
+        ] {
+            assert_eq!(DockerCreateTarget::parse(target.as_str()), Some(target));
+        }
+    }
+
+    #[test]
     fn connection_classifies_down_starting_connected() {
-        // Missing container reads as Down.
+        // Missing container reads as Down when addressed by its verified ID.
         let mut runner = ScriptRunner::scripted(vec![ScriptRunner::fail(
             1,
-            "Error: No such container: velnor-scaleset-runner-s7-velnor-set-0007-2ad92676",
+            "Error: No such container: cafe",
         )]);
         assert_eq!(
-            runner_connection(&mut runner, &identity()).unwrap(),
+            runner_connection_by_id(&mut runner, RUNNER_ID).unwrap(),
             RunnerConnection::Down
         );
         // Stopped container reads as Down.
         let mut runner = ScriptRunner::scripted(vec![ScriptRunner::ok("false\n")]);
         assert_eq!(
-            runner_connection(&mut runner, &identity()).unwrap(),
+            runner_connection_by_id(&mut runner, RUNNER_ID).unwrap(),
             RunnerConnection::Down
         );
         // Running without the marker reads as Starting.
         let mut runner = ScriptRunner::scripted(vec![
             ScriptRunner::ok("true\n"),
-            ScriptRunner::ok("Listening for Jobs\n"),
+            ScriptRunner::ok("Connected to GitHub\n"),
         ]);
         assert_eq!(
-            runner_connection(&mut runner, &identity()).unwrap(),
+            runner_connection_by_id(&mut runner, RUNNER_ID).unwrap(),
             RunnerConnection::Starting
         );
         // Running with the marker reads as Connected.
@@ -1279,17 +1674,26 @@ mod tests {
             ScriptRunner::ok("Connected to GitHub\nListening for Jobs\n"),
         ]);
         assert_eq!(
-            runner_connection(&mut runner, &identity()).unwrap(),
+            runner_connection_by_id(&mut runner, RUNNER_ID).unwrap(),
             RunnerConnection::Connected
+        );
+        assert!(
+            runner
+                .seen
+                .iter()
+                .all(|args| args.last().is_some_and(|arg| arg == RUNNER_ID)),
+            "connectivity probe must keep using its immutable ID: {:?}",
+            runner.seen
         );
         // A daemon error that is NOT a missing answer propagates.
         let mut runner = ScriptRunner::scripted(vec![ScriptRunner::fail(
             1,
             "Error response from daemon: context deadline exceeded",
         )]);
-        assert!(runner_connection(&mut runner, &identity()).is_err());
+        assert!(runner_connection_by_id(&mut runner, RUNNER_ID).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn runner_provision_creates_then_adopts() {
         let state = temp_state("provision");
@@ -1299,21 +1703,47 @@ mod tests {
             &state,
             "jit-blob",
         );
-        let mut runner = ScriptRunner::scripted(vec![
-            ScriptRunner::ok(""),
+        let mut create_results = vec![
+            ScriptRunner::ok(&owned_workspace_volume_inspect(&identity())),
+            ScriptRunner::ok(&owned_workspace_volume_list(&identity())),
+            ScriptRunner::ok(&owned_workspace_volume_snapshot(&identity())),
+            ScriptRunner::fail(1, "Error: No such container: runner"),
             ScriptRunner::ok("cafe\n"),
-            ScriptRunner::ok("velnor-scaleset-runner-s7-velnor-set-0007-2ad92676\n"),
-        ]);
+            ScriptRunner::ok(&owned_container_inspect(&identity(), "cafe", ROLE_RUNNER)),
+        ];
+        create_results.extend(runner_runtime_outputs(&spec, "cafe", DIND_ID));
+        create_results.push(ScriptRunner::ok("started\n"));
+        let mut runner = ScriptRunner::scripted(create_results);
+        let mut events = Vec::new();
         assert_eq!(
-            ensure_runner(&mut runner, &spec, &mut || Ok(())).unwrap(),
+            ensure_runner(&mut runner, &spec, DIND_ID, &mut |event| {
+                events.push(event);
+                Ok(())
+            })
+            .unwrap(),
             RunnerProvision::Created
+        );
+        assert_eq!(
+            events,
+            [
+                DockerLifecycleEvent::CreateResolved(DockerCreateTarget::WorkspaceVolume),
+                DockerLifecycleEvent::BeforeCreateRequest(DockerCreateTarget::Runner),
+                DockerLifecycleEvent::CreateResolved(DockerCreateTarget::Runner),
+                DockerLifecycleEvent::BeforeStart,
+            ]
         );
         // The create argv carries --env-file, never the blob (never App
         // keys either), and the env file is deleted right after create.
-        let create = &runner.seen[1];
+        let create = &runner.seen[4];
         assert!(
             !create.iter().any(|arg| arg.contains("jit-blob")),
             "{create:?}"
+        );
+        assert!(
+            create.windows(2).any(|pair| {
+                pair[0] == "--network" && pair[1] == format!("container:{DIND_ID}")
+            }),
+            "runner must join the inspected immutable DinD ID: {create:?}"
         );
         let env_file = spec.jit_env_file_path().unwrap();
         assert!(
@@ -1324,27 +1754,349 @@ mod tests {
         );
         assert!(!env_file.starts_with(&state));
         assert!(!env_file.exists());
-        assert!(!state.join("jit.env").exists());
+        assert_eq!(runner.seen[9], ["start", "--", "cafe"]);
 
-        // Simulate a crash leaving both current and legacy files behind.
-        std::fs::create_dir_all(env_file.parent().unwrap()).unwrap();
-        std::fs::write(&env_file, "stale-secret").unwrap();
-        std::fs::write(state.join("jit.env"), "legacy-secret").unwrap();
-        let mut runner = ScriptRunner::scripted(vec![
-            ScriptRunner::ok("cafe\n"),
-            ScriptRunner::ok("velnor.scaleset.ownership=7/velnor-set-0007\n"),
-            ScriptRunner::ok("velnor-scaleset-runner-s7-velnor-set-0007-2ad92676\n"),
-        ]);
+        // Simulate a crash leaving a host-only JIT file behind.
+        let stale_env_file = super::super::create_owner_only_file_next_to(
+            &state,
+            format!("{JIT_CONFIG_ENV}=stale-secret\n").as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(stale_env_file, env_file);
+        use std::os::unix::fs::PermissionsExt;
+        let private_dir_mode = std::fs::metadata(env_file.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(
-            ensure_runner(&mut runner, &spec, &mut || Ok(())).unwrap(),
+            private_dir_mode, 0o700,
+            "crash-left JIT directory has mode {private_dir_mode:o}"
+        );
+        let legacy_env_file = state.join(JIT_ENV_FILE);
+        std::fs::write(&legacy_env_file, "legacy-crash-left-secret").unwrap();
+        let mut adoption_results = vec![
+            ScriptRunner::ok(&owned_workspace_volume_inspect(&identity())),
+            ScriptRunner::ok(&owned_workspace_volume_list(&identity())),
+            ScriptRunner::ok(&owned_workspace_volume_snapshot(&identity())),
+            ScriptRunner::ok(&owned_container_inspect(&identity(), "cafe", ROLE_RUNNER)),
+        ];
+        adoption_results.extend(runner_runtime_outputs(&spec, "cafe", DIND_ID));
+        adoption_results.push(ScriptRunner::ok("started\n"));
+        let mut runner = ScriptRunner::scripted(adoption_results);
+        assert_eq!(
+            ensure_runner(&mut runner, &spec, DIND_ID, &mut |_| Ok(())).unwrap(),
             RunnerProvision::Adopted
         );
         // Adoption writes no env file at all.
         assert!(!env_file.exists());
-        assert!(!state.join("jit.env").exists());
-        std::fs::remove_dir_all(&state).unwrap();
+        assert!(
+            !legacy_env_file.exists(),
+            "legacy JIT file survived recovery"
+        );
+        assert_eq!(runner.seen[7], ["start", "--", "cafe"]);
+        std::fs::remove_dir_all(state.parent().unwrap()).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn runner_provision_creates_missing_workspace_volume_with_verified_labels() {
+        let state = temp_state("workspace-volume-create");
+        let worker_identity = identity();
+        let workspace_volume = worker_identity.workspace_volume();
+        let mut expected_labels = worker_identity.labels();
+        expected_labels.insert(WORKER_VOLUME_LABEL.to_string(), "workspace".to_string());
+        expected_labels.insert(
+            WORKER_VOLUME_NAME_LABEL.to_string(),
+            workspace_volume.clone(),
+        );
+        let mut expected_create_args = vec!["volume".to_string(), "create".to_string()];
+        for (key, value) in expected_labels {
+            expected_create_args.push("--label".to_string());
+            expected_create_args.push(format!("{key}={value}"));
+        }
+        expected_create_args.push("--".to_string());
+        expected_create_args.push(workspace_volume.clone());
+
+        let spec = RunnerSpec::new(
+            worker_identity.clone(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            &state,
+            "jit-blob",
+        );
+        let mut results = vec![
+            ScriptRunner::fail(1, &format!("Error: No such volume: {workspace_volume}")),
+            ScriptRunner::ok(""),
+            ScriptRunner::ok(&format!("{workspace_volume}\n")),
+            ScriptRunner::ok(&owned_workspace_volume_inspect(&worker_identity)),
+            ScriptRunner::ok(&owned_workspace_volume_list(&worker_identity)),
+            ScriptRunner::ok(&owned_workspace_volume_snapshot(&worker_identity)),
+            ScriptRunner::ok(&owned_container_inspect(
+                &worker_identity,
+                "cafe",
+                ROLE_RUNNER,
+            )),
+        ];
+        results.extend(runner_runtime_outputs(&spec, "cafe", DIND_ID));
+        results.push(ScriptRunner::ok("started\n"));
+        let mut runner = ScriptRunner::scripted(results);
+        let mut events = Vec::new();
+
+        assert_eq!(
+            ensure_runner(&mut runner, &spec, DIND_ID, &mut |event| {
+                events.push(event);
+                Ok(())
+            })
+            .unwrap(),
+            RunnerProvision::Adopted
+        );
+        assert_eq!(
+            events,
+            [
+                DockerLifecycleEvent::BeforeCreateRequest(DockerCreateTarget::WorkspaceVolume),
+                DockerLifecycleEvent::CreateResolved(DockerCreateTarget::WorkspaceVolume),
+                DockerLifecycleEvent::CreateResolved(DockerCreateTarget::Runner),
+                DockerLifecycleEvent::BeforeStart,
+            ],
+            "workspace volume creation and verification must settle before runner adoption"
+        );
+        assert_eq!(runner.seen.len(), 11);
+        assert_eq!(runner.seen[0][..2], ["volume", "inspect"]);
+        assert_eq!(runner.seen[1][..3], ["volume", "ls", "--quiet"]);
+        assert_eq!(runner.seen[2], expected_create_args);
+        assert_eq!(runner.seen[3][..2], ["volume", "inspect"]);
+        assert_eq!(runner.seen[4][..3], ["volume", "ls", "--quiet"]);
+        assert_eq!(runner.seen[5][..2], ["volume", "inspect"]);
+        assert_eq!(runner.seen[6][0], "inspect");
+        assert_eq!(runner.seen[7][0], "container");
+        assert_eq!(runner.seen[8][0], "inspect");
+        assert_eq!(runner.seen[9][0], "image");
+        assert_eq!(runner.seen[10], ["start", "--", "cafe"]);
+
+        std::fs::remove_dir_all(state.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_adoption_rejects_mismatched_image_mount_or_dind_id_before_start() {
+        let state = temp_state("runtime-mismatch");
+        let spec = RunnerSpec::new(
+            identity(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            &state,
+            "jit-blob",
+        );
+        let mutations: [(&str, fn(&mut serde_json::Value)); 6] = [
+            ("image", |container| {
+                container["Image"] = serde_json::json!("sha256:wrong-runner-image");
+            }),
+            ("state mount source", |container| {
+                container["Mounts"][0]["Source"] = serde_json::json!("/tmp/foreign-state");
+            }),
+            ("state mount destination", |container| {
+                container["Mounts"][0]["Destination"] = serde_json::json!("/foreign/state");
+            }),
+            ("workspace volume", |container| {
+                container["Mounts"][1]["Name"] = serde_json::json!("foreign-workspace");
+            }),
+            ("workspace destination", |container| {
+                container["Mounts"][1]["Destination"] = serde_json::json!("/foreign/work");
+            }),
+            ("dind id", |container| {
+                container["HostConfig"]["NetworkMode"] =
+                    serde_json::json!("container:replacement-dind-id");
+            }),
+        ];
+        for (field, mutate) in mutations {
+            let mut results = vec![
+                ScriptRunner::ok(&owned_workspace_volume_inspect(&identity())),
+                ScriptRunner::ok(&owned_workspace_volume_list(&identity())),
+                ScriptRunner::ok(&owned_workspace_volume_snapshot(&identity())),
+                ScriptRunner::ok(&owned_container_inspect(&identity(), "cafe", ROLE_RUNNER)),
+            ];
+            let mut runtime = runner_runtime_outputs(&spec, "cafe", DIND_ID);
+            let mut snapshot: serde_json::Value = serde_json::from_str(&runtime[1].stdout).unwrap();
+            mutate(&mut snapshot);
+            runtime[1].stdout = snapshot.to_string();
+            results.extend(runtime);
+
+            let mut runner = ScriptRunner::scripted(results);
+            let mut events = Vec::new();
+            let error = ensure_runner(&mut runner, &spec, DIND_ID, &mut |event| {
+                events.push(event);
+                Ok(())
+            })
+            .unwrap_err();
+            let error = format!("{error:#}");
+            let expected = match field {
+                "image" => "wrong pinned image ID",
+                "dind id" => "mismatched network namespace identity",
+                _ => "mismatched mount configuration",
+            };
+            assert!(
+                error.contains(expected),
+                "{field}: expected {expected:?}, got {error}"
+            );
+            assert!(events.contains(&DockerLifecycleEvent::CreateResolved(
+                DockerCreateTarget::Runner
+            )));
+            assert!(!runner.seen.iter().any(|args| {
+                args.first()
+                    .is_some_and(|verb| verb == "start" || verb == "rm")
+            }));
+        }
+        std::fs::remove_dir_all(state.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_adoption_accepts_rotated_jit_config_when_static_runtime_matches() {
+        let state = temp_state("runtime-rotated-jit");
+        let spec = RunnerSpec::new(
+            identity(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            &state,
+            "new-jit-blob",
+        );
+        let mut results = vec![
+            ScriptRunner::ok(&owned_workspace_volume_inspect(&identity())),
+            ScriptRunner::ok(&owned_workspace_volume_list(&identity())),
+            ScriptRunner::ok(&owned_workspace_volume_snapshot(&identity())),
+            ScriptRunner::ok(&owned_container_inspect(&identity(), "cafe", ROLE_RUNNER)),
+        ];
+        let mut runtime = runner_runtime_outputs(&spec, "cafe", DIND_ID);
+        let mut snapshot: serde_json::Value = serde_json::from_str(&runtime[1].stdout).unwrap();
+        let jit_env = snapshot["Config"]["Env"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|entry| {
+                entry
+                    .as_str()
+                    .is_some_and(|entry| entry.starts_with(&format!("{JIT_CONFIG_ENV}=")))
+            })
+            .expect("runtime fixture has JIT config env");
+        *jit_env = serde_json::json!(format!("{JIT_CONFIG_ENV}=old-jit-blob"));
+        runtime[1].stdout = snapshot.to_string();
+        results.extend(runtime);
+        results.push(ScriptRunner::ok("started\n"));
+
+        let mut runner = ScriptRunner::scripted(results);
+        let mut events = Vec::new();
+        assert_eq!(
+            ensure_runner(&mut runner, &spec, DIND_ID, &mut |event| {
+                events.push(event);
+                Ok(())
+            })
+            .unwrap(),
+            RunnerProvision::Adopted,
+        );
+        assert_eq!(
+            events,
+            [
+                DockerLifecycleEvent::CreateResolved(DockerCreateTarget::WorkspaceVolume),
+                DockerLifecycleEvent::CreateResolved(DockerCreateTarget::Runner),
+                DockerLifecycleEvent::BeforeStart,
+            ],
+        );
+        assert_eq!(runner.seen.last().unwrap()[..3], ["start", "--", "cafe"]);
+        std::fs::remove_dir_all(state.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_create_settles_owned_id_but_rejects_runtime_mismatch_before_start() {
+        let state = temp_state("create-runtime-mismatch");
+        let spec = RunnerSpec::new(
+            identity(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            &state,
+            "jit-blob",
+        );
+        let mut results = vec![
+            ScriptRunner::ok(&owned_workspace_volume_inspect(&identity())),
+            ScriptRunner::ok(&owned_workspace_volume_list(&identity())),
+            ScriptRunner::ok(&owned_workspace_volume_snapshot(&identity())),
+            ScriptRunner::fail(1, "Error: No such container: runner"),
+            ScriptRunner::ok("cafe\n"),
+            ScriptRunner::ok(&owned_container_inspect(&identity(), "cafe", ROLE_RUNNER)),
+        ];
+        let mut runtime = runner_runtime_outputs(&spec, "cafe", DIND_ID);
+        let mut snapshot: serde_json::Value = serde_json::from_str(&runtime[1].stdout).unwrap();
+        snapshot["Mounts"][1]["Name"] = serde_json::json!("foreign-workspace");
+        runtime[1].stdout = snapshot.to_string();
+        results.extend(runtime);
+
+        let mut runner = ScriptRunner::scripted(results);
+        let mut events = Vec::new();
+        let error = ensure_runner(&mut runner, &spec, DIND_ID, &mut |event| {
+            events.push(event);
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("mismatched mount configuration"),
+            "{error:#}"
+        );
+        assert_eq!(
+            events,
+            [
+                DockerLifecycleEvent::CreateResolved(DockerCreateTarget::WorkspaceVolume),
+                DockerLifecycleEvent::BeforeCreateRequest(DockerCreateTarget::Runner),
+                DockerLifecycleEvent::CreateResolved(DockerCreateTarget::Runner),
+            ],
+            "the exact owned ID settles create even when its runtime spec is not startable"
+        );
+        assert!(!events.contains(&DockerLifecycleEvent::BeforeStart));
+        assert!(!runner.seen.iter().any(|args| {
+            args.first()
+                .is_some_and(|verb| verb == "start" || verb == "rm")
+        }));
+        assert!(!spec.jit_env_file_path().unwrap().exists());
+        std::fs::remove_dir_all(state.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_recovery_unlinks_legacy_jit_symlink_without_following() {
+        let state = temp_state("legacy-jit-symlink");
+        let spec = RunnerSpec::new(
+            identity(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            &state,
+            "jit-blob",
+        );
+        let target = state.parent().unwrap().join("external-secret");
+        std::fs::write(&target, "must remain").unwrap();
+        let legacy_env_file = state.join(JIT_ENV_FILE);
+        std::os::unix::fs::symlink(&target, &legacy_env_file).unwrap();
+        let mut adoption_results = vec![
+            ScriptRunner::ok(&owned_workspace_volume_inspect(&identity())),
+            ScriptRunner::ok(&owned_workspace_volume_list(&identity())),
+            ScriptRunner::ok(&owned_workspace_volume_snapshot(&identity())),
+            ScriptRunner::ok(&owned_container_inspect(&identity(), "cafe", ROLE_RUNNER)),
+        ];
+        adoption_results.extend(runner_runtime_outputs(&spec, "cafe", DIND_ID));
+        adoption_results.push(ScriptRunner::ok("started\n"));
+        let mut runner = ScriptRunner::scripted(adoption_results);
+
+        assert_eq!(
+            ensure_runner(&mut runner, &spec, DIND_ID, &mut |_| Ok(())).unwrap(),
+            RunnerProvision::Adopted
+        );
+
+        assert_eq!(
+            std::fs::symlink_metadata(&legacy_env_file)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound,
+            "legacy symlink survived recovery"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "must remain");
+        std::fs::remove_dir_all(state.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
     #[test]
     fn runner_provision_fails_closed_when_jit_scrub_fails() {
         let state = temp_state("provision-scrub-fail");
@@ -1354,19 +2106,37 @@ mod tests {
             &state,
             "jit-blob",
         );
-        let env_file = spec.jit_env_file_path().unwrap();
-        std::fs::create_dir_all(env_file.parent().unwrap().join(JIT_ENV_FILE)).unwrap();
+        let private_dir = spec
+            .jit_env_file_path()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let outside = state.parent().unwrap().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("sentinel"), b"must remain").unwrap();
+        std::os::unix::fs::symlink(&outside, &private_dir).unwrap();
         let mut runner = ScriptRunner::scripted(vec![]);
-        let error = ensure_runner(&mut runner, &spec, &mut || Ok(())).unwrap_err();
-        assert!(error.to_string().contains("scrub secret file"), "{error:#}");
+        let error = ensure_runner(&mut runner, &spec, DIND_ID, &mut |_| Ok(())).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("scrub host-only JIT file directory"),
+            "{error:#}"
+        );
         assert!(
             runner.seen.is_empty(),
             "Docker must not run after scrub failure"
         );
-        std::fs::remove_dir_all(env_file.parent().unwrap()).unwrap();
-        std::fs::remove_dir_all(&state).unwrap();
+        assert_eq!(
+            std::fs::read(outside.join("sentinel")).unwrap(),
+            b"must remain"
+        );
+        std::fs::remove_file(&private_dir).unwrap();
+        std::fs::remove_dir_all(state.parent().unwrap()).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn runner_provision_deletes_the_env_file_when_create_fails() {
         let state = temp_state("provision-fail");
@@ -1377,35 +2147,406 @@ mod tests {
             "jit-blob",
         );
         let mut runner = ScriptRunner::scripted(vec![
-            ScriptRunner::ok(""),
+            ScriptRunner::ok(&owned_workspace_volume_inspect(&identity())),
+            ScriptRunner::ok(&owned_workspace_volume_list(&identity())),
+            ScriptRunner::ok(&owned_workspace_volume_snapshot(&identity())),
+            ScriptRunner::fail(1, "Error: No such container: runner"),
             ScriptRunner::fail(1, "Error response from daemon: conflict"),
+            ScriptRunner::fail(1, "Error: No such container: runner"),
         ]);
-        assert!(ensure_runner(&mut runner, &spec, &mut || Ok(())).is_err());
+        let mut events = Vec::new();
+        assert!(ensure_runner(&mut runner, &spec, DIND_ID, &mut |event| {
+            events.push(event);
+            Ok(())
+        })
+        .is_err());
+        assert_eq!(
+            runner.seen.len(),
+            6,
+            "daemon rejection must inspect the exact target before settlement"
+        );
+        assert_eq!(
+            events,
+            [
+                DockerLifecycleEvent::CreateResolved(DockerCreateTarget::WorkspaceVolume),
+                DockerLifecycleEvent::BeforeCreateRequest(DockerCreateTarget::Runner),
+                DockerLifecycleEvent::CreateResolved(DockerCreateTarget::Runner),
+            ]
+        );
+        assert!(
+            runner
+                .seen
+                .iter()
+                .all(|args| args.first().is_some_and(|verb| verb != "start")),
+            "failed create must not issue docker start: {:?}",
+            runner.seen
+        );
         assert!(!spec.jit_env_file_path().unwrap().exists());
-        assert!(!state.join("jit.env").exists());
-        std::fs::remove_dir_all(&state).unwrap();
+        assert!(!spec.jit_env_file_path().unwrap().parent().unwrap().exists());
+        std::fs::remove_dir_all(state.parent().unwrap()).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
-    fn runner_provision_rejects_foreign_container() {
+    fn runner_create_rejection_with_foreign_name_race_keeps_intent() {
+        let state = temp_state("foreign-create-race");
         let spec = RunnerSpec::new(
             identity(),
             PinnedImage::parse(RUNNER_REF).unwrap(),
-            Path::new("/tmp/velnor-test-runner-state"),
+            &state,
+            "jit-blob",
+        );
+        let foreign_identity = WorkerIdentity::new(OwnershipId::bind(7, "stranger"));
+        let mut runner = ScriptRunner::scripted(vec![
+            ScriptRunner::ok(&owned_workspace_volume_inspect(&identity())),
+            ScriptRunner::ok(&owned_workspace_volume_list(&identity())),
+            ScriptRunner::ok(&owned_workspace_volume_snapshot(&identity())),
+            ScriptRunner::fail(1, "Error: No such container: runner"),
+            ScriptRunner::fail(
+                1,
+                "Error response from daemon: Conflict. The container name is already in use",
+            ),
+            ScriptRunner::ok(&owned_container_inspect(
+                &foreign_identity,
+                "foreign-container-id",
+                ROLE_RUNNER,
+            )),
+        ]);
+        let mut events = Vec::new();
+
+        let error = ensure_runner(&mut runner, &spec, DIND_ID, &mut |event| {
+            events.push(event);
+            Ok(())
+        })
+        .unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(message.contains("Conflict"), "{message}");
+        assert!(message.contains("foreign ownership"), "{message}");
+        assert_eq!(
+            events,
+            [
+                DockerLifecycleEvent::CreateResolved(DockerCreateTarget::WorkspaceVolume),
+                DockerLifecycleEvent::BeforeCreateRequest(DockerCreateTarget::Runner),
+            ],
+            "foreign name conflict must leave the create intent pending"
+        );
+        assert_eq!(runner.seen.len(), 6);
+        assert_eq!(runner.seen[0][0], "volume");
+        assert_eq!(runner.seen[1][0], "volume");
+        assert_eq!(runner.seen[2][..2], ["volume", "inspect"]);
+        assert_eq!(runner.seen[3][0], "inspect");
+        assert_eq!(runner.seen[4][0], "create");
+        assert_eq!(runner.seen[5][0], "inspect");
+        assert!(
+            runner.seen.iter().all(|args| {
+                !args
+                    .first()
+                    .is_some_and(|verb| verb == "start" || verb == "rm")
+            }),
+            "foreign container must remain untouched: {:?}",
+            runner.seen
+        );
+        std::fs::remove_dir_all(state.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_create_rejection_with_owned_name_race_settles_without_start() {
+        let state = temp_state("owned-create-race");
+        let spec = RunnerSpec::new(
+            identity(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            &state,
             "jit-blob",
         );
         let mut runner = ScriptRunner::scripted(vec![
-            ScriptRunner::ok("cafe\n"),
-            ScriptRunner::ok("velnor.scaleset.ownership=7/stranger\n"),
+            ScriptRunner::ok(&owned_workspace_volume_inspect(&identity())),
+            ScriptRunner::ok(&owned_workspace_volume_list(&identity())),
+            ScriptRunner::ok(&owned_workspace_volume_snapshot(&identity())),
+            ScriptRunner::fail(1, "Error: No such container: runner"),
+            ScriptRunner::fail(
+                1,
+                "Error response from daemon: Conflict. The container name is already in use",
+            ),
+            ScriptRunner::ok(&owned_container_inspect(&identity(), "cafe", ROLE_RUNNER)),
         ]);
-        let error = ensure_runner(&mut runner, &spec, &mut || Ok(())).unwrap_err();
+        let mut events = Vec::new();
+
+        let error = ensure_runner(&mut runner, &spec, DIND_ID, &mut |event| {
+            events.push(event);
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert!(format!("{error:#}").contains("Conflict"), "{error:#}");
+        assert_eq!(
+            events,
+            [
+                DockerLifecycleEvent::CreateResolved(DockerCreateTarget::WorkspaceVolume),
+                DockerLifecycleEvent::BeforeCreateRequest(DockerCreateTarget::Runner),
+                DockerLifecycleEvent::CreateResolved(DockerCreateTarget::Runner),
+            ],
+            "an exact owned target resolves the rejected create; adoption validates before start"
+        );
+        assert_eq!(runner.seen.len(), 6);
+        assert!(!runner.seen.iter().any(|args| {
+            args.first()
+                .is_some_and(|verb| verb == "start" || verb == "rm")
+        }));
+        assert!(!spec.jit_env_file_path().unwrap().exists());
+        std::fs::remove_dir_all(state.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_create_ambiguous_failure_keeps_intent_and_daemon_outage_never_creates() {
+        let state = temp_state("create-intent-ambiguous");
+        let spec = RunnerSpec::new(
+            identity(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            &state,
+            "jit-blob",
+        );
+        let mut ambiguous = ScriptRunner::scripted(vec![
+            ScriptRunner::ok(&owned_workspace_volume_inspect(&identity())),
+            ScriptRunner::ok(&owned_workspace_volume_list(&identity())),
+            ScriptRunner::ok(&owned_workspace_volume_snapshot(&identity())),
+            ScriptRunner::fail(1, "Error: No such container: runner"),
+            ScriptRunner::fail(1, "error during connect: connection reset"),
+        ]);
+        let mut events = Vec::new();
+        assert!(ensure_runner(&mut ambiguous, &spec, DIND_ID, &mut |event| {
+            events.push(event);
+            Ok(())
+        })
+        .is_err());
+        assert_eq!(
+            events,
+            [
+                DockerLifecycleEvent::CreateResolved(DockerCreateTarget::WorkspaceVolume),
+                DockerLifecycleEvent::BeforeCreateRequest(DockerCreateTarget::Runner),
+            ]
+        );
+        assert!(!spec.jit_env_file_path().unwrap().exists());
+
+        let mut unavailable = ScriptRunner::scripted(vec![ScriptRunner::fail(
+            1,
+            "error during connect: no such file or directory",
+        )]);
+        assert!(ensure_runner(&mut unavailable, &spec, DIND_ID, &mut |_| Ok(())).is_err());
+        assert_eq!(unavailable.seen.len(), 1);
+        std::fs::remove_dir_all(state.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_provision_fails_closed_on_state_parent_swap_before_jit_unlink() {
+        let state = temp_state("unlink-parent-swap");
+        let spec = RunnerSpec::new(
+            identity(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            &state,
+            "jit-blob",
+        );
+        let mut runner = BreakJitUnlinkRunner {
+            env_file: None,
+            swapped_path: None,
+            displaced_root: None,
+            swap_state_parent: true,
+            create_result: None,
+            runtime_results: VecDeque::new(),
+            seen: Vec::new(),
+        };
+        let mut before_start = false;
+        let mut events = Vec::new();
+
+        let error = ensure_runner(&mut runner, &spec, DIND_ID, &mut |event| {
+            events.push(event);
+            if event == DockerLifecycleEvent::BeforeStart {
+                before_start = true;
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("scrub JIT env file after create"),
+            "{error:#}"
+        );
+        assert!(!before_start, "runner start deadline must not be persisted");
+        assert_eq!(
+            events,
+            [
+                DockerLifecycleEvent::CreateResolved(DockerCreateTarget::WorkspaceVolume),
+                DockerLifecycleEvent::BeforeCreateRequest(DockerCreateTarget::Runner),
+                DockerLifecycleEvent::CreateResolved(DockerCreateTarget::Runner),
+            ],
+            "the inspected immutable owned ID must settle before the scrub error: {error:#}"
+        );
+        assert_eq!(runner.seen.len(), 6, "must stop after failed secure unlink");
+        let env_file = runner.env_file.as_ref().expect("create received env file");
+        assert_eq!(
+            std::fs::read_to_string(env_file).unwrap(),
+            format!("{JIT_CONFIG_ENV}=jit-blob\n")
+        );
+
+        runner.cleanup(&state);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_create_success_settles_before_host_only_jit_scrub_failure() {
+        let state = temp_state("create-scrub-fail");
+        let spec = RunnerSpec::new(
+            identity(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            &state,
+            "jit-blob",
+        );
+        let mut runner = BreakJitUnlinkRunner {
+            env_file: None,
+            swapped_path: None,
+            displaced_root: None,
+            swap_state_parent: false,
+            create_result: None,
+            runtime_results: VecDeque::new(),
+            seen: Vec::new(),
+        };
+        let mut before_start = false;
+        let mut events = Vec::new();
+
+        let error = ensure_runner(&mut runner, &spec, DIND_ID, &mut |event| {
+            events.push(event);
+            if event == DockerLifecycleEvent::BeforeStart {
+                before_start = true;
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("scrub JIT env file after create"),
+            "{error:#}"
+        );
+        assert!(!before_start, "runner start deadline must not be persisted");
+        assert_eq!(
+            events,
+            [
+                DockerLifecycleEvent::CreateResolved(DockerCreateTarget::WorkspaceVolume),
+                DockerLifecycleEvent::BeforeCreateRequest(DockerCreateTarget::Runner),
+                DockerLifecycleEvent::CreateResolved(DockerCreateTarget::Runner),
+            ],
+            "owned create must settle before JIT scrub can fail: {error:#}"
+        );
+        assert_eq!(runner.seen.len(), 6, "must stop after failed secure unlink");
+        let env_file = runner.env_file.as_ref().expect("create received env file");
+        assert_eq!(
+            std::fs::read_to_string(env_file).unwrap(),
+            format!("{JIT_CONFIG_ENV}=jit-blob\n")
+        );
+
+        runner.cleanup(&state);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_create_rejection_and_absence_settle_before_scrub_error() {
+        let state = temp_state("rejected-create-scrub-fail");
+        let spec = RunnerSpec::new(
+            identity(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            &state,
+            "jit-blob",
+        );
+        let mut runner = BreakJitUnlinkRunner {
+            env_file: None,
+            swapped_path: None,
+            displaced_root: None,
+            swap_state_parent: false,
+            create_result: Some(ScriptRunner::fail(
+                1,
+                "Error response from daemon: invalid create request",
+            )),
+            runtime_results: VecDeque::new(),
+            seen: Vec::new(),
+        };
+        let mut events = Vec::new();
+
+        let error = ensure_runner(&mut runner, &spec, DIND_ID, &mut |event| {
+            events.push(event);
+            Ok(())
+        })
+        .unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(message.contains("invalid create request"), "{message}");
+        assert!(
+            message.contains("scrub JIT env file after create"),
+            "{message}"
+        );
+        assert_eq!(
+            events,
+            [
+                DockerLifecycleEvent::CreateResolved(DockerCreateTarget::WorkspaceVolume),
+                DockerLifecycleEvent::BeforeCreateRequest(DockerCreateTarget::Runner),
+                DockerLifecycleEvent::CreateResolved(DockerCreateTarget::Runner),
+            ],
+            "rejected create with exact target absent must settle before scrub failure"
+        );
+        assert_eq!(
+            runner.seen.len(),
+            6,
+            "must inspect exact target after daemon rejection, before scrub"
+        );
+        let env_file = runner.env_file.as_ref().expect("create received env file");
+        assert_eq!(
+            std::fs::read_to_string(env_file).unwrap(),
+            format!("{JIT_CONFIG_ENV}=jit-blob\n")
+        );
+
+        runner.cleanup(&state);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runner_provision_rejects_foreign_container() {
+        let state = temp_state("foreign");
+        let spec = RunnerSpec::new(
+            identity(),
+            PinnedImage::parse(RUNNER_REF).unwrap(),
+            &state,
+            "jit-blob",
+        );
+        let mut labels = spec.identity().labels();
+        labels.insert(WORKER_ROLE_LABEL.to_string(), ROLE_RUNNER.to_string());
+        labels.insert(
+            super::super::ownership::OWNERSHIP_LABEL.to_string(),
+            "7/stranger".to_string(),
+        );
+        let mut runner = ScriptRunner::scripted(vec![
+            ScriptRunner::ok(&owned_workspace_volume_inspect(&identity())),
+            ScriptRunner::ok(&owned_workspace_volume_list(&identity())),
+            ScriptRunner::ok(&owned_workspace_volume_snapshot(&identity())),
+            ScriptRunner::ok(&format!(
+                "cafe\n{}",
+                serde_json::to_string(&labels).unwrap()
+            )),
+        ]);
+        let error = ensure_runner(&mut runner, &spec, DIND_ID, &mut |_| Ok(())).unwrap_err();
         assert!(error.to_string().contains("foreign ownership"), "{error}");
+        assert_eq!(
+            runner.seen.len(),
+            4,
+            "foreign container must not be started"
+        );
+        std::fs::remove_dir_all(state.parent().unwrap()).unwrap();
     }
 
     #[test]
     fn connected_marker_parses() {
-        assert!(parse_connected_marker("....\nConnected to GitHub\n....\n"));
-        assert!(!parse_connected_marker("Listening for Jobs\n"));
+        assert!(!parse_connected_marker("....\nConnected to GitHub\n....\n"));
+        assert!(parse_connected_marker("Listening for Jobs\n"));
         assert!(!parse_connected_marker(""));
     }
 

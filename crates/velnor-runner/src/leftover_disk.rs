@@ -2,9 +2,10 @@
 //!
 //! Job UUID work trees and dangling untagged images outlive jobs because GC
 //! scanned empty `$HOME/.velnor/runner/_work` while daemons write
-//! `/var/lib/velnor*/work/slot-N/<job-uuid>`. Hard pressure (90% used) reclaims
-//! those leftover classes only — never warm caches, never `docker system prune`,
-//! `volume prune`, or `builder prune --all`.
+//! `/var/lib/velnor*/work/slot-N/<job-uuid>`. Disk-pressure reclaim deletes
+//! only those leftover classes — never warm caches, never `docker system prune`,
+//! `volume prune`, or `builder prune --all`. Every deletion path requires the
+//! lifecycle filesystem coordinator held by the caller.
 
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeSet;
@@ -12,7 +13,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-pub const HARD_PRESSURE_PERCENT: u8 = 90;
 pub const LIVE_JOB_NAME_PREFIX: &str = "velnor-job-";
 
 /// A job workspace untouched for less than this is presumed live regardless of
@@ -349,60 +349,15 @@ pub struct LeftoverReclaimReport {
     pub skipped_docker: bool,
 }
 
-/// Reclaim leftover workspaces, acquiring the filesystem coordinator here.
-///
-/// This is the entry point for callers that hold no coordinator (the daemon's
-/// disk-pressure paths). A caller that already holds it must use
-/// [`reclaim_leftover_under_coordinator`]: the coordinator is a blocking
-/// `flock`, and a second open of the same lock file from the thread that
-/// holds it never returns, which is how `velnorctl cache gc` deadlocked on
-/// itself. [`crate::capacity::FilesystemCoordinator`] refuses that re-entry
-/// with an error, so the mistake is loud, but the fix is to lock once.
-pub fn reclaim_leftover_after_velnor(
-    work_roots: &[PathBuf],
-    live_job_ids: &BTreeSet<String>,
-    docker: impl FnMut(&[String]) -> Result<String>,
-    remove_dir: impl FnMut(&Path) -> Result<()>,
-    prune_dangling_images: bool,
-) -> Result<LeftoverReclaimReport> {
-    match runtime_root() {
-        // Hold the same coordinator the cache reclaimer takes, so no daemon can
-        // publish a lease between the liveness snapshot and the deletions it
-        // authorizes.
-        Some(run_root) => {
-            let coordinator = crate::capacity::FilesystemCoordinator::lock_exclusive(&run_root)?;
-            reclaim_leftover_under_coordinator(
-                &coordinator,
-                &run_root,
-                work_roots,
-                live_job_ids,
-                docker,
-                remove_dir,
-                prune_dangling_images,
-            )
-        }
-        None => reclaim_with_liveness(
-            work_roots,
-            &WorkspaceLiveness {
-                running: live_job_ids.clone(),
-                min_idle: WORKSPACE_MIN_IDLE,
-                ..WorkspaceLiveness::default()
-            },
-            docker,
-            remove_dir,
-            prune_dangling_images,
-        ),
-    }
-}
-
-/// Reclaim leftover workspaces under a coordinator the caller already holds.
+/// Reclaim leftover workspaces under the lifecycle coordinator the caller holds.
 ///
 /// `_coordinator` is the proof of ownership: a [`FilesystemCoordinator`] can
-/// only be obtained by locking, so this function cannot be reached without
-/// the lock and never takes it again.
+/// only be obtained by locking, and the exact exclusive `run_root` is checked
+/// before any liveness read or deletion. This function never takes the lock
+/// again.
 ///
 /// [`FilesystemCoordinator`]: crate::capacity::FilesystemCoordinator
-pub fn reclaim_leftover_under_coordinator(
+pub(crate) fn reclaim_leftover_under_coordinator(
     _coordinator: &crate::capacity::FilesystemCoordinator,
     run_root: &Path,
     work_roots: &[PathBuf],
@@ -411,7 +366,9 @@ pub fn reclaim_leftover_under_coordinator(
     remove_dir: impl FnMut(&Path) -> Result<()>,
     prune_dangling_images: bool,
 ) -> Result<LeftoverReclaimReport> {
+    _coordinator.require_exclusive_for(run_root)?;
     reclaim_with_liveness(
+        _coordinator,
         work_roots,
         &WorkspaceLiveness::collect(run_root, live_job_ids.clone()),
         docker,
@@ -420,12 +377,9 @@ pub fn reclaim_leftover_under_coordinator(
     )
 }
 
-fn runtime_root() -> Option<PathBuf> {
-    crate::storage::StorageLayout::resolve().map(|layout| layout.run_root)
-}
-
 /// Delete only workspaces that every liveness source agrees are dead.
-pub fn reclaim_with_liveness(
+fn reclaim_with_liveness(
+    _coordinator: &crate::capacity::FilesystemCoordinator,
     work_roots: &[PathBuf],
     liveness: &WorkspaceLiveness,
     mut docker: impl FnMut(&[String]) -> Result<String>,
@@ -456,22 +410,7 @@ pub fn reclaim_with_liveness(
     Ok(report)
 }
 
-/// Hard-pressure path: at >= 90% used, reclaim leftover-after-Velnor
-/// disposable classes. Warm caches and unowned Docker stay.
-pub fn reclaim_if_hard_pressure(
-    usage_percent: u8,
-    work_roots: &[PathBuf],
-    live_job_ids: &BTreeSet<String>,
-    docker: impl FnMut(&[String]) -> Result<String>,
-    remove_dir: impl FnMut(&Path) -> Result<()>,
-) -> Result<LeftoverReclaimReport> {
-    if usage_percent < HARD_PRESSURE_PERCENT {
-        return Ok(LeftoverReclaimReport::default());
-    }
-    reclaim_leftover_after_velnor(work_roots, live_job_ids, docker, remove_dir, true)
-}
-
-pub fn remove_dir_all(path: &Path) -> Result<()> {
+fn remove_dir_all(path: &Path) -> Result<()> {
     fs::remove_dir_all(path)
         .with_context(|| format!("remove leftover workspace {}", path.display()))
 }
@@ -493,51 +432,16 @@ pub fn live_job_ids_for_reclaim(
     }
 }
 
-fn reclaim_production_leftovers(prune_dangling_images: bool) -> Result<LeftoverReclaimReport> {
-    let work_roots = discover_daemon_work_roots();
-    let live = match live_job_ids_from_host_docker() {
-        Ok(ids) => ids,
-        Err(error) => {
-            eprintln!("leftover workspace reclaim skipped (cannot list live jobs): {error:#}");
-            return Ok(LeftoverReclaimReport {
-                skipped_docker: true,
-                ..LeftoverReclaimReport::default()
-            });
-        }
-    };
-    reclaim_leftover_after_velnor(
-        &work_roots,
-        &live,
-        host_docker_if_safe,
-        remove_dir_all,
-        prune_dangling_images,
-    )
-}
-
-/// Reclaim leftover workspaces. The microVM backend never lists or prunes
-/// through the host Docker socket.
-pub fn reclaim_production_leftovers_for(
-    backend: velnor_model::ExecutionBackendKind,
-    prune_dangling_images: bool,
-) -> Result<LeftoverReclaimReport> {
-    if backend.uses_host_docker_socket() {
-        reclaim_production_leftovers(prune_dangling_images)
-    } else {
-        reclaim_microvm_leftovers()
-    }
-}
-
-/// [`reclaim_production_leftovers_for`] for a caller that already holds the
-/// filesystem coordinator of `run_root` (the destructive `cache gc` path,
-/// which takes it before its own eviction pass and must keep holding it
-/// through this reclaim instead of locking twice).
-pub fn reclaim_production_leftovers_under_coordinator(
+/// Reclaim leftover workspaces while the caller holds the lifecycle
+/// coordinator of `run_root`.
+pub(crate) fn reclaim_production_leftovers_under_coordinator(
     coordinator: &crate::capacity::FilesystemCoordinator,
     run_root: &Path,
     work_roots: &[PathBuf],
     backend: velnor_model::ExecutionBackendKind,
     prune_dangling_images: bool,
 ) -> Result<LeftoverReclaimReport> {
+    coordinator.require_exclusive_for(run_root)?;
     if !backend.uses_host_docker_socket() {
         return reclaim_microvm_leftovers();
     }
@@ -571,53 +475,6 @@ fn reclaim_microvm_leftovers() -> Result<LeftoverReclaimReport> {
     Ok(LeftoverReclaimReport::default())
 }
 
-/// Hard-pressure reclaim that skips host Docker when the selected backend is
-/// `microvm` or selection is unknown.
-pub fn reclaim_production_if_hard_pressure_for(
-    backend: Option<velnor_model::ExecutionBackendKind>,
-    usage_percent: u8,
-) -> Result<LeftoverReclaimReport> {
-    reclaim_production_if_hard_pressure_with(
-        backend,
-        usage_percent,
-        &discover_daemon_work_roots(),
-        host_docker_if_safe,
-        remove_dir_all,
-    )
-}
-
-/// Injectable hard-pressure reclaim. Host Docker listing and prune run only
-/// when the selected backend permits host Docker maintenance.
-pub fn reclaim_production_if_hard_pressure_with(
-    backend: Option<velnor_model::ExecutionBackendKind>,
-    usage_percent: u8,
-    work_roots: &[PathBuf],
-    mut docker: impl FnMut(&[String]) -> Result<String>,
-    remove_dir: impl FnMut(&Path) -> Result<()>,
-) -> Result<LeftoverReclaimReport> {
-    if usage_percent < HARD_PRESSURE_PERCENT {
-        return Ok(LeftoverReclaimReport::default());
-    }
-    if !velnor_model::ExecutionBackendKind::permits_host_docker_maintenance(backend) {
-        // A backend choice is not an ownership proof: `work_roots` can contain
-        // active jobs belonging to another daemon/pool. Fail closed until the
-        // cross-daemon coordinator exposes pool-scoped leases here.
-        let _ = (work_roots, remove_dir);
-        return Ok(LeftoverReclaimReport::default());
-    }
-    let live = match docker(&list_live_job_names_args()) {
-        Ok(listed) => live_job_ids_from_docker_ps(&listed),
-        Err(error) => {
-            eprintln!("leftover workspace reclaim skipped (cannot list live jobs): {error:#}");
-            return Ok(LeftoverReclaimReport {
-                skipped_docker: true,
-                ..LeftoverReclaimReport::default()
-            });
-        }
-    };
-    reclaim_if_hard_pressure(usage_percent, work_roots, &live, docker, remove_dir)
-}
-
 fn host_docker_if_safe(args: &[String]) -> Result<String> {
     if leftover_docker_args_are_unsafe(args) {
         bail!("refusing unsafe docker reclaim {args:?}");
@@ -648,6 +505,7 @@ fn leftover_docker_args_are_unsafe(args: &[String]) -> bool {
 )]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::sync::{Arc, Mutex};
 
     fn write_tree(path: &Path) {
@@ -703,7 +561,12 @@ velnor-job-not-a-uuid\n\
         assert_eq!(orphans, vec![orphan.clone()]);
         let deleted = Arc::new(Mutex::new(Vec::new()));
         let docker_calls = Arc::new(Mutex::new(Vec::new()));
-        let report = reclaim_leftover_after_velnor(
+        let run_root = root.join("run");
+        let coordinator =
+            crate::capacity::FilesystemCoordinator::lock_exclusive(&run_root).unwrap();
+        let report = reclaim_leftover_under_coordinator(
+            &coordinator,
+            &run_root,
             &roots,
             &live_ids,
             {
@@ -735,67 +598,115 @@ velnor-job-not-a-uuid\n\
     }
 
     #[test]
-    fn hard_pressure_90_reclaims_leftovers_without_system_or_volume_prune() {
-        let root = std::env::temp_dir().join(format!("velnor-leftover-p90-{}", std::process::id()));
-        let work = root.join("velnor-fixture/work");
-        let orphan = work
-            .join("slot-1")
-            .join("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+    fn leftover_reclaim_rejects_wrong_run_root_before_deletion() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-leftover-wrong-coordinator-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let work = root.join("velnor-tailrocks/work");
+        let orphan = work.join("slot-1/11111111-2222-3333-4444-555555555555");
         cold_tree(&orphan);
-        let docker_calls = Arc::new(Mutex::new(Vec::new()));
-        let below = reclaim_if_hard_pressure(
-            89,
-            std::slice::from_ref(&work),
+        let roots = vec![work];
+        let expected_run_root = root.join("run");
+        let wrong_run_root = root.join("other-run");
+        let coordinator =
+            crate::capacity::FilesystemCoordinator::lock_exclusive(&wrong_run_root).unwrap();
+        let removed = Cell::new(false);
+        let docker_called = Cell::new(false);
+
+        let error = reclaim_leftover_under_coordinator(
+            &coordinator,
+            &expected_run_root,
+            &roots,
             &BTreeSet::new(),
-            |_| Ok(String::new()),
-            |_| Ok(()),
-        )
-        .unwrap();
-        assert!(below.deleted_workspaces.is_empty());
-        assert!(below.docker_commands.is_empty());
-        assert!(orphan.exists());
-        let report = reclaim_if_hard_pressure(
-            HARD_PRESSURE_PERCENT,
-            std::slice::from_ref(&work),
-            &BTreeSet::new(),
-            {
-                let docker_calls = Arc::clone(&docker_calls);
-                move |args| {
-                    docker_calls.lock().unwrap().push(args.to_vec());
-                    Ok(String::new())
-                }
+            |_| {
+                docker_called.set(true);
+                Ok(String::new())
             },
             |path| {
+                removed.set(true);
                 fs::remove_dir_all(path)?;
                 Ok(())
             },
+            true,
         )
-        .unwrap();
-        assert_eq!(report.deleted_workspaces, vec![orphan.clone()]);
-        assert!(!orphan.exists());
-        let commands = docker_calls.lock().unwrap().clone();
-        assert_leftover_docker_commands_are_safe(&commands);
+        .unwrap_err();
+
+        assert!(error.to_string().contains("not an exclusive lock"));
         assert!(
-            commands
-                .iter()
-                .all(|cmd| cmd == &dangling_image_prune_args()),
-            "90% path must only prune dangling images, got {commands:?}"
+            !removed.get(),
+            "wrong-root proof must reject before deletion"
         );
+        assert!(
+            !docker_called.get(),
+            "wrong-root proof must reject before Docker reclaim"
+        );
+        assert!(orphan.exists());
+        drop(coordinator);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn leftover_reclaim_rejects_shared_coordinator_before_deletion() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-leftover-shared-coordinator-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let work = root.join("velnor-tailrocks/work");
+        let orphan = work.join("slot-1/11111111-2222-3333-4444-555555555555");
+        cold_tree(&orphan);
+        let roots = vec![work];
+        let run_root = root.join("run");
+        let coordinator = crate::capacity::FilesystemCoordinator::lock_shared(&run_root).unwrap();
+        let removed = Cell::new(false);
+        let docker_called = Cell::new(false);
+
+        let error = reclaim_leftover_under_coordinator(
+            &coordinator,
+            &run_root,
+            &roots,
+            &BTreeSet::new(),
+            |_| {
+                docker_called.set(true);
+                Ok(String::new())
+            },
+            |path| {
+                removed.set(true);
+                fs::remove_dir_all(path)?;
+                Ok(())
+            },
+            true,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("not an exclusive lock"));
+        assert!(!removed.get(), "shared proof must reject before deletion");
+        assert!(
+            !docker_called.get(),
+            "shared proof must reject before Docker reclaim"
+        );
+        assert!(orphan.exists());
+        drop(coordinator);
         fs::remove_dir_all(root).ok();
     }
 
     #[test]
     fn microvm_reclaim_does_not_invoke_host_docker() {
-        let report = reclaim_leftover_after_velnor(
+        let root =
+            std::env::temp_dir().join(format!("velnor-leftover-microvm-{}", uuid::Uuid::new_v4()));
+        let coordinator = crate::capacity::FilesystemCoordinator::lock_exclusive(&root).unwrap();
+        let report = reclaim_production_leftovers_under_coordinator(
+            &coordinator,
+            &root,
             &[],
-            &BTreeSet::new(),
-            |_| panic!("microvm leftover reclaim must not use host docker"),
-            |_| Ok(()),
+            velnor_model::ExecutionBackendKind::MicroVm,
             false,
         )
         .unwrap();
         assert!(report.docker_commands.is_empty());
         assert!(!report.skipped_docker);
+        drop(coordinator);
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -809,54 +720,6 @@ velnor-job-not-a-uuid\n\
     }
 
     #[test]
-    fn hard_pressure_microvm_and_missing_never_invoke_host_docker() {
-        for backend in [None, Some(velnor_model::ExecutionBackendKind::MicroVm)] {
-            let mut removed = Vec::new();
-            let report = reclaim_production_if_hard_pressure_with(
-                backend,
-                HARD_PRESSURE_PERCENT,
-                &[PathBuf::from("/var/lib/velnor-trusted/work/active-job")],
-                |_| panic!("host docker must not run for {backend:?}"),
-                |path| {
-                    removed.push(path.to_path_buf());
-                    Ok(())
-                },
-            )
-            .unwrap();
-            assert!(report.docker_commands.is_empty(), "{backend:?}");
-            assert!(!report.skipped_docker, "{backend:?}");
-            assert!(
-                removed.is_empty(),
-                "cross-pool workspace was reclaimed: {removed:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn hard_pressure_docker_lists_live_jobs_through_injected_docker() {
-        let mut calls = Vec::new();
-        let report = reclaim_production_if_hard_pressure_with(
-            Some(velnor_model::ExecutionBackendKind::Docker),
-            HARD_PRESSURE_PERCENT,
-            &[],
-            |args| {
-                calls.push(args.to_vec());
-                Ok(String::new())
-            },
-            |_| Ok(()),
-        )
-        .unwrap();
-        assert!(
-            calls.iter().any(|args| args
-                .windows(2)
-                .any(|w| w == ["ps".to_string(), "--all".to_string()]
-                    || w == ["image".to_string(), "prune".to_string()])),
-            "docker hard-pressure reclaim must list or prune via host docker, got {calls:?}"
-        );
-        assert_leftover_docker_commands_are_safe(&report.docker_commands);
-    }
-
-    #[test]
     fn df_capacity_column_is_hard_pressure_input() {
         let stdout = "\
 Filesystem     1024-blocks      Used Available Capacity Mounted on
@@ -867,10 +730,7 @@ Filesystem     1024-blocks      Used Available Capacity Mounted on
 Filesystem     1024-blocks      Used Available Capacity Mounted on
 /dev/md3         963379200 867000000  96000000      90% /
 ";
-        assert_eq!(
-            disk_usage_percent_from_df(stdout),
-            Some(HARD_PRESSURE_PERCENT)
-        );
+        assert_eq!(disk_usage_percent_from_df(stdout), Some(90));
     }
 
     #[test]

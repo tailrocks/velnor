@@ -67,15 +67,17 @@ impl RetryPolicy {
         status.as_u16() >= 500 && status != StatusCode::NOT_IMPLEMENTED
     }
 
-    /// Match retryablehttp's non-retryable transport cases: request build and
-    /// redirect failures, deadline/timeout, and TLS certificate validation.
+    /// Match retryablehttp's non-retryable transport cases: request build,
+    /// redirect, caller-context cancellation, and TLS certificate validation.
+    /// Reqwest does not expose caller-context cancellation separately here;
+    /// its configured request timeout is retryable like `retryablehttp`'s
+    /// client timeout.
     #[must_use]
     pub fn retryable_transport_error(error: &reqwest::Error) -> bool {
         let rendered = format!("{error:#}").to_ascii_lowercase();
         retryable_transport_flags(
             error.is_builder(),
             error.is_redirect(),
-            error.is_timeout(),
             is_certificate_verification_failure(&rendered),
         )
     }
@@ -136,10 +138,9 @@ impl RetryPolicy {
 fn retryable_transport_flags(
     builder: bool,
     redirect: bool,
-    timeout: bool,
     certificate_verification: bool,
 ) -> bool {
-    !(builder || redirect || timeout || certificate_verification)
+    !(builder || redirect || certificate_verification)
 }
 
 fn is_certificate_verification_failure(error: &str) -> bool {
@@ -271,11 +272,10 @@ mod tests {
 
     #[test]
     fn transport_retryability_matches_non_retryable_upstream_cases() {
-        assert!(retryable_transport_flags(false, false, false, false));
-        assert!(!retryable_transport_flags(true, false, false, false));
-        assert!(!retryable_transport_flags(false, true, false, false));
-        assert!(!retryable_transport_flags(false, false, true, false));
-        assert!(!retryable_transport_flags(false, false, false, true));
+        assert!(retryable_transport_flags(false, false, false));
+        assert!(!retryable_transport_flags(true, false, false));
+        assert!(!retryable_transport_flags(false, true, false));
+        assert!(!retryable_transport_flags(false, false, true));
         assert!(is_certificate_verification_failure(
             "error sending request: invalid peer certificate: UnknownIssuer"
         ));

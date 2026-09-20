@@ -42,7 +42,7 @@ pub enum ServiceCommand {
     Controller(Box<crate::node::ControllerArgs>),
     /// One ready slot as its own OS process.
     Slot(Box<crate::node::SlotArgs>),
-    /// Transient per-job worker process.
+    /// Slot waiter or provisional-acquisition recovery child.
     Job(crate::node::JobArgs),
     /// Release-coherence hooks for ExecStartPre, postinst, and release CI.
     Release(ReleaseArgs),
@@ -580,11 +580,11 @@ impl From<RunArgs> for crate::args::RunArgs {
     }
 }
 
-/// Binary used to spawn node-local guardian/controller/slot/job children.
+/// Binary used to spawn node-local guardian/controller/slot/waiter children.
 ///
 /// Packaged hosts execute `velnor-runner` directly. When the control plane is
 /// launched through `velnorctl` (for example `velnorctl host start`), slot and
-/// job workers must still exec the service binary beside it.
+/// waiter workers must still exec the service binary beside it.
 pub fn node_service_executable() -> std::io::Result<std::path::PathBuf> {
     if let Ok(path) = std::env::var("VELNOR_SERVICE_BINARY")
         && !path.is_empty()

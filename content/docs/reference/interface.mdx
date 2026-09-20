@@ -67,16 +67,22 @@ Global options:
 ### Workflow generation and monitoring
 
 `velnor-workflow` is the Velnor-owned static generator and runtime used by
-generated GitHub Actions jobs. It writes only its owned files and keeps the
-declarative execution contract in `.github/ci/project.toml`:
+generated GitHub Actions jobs. When present, the provider-mode generation
+config lives at `.github-gen/velnor-workflow.toml` and must declare
+`schema = 2`; that parser rejects schema-1 generation config. The generator
+writes only its owned files and keeps the declarative execution contract in
+`.github/ci/project.toml`:
 
 ```sh
-velnor-workflow REPOSITORY --runners both
+velnor-workflow REPOSITORY --providers github-hosted,velnor
 velnor-workflow plan --config .github/ci/project.toml
-velnor-workflow run --scope affected
-velnor-workflow policy --workflow-root .
+velnor-workflow run --config .github/ci/project.toml --scope affected
+velnor-workflow policy --workflow-root . --base-revision BASE_VALIDATOR_SHA
 velnor-workflow release verify-tag
 ```
+
+`policy` requires `--base-revision SHA` or `VELNOR_WORKFLOW_POLICY_REVISION`
+to name the validator revision used by the base branch.
 
 `velnor-tools workflow-monitor` joins authoritative GitHub run state with
 read-only local Velnor observations. GitHub remains authoritative for the
@@ -120,13 +126,13 @@ does not accept a command-line credential argument. Relevant options are:
 | `--name` | Runner name. |
 | `--labels` | Comma-separated labels. Empty labels become `self-hosted,velnor`. |
 | `--target-mvp-labels` | Add the target MVP Linux label set. |
-| `--target-mvp-arm-label` | Add `ubuntu-24.04-arm`. |
+| `--target-mvp-arm-label` | Add `velnor-target-mvp-arm64`. |
 | `--pool-id`, `--pool-name` | Select the runner group. Organization and enterprise scope require an explicit group rather than implicit `Default`. |
 | `--replace` | Replace an existing local registration. |
 | `--dry-run` | Validate registration inputs without writing credentials. |
 | `--config-dir` | Store runner identity/configuration in this directory. |
 
-Labels are sorted and deduplicated. macOS labels are rejected; execution is Linux-only. The target MVP label additions are `hetzner-sentry-ci`, `ubuntu-24.04`, `ubuntu-latest`, and `velnor-target-mvp`.
+Labels are sorted and deduplicated. Target-MVP x64 adds `hetzner-sentry-ci`, `velnor-target-mvp`, and `velnor-target-mvp-x64`; `--target-mvp-arm-label` adds `velnor-target-mvp-arm64`. Native and Scale Set labels, including a derived Scale Set `System` label, cannot start with `ubuntu-`, `macos-`, or `windows-` (case-insensitive). Local workflow selectors enforce the same boundary; GitHub-hosted selectors may use image labels. Execution is Linux-only.
 
 Other current setup commands are `auth status`, `auth check`, `context list/current/use/set/delete`, `config view/validate/diff/sources`, `instance init/install/apply/delete`, `adapter list/describe/check`, `workflow check`, `remove`, `status`, and `preflight`. `instance` and `workflow check` are local planning/input checks, not proof of a remote mutation or complete workflow compatibility.
 
@@ -195,20 +201,48 @@ backend = "docker" # or "microvm"
 
 Missing, unknown, or malformed values fail closed. There is no Docker/Firecracker fallback. Docker requires the host Docker socket and the Docker preflight. MicroVM requires KVM, verified Firecracker/jailer artifacts, and its guest/vsock path; it rejects host Docker-socket use.
 
-Admission validates trust policy, the compiled capability manifest, and the complete action closure before checkout, downloads, leases, credentials, or execution. Unsupported actions, unapproved references, invalid inputs, and unsafe trust combinations are rejected.
+Native admission validates trust policy, the compiled capability manifest, and the complete action closure before checkout, action acquisition, lease creation, job-credential delivery, or execution. It uses the read-only metadata requests below during validation. Unsupported native actions, unapproved references, invalid inputs, and unsafe trust combinations are rejected.
 
-Ordinary action references must be full 40-character commit SHAs unless explicitly allowed by the compiled manifest. The manifest includes approved native checkout/cache behavior and a finite allowlist of actions; it is the authority for a particular build. Inspect it with `capabilities export` and test a job message with `capabilities check`.
+Ordinary native action references must be full 40-character commit SHAs unless explicitly allowed by the compiled manifest. The manifest includes approved native checkout/cache behavior and a finite allowlist of native actions; it is the authority for a particular build. Inspect it with `capabilities export` and test a job message with `capabilities check`.
 
-The allowlist is closed. A JavaScript, Docker, or composite action that is not on it is rejected at planning, and there is no generic JavaScript action runtime open to workflows. See [what Velnor does not support](/guides/execution#what-velnor-does-not-support).
+The native action allowlist is closed. A JavaScript, Docker, or composite action that is not on it is rejected during native planning, and there is no generic JavaScript action runtime open to native workflows. See [what Velnor does not support](/guides/execution#what-velnor-does-not-support).
+
+Before checkout or execution, Velnor uses the repository access token from the
+job payload for read-only GitHub Contents API requests. Strict action-closure
+admission fetches remote `action.yml` or `action.yaml` metadata; missing
+required metadata fails admission. Separately, Velnor makes a best-effort
+workflow-YAML lookup to recover script-step display names; missing context or
+lookup failures only skip that enrichment. Strict action-closure admission
+still requires the repository token and any remote metadata it needs. Velnor
+uses the token for these pre-admission reads and exposes the same job-scoped
+token to workflow steps only after admission succeeds. Checkout, other job
+credentials, and execution remain gated by admission.
 
 ## Credential boundaries
 
 The operator PAT is used for registration, runner/group lookup, and runner cleanup. It is not a job credential.
 
-GitHub supplies job-scoped credentials in the acquired job payload. Velnor injects them only after admission, including the job token, Actions runtime token, OIDC material, and cache/results credentials. A job carrying GitHub user secrets is rejected outright unless the pool is `trusted` (`VELNOR_TRUST_SCOPE=trusted`, which is not the default) and the job's own trust class is trusted; see [Trust scope](/reference/trust-scope). MicroVM guests must be credential-free at readiness; credentials are delivered only for the job session.
+On the native lane, GitHub supplies job-scoped credentials in the acquired
+job payload. Velnor injects them only after admission, including the job token,
+Actions runtime token, OIDC material, and cache/results credentials. On the
+Scale Set lane, the official runner receives credentials through its GitHub
+session. Neither lane substitutes its operator PAT or Scale Set admin
+credential for job credentials. Native jobs carrying GitHub user secrets are
+rejected unless the pool is `trusted` (`VELNOR_TRUST_SCOPE=trusted`, not the
+default) and the job's own trust class is trusted; see
+[Trust scope](/reference/trust-scope). MicroVM guests must be credential-free
+at readiness; credentials are delivered only for the job session.
+
+The Scale Set offer classifier is separate from native `VELNOR_TRUST_SCOPE`
+and native job-secret rejection rules. For a well-formed offer with a
+nonempty repository owner and name, it marks `pull_request*` and
+`workflow_run` events `unknown`; the offer lacks the fork details needed to
+determine their trust. Syntactically valid event names outside those patterns
+are classified `trusted`. Unknown offers stay `Observed`, never become
+`Eligible`, and receive no permit; Velnor does not acquire or provision them.
 
 Packaged installations keep the operator token in `/etc/velnor/secrets.env` with mode `0600`; it is not passed in process arguments.
 
 ## Known visibility limits
 
-The read API is local Unix-socket access only. There is no Prometheus endpoint, dashboard, SSE endpoint, or HTTP health endpoint. Query, log, and storage projections may be empty after reopening because their current application wiring is not fully rehydrated; durable lifecycle events are the stronger recovery signal. Controller phase CPU buckets are currently zero. Forensic and tracing log writers are best-effort.
+The read API is local Unix-socket access only; health and status do not have an HTTP endpoint. There is no Prometheus endpoint, dashboard, or SSE endpoint. Query, log, and storage projections may be empty after reopening because their current application wiring is not fully rehydrated; durable lifecycle events are the stronger recovery signal. The controller snapshot reports only `journal.db-wal` bytes, and phase CPU buckets are currently zero. Forensic and tracing log writers are best-effort.

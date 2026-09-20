@@ -1887,6 +1887,19 @@ fn validate_config_text(value: &str, field: &str) -> Result<(), GeneratorError> 
     Ok(())
 }
 
+/// Local runner selectors cannot claim namespaces reserved for GitHub-hosted
+/// images, regardless of which config or workflow generation path supplies
+/// them.
+fn validate_local_selector_label(label: &str, field: &str) -> Result<(), GeneratorError> {
+    validate_config_text(label, field)?;
+    if crate::s2::provider::is_github_hosted_image_label(label) {
+        return Err(GeneratorError::usage(format!(
+            "{field} cannot use GitHub-hosted image prefix `{label}`; local selectors need Velnor-owned labels"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn parse_runner_mode(value: &str) -> Result<RunnerMode, GeneratorError> {
     match value {
         "github" => Ok(RunnerMode::Github),
@@ -1981,7 +1994,7 @@ fn apply_lane_generation_config(
             ));
         }
         for label in labels {
-            validate_config_text(label, "[workflow] velnor_labels")?;
+            validate_local_selector_label(label, "[workflow] velnor_labels")?;
         }
         config.velnor_labels = labels.to_vec();
     }
@@ -1990,7 +2003,7 @@ fn apply_lane_generation_config(
         config.velnor_runner_group = Some(group.to_owned());
     }
     if let Some(label) = generation.velnor_trusted_label() {
-        validate_config_text(label, "[workflow] velnor_trusted_label")?;
+        validate_local_selector_label(label, "[workflow] velnor_trusted_label")?;
         config.velnor_trusted_label = Some(label.to_owned());
     }
     if let Some(available) = generation.velnor_trusted_runner_available() {
@@ -3216,6 +3229,12 @@ fn package_update_owner_blocks(config: &ProjectConfig) -> Vec<String> {
 /// runner can ever match: labels are a declared input, never a generator
 /// default.
 fn validate_runner_labels(config: &ProjectConfig) -> Result<(), GeneratorError> {
+    for label in &config.velnor_labels {
+        validate_local_selector_label(label, "[workflow] velnor_labels")?;
+    }
+    if let Some(label) = config.velnor_trusted_label.as_deref() {
+        validate_local_selector_label(label, "[workflow] velnor_trusted_label")?;
+    }
     let self_hosted =
         config.runners != RunnerMode::Github && (!config.units.is_empty() || config.docs.is_some());
     if self_hosted && config.velnor_labels.is_empty() {
@@ -8262,6 +8281,27 @@ mod tests {
             .map(|label| (*label).to_owned())
             .collect();
         config
+    }
+
+    #[test]
+    fn programmatic_local_labels_reject_hosted_image_prefixes() {
+        let mut config = scanned_fixture(RunnerMode::Velnor);
+        config.velnor_labels = vec!["self-hosted".to_owned(), "UbUnTu-26.04".to_owned()];
+        let error = must_fail(
+            validate_runner_labels(&config),
+            "programmatic local labels must reject hosted image prefixes",
+        )
+        .to_string();
+        assert!(error.contains("UbUnTu-26.04"), "{error}");
+
+        config.velnor_labels = vec!["self-hosted".to_owned()];
+        config.velnor_trusted_label = Some("WINDOWS-2025".to_owned());
+        let error = must_fail(
+            validate_runner_labels(&config),
+            "programmatic trusted labels must reject hosted image prefixes",
+        )
+        .to_string();
+        assert!(error.contains("WINDOWS-2025"), "{error}");
     }
 
     fn temporary_repository(name: &str) -> PathBuf {

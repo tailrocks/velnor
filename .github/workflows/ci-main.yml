@@ -642,7 +642,6 @@ jobs:
         crates/velnor-runner/debian/velnor-doctor.service
         crates/velnor-runner/debian/velnor-doctor@.service
         crates/velnor-runner/debian/velnor-guardian.service
-        crates/velnor-runner/debian/velnor-job@.service
         crates/velnor-runner/debian/velnor-jobs.slice
         crates/velnor-runner/debian/velnor-runner.tmpfiles
         crates/velnor-runner/debian/velnor-slot@.service
@@ -1038,7 +1037,6 @@ jobs:
         crates/velnor-runner/debian/velnor-doctor.service
         crates/velnor-runner/debian/velnor-doctor@.service
         crates/velnor-runner/debian/velnor-guardian.service
-        crates/velnor-runner/debian/velnor-job@.service
         crates/velnor-runner/debian/velnor-jobs.slice
         crates/velnor-runner/debian/velnor-runner.tmpfiles
         crates/velnor-runner/debian/velnor-slot@.service
@@ -1233,7 +1231,6 @@ jobs:
         crates/velnor-runner/debian/velnor-doctor.service
         crates/velnor-runner/debian/velnor-doctor@.service
         crates/velnor-runner/debian/velnor-guardian.service
-        crates/velnor-runner/debian/velnor-job@.service
         crates/velnor-runner/debian/velnor-jobs.slice
         crates/velnor-runner/debian/velnor-runner.tmpfiles
         crates/velnor-runner/debian/velnor-slot@.service
@@ -1436,7 +1433,6 @@ jobs:
         crates/velnor-runner/debian/velnor-doctor.service
         crates/velnor-runner/debian/velnor-doctor@.service
         crates/velnor-runner/debian/velnor-guardian.service
-        crates/velnor-runner/debian/velnor-job@.service
         crates/velnor-runner/debian/velnor-jobs.slice
         crates/velnor-runner/debian/velnor-runner.tmpfiles
         crates/velnor-runner/debian/velnor-slot@.service

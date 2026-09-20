@@ -95,8 +95,9 @@ remote registration shuts down dependent slots, while missing registration
 credentials fails closed.
 
 After successful work, a slot may prepare a successor before the current
-identity is consumed. Local failures use bounded retry and backoff; remote
-identity loss requires cleanup and re-registration.
+identity is consumed. Recoverable registration and network errors retry in the
+running process with backoff; systemd restarts only after a process exits.
+Remote identity loss requires cleanup and re-registration.
 
 For the broader component boundaries, ownership rules, and system invariants,
 see [Architecture](/concepts/architecture#velnor-architecture).

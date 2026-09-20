@@ -16,6 +16,7 @@
 //! shrinking values before the estate proof.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Mutex;
 
 /// A local lane sharing the one host-wide `N`. Mirrors C2 `PermitLane`.
@@ -45,6 +46,15 @@ pub struct LedgerHolder {
     pub lane: LedgerLane,
     pub state: LedgerPermitState,
     pub generation: u64,
+    pub lease_generation: u64,
+}
+
+/// Closed queue state used when an upstream terminal callback arrives for a
+/// request that never acquired a permit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LedgerDemandTerminalState {
+    Terminal,
+    Cancelled,
 }
 
 /// Outcome of [`CapacityLedger::acquire`]. Mirrors C2 `AcquireOutcome`.
@@ -53,6 +63,9 @@ pub enum AcquireOutcome {
     Acquired,
     AlreadyHeld,
     Full,
+    Deferred,
+    NotReady,
+    Closed,
     StaleGeneration,
     NotConfigured,
 }
@@ -63,6 +76,16 @@ pub struct ReconcileReport {
     pub adopted: Vec<String>,
     pub marked_uncertain: Vec<String>,
     pub confirmed: Vec<String>,
+}
+
+/// A durable Scale Set demand to mirror before admission starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LedgerDemandObservation {
+    pub holder: String,
+    pub lane: LedgerLane,
+    pub scope: String,
+    pub first_seen_unix: u64,
+    pub first_seen_subsec_nanos: u32,
 }
 
 /// Ledger failures. Mirrors C2 `LedgerError`.
@@ -119,43 +142,132 @@ pub trait CapacityLedger {
     ) -> Result<(), Self::Error> {
         Ok(())
     }
+    /// Observe demand with exact fractional age. Implementations without a
+    /// fractional queue may keep the whole-second behavior.
+    fn observe_demand_with_subsecond(
+        &mut self,
+        holder: &str,
+        lane: LedgerLane,
+        scope: &str,
+        first_seen_unix: u64,
+        _first_seen_subsec_nanos: u32,
+        observed_unix: u64,
+    ) -> Result<(), Self::Error> {
+        self.observe_demand(holder, lane, scope, first_seen_unix, observed_unix)
+    }
+    /// Restore a durable queue snapshot before acquisitions can race it.
+    /// Production's shared ledger overrides this with one atomic batch.
+    fn observe_demands(
+        &mut self,
+        demands: &[LedgerDemandObservation],
+        observed_unix: u64,
+    ) -> Result<(), Self::Error> {
+        for demand in demands {
+            self.observe_demand_with_subsecond(
+                &demand.holder,
+                demand.lane,
+                &demand.scope,
+                demand.first_seen_unix,
+                demand.first_seen_subsec_nanos,
+                observed_unix,
+            )?;
+        }
+        Ok(())
+    }
+    /// Publish a live Scale Set offer globally before the source database
+    /// can commit it as eligible. Production leaves a durable pending marker
+    /// until the source row is confirmed; lightweight ledgers preserve the
+    /// same queue age without cross-database coordination.
+    fn begin_scale_set_offer(
+        &mut self,
+        holder: &str,
+        scope: &str,
+        _source_db: &Path,
+        generation: u64,
+        first_seen: Option<(u64, u32)>,
+        _publication: &velnor_control::permit_ledger::ScaleSetDemandPublication,
+    ) -> Result<(u64, u32), Self::Error> {
+        let (now, nanos) = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| (elapsed.as_secs(), elapsed.subsec_nanos()))
+            .unwrap_or((0, 0));
+        let (first_seen_unix, first_seen_subsec_nanos) = first_seen.unwrap_or((now, nanos));
+        self.observe_demand_with_subsecond(
+            holder,
+            LedgerLane::ScaleSet,
+            scope,
+            first_seen_unix,
+            first_seen_subsec_nanos,
+            now,
+        )?;
+        let _ = generation;
+        Ok((first_seen_unix, first_seen_subsec_nanos))
+    }
+    /// Remove the live-offer pending marker after its source row commits.
+    fn complete_scale_set_offer(
+        &mut self,
+        _holder: &str,
+        _source_db: &Path,
+        _generation: u64,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
     /// Close unheld upstream demand that the lane confirmed is no longer
     /// eligible. A held permit must use one of the cleanup release methods.
     fn cancel_demand(&mut self, _holder: &str) -> Result<bool, Self::Error> {
         Ok(false)
     }
-    /// Acquire one permit for `holder`, fenced on `generation`. Idempotent
-    /// per holder: duplicates report [`AcquireOutcome::AlreadyHeld`].
-    fn acquire(
+    /// Acquire one permit for `holder`, fenced on `generation`, and return
+    /// the immutable lease identity for the successful/current hold.
+    fn acquire_with_lease_generation(
         &mut self,
         holder: &str,
         lane: LedgerLane,
         state: LedgerPermitState,
         generation: u64,
-    ) -> Result<AcquireOutcome, Self::Error>;
-    /// Move one held permit to a new state, fenced on `generation`.
-    fn transition(
+    ) -> Result<(AcquireOutcome, Option<u64>), Self::Error>;
+    /// Transition only the exact immutable permit lease. This cannot mutate
+    /// a replacement acquisition that reused the same holder.
+    fn transition_if_lease_generation(
         &mut self,
         holder: &str,
         state: LedgerPermitState,
-        generation: u64,
-    ) -> Result<(), Self::Error>;
-    /// Release one holder's permit. Unfenced by design; freeing capacity is
-    /// always safe. Returns whether a row was removed.
-    fn release(&mut self, holder: &str) -> Result<bool, Self::Error>;
-    /// Confirm a retry/handoff: free occupancy and put the same demand back
-    /// into the eligible queue without changing its original age.
-    fn release_to_eligible(&mut self, holder: &str) -> Result<bool, Self::Error> {
-        self.release(holder)
-    }
-    /// Confirm upstream cancellation: free occupancy and close its demand.
-    fn release_cancelled(&mut self, holder: &str) -> Result<bool, Self::Error> {
-        self.release(holder)
-    }
+        expected_lease_generation: u64,
+    ) -> Result<bool, Self::Error>;
+    /// Current immutable lease identity for one held permit.
+    fn permit_lease_generation(&self, holder: &str) -> Result<Option<u64>, Self::Error>;
+    /// Release the exact lease acquired by one attempt.
+    fn release_if_generation(
+        &mut self,
+        holder: &str,
+        expected_lease_generation: u64,
+    ) -> Result<bool, Self::Error>;
+    /// Release the exact lease and return its demand to the queue.
+    fn release_to_eligible_if_generation(
+        &mut self,
+        holder: &str,
+        expected_lease_generation: u64,
+    ) -> Result<bool, Self::Error>;
+    /// Release the exact lease and close the demand as cancelled.
+    fn release_cancelled_if_generation(
+        &mut self,
+        holder: &str,
+        expected_lease_generation: u64,
+    ) -> Result<bool, Self::Error>;
+    /// Close demand only while no permit is held; it cannot authorize a
+    /// permit deletion and is safe for unacquired terminal callbacks.
+    fn close_demand_if_unheld(
+        &mut self,
+        holder: &str,
+        state: LedgerDemandTerminalState,
+    ) -> Result<bool, Self::Error>;
     /// Keep occupancy and close demand after cleanup could not be confirmed.
-    fn retain_uncertain(&mut self, holder: &str, generation: u64) -> Result<(), Self::Error> {
-        self.transition(holder, LedgerPermitState::Uncertain, generation)
-    }
+    fn retain_uncertain_if_generation(
+        &mut self,
+        holder: &str,
+        expected_lease_generation: u64,
+    ) -> Result<bool, Self::Error>;
+
     /// Reconcile durable occupancy against the attested live set and mark
     /// this epoch reconciled. Never deletes: observed-but-unrecorded work
     /// is adopted, recorded-but-unobserved work is marked uncertain.
@@ -163,10 +275,18 @@ pub trait CapacityLedger {
         &mut self,
         alive: &[(&str, LedgerLane, LedgerPermitState)],
     ) -> Result<ReconcileReport, Self::Error>;
-
-    /// Whether a mutation error is generation fencing (re-read + retry)
-    /// rather than a hard failure.
-    fn is_stale_generation(error: &Self::Error) -> bool;
+    /// Reconcile the complete host source roster before reopening admission.
+    /// Lightweight ledgers keep the local behavior; the production adapter
+    /// scans every configured source and fences this with the sampled epoch.
+    fn reconcile_host_sources(
+        &mut self,
+        expected_generation: u64,
+        _required_demand_db: &Path,
+        alive: &[(&str, LedgerLane, LedgerPermitState)],
+    ) -> Result<ReconcileReport, Self::Error> {
+        let _ = expected_generation;
+        self.reconcile(alive)
+    }
 }
 
 /// In-memory [`CapacityLedger`] implementing the exact C2 state machine
@@ -182,7 +302,8 @@ struct MemLedgerState {
     max_jobs: Option<u32>,
     generation: u64,
     reconciled_generation: Option<u64>,
-    holders: HashMap<String, (LedgerLane, LedgerPermitState, u64)>,
+    next_lease_generation: u64,
+    holders: HashMap<String, (LedgerLane, LedgerPermitState, u64, u64)>,
 }
 
 impl MemLedger {
@@ -244,70 +365,139 @@ impl CapacityLedger for MemLedger {
         let mut holders: Vec<LedgerHolder> = state
             .holders
             .iter()
-            .map(|(holder, (lane, permit, generation))| LedgerHolder {
-                holder: holder.clone(),
-                lane: *lane,
-                state: *permit,
-                generation: *generation,
-            })
+            .map(
+                |(holder, (lane, permit, generation, lease_generation))| LedgerHolder {
+                    holder: holder.clone(),
+                    lane: *lane,
+                    state: *permit,
+                    generation: *generation,
+                    lease_generation: *lease_generation,
+                },
+            )
             .collect();
         holders.sort_by(|left, right| left.holder.cmp(&right.holder));
         Ok(holders)
     }
 
     fn holder_state(&self, holder: &str) -> Result<Option<LedgerPermitState>, Self::Error> {
-        Ok(self.lock().holders.get(holder).map(|(_, state, _)| *state))
+        Ok(self
+            .lock()
+            .holders
+            .get(holder)
+            .map(|(_, state, _, _)| *state))
     }
 
-    fn acquire(
+    fn acquire_with_lease_generation(
         &mut self,
         holder: &str,
         lane: LedgerLane,
         state: LedgerPermitState,
         generation: u64,
-    ) -> Result<AcquireOutcome, Self::Error> {
+    ) -> Result<(AcquireOutcome, Option<u64>), Self::Error> {
         let mut ledger = self.lock();
         if ledger.generation != generation {
-            return Ok(AcquireOutcome::StaleGeneration);
+            return Ok((AcquireOutcome::StaleGeneration, None));
         }
         let Some(max) = ledger.max_jobs else {
-            return Ok(AcquireOutcome::NotConfigured);
+            return Ok((AcquireOutcome::NotConfigured, None));
         };
-        if ledger.holders.contains_key(holder) {
-            return Ok(AcquireOutcome::AlreadyHeld);
+        if let Some((_, _, _, lease_generation)) = ledger.holders.get(holder) {
+            return Ok((AcquireOutcome::AlreadyHeld, Some(*lease_generation)));
         }
         if u64::try_from(ledger.holders.len()).unwrap_or(u64::MAX) >= u64::from(max) {
-            return Ok(AcquireOutcome::Full);
+            return Ok((AcquireOutcome::Full, None));
         }
-        ledger
-            .holders
-            .insert(holder.to_owned(), (lane, state, generation));
-        Ok(AcquireOutcome::Acquired)
+        ledger.next_lease_generation = ledger.next_lease_generation.saturating_add(1);
+        let lease_generation = ledger.next_lease_generation;
+        ledger.holders.insert(
+            holder.to_owned(),
+            (lane, state, generation, lease_generation),
+        );
+        Ok((AcquireOutcome::Acquired, Some(lease_generation)))
     }
 
-    fn transition(
+    fn transition_if_lease_generation(
         &mut self,
         holder: &str,
         state: LedgerPermitState,
-        generation: u64,
-    ) -> Result<(), Self::Error> {
+        expected_lease_generation: u64,
+    ) -> Result<bool, Self::Error> {
         let mut ledger = self.lock();
-        if ledger.generation != generation {
-            return Err(LedgerError::StaleGeneration {
-                expected: ledger.generation,
-                seen: generation,
-            });
-        }
-        let Some(entry) = ledger.holders.get_mut(holder) else {
-            return Err(LedgerError::UnknownHolder(holder.to_owned()));
+        let Some((_, current_state, _, lease_generation)) = ledger.holders.get_mut(holder) else {
+            return Ok(false);
         };
-        entry.1 = state;
-        entry.2 = generation;
-        Ok(())
+        if *lease_generation != expected_lease_generation {
+            return Ok(false);
+        }
+        *current_state = state;
+        Ok(true)
     }
 
-    fn release(&mut self, holder: &str) -> Result<bool, Self::Error> {
-        Ok(self.lock().holders.remove(holder).is_some())
+    fn permit_lease_generation(&self, holder: &str) -> Result<Option<u64>, Self::Error> {
+        Ok(self
+            .lock()
+            .holders
+            .get(holder)
+            .map(|(_, _, _, lease_generation)| *lease_generation))
+    }
+
+    fn release_if_generation(
+        &mut self,
+        holder: &str,
+        expected_lease_generation: u64,
+    ) -> Result<bool, Self::Error> {
+        let mut ledger = self.lock();
+        if ledger
+            .holders
+            .get(holder)
+            .is_some_and(|(_, _, _, generation)| *generation == expected_lease_generation)
+        {
+            ledger.holders.remove(holder);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn release_to_eligible_if_generation(
+        &mut self,
+        holder: &str,
+        expected_lease_generation: u64,
+    ) -> Result<bool, Self::Error> {
+        self.release_if_generation(holder, expected_lease_generation)
+    }
+
+    fn release_cancelled_if_generation(
+        &mut self,
+        holder: &str,
+        expected_lease_generation: u64,
+    ) -> Result<bool, Self::Error> {
+        self.release_if_generation(holder, expected_lease_generation)
+    }
+
+    fn close_demand_if_unheld(
+        &mut self,
+        holder: &str,
+        _state: LedgerDemandTerminalState,
+    ) -> Result<bool, Self::Error> {
+        Ok(!self.lock().holders.contains_key(holder))
+    }
+
+    fn retain_uncertain_if_generation(
+        &mut self,
+        holder: &str,
+        expected_lease_generation: u64,
+    ) -> Result<bool, Self::Error> {
+        let mut ledger = self.lock();
+        let current_generation = ledger.generation;
+        let Some((_, state, epoch, lease_generation)) = ledger.holders.get_mut(holder) else {
+            return Ok(false);
+        };
+        if *lease_generation != expected_lease_generation {
+            return Ok(false);
+        }
+        *state = LedgerPermitState::Uncertain;
+        *epoch = current_generation;
+        Ok(true)
     }
 
     fn reconcile(
@@ -321,9 +511,12 @@ impl CapacityLedger for MemLedger {
             if ledger.holders.contains_key(*holder) {
                 report.confirmed.push((*holder).to_owned());
             } else {
-                ledger
-                    .holders
-                    .insert((*holder).to_owned(), (*lane, *state, generation));
+                let lease_generation = ledger.next_lease_generation.saturating_add(1);
+                ledger.next_lease_generation = lease_generation;
+                ledger.holders.insert(
+                    (*holder).to_owned(),
+                    (*lane, *state, generation, lease_generation),
+                );
                 report.adopted.push((*holder).to_owned());
             }
         }
@@ -344,10 +537,6 @@ impl CapacityLedger for MemLedger {
         report.confirmed.sort();
         Ok(report)
     }
-
-    fn is_stale_generation(error: &Self::Error) -> bool {
-        matches!(error, LedgerError::StaleGeneration { .. })
-    }
 }
 
 /// Outcome of reserving one permit for a granted offer.
@@ -366,6 +555,7 @@ pub enum ReserveOutcome {
 #[derive(Debug)]
 pub enum ReserveError<E> {
     Ledger(E),
+    MissingLeaseGeneration,
     DoubleStale { seen: u64 },
 }
 
@@ -373,6 +563,9 @@ impl<E: std::fmt::Display> std::fmt::Display for ReserveError<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Ledger(error) => write!(f, "permit ledger reserve: {error}"),
+            Self::MissingLeaseGeneration => {
+                f.write_str("successful permit acquire returned no lease generation")
+            }
             Self::DoubleStale { seen } => write!(
                 f,
                 "permit ledger epoch moved twice during one reserve (seen {seen}); retry the poll"
@@ -385,7 +578,7 @@ impl<E: std::error::Error + Send + Sync + 'static> std::error::Error for Reserve
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Ledger(error) => Some(error),
-            Self::DoubleStale { .. } => None,
+            Self::MissingLeaseGeneration | Self::DoubleStale { .. } => None,
         }
     }
 }
@@ -398,10 +591,10 @@ pub fn reserve_for_offer<L: CapacityLedger>(
     ledger: &mut L,
     holder: &str,
     generation: u64,
-) -> Result<(ReserveOutcome, u64), ReserveError<L::Error>> {
+) -> Result<(ReserveOutcome, u64, Option<u64>), ReserveError<L::Error>> {
     let attempt = |ledger: &mut L, generation: u64| {
         ledger
-            .acquire(
+            .acquire_with_lease_generation(
                 holder,
                 LedgerLane::ScaleSet,
                 LedgerPermitState::Reserved,
@@ -409,22 +602,41 @@ pub fn reserve_for_offer<L: CapacityLedger>(
             )
             .map_err(ReserveError::Ledger)
     };
-    match attempt(ledger, generation)? {
-        AcquireOutcome::Acquired | AcquireOutcome::AlreadyHeld => {
-            Ok((ReserveOutcome::Reserved, generation))
+    let result = attempt(ledger, generation)?;
+    match result {
+        (AcquireOutcome::Acquired | AcquireOutcome::AlreadyHeld, Some(lease_generation)) => {
+            Ok((ReserveOutcome::Reserved, generation, Some(lease_generation)))
         }
-        AcquireOutcome::Full => Ok((ReserveOutcome::CapacityExhausted, generation)),
-        AcquireOutcome::NotConfigured => Ok((ReserveOutcome::NotConfigured, generation)),
-        AcquireOutcome::StaleGeneration => {
+        (AcquireOutcome::Acquired | AcquireOutcome::AlreadyHeld, None) => {
+            Err(ReserveError::MissingLeaseGeneration)
+        }
+        (AcquireOutcome::Full, _) => Ok((ReserveOutcome::CapacityExhausted, generation, None)),
+        (AcquireOutcome::NotConfigured, _) => Ok((ReserveOutcome::NotConfigured, generation, None)),
+        (AcquireOutcome::StaleGeneration, _) => {
             let fresh = ledger.generation().map_err(ReserveError::Ledger)?;
             match attempt(ledger, fresh)? {
-                AcquireOutcome::Acquired | AcquireOutcome::AlreadyHeld => {
-                    Ok((ReserveOutcome::Reserved, fresh))
+                (
+                    AcquireOutcome::Acquired | AcquireOutcome::AlreadyHeld,
+                    Some(lease_generation),
+                ) => Ok((ReserveOutcome::Reserved, fresh, Some(lease_generation))),
+                (AcquireOutcome::Acquired | AcquireOutcome::AlreadyHeld, None) => {
+                    Err(ReserveError::MissingLeaseGeneration)
                 }
-                AcquireOutcome::Full => Ok((ReserveOutcome::CapacityExhausted, fresh)),
-                AcquireOutcome::NotConfigured => Ok((ReserveOutcome::NotConfigured, fresh)),
-                AcquireOutcome::StaleGeneration => Err(ReserveError::DoubleStale { seen: fresh }),
+                (AcquireOutcome::Full, _) => Ok((ReserveOutcome::CapacityExhausted, fresh, None)),
+                (AcquireOutcome::NotConfigured, _) => {
+                    Ok((ReserveOutcome::NotConfigured, fresh, None))
+                }
+                (AcquireOutcome::StaleGeneration, _) => {
+                    Err(ReserveError::DoubleStale { seen: fresh })
+                }
+                (
+                    AcquireOutcome::Deferred | AcquireOutcome::NotReady | AcquireOutcome::Closed,
+                    _,
+                ) => Ok((ReserveOutcome::CapacityExhausted, fresh, None)),
             }
+        }
+        (AcquireOutcome::Deferred | AcquireOutcome::NotReady | AcquireOutcome::Closed, _) => {
+            Ok((ReserveOutcome::CapacityExhausted, generation, None))
         }
     }
 }
@@ -444,8 +656,9 @@ pub fn advertise_free<L: CapacityLedger>(ledger: &L) -> u32 {
 pub fn release_after_cleanup<L: CapacityLedger>(
     ledger: &mut L,
     holder: &str,
+    expected_lease_generation: u64,
 ) -> Result<bool, L::Error> {
-    ledger.release(holder)
+    ledger.release_if_generation(holder, expected_lease_generation)
 }
 
 #[cfg(test)]
@@ -480,8 +693,10 @@ mod tests {
         ledger.reconcile(&[]).unwrap();
         assert_eq!(advertise_free(&ledger), 2);
         let generation = ledger.generation().unwrap();
-        let (outcome, _) = reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
+        let (outcome, _, lease_generation) =
+            reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
         assert_eq!(outcome, ReserveOutcome::Reserved);
+        assert!(lease_generation.is_some());
         assert_eq!(advertise_free(&ledger), 1);
     }
 
@@ -490,14 +705,18 @@ mod tests {
         let mut ledger = ledgers();
         ledger.reconcile(&[]).unwrap();
         let generation = ledger.generation().unwrap();
-        let (first, _) = reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
-        let (again, _) = reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
+        let (first, _, first_lease) =
+            reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
+        let (again, _, again_lease) =
+            reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
         assert_eq!(first, ReserveOutcome::Reserved);
         assert_eq!(again, ReserveOutcome::Reserved);
+        assert_eq!(first_lease, again_lease);
         assert_eq!(ledger.occupied().unwrap(), 1);
         let _ = reserve_for_offer(&mut ledger, "scaleset/7/2", generation).unwrap();
-        let (full, _) = reserve_for_offer(&mut ledger, "scaleset/7/3", generation).unwrap();
+        let (full, _, lease) = reserve_for_offer(&mut ledger, "scaleset/7/3", generation).unwrap();
         assert_eq!(full, ReserveOutcome::CapacityExhausted);
+        assert_eq!(lease, None);
     }
 
     #[test]
@@ -507,9 +726,11 @@ mod tests {
         let stale = ledger.generation().unwrap();
         ledger.begin_epoch();
         ledger.reconcile(&[]).unwrap();
-        let (outcome, landed) = reserve_for_offer(&mut ledger, "scaleset/7/9", stale).unwrap();
+        let (outcome, landed, lease) =
+            reserve_for_offer(&mut ledger, "scaleset/7/9", stale).unwrap();
         assert_eq!(outcome, ReserveOutcome::Reserved);
         assert_eq!(landed, stale + 1);
+        assert!(lease.is_some());
     }
 
     #[test]
@@ -517,7 +738,7 @@ mod tests {
         let mut ledger = ledgers();
         let generation = ledger.generation().unwrap();
         ledger
-            .acquire(
+            .acquire_with_lease_generation(
                 "scaleset/7/1",
                 LedgerLane::ScaleSet,
                 LedgerPermitState::Running,

@@ -3065,6 +3065,26 @@ mod tests {
     }
 
     #[test]
+    fn validate_job_rejects_missing_attestations_write_permission() {
+        let mut target = job(
+            "actions/attest-build-provenance",
+            Some("0f67c3f4856b2e3261c31976d6725780e5e4c373"),
+            serde_json::json!({"subject-path": "dist/*.tar.gz"}),
+        );
+        target
+            .variables
+            .get_mut("system.github.token.permissions")
+            .unwrap()
+            .value = Some(r#"{"Contents":"read"}"#.into());
+
+        let errors = violations(&target);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].field, "permissions.attestations");
+        assert_eq!(errors[0].received, "absent");
+        assert_eq!(errors[0].accepted, vec![String::from("write")]);
+    }
+
+    #[test]
     fn validate_job_rejects_missing_attestation_id_token_endpoint() {
         let mut target = job(
             "actions/attest-build-provenance",

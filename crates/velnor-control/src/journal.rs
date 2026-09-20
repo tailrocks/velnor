@@ -26,11 +26,12 @@ pub const MIN_SQLITE_VERSION: (u32, u32, u32) = (3, 51, 3);
 /// Current journal schema. Older writers seeing a higher `PRAGMA user_version`
 /// must not apply events (N-1 must not clobber an N writer's log).
 ///
-/// Every terminal-affecting event rides a bump here. `Journal::open` stamps
-/// the current version onto an older journal *before* any event may be
-/// written, so a binary that predates the bump refuses the file outright
-/// instead of decoding it with an incomplete event vocabulary.
-pub const JOURNAL_SCHEMA_VERSION: u32 = 14;
+/// Every serialized event-vocabulary change, including nested enum variants,
+/// rides a bump here. `Journal::open` stamps the current version onto an older
+/// journal *before* any event may be written, so a binary that predates the
+/// bump refuses the file outright instead of decoding it with an incomplete
+/// event vocabulary.
+pub const JOURNAL_SCHEMA_VERSION: u32 = 16;
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const SETUP_RETRIES: u32 = 5;
@@ -528,6 +529,11 @@ pub struct JobRecord {
     /// ambiguity.
     #[serde(default)]
     pub acquisition_loss_unproven: bool,
+    /// Pre-release proof for a confirmed acquisition loss. Its exact permit
+    /// must be idempotently released before `JobAcquisitionLost` may remove
+    /// this provisional row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acquisition_loss_proof: Option<AcquisitionLossProof>,
     /// Durable count of spent recovery probes. Only the reducer moves it.
     pub probe_attempts: u32,
     /// Wall-clock instant past which this provisional row is unresolvable.
@@ -546,11 +552,15 @@ pub struct NativePermitLease {
     pub generation: u64,
 }
 
-/// Run-service terminal evidence that permits a provisional acquisition to
-/// be forgotten after its exact host permit lease is released.
+/// Durable evidence that permits a provisional acquisition to be forgotten
+/// after its exact host permit lease is released.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AcquisitionLossSource {
+    /// The local admission fence stopped the flow before `acquirejob` was
+    /// first polled, so the provisional request is still eligible for
+    /// broker redelivery.
+    AcquireJobNotSent,
     /// The typed acquire-job response proves the request is no longer live.
     AcquireJobNotFound,
     /// `renewjob` proves this runner does not own the acquired job.
@@ -779,6 +789,14 @@ pub enum Event {
         /// their provisional row; a human-readable reason is not proof.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         proof: Option<AcquisitionLossProof>,
+    },
+    /// Durable pre-release proof for a no-send or exact not-found verdict.
+    /// Recovery keeps the provisional row and lease until it has idempotently
+    /// released that permit and commits `JobAcquisitionLost`.
+    JobAcquisitionLossProofRecorded {
+        job_id: JobId,
+        generation: Generation,
+        proof: AcquisitionLossProof,
     },
     JobOwned {
         job_id: JobId,
@@ -1120,6 +1138,7 @@ fn reduce_job_acquisition_intended(
         runner_request_id,
         permit_lease,
         acquisition_loss_unproven: false,
+        acquisition_loss_proof: None,
         probe_attempts: 0,
         probe_deadline_unix: intended_unix.saturating_add(ACQUISITION_RESOLUTION_SECONDS),
     });
@@ -1188,6 +1207,7 @@ fn reduce_job_acquisition_rebuilt(
         runner_request_id,
         permit_lease,
         acquisition_loss_unproven: false,
+        acquisition_loss_proof: None,
         probe_attempts: 0,
         probe_deadline_unix,
     });
@@ -1232,6 +1252,25 @@ fn validate_job_identity_uniqueness(jobs: &[JobRecord]) -> StoreResult<()> {
     let mut request_ids = HashSet::with_capacity(jobs.len());
     let mut permit_leases = HashSet::with_capacity(jobs.len());
     for job in jobs {
+        if let Some(proof) = &job.acquisition_loss_proof
+            && (!job.provisional
+                || job.acquisition_loss_unproven
+                || !matches!(
+                    proof.source,
+                    AcquisitionLossSource::AcquireJobNotSent
+                        | AcquisitionLossSource::AcquireJobNotFound
+                )
+                || !native_permit_lease_is_valid(&proof.permit_lease)
+                || job.permit_lease.as_ref() != Some(&proof.permit_lease))
+        {
+            return Err(invalid_materialized(
+                "job acquisition loss proof",
+                &format!(
+                    "job {} generation {} has a pre-release proof without its exact provisional permit",
+                    job.job_id.0, job.generation.0
+                ),
+            ));
+        }
         if !job.runner_request_id.is_empty()
             && (request_ids.contains(job.job_id.0.as_str())
                 || job_ids.contains(job.runner_request_id.as_str()))
@@ -1306,6 +1345,7 @@ fn reduce_job_acquisition_resolved(
         None => None,
     };
     let invalid = row.acquisition_loss_unproven
+        || row.acquisition_loss_proof.is_some()
         || state_has_unknown_request_identity(state)
         || acquired_job_id.0.is_empty()
         || plan_id.is_empty()
@@ -1347,6 +1387,51 @@ fn reduce_job_acquisition_resolved(
     row.plan_id = plan_id;
     row.runner_request_id = resolved_request_id.unwrap_or_default();
     false
+}
+
+fn reduce_job_acquisition_loss_proof_recorded(
+    state: &mut FleetState,
+    job_id: JobId,
+    generation: Generation,
+    proof: AcquisitionLossProof,
+) -> bool {
+    let matches: Vec<_> = state
+        .jobs
+        .iter()
+        .enumerate()
+        .filter(|(_, job)| job.job_id == job_id && job.generation == generation)
+        .map(|(index, _)| index)
+        .collect();
+    let [index] = matches.as_slice() else {
+        return true;
+    };
+    let index = *index;
+    let row = &state.jobs[index];
+    let valid = row.provisional
+        && !row.acquisition_loss_unproven
+        && matches!(
+            proof.source,
+            AcquisitionLossSource::AcquireJobNotSent | AcquisitionLossSource::AcquireJobNotFound
+        )
+        && native_permit_lease_is_valid(&proof.permit_lease)
+        && row.permit_lease.as_ref() == Some(&proof.permit_lease)
+        && state
+            .jobs
+            .iter()
+            .filter(|job| job.permit_lease.as_ref() == Some(&proof.permit_lease))
+            .count()
+            == 1;
+    if !valid {
+        return true;
+    }
+
+    match &state.jobs[index].acquisition_loss_proof {
+        None => {
+            state.jobs[index].acquisition_loss_proof = Some(proof);
+            false
+        }
+        Some(recorded) => recorded != &proof,
+    }
 }
 
 fn reduce_job_owned(
@@ -1394,6 +1479,7 @@ fn reduce_job_owned(
                 let source = &state.jobs[index];
                 if !source.provisional
                     || source.acquisition_loss_unproven
+                    || source.acquisition_loss_proof.is_some()
                     || source.slot_id != slot_id
                 {
                     if source.slot_id != slot_id {
@@ -1447,6 +1533,7 @@ fn reduce_job_owned(
         // occupied forensic rows. They cannot be started, completed, or freed
         // by a worker-loss event under the current vocabulary.
         acquisition_loss_unproven: unknown_identity,
+        acquisition_loss_proof: None,
         probe_attempts: 0,
         probe_deadline_unix: 0,
     };
@@ -1481,7 +1568,21 @@ pub fn reduce(state: FleetState, event: Event) -> ReduceOutcome {
 /// written. Event history must not re-read wall clock: doing so changes
 /// heartbeat ages and completion deadlines every time the journal replays.
 #[must_use]
-fn reduce_at(mut state: FleetState, event: Event, recorded_unix: u64) -> ReduceOutcome {
+fn reduce_at(state: FleetState, event: Event, recorded_unix: u64) -> ReduceOutcome {
+    reduce_at_with_pre_v16_migration_semantics(state, event, recorded_unix, false)
+}
+
+/// Replay an already committed pre-v16 log during migration. Before v16, the
+/// terminal event itself carried the release proof; this migration-only mode
+/// accepts that historical form so the checked projection can be rebased
+/// before v16 writers begin requiring a separate durable prepare event.
+#[must_use]
+fn reduce_at_with_pre_v16_migration_semantics(
+    mut state: FleetState,
+    event: Event,
+    recorded_unix: u64,
+    accept_legacy_release_event: bool,
+) -> ReduceOutcome {
     let mut commands = Vec::new();
     let mut rejected = false;
     match event {
@@ -1707,9 +1808,20 @@ fn reduce_at(mut state: FleetState, event: Event, recorded_unix: u64) -> ReduceO
                 job.job_id == job_id && job.generation == generation && job.provisional
             });
             match row {
-                Some(row) => row.probe_attempts = row.probe_attempts.saturating_add(1),
+                Some(row) if row.acquisition_loss_proof.is_none() => {
+                    row.probe_attempts = row.probe_attempts.saturating_add(1);
+                }
+                Some(_) => rejected = true,
                 None => rejected = true,
             }
+        }
+        Event::JobAcquisitionLossProofRecorded {
+            job_id,
+            generation,
+            proof,
+        } => {
+            rejected =
+                reduce_job_acquisition_loss_proof_recorded(&mut state, job_id, generation, proof);
         }
         Event::JobAcquisitionLost {
             job_id,
@@ -1733,7 +1845,8 @@ fn reduce_at(mut state: FleetState, event: Event, recorded_unix: u64) -> ReduceO
                 let index = matches[0];
                 let proof_matches = state.jobs[index].provisional
                     && proof.as_ref().is_some_and(|proof| {
-                        state.jobs[index].permit_lease.as_ref() == Some(&proof.permit_lease)
+                        native_permit_lease_is_valid(&proof.permit_lease)
+                            && state.jobs[index].permit_lease.as_ref() == Some(&proof.permit_lease)
                             && state
                                 .jobs
                                 .iter()
@@ -1742,6 +1855,23 @@ fn reduce_at(mut state: FleetState, event: Event, recorded_unix: u64) -> ReduceO
                                 })
                                 .count()
                                 == 1
+                            && match proof.source {
+                                AcquisitionLossSource::AcquireJobNotSent
+                                | AcquisitionLossSource::AcquireJobNotFound => {
+                                    if accept_legacy_release_event
+                                        && state.jobs[index].acquisition_loss_proof.is_none()
+                                    {
+                                        true
+                                    } else {
+                                        !state.jobs[index].acquisition_loss_unproven
+                                            && state.jobs[index].acquisition_loss_proof.as_ref()
+                                                == Some(proof)
+                                    }
+                                }
+                                AcquisitionLossSource::RenewJobNotOurs => {
+                                    state.jobs[index].acquisition_loss_proof.is_none()
+                                }
+                            }
                     });
                 if proof_matches {
                     restore_slot_after_job_removal(&mut state, &mut commands, &job_id);
@@ -1751,7 +1881,11 @@ fn reduce_at(mut state: FleetState, event: Event, recorded_unix: u64) -> ReduceO
                     // the exact lease and sticky ambiguity so later
                     // same-ID intent/owned/worker-lost events cannot make that
                     // deletion appear valid under the v12 vocabulary.
-                    state.jobs[index].acquisition_loss_unproven = true;
+                    // A mismatched final proof must leave a recorded no-send
+                    // proof resumable after restart.
+                    if state.jobs[index].acquisition_loss_proof.is_none() {
+                        state.jobs[index].acquisition_loss_unproven = true;
+                    }
                     rejected = true;
                 }
             }
@@ -2964,7 +3098,12 @@ fn setup_journal(conn: &mut Connection) -> StoreResult<()> {
     migrate_v11_to_v12(&transaction, stored)?;
     migrate_v12_to_v13(&transaction, stored)?;
     migrate_v13_to_v14(&transaction, stored)?;
-    if stored < JOURNAL_SCHEMA_VERSION && (had_journal_tables || initially_fresh) {
+    migrate_v14_to_v15(&transaction)?;
+    migrate_v15_to_v16(&transaction, stored)?;
+    // v14 introduced the replay baseline. Later vocabulary/shape upgrades
+    // preserve that checksummed snapshot; only older sources need a baseline
+    // installed from migrated materialization.
+    if stored < 14 && (had_journal_tables || initially_fresh) {
         install_replay_baseline(&transaction)?;
     }
     transaction.commit()?;
@@ -3097,11 +3236,11 @@ fn verify_pending_migration_integrity_before_wal(
     // loader; malformed meta, negative timestamps/generations, invalid bools,
     // and bad lease JSON fail here without changing the file.
     let current_materialized = load_materialized_state(conn)?;
-    if stored == JOURNAL_SCHEMA_VERSION {
+    if stored >= 14 {
         if load_replay_baseline(conn)?.is_none() {
-            return Err(replay_baseline_error(
-                "current-schema journal has no committed event-tail watermark",
-            ));
+            return Err(replay_baseline_error(format!(
+                "schema-v{stored} journal has no committed event-tail watermark"
+            )));
         }
     } else if table_exists(conn, "meta")?
         && conn
@@ -3118,7 +3257,7 @@ fn verify_pending_migration_integrity_before_wal(
             "journal.schema.mismatch",
         )
         .with_remediation(format!(
-            "preserve the schema-v{stored} journal unchanged; replay baseline is only valid in schema v{JOURNAL_SCHEMA_VERSION}"
+            "preserve the schema-v{stored} journal unchanged; replay baseline is only valid in schema v14 or later"
         )));
     }
     if stored == 11 || stored == 12 {
@@ -3127,6 +3266,12 @@ fn verify_pending_migration_integrity_before_wal(
         // heartbeat, and outbox identities before WAL.
         let replayed = load_state_from_conn(conn)?;
         ensure_v11_replay_preserves_materialized_evidence(&current_materialized, &replayed)?;
+    }
+    if (14..16).contains(&stored) {
+        // v14/v15 already carry a replay baseline, so verify the full suffix
+        // projection while still in the read-only preflight. A bad source
+        // must fail before journal_mode=WAL, DDL, or schema stamping.
+        verify_pre_v16_migration_projection(conn)?;
     }
     Ok(())
 }
@@ -3423,7 +3568,20 @@ fn decode_event_for_schema(payload: &str, stored: u32) -> StoreResult<Event> {
     let has_v12_field = raw.as_object().is_some_and(|object| {
         event_type == Some("job_acquisition_lost") && object.contains_key("proof")
     });
-    if newer_variant || (stored < 11 && has_v11_field) || (stored < 12 && has_v12_field) {
+    let has_v15_acquisition_loss_source = event_type == Some("job_acquisition_lost")
+        && raw
+            .get("proof")
+            .and_then(|proof| proof.get("source"))
+            .and_then(serde_json::Value::as_str)
+            == Some("acquire_job_not_sent");
+    let has_v16_acquisition_loss_proof_event =
+        event_type == Some("job_acquisition_loss_proof_recorded");
+    if newer_variant
+        || (stored < 11 && has_v11_field)
+        || (stored < 12 && has_v12_field)
+        || (stored < 15 && has_v15_acquisition_loss_source)
+        || (stored < 16 && has_v16_acquisition_loss_proof_event)
+    {
         return Err(StoreError::new(
             velnor_model::ExitClass::Conflict,
             "journal.event.unknown",
@@ -3534,6 +3692,13 @@ fn validate_schema_catalog_before_migration(conn: &Connection, stored: u32) -> S
             ));
         }
 
+        if name.eq_ignore_ascii_case("journal_write_gate_v15") {
+            return Err(journal_schema_catalog_mismatch(
+                stored,
+                "reserved v15 write-gate rebuild name is occupied",
+            ));
+        }
+
         if name.eq_ignore_ascii_case("events_generation_kind_id_idx") {
             let expected_sql = normalize_schema_sql(
                 "CREATE INDEX events_generation_kind_id_idx
@@ -3584,6 +3749,7 @@ fn validate_schema_catalog_before_migration(conn: &Connection, stored: u32) -> S
             .iter()
             .any(|table| name.eq_ignore_ascii_case(table))
             || name.eq_ignore_ascii_case("journal_write_gate")
+            || name.eq_ignore_ascii_case("journal_write_gate_v15")
             // The v2→v3 migration creates this staging table, inserts the
             // replacement outbox, then drops the old table before renaming
             // the stage. An extension FK to this reserved target could be
@@ -3701,10 +3867,19 @@ fn preflight_schema_snapshot(conn: &Connection) -> StoreResult<(u32, OutboxSchem
             "acquisition_loss_unproven is present before the v12 migration",
         ));
     }
+    if stored < 16 && table_has_column(conn, "jobs", "acquisition_loss_proof")? {
+        return Err(jobs_column_schema_mismatch(
+            stored,
+            "acquisition_loss_proof is present before the v16 migration",
+        ));
+    }
     if stored == 11 && !jobs_v11_shape_matches(conn)? {
         return Err(jobs_schema_mismatch(stored));
     }
-    if stored >= 12 && !jobs_v12_shape_matches(conn)? {
+    if (12..16).contains(&stored) && !jobs_v12_shape_matches(conn)? {
+        return Err(jobs_schema_mismatch(stored));
+    }
+    if stored >= 16 && !jobs_v16_shape_matches(conn)? {
         return Err(jobs_schema_mismatch(stored));
     }
     Ok((stored, outbox_shape))
@@ -3751,7 +3926,8 @@ fn validate_recorded_migration_shape(
             7 | 8 => jobs_shape_matches_version(conn, 8)?,
             9 | 10 => jobs_shape_matches_version(conn, 10)?,
             11 => jobs_v11_shape_matches(conn)?,
-            12 | 13 | 14 => jobs_v12_shape_matches(conn)?,
+            12 | 13 | 14 | 15 => jobs_v12_shape_matches(conn)?,
+            16 => jobs_v16_shape_matches(conn)?,
             _ => false,
         };
         if !jobs_match {
@@ -3979,13 +4155,12 @@ fn explicit_capacity_invalid_marker(conn: &Connection) -> StoreResult<bool> {
 }
 
 fn install_replay_baseline(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
-    let (event_count, through_event_id): (i64, i64) = tx.query_row(
-        "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM events",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
     let mut state = load_materialized_state(tx)?;
-    let event_projection = load_state_from_conn(tx)?;
+    // A pre-v14 history may contain terminal release evidence in the old
+    // event itself. This migration-only replay mode preserves that meaning;
+    // current v16 writes still use the strict reducer and require a durable
+    // pre-release proof event.
+    let event_projection = load_pre_v16_semantic_state(tx)?;
     let materialized_pending = sorted_pending_outbox(&state);
     let event_pending = sorted_pending_outbox(&event_projection);
     if event_pending
@@ -4018,6 +4193,20 @@ fn install_replay_baseline(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
             .then_with(|| left.generation.0.cmp(&right.generation.0))
     });
     state.outbox = archived_outbox;
+    store_replay_baseline(tx, &state, false)
+}
+
+fn store_replay_baseline(
+    tx: &rusqlite::Transaction<'_>,
+    state: &FleetState,
+    replace_existing: bool,
+) -> StoreResult<()> {
+    let (event_count, through_event_id): (i64, i64) = tx.query_row(
+        "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM events",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let mut state = state.clone();
     // These latches are direct meta writes, so they are copied from the live
     // snapshot on each comparison rather than frozen into the event baseline.
     state.drain_active = false;
@@ -4042,10 +4231,18 @@ fn install_replay_baseline(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
         .with_remediation(error.to_string())
     })?;
     open_journal_write_gate(tx)?;
-    tx.execute(
-        "INSERT INTO meta (key, value) VALUES ('replay_baseline', ?1)",
-        [value],
-    )?;
+    if replace_existing {
+        tx.execute(
+            "INSERT INTO meta (key, value) VALUES ('replay_baseline', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [value],
+        )?;
+    } else {
+        tx.execute(
+            "INSERT INTO meta (key, value) VALUES ('replay_baseline', ?1)",
+            [value],
+        )?;
+    }
     close_journal_write_gate(tx)?;
     Ok(())
 }
@@ -4111,6 +4308,36 @@ fn current_projection_mismatch_fields(
     fields
 }
 
+fn verify_pre_v16_migration_projection(conn: &Connection) -> StoreResult<FleetState> {
+    let stored_raw: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let stored =
+        u32::try_from(stored_raw).map_err(|_| journal_schema_version_invalid(stored_raw))?;
+    if !(14..16).contains(&stored) {
+        return Err(journal_schema_version_invalid(stored_raw));
+    }
+
+    let mut replayed = load_pre_v16_migration_state(conn)?;
+    let materialized = load_materialized_state(conn)?;
+    // Drain and admission are direct meta writes, not events. Compare the
+    // replayed durable projection after applying those two live latches.
+    replayed.drain_active = materialized.drain_active;
+    replayed.drain_version = materialized.drain_version;
+    replayed.admission_blocked = materialized.admission_blocked;
+    replayed.admission_version = materialized.admission_version;
+    let mismatches = current_projection_mismatch_fields(&replayed, &materialized);
+    if !mismatches.is_empty() {
+        return Err(StoreError::new(
+            velnor_model::ExitClass::Conflict,
+            "journal.materialized.replay.mismatch",
+        )
+        .with_remediation(format!(
+            "preserve the schema-v{stored} journal unchanged; materialized projection differs from accepted event history in {}",
+            mismatches.join(", ")
+        )));
+    }
+    Ok(replayed)
+}
+
 fn sorted_pending_outbox(state: &FleetState) -> Vec<OutboxRecord> {
     let mut pending: Vec<_> = state
         .outbox
@@ -4135,17 +4362,46 @@ fn load_state_from_conn_with_policy(
     conn: &Connection,
     reject_current_replay_events: bool,
 ) -> StoreResult<FleetState> {
+    load_state_from_conn_with_replay_policy(conn, reject_current_replay_events, false, false, false)
+}
+
+/// Strict pre-v16 replay used only to validate and rebase an existing v14/v15
+/// baseline before schema migration. The old terminal event carried its own
+/// proof, so this mode preserves that historical reducer behavior while
+/// rejecting gaps, invalid IDs, and reducer-rejected events.
+fn load_pre_v16_migration_state(conn: &Connection) -> StoreResult<FleetState> {
+    load_state_from_conn_with_replay_policy(conn, false, true, true, true)
+}
+
+/// Migration-only replay for installing the first baseline when upgrading a
+/// schema older than v14. It preserves pre-v16 terminal-event semantics; no
+/// current writer reaches this path.
+fn load_pre_v16_semantic_state(conn: &Connection) -> StoreResult<FleetState> {
+    load_state_from_conn_with_replay_policy(conn, false, true, true, false)
+}
+
+fn load_state_from_conn_with_replay_policy(
+    conn: &Connection,
+    reject_current_replay_events: bool,
+    accept_legacy_release_event: bool,
+    use_pre_v16_baseline: bool,
+    reject_pre_v16_replay_events: bool,
+) -> StoreResult<FleetState> {
     // Journal open succeeded, so the file is writable unless a later apply
     // fails; recovery treats an opened journal as writable.
     let materialized = load_materialized_state(conn)?;
     let stored_raw: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     let stored =
         u32::try_from(stored_raw).map_err(|_| journal_schema_version_invalid(stored_raw))?;
-    let replay_baseline = if stored == JOURNAL_SCHEMA_VERSION {
+    let use_replay_baseline =
+        stored == JOURNAL_SCHEMA_VERSION || (use_pre_v16_baseline && (14..16).contains(&stored));
+    let strict_replay = (reject_current_replay_events && stored == JOURNAL_SCHEMA_VERSION)
+        || (reject_pre_v16_replay_events && (14..16).contains(&stored));
+    let replay_baseline = if use_replay_baseline {
         let baseline = load_replay_baseline(conn)?;
-        if reject_current_replay_events && baseline.is_none() {
+        if strict_replay && baseline.is_none() {
             return Err(replay_baseline_error(
-                "current-schema journal has no committed event-tail watermark",
+                "migration source has no committed event-tail watermark",
             ));
         }
         baseline
@@ -4180,7 +4436,7 @@ fn load_state_from_conn_with_policy(
         })?;
         for row in rows {
             let (id, generation, kind, payload, checksum, recorded_unix) = row?;
-            if reject_current_replay_events && stored == JOURNAL_SCHEMA_VERSION && id <= 0 {
+            if strict_replay && id <= 0 {
                 return Err(StoreError::new(
                     velnor_model::ExitClass::Conflict,
                     "journal.event.id.invalid",
@@ -4208,7 +4464,7 @@ fn load_state_from_conn_with_policy(
                 .with_remediation("the event log failed integrity verification"));
             }
             let recorded_unix = i64_u64(recorded_unix, "event recorded_unix")?;
-            let event = decode_current_event(&payload)?;
+            let event = decode_event_for_schema(&payload, stored)?;
             if kind != event_kind(&event)
                 || i64_u64(generation, "event generation")? != event_generation(&event).0
             {
@@ -4223,7 +4479,7 @@ fn load_state_from_conn_with_policy(
             {
                 continue;
             }
-            if reject_current_replay_events && stored == JOURNAL_SCHEMA_VERSION {
+            if strict_replay {
                 if id != expected_current_id {
                     return Err(StoreError::new(
                         velnor_model::ExitClass::Conflict,
@@ -4235,15 +4491,19 @@ fn load_state_from_conn_with_policy(
                 }
                 expected_current_id = expected_current_id.saturating_add(1);
             }
-            let outcome = reduce_at(state, event, recorded_unix);
-            if reject_current_replay_events && stored == JOURNAL_SCHEMA_VERSION && outcome.rejected
-            {
+            let outcome = reduce_at_with_pre_v16_migration_semantics(
+                state,
+                event,
+                recorded_unix,
+                accept_legacy_release_event,
+            );
+            if strict_replay && outcome.rejected {
                 return Err(StoreError::new(
                     velnor_model::ExitClass::Conflict,
                     "journal.event.replay.rejected",
                 )
                 .with_remediation(format!(
-                    "preserve the journal unchanged; current-schema event at row {id} was rejected by the reducer"
+                    "preserve the journal unchanged; replay event at row {id} was rejected by the source reducer"
                 )));
             }
             state = outcome.state;
@@ -4376,7 +4636,7 @@ fn replay_legacy_events(
             _ => 0,
         };
         recorded_by_id.insert(id, recorded_unix);
-        state = reduce_at(state, event, recorded_unix).state;
+        state = reduce_at_with_pre_v16_migration_semantics(state, event, recorded_unix, true).state;
     }
     state.capacity_invalid |= materialized.capacity_invalid;
     state.capacity_invalid |= state_capacity_invalid(&state) || legacy_slots_schema(conn)?;
@@ -4528,11 +4788,13 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
     let permit_lease = materialized_column_projection(conn, "jobs", "permit_lease", "NULL")?;
     let loss_flag_projection =
         materialized_column_projection(conn, "jobs", "acquisition_loss_unproven", "0")?;
+    let loss_proof_projection =
+        materialized_column_projection(conn, "jobs", "acquisition_loss_proof", "NULL")?;
     let mut statement = conn.prepare(&format!(
         "SELECT job_id, slot_id, generation, attempt, worker, phase, accepted_unix,
                 {terminal_conclusion}, {provisional}, {plan_id}, {run_service_url},
                 {probe_attempts}, {probe_deadline_unix}, {runner_request_id}, {permit_lease},
-                {loss_flag_projection}
+                {loss_flag_projection}, {loss_proof_projection}
          FROM jobs ORDER BY rowid"
     ))?;
     let rows = statement.query_map([], |row| {
@@ -4553,6 +4815,7 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
             row.get::<_, String>(13)?,
             row.get::<_, Option<String>>(14)?,
             row.get::<_, i64>(15)?,
+            row.get::<_, Option<String>>(16)?,
         ))
     })?;
     for row in rows {
@@ -4573,11 +4836,19 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
             runner_request_id,
             permit_lease,
             acquisition_loss_unproven,
+            acquisition_loss_proof,
         ) = row?;
         let permit_lease = permit_lease
             .map(|value| {
                 serde_json::from_str(&value)
                     .map_err(|error| invalid_materialized("job permit lease", &error.to_string()))
+            })
+            .transpose()?;
+        let acquisition_loss_proof = acquisition_loss_proof
+            .map(|value| {
+                serde_json::from_str(&value).map_err(|error| {
+                    invalid_materialized("job acquisition loss proof", &error.to_string())
+                })
             })
             .transpose()?;
         state.jobs.push(JobRecord {
@@ -4598,6 +4869,7 @@ fn load_materialized_state(conn: &Connection) -> StoreResult<FleetState> {
                 acquisition_loss_unproven,
                 "job acquisition_loss_unproven",
             )?,
+            acquisition_loss_proof,
             probe_attempts: i64_u32(probe_attempts, "job probe_attempts")?,
             probe_deadline_unix: i64_u64(probe_deadline_unix, "job probe_deadline_unix")?,
         });
@@ -4791,7 +5063,15 @@ fn open_journal_write_gate(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
     if !journal_write_gate_schema_matches(tx)? || journal_write_gate_has_open_row(tx)? {
         return Err(journal_write_gate_schema_mismatch(JOURNAL_SCHEMA_VERSION));
     }
-    let inserted = tx.execute("INSERT INTO journal_write_gate (id) VALUES (1)", [])?;
+    let stored: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let inserted = if stored >= 16 {
+        tx.execute(
+            "INSERT INTO journal_write_gate (id, schema_version) VALUES (1, 16)",
+            [],
+        )?
+    } else {
+        tx.execute("INSERT INTO journal_write_gate (id) VALUES (1)", [])?
+    };
     if inserted != 1 || !journal_write_gate_has_open_row(tx)? {
         return Err(journal_write_gate_schema_mismatch(JOURNAL_SCHEMA_VERSION));
     }
@@ -4815,6 +5095,18 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
     let stored_raw: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     let stored =
         u32::try_from(stored_raw).map_err(|_| journal_schema_version_invalid(stored_raw))?;
+    let has_acquisition_loss_proof = table_has_column(tx, "jobs", "acquisition_loss_proof")?;
+    if !has_acquisition_loss_proof
+        && state
+            .jobs
+            .iter()
+            .any(|job| job.acquisition_loss_proof.is_some())
+    {
+        return Err(jobs_column_schema_mismatch(
+            stored,
+            "acquisition_loss_proof is missing for a pending release saga",
+        ));
+    }
     let replay_baseline = decode_replay_baseline(tx)?;
     if stored == JOURNAL_SCHEMA_VERSION && replay_baseline.is_none() {
         return Err(replay_baseline_error(
@@ -4839,6 +5131,19 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
                 generation_to_sql(job.generation)?,
                 timestamp_to_sql(job.accepted_unix, "job accepted_unix")?,
                 timestamp_to_sql(job.probe_deadline_unix, "job probe_deadline_unix")?,
+                job.acquisition_loss_proof
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()
+                    .map_err(|error| {
+                        StoreError::new(
+                            velnor_model::ExitClass::Operation,
+                            "journal.materialized.serialize",
+                        )
+                        .with_remediation(format!(
+                            "could not serialize acquisition loss proof: {error}"
+                        ))
+                    })?,
             ))
         })
         .collect::<StoreResult<Vec<_>>>()?;
@@ -4878,43 +5183,77 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
             ],
         )?;
     }
-    for (job, (generation, accepted_unix, probe_deadline_unix)) in state.jobs.iter().zip(job_sql) {
-        tx.execute(
-            "INSERT INTO jobs (
-                job_id, slot_id, generation, attempt, worker, phase, accepted_unix,
-                terminal_conclusion, provisional, plan_id, run_service_url,
-                probe_attempts, probe_deadline_unix, runner_request_id, permit_lease,
-                acquisition_loss_unproven
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-            params![
-                job.job_id.0,
-                job.slot_id.0,
-                generation,
-                job.attempt as i64,
-                job.worker,
-                job.phase.as_str(),
-                accepted_unix,
-                job.terminal_conclusion.as_deref(),
-                job.provisional as i64,
-                job.plan_id,
-                job.run_service_url,
-                job.probe_attempts as i64,
-                probe_deadline_unix,
-                job.runner_request_id,
-                job.permit_lease
-                    .as_ref()
-                    .map(serde_json::to_string)
-                    .transpose()
-                    .map_err(|error| {
-                        StoreError::new(
-                            velnor_model::ExitClass::Operation,
-                            "journal.materialized.serialize",
-                        )
-                        .with_remediation(format!("could not serialize permit lease: {error}"))
-                    })?,
-                job.acquisition_loss_unproven as i64,
-            ],
-        )?;
+    for (job, (generation, accepted_unix, probe_deadline_unix, acquisition_loss_proof)) in
+        state.jobs.iter().zip(job_sql)
+    {
+        let permit_lease = job
+            .permit_lease
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| {
+                StoreError::new(
+                    velnor_model::ExitClass::Operation,
+                    "journal.materialized.serialize",
+                )
+                .with_remediation(format!("could not serialize permit lease: {error}"))
+            })?;
+        if has_acquisition_loss_proof {
+            tx.execute(
+                "INSERT INTO jobs (
+                    job_id, slot_id, generation, attempt, worker, phase, accepted_unix,
+                    terminal_conclusion, provisional, plan_id, run_service_url,
+                    probe_attempts, probe_deadline_unix, runner_request_id, permit_lease,
+                    acquisition_loss_unproven, acquisition_loss_proof
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                params![
+                    job.job_id.0,
+                    job.slot_id.0,
+                    generation,
+                    job.attempt as i64,
+                    job.worker,
+                    job.phase.as_str(),
+                    accepted_unix,
+                    job.terminal_conclusion.as_deref(),
+                    job.provisional as i64,
+                    job.plan_id,
+                    job.run_service_url,
+                    job.probe_attempts as i64,
+                    probe_deadline_unix,
+                    job.runner_request_id,
+                    permit_lease,
+                    job.acquisition_loss_unproven as i64,
+                    acquisition_loss_proof,
+                ],
+            )?;
+        } else {
+            tx.execute(
+                "INSERT INTO jobs (
+                    job_id, slot_id, generation, attempt, worker, phase, accepted_unix,
+                    terminal_conclusion, provisional, plan_id, run_service_url,
+                    probe_attempts, probe_deadline_unix, runner_request_id, permit_lease,
+                    acquisition_loss_unproven
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                params![
+                    job.job_id.0,
+                    job.slot_id.0,
+                    generation,
+                    job.attempt as i64,
+                    job.worker,
+                    job.phase.as_str(),
+                    accepted_unix,
+                    job.terminal_conclusion.as_deref(),
+                    job.provisional as i64,
+                    job.plan_id,
+                    job.run_service_url,
+                    job.probe_attempts as i64,
+                    probe_deadline_unix,
+                    job.runner_request_id,
+                    permit_lease,
+                    job.acquisition_loss_unproven as i64,
+                ],
+            )?;
+        }
     }
     for (row, (generation, created_unix, deadline_unix)) in state
         .outbox
@@ -5817,6 +6156,102 @@ fn migrate_v13_to_v14(tx: &rusqlite::Transaction<'_>, source_version: u32) -> St
     Ok(())
 }
 
+/// v15 adds `AcquireJobNotSent` to the nested acquisition-loss proof
+/// vocabulary. The row layout and v14 checksum format stay unchanged, but
+/// preflight rejects that source under a v14 stamp; stamping v15 makes
+/// schema-v14 binaries refuse the journal before decoding its vocabulary.
+fn migrate_v14_to_v15(tx: &rusqlite::Transaction<'_>) -> StoreResult<()> {
+    let stored: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if u32::try_from(stored).unwrap_or(0) >= 15 {
+        return Ok(());
+    }
+    if stored != 14 {
+        return Err(journal_schema_version_invalid(stored));
+    }
+    if !event_schema_matches(tx, 14)? {
+        return Err(journal_schema_catalog_mismatch(
+            14,
+            "event table is not in its v14 source shape",
+        ));
+    }
+    tx.pragma_update(None, "user_version", 15u32)?;
+    Ok(())
+}
+
+/// v16 records a pre-release proof for `AcquireJobNotSent` and exact
+/// `AcquireJobNotFound` outcomes on the provisional row. It also adds a
+/// required gate epoch: a v14/v15 handle can no longer open the SQL write gate
+/// after this transaction commits.
+fn migrate_v15_to_v16(tx: &rusqlite::Transaction<'_>, source_version: u32) -> StoreResult<()> {
+    let stored: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if u32::try_from(stored).unwrap_or(0) >= 16 {
+        return Ok(());
+    }
+    if stored != 15 {
+        return Err(journal_schema_version_invalid(stored));
+    }
+    if !jobs_v12_shape_matches(tx)?
+        || table_has_column(tx, "jobs", "acquisition_loss_proof")?
+        || !journal_write_gate_schema_matches(tx)?
+        || journal_write_gate_has_open_row(tx)?
+    {
+        return Err(journal_schema_catalog_mismatch(
+            15,
+            "jobs or write gate is not in its v15 source shape",
+        ));
+    }
+
+    // Keep v14/v15 event semantics only through a strict replay that matches
+    // every materialized projection field. The preflight already ran before
+    // WAL mutation; repeat under this write lock, then rebase so current v16
+    // replay never treats an old direct terminal proof as a current write.
+    let validated_projection = if (14..16).contains(&source_version) {
+        Some(verify_pre_v16_migration_projection(tx)?)
+    } else {
+        None
+    };
+
+    tx.execute_batch("ALTER TABLE jobs ADD COLUMN acquisition_loss_proof TEXT;")?;
+
+    for table in ["events", "slots", "jobs", "outbox", "meta"] {
+        for operation in ["insert", "update", "delete"] {
+            tx.execute_batch(&format!(
+                "DROP TRIGGER journal_write_gate_{table}_{operation};"
+            ))?;
+        }
+    }
+    tx.execute_batch(
+        "ALTER TABLE journal_write_gate RENAME TO journal_write_gate_v15;
+         CREATE TABLE journal_write_gate (
+             id INTEGER PRIMARY KEY CHECK (id = 1),
+             schema_version INTEGER NOT NULL CHECK (schema_version = 16)
+         );
+         DROP TABLE journal_write_gate_v15;",
+    )?;
+    // Recreate the canonical data-table triggers against the epoch-bearing
+    // gate. The trigger bodies remain unchanged; older writers fail the
+    // required-column insert even if they hold a connection across upgrade.
+    let Some((_, trigger_schema)) = JOURNAL_WRITE_GATE_SCHEMA.split_once(';') else {
+        return Err(journal_schema_catalog_mismatch(
+            15,
+            "canonical write-gate schema has no table/trigger boundary",
+        ));
+    };
+    tx.execute_batch(trigger_schema)?;
+
+    tx.pragma_update(None, "user_version", 16u32)?;
+    if !jobs_v16_shape_matches(tx)? || !journal_write_gate_schema_matches(tx)? {
+        return Err(journal_schema_catalog_mismatch(
+            16,
+            "v16 jobs or write-gate shape did not validate after migration",
+        ));
+    }
+    if let Some(projection) = validated_projection {
+        store_replay_baseline(tx, &projection, true)?;
+    }
+    Ok(())
+}
+
 fn jobs_v10_shape_matches(conn: &Connection) -> StoreResult<bool> {
     jobs_shape_matches_version(conn, 10)
 }
@@ -5827,6 +6262,10 @@ fn jobs_v11_shape_matches(conn: &Connection) -> StoreResult<bool> {
 
 fn jobs_v12_shape_matches(conn: &Connection) -> StoreResult<bool> {
     jobs_shape_matches_version(conn, 12)
+}
+
+fn jobs_v16_shape_matches(conn: &Connection) -> StoreResult<bool> {
+    jobs_shape_matches_version(conn, 16)
 }
 
 fn jobs_shape_matches_version(conn: &Connection, version: u32) -> StoreResult<bool> {
@@ -5861,6 +6300,9 @@ fn jobs_shape_matches_version(conn: &Connection, version: u32) -> StoreResult<bo
     }
     if version >= 12 {
         expected.push(("acquisition_loss_unproven", "INTEGER", 1, Some("0"), 0));
+    }
+    if version >= 16 {
+        expected.push(("acquisition_loss_proof", "TEXT", 0, None, 0));
     }
     job_columns_match(conn, &expected)
 }
@@ -6134,6 +6576,8 @@ fn journal_write_gate_schema_matches(conn: &Connection) -> StoreResult<bool> {
     if !table_exists(conn, "journal_write_gate")? {
         return Ok(false);
     }
+    let stored: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let epoch_gate = stored >= 16;
     let mut statement = conn.prepare("PRAGMA table_info(journal_write_gate)")?;
     let columns = statement
         .query_map([], |row| {
@@ -6146,7 +6590,21 @@ fn journal_write_gate_schema_matches(conn: &Connection) -> StoreResult<bool> {
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    if columns != vec![("id".to_owned(), "INTEGER".to_owned(), 0, None, 1)] {
+    let expected_columns = if epoch_gate {
+        vec![
+            ("id".to_owned(), "INTEGER".to_owned(), 0, None, 1),
+            (
+                "schema_version".to_owned(),
+                "INTEGER".to_owned(),
+                1,
+                None,
+                0,
+            ),
+        ]
+    } else {
+        vec![("id".to_owned(), "INTEGER".to_owned(), 0, None, 1)]
+    };
+    if columns != expected_columns {
         return Ok(false);
     }
     let gate_sql: Option<String> = conn
@@ -6157,11 +6615,16 @@ fn journal_write_gate_schema_matches(conn: &Connection) -> StoreResult<bool> {
             |row| row.get(0),
         )
         .optional()?;
-    let expected_gate_sql = normalize_schema_sql(
+    let expected_gate_sql = normalize_schema_sql(if epoch_gate {
+        "CREATE TABLE journal_write_gate (
+             id INTEGER PRIMARY KEY CHECK (id = 1),
+             schema_version INTEGER NOT NULL CHECK (schema_version = 16)
+         )"
+    } else {
         "CREATE TABLE journal_write_gate (
              id INTEGER PRIMARY KEY CHECK (id = 1)
-         )",
-    );
+         )"
+    });
     if !gate_sql.is_some_and(|sql| normalize_schema_sql(&sql) == expected_gate_sql) {
         return Ok(false);
     }
@@ -6306,6 +6769,7 @@ fn event_generation(event: &Event) -> Generation {
         | Event::JobAcquisitionIntendedWithPermit { generation, .. }
         | Event::JobAcquisitionResolved { generation, .. }
         | Event::AcquisitionProbeFailed { generation, .. }
+        | Event::JobAcquisitionLossProofRecorded { generation, .. }
         | Event::JobAcquisitionLost { generation, .. }
         | Event::JobAcquisitionRebuilt { generation, .. }
         | Event::JobAcquisitionRebuiltWithPermit { generation, .. }
@@ -6339,6 +6803,7 @@ fn event_kind(event: &Event) -> &'static str {
         Event::JobAcquisitionRebuilt { .. } => "job_acquisition_rebuilt",
         Event::JobAcquisitionRebuiltWithPermit { .. } => "job_acquisition_rebuilt_with_permit",
         Event::AcquisitionProbeFailed { .. } => "acquisition_probe_failed",
+        Event::JobAcquisitionLossProofRecorded { .. } => "job_acquisition_loss_proof_recorded",
         Event::JobAcquisitionLost { .. } => "job_acquisition_lost",
         Event::Dependency { .. } => "dependency",
         Event::Routing { .. } => "routing",
@@ -6522,8 +6987,16 @@ mod tests {
 
     fn open_fixture_write_gate(conn: &Connection) {
         if table_exists(conn, "journal_write_gate").unwrap() {
-            conn.execute("INSERT INTO journal_write_gate (id) VALUES (1)", [])
+            if table_has_column(conn, "journal_write_gate", "schema_version").unwrap() {
+                conn.execute(
+                    "INSERT INTO journal_write_gate (id, schema_version) VALUES (1, 16)",
+                    [],
+                )
                 .unwrap();
+            } else {
+                conn.execute("INSERT INTO journal_write_gate (id) VALUES (1)", [])
+                    .unwrap();
+            }
         }
     }
 
@@ -6572,6 +7045,48 @@ mod tests {
 
     fn append_fixture_event(conn: &Connection, event: &Event) {
         append_fixture_event_omitting_fields(conn, event, &[]);
+    }
+
+    fn fixture_event_rows(conn: &Connection) -> Vec<(i64, i64, String, String, String, i64)> {
+        let mut statement = conn
+            .prepare(
+                "SELECT id, generation, kind, payload, checksum, recorded_unix
+                 FROM events ORDER BY id",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn stamp_fixture_as_v14(conn: &Connection) {
+        stamp_fixture_as_version(conn, 14);
+    }
+
+    fn stamp_fixture_as_v15(conn: &Connection) {
+        stamp_fixture_as_version(conn, 15);
+    }
+
+    fn stamp_fixture_as_version(conn: &Connection, version: u32) {
+        drop_jobs_columns_added_after_version(conn, version);
+        conn.pragma_update(None, "user_version", version).unwrap();
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_row| Ok(()))
+            .unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
     }
 
     fn append_fixture_event_omitting_fields(
@@ -6932,9 +7447,6 @@ mod tests {
                 close_fixture_write_gate(conn);
             }
         }
-        if version < 12 {
-            drop_journal_write_gate(conn);
-        }
         if version < 13 && table_has_column(conn, "events", "recorded_unix").unwrap() {
             conn.execute_batch("ALTER TABLE events DROP COLUMN recorded_unix;")
                 .unwrap();
@@ -6949,6 +7461,7 @@ mod tests {
             (9, "runner_request_id"),
             (11, "permit_lease"),
             (12, "acquisition_loss_unproven"),
+            (16, "acquisition_loss_proof"),
         ] {
             if introduced > version && table_has_column(conn, "jobs", column).unwrap() {
                 conn.execute_batch(&format!("ALTER TABLE jobs DROP COLUMN {column};"))
@@ -6974,6 +7487,14 @@ mod tests {
                 .unwrap();
             }
             close_fixture_write_gate(conn);
+        }
+        if version < 12 {
+            drop_journal_write_gate(conn);
+        } else if version < 16
+            && table_has_column(conn, "journal_write_gate", "schema_version").unwrap()
+        {
+            drop_journal_write_gate(conn);
+            conn.execute_batch(JOURNAL_WRITE_GATE_SCHEMA).unwrap();
         }
     }
 
@@ -7002,7 +7523,7 @@ mod tests {
         assert_eq!(mode, "delete");
         drop(conn);
 
-        let migrated = Journal::open(&path).expect("v13 fixture migrates to v14");
+        let migrated = Journal::open(&path).expect("v13 fixture migrates to v16");
         assert!(migrated
             .conn
             .query_row(
@@ -7015,6 +7536,540 @@ mod tests {
             .is_some());
         drop(migrated);
         (dir, path)
+    }
+
+    #[test]
+    fn v14_journal_replays_and_rebases_its_validated_projection() {
+        let (dir, mut journal) = open_tmp("v14-to-v16");
+        assert!(!journal.apply(Event::ControlLive).unwrap().rejected);
+        assert!(
+            !journal
+                .apply(Event::Dependency {
+                    github_reachable: true,
+                })
+                .unwrap()
+                .rejected
+        );
+        let expected_state = journal.materialized_state().unwrap();
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        let expected_events = fixture_event_rows(&conn);
+        stamp_fixture_as_v14(&conn);
+        drop(conn);
+
+        let migrated = Journal::open(&path).expect("valid v14 history remains readable");
+        let version: i64 = migrated
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 16);
+        assert_eq!(fixture_event_rows(&migrated.conn), expected_events);
+        let migrated_baseline: ReplayBaseline = serde_json::from_str(
+            &migrated
+                .conn
+                .query_row(
+                    "SELECT value FROM meta WHERE key = 'replay_baseline'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(migrated_baseline.event_count, expected_events.len() as i64);
+        assert_eq!(
+            migrated_baseline.through_event_id,
+            expected_events.last().unwrap().0
+        );
+        assert_eq!(
+            migrated_baseline.latest_event_count,
+            expected_events.len() as i64
+        );
+        assert_eq!(
+            migrated_baseline.latest_event_id,
+            expected_events.last().unwrap().0
+        );
+        assert_eq!(migrated_baseline.state, expected_state);
+        assert_eq!(migrated.materialized_state().unwrap(), expected_state);
+        drop(migrated);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v14_projection_mismatch_fails_before_wal_or_schema_migration() {
+        let (dir, mut journal) = open_tmp("v14-projection-mismatch-preflight");
+        assert!(!journal.apply(Event::ControlLive).unwrap().rejected);
+        assert!(
+            !journal
+                .apply(Event::Dependency {
+                    github_reachable: true,
+                })
+                .unwrap()
+                .rejected
+        );
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        stamp_fixture_as_v14(&conn);
+        open_fixture_write_gate(&conn);
+        conn.execute("UPDATE meta SET value = '0' WHERE key = 'control_live'", [])
+            .unwrap();
+        close_fixture_write_gate(&conn);
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(conn);
+
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
+        let shm = PathBuf::from(format!("{}-shm", path.display()));
+        assert!(!wal.exists());
+        assert!(!shm.exists());
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(
+            error.envelope.reason,
+            "journal.materialized.replay.mismatch"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!wal.exists());
+        assert!(!shm.exists());
+        let conn = Connection::open(&path).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 14);
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn make_v15_direct_acquisition_loss_fixture(
+        label: &str,
+        source: AcquisitionLossSource,
+    ) -> (PathBuf, PathBuf) {
+        let (dir, mut journal) = open_tmp(label);
+        prime_ready(&mut journal, "scope-1");
+        let permit_lease = NativePermitLease {
+            holder: "request-1".to_owned(),
+            ledger_path: "/tmp/permit-ledger.json".to_owned(),
+            generation: r#gen().0,
+        };
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntendedWithPermit {
+                    slot_id: slot("scope-1"),
+                    job_id: job("request-1"),
+                    generation: r#gen(),
+                    message_id: "message-1".to_owned(),
+                    runner_request_id: "request-1".to_owned(),
+                    run_service_url: "https://run.example/run".to_owned(),
+                    intended_unix: 1_000,
+                    permit_lease: permit_lease.clone(),
+                })
+                .unwrap()
+                .rejected
+        );
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        append_fixture_event(
+            &conn,
+            &Event::JobAcquisitionLost {
+                job_id: job("request-1"),
+                generation: r#gen(),
+                reason: "confirmed acquire loss".to_owned(),
+                proof: Some(AcquisitionLossProof {
+                    source,
+                    permit_lease,
+                }),
+            },
+        );
+        open_fixture_write_gate(&conn);
+        conn.execute("DELETE FROM jobs WHERE job_id = 'request-1'", [])
+            .unwrap();
+        conn.execute(
+            "UPDATE slots SET phase = 'ready' WHERE slot_id = 'scope-1'",
+            [],
+        )
+        .unwrap();
+        close_fixture_write_gate(&conn);
+        stamp_fixture_as_v15(&conn);
+        drop(conn);
+        (dir, path)
+    }
+
+    #[test]
+    fn v15_direct_not_sent_and_not_found_terminal_proofs_migrate_and_rebase() {
+        for (label, source) in [
+            (
+                "v15-direct-not-sent-terminal",
+                AcquisitionLossSource::AcquireJobNotSent,
+            ),
+            (
+                "v15-direct-not-found-terminal",
+                AcquisitionLossSource::AcquireJobNotFound,
+            ),
+        ] {
+            let (dir, path) = make_v15_direct_acquisition_loss_fixture(label, source);
+            let migrated = Journal::open(&path).expect("valid v15 terminal history migrates");
+            assert!(migrated.materialized_state().unwrap().jobs.is_empty());
+            assert_eq!(
+                migrated.materialized_state().unwrap().slots[0].phase,
+                SlotPhase2::Ready
+            );
+            let baseline: ReplayBaseline = serde_json::from_str(
+                &migrated
+                    .conn
+                    .query_row(
+                        "SELECT value FROM meta WHERE key = 'replay_baseline'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+            let event_count: i64 = migrated
+                .conn
+                .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+                .unwrap();
+            let high_water: i64 = migrated
+                .conn
+                .query_row("SELECT COALESCE(MAX(id), 0) FROM events", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(baseline.event_count, event_count);
+            assert_eq!(baseline.through_event_id, high_water);
+            assert_eq!(baseline.latest_event_count, event_count);
+            assert_eq!(baseline.latest_event_id, high_water);
+            assert!(load_current_state_checked(&migrated.conn).is_ok());
+            drop(migrated);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn v14_stamp_rejects_acquire_job_not_sent_before_migration() {
+        let (dir, journal) = open_tmp("v14-new-acquisition-loss-source");
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        append_fixture_event(
+            &conn,
+            &Event::JobAcquisitionLost {
+                job_id: job("job-1"),
+                generation: r#gen(),
+                reason: "acquirejob was not sent".to_owned(),
+                proof: Some(AcquisitionLossProof {
+                    source: AcquisitionLossSource::AcquireJobNotSent,
+                    permit_lease: NativePermitLease {
+                        holder: "request-1".to_owned(),
+                        ledger_path: "/tmp/permit-ledger.json".to_owned(),
+                        generation: r#gen().0,
+                    },
+                }),
+            },
+        );
+        stamp_fixture_as_v14(&conn);
+        drop(conn);
+
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.event.unknown");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v15_stamp_rejects_the_v16_pre_release_proof_event_before_migration() {
+        let (dir, mut journal) = open_tmp("v15-new-acquisition-loss-event");
+        prime_ready(&mut journal, "scope-1");
+        let permit_lease = NativePermitLease {
+            holder: "request-1".to_owned(),
+            ledger_path: "/tmp/permit-ledger.json".to_owned(),
+            generation: r#gen().0,
+        };
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntendedWithPermit {
+                    slot_id: slot("scope-1"),
+                    job_id: job("request-1"),
+                    generation: r#gen(),
+                    message_id: "message-1".to_owned(),
+                    runner_request_id: "request-1".to_owned(),
+                    run_service_url: "https://run.example/run".to_owned(),
+                    intended_unix: 1_000,
+                    permit_lease: permit_lease.clone(),
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionLossProofRecorded {
+                    job_id: job("request-1"),
+                    generation: r#gen(),
+                    proof: AcquisitionLossProof {
+                        source: AcquisitionLossSource::AcquireJobNotSent,
+                        permit_lease,
+                    },
+                })
+                .unwrap()
+                .rejected
+        );
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        stamp_fixture_as_v15(&conn);
+        drop(conn);
+
+        let before = std::fs::read(&path).unwrap();
+        let error = Journal::open(&path).unwrap_err();
+        assert_eq!(error.envelope.reason, "journal.event.unknown");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v15_writer_handle_cannot_open_the_v16_write_gate_after_migration() {
+        let (dir, journal) = open_tmp("v15-stale-write-gate-handle");
+        let path = dir.join("journal.db");
+        drop(journal);
+
+        let conn = Connection::open(&path).unwrap();
+        stamp_fixture_as_v15(&conn);
+        drop(conn);
+
+        // Compile the same gate insert an old writer issues before the current
+        // opener atomically changes the gate schema and user_version.
+        let stale = Connection::open(&path).unwrap();
+        let mut old_gate_insert = stale
+            .prepare("INSERT INTO journal_write_gate (id) VALUES (1)")
+            .unwrap();
+        let migrated = Journal::open(&path).expect("v15 fixture migrates to v16");
+        let version: i64 = migrated
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 16);
+        assert!(old_gate_insert.execute([]).is_err());
+        drop(old_gate_insert);
+        assert!(stale
+            .execute(
+                "INSERT INTO events (generation, kind, payload, checksum)
+                 VALUES (0, 'control_live', '{\"type\":\"control_live\"}', '')",
+                [],
+            )
+            .is_err());
+        let gate_rows: i64 = stale
+            .query_row("SELECT COUNT(*) FROM journal_write_gate", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let events: i64 = stale
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(gate_rows, 0);
+        assert_eq!(events, 0);
+        drop(stale);
+        drop(migrated);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn acquire_job_not_sent_proof_survives_restart_until_exact_release_terminal_event() {
+        let (dir, mut journal) = open_tmp("acquire-job-not-sent-release-saga");
+        prime_ready(&mut journal, "scope-1");
+        let permit_lease = NativePermitLease {
+            holder: "request-1".to_owned(),
+            ledger_path: "/tmp/permit-ledger.json".to_owned(),
+            generation: r#gen().0,
+        };
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntendedWithPermit {
+                    slot_id: slot("scope-1"),
+                    job_id: job("request-1"),
+                    generation: r#gen(),
+                    message_id: "message-1".to_owned(),
+                    runner_request_id: "request-1".to_owned(),
+                    run_service_url: "https://run.example/run".to_owned(),
+                    intended_unix: 1_000,
+                    permit_lease: permit_lease.clone(),
+                })
+                .unwrap()
+                .rejected
+        );
+        let proof = AcquisitionLossProof {
+            source: AcquisitionLossSource::AcquireJobNotSent,
+            permit_lease: permit_lease.clone(),
+        };
+        assert!(
+            journal
+                .apply(Event::JobAcquisitionLossProofRecorded {
+                    job_id: job("request-1"),
+                    generation: r#gen(),
+                    proof: AcquisitionLossProof {
+                        source: AcquisitionLossSource::AcquireJobNotSent,
+                        permit_lease: NativePermitLease {
+                            holder: "wrong-request".to_owned(),
+                            ..permit_lease.clone()
+                        },
+                    },
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionLossProofRecorded {
+                    job_id: job("request-1"),
+                    generation: r#gen(),
+                    proof: proof.clone(),
+                })
+                .unwrap()
+                .rejected
+        );
+        let pending = journal.materialized_state().unwrap();
+        assert_eq!(pending.jobs.len(), 1);
+        assert!(pending.jobs[0].provisional);
+        assert_eq!(pending.jobs[0].permit_lease, Some(permit_lease));
+        assert_eq!(pending.jobs[0].acquisition_loss_proof, Some(proof.clone()));
+        assert!(
+            journal
+                .apply(Event::AcquisitionProbeFailed {
+                    job_id: job("request-1"),
+                    generation: r#gen(),
+                })
+                .unwrap()
+                .rejected
+        );
+
+        let path = dir.join("journal.db");
+        drop(journal);
+        let mut journal = Journal::open(&path).expect("pending release saga replays");
+        let replayed = journal.load_state().unwrap();
+        assert_eq!(replayed.jobs.len(), 1);
+        assert_eq!(replayed.jobs[0].acquisition_loss_proof, Some(proof.clone()));
+
+        // Replaying the durable prepare is idempotent. The exact proof must
+        // then accompany the terminal event after external release succeeds.
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionLossProofRecorded {
+                    job_id: job("request-1"),
+                    generation: r#gen(),
+                    proof: proof.clone(),
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionLost {
+                    job_id: job("request-1"),
+                    generation: r#gen(),
+                    reason: "acquirejob was not sent".to_owned(),
+                    proof: Some(proof),
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(journal.materialized_state().unwrap().jobs.is_empty());
+        drop(journal);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn acquire_job_not_found_proof_is_source_bound_across_restart() {
+        let (dir, mut journal) = open_tmp("acquire-job-not-found-release-saga");
+        prime_ready(&mut journal, "scope-1");
+        let permit_lease = NativePermitLease {
+            holder: "request-1".to_owned(),
+            ledger_path: "/tmp/permit-ledger.json".to_owned(),
+            generation: r#gen().0,
+        };
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionIntendedWithPermit {
+                    slot_id: slot("scope-1"),
+                    job_id: job("request-1"),
+                    generation: r#gen(),
+                    message_id: "message-1".to_owned(),
+                    runner_request_id: "request-1".to_owned(),
+                    run_service_url: "https://run.example/run".to_owned(),
+                    intended_unix: 1_000,
+                    permit_lease: permit_lease.clone(),
+                })
+                .unwrap()
+                .rejected
+        );
+        let proof = AcquisitionLossProof {
+            source: AcquisitionLossSource::AcquireJobNotFound,
+            permit_lease: permit_lease.clone(),
+        };
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionLossProofRecorded {
+                    job_id: job("request-1"),
+                    generation: r#gen(),
+                    proof: proof.clone(),
+                })
+                .unwrap()
+                .rejected
+        );
+
+        // A not-sent terminal cannot consume a persisted exact not-found
+        // proof. The row and proof remain available for startup recovery.
+        assert!(
+            journal
+                .apply(Event::JobAcquisitionLost {
+                    job_id: job("request-1"),
+                    generation: r#gen(),
+                    reason: "mismatched evidence source".to_owned(),
+                    proof: Some(AcquisitionLossProof {
+                        source: AcquisitionLossSource::AcquireJobNotSent,
+                        permit_lease: permit_lease.clone(),
+                    }),
+                })
+                .unwrap()
+                .rejected
+        );
+        assert_eq!(
+            journal.materialized_state().unwrap().jobs[0].acquisition_loss_proof,
+            Some(proof.clone())
+        );
+
+        let path = dir.join("journal.db");
+        drop(journal);
+        let mut journal = Journal::open(&path).expect("confirmed not-found proof replays");
+        assert_eq!(
+            journal.load_state().unwrap().jobs[0].acquisition_loss_proof,
+            Some(proof.clone())
+        );
+        assert!(
+            !journal
+                .apply(Event::JobAcquisitionLost {
+                    job_id: job("request-1"),
+                    generation: r#gen(),
+                    reason: "acquirejob returned not found".to_owned(),
+                    proof: Some(proof),
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(journal.materialized_state().unwrap().jobs.is_empty());
+        drop(journal);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn strip_v11_event_fields(conn: &Connection) {
@@ -10493,6 +11548,7 @@ mod tests {
                     runner_request_id: String::new(),
                     permit_lease: None,
                     acquisition_loss_unproven: false,
+                    acquisition_loss_proof: None,
                     probe_attempts: 0,
                     probe_deadline_unix: 0,
                 }],
@@ -11968,7 +13024,7 @@ mod tests {
             .unwrap();
         assert_eq!(u32::try_from(version).unwrap(), JOURNAL_SCHEMA_VERSION);
         assert_eq!(
-            JOURNAL_SCHEMA_VERSION, 14,
+            JOURNAL_SCHEMA_VERSION, 16,
             "this test pins the current upgrade"
         );
         for column in [
@@ -13233,6 +14289,7 @@ mod tests {
             runner_request_id: String::new(),
             permit_lease: None,
             acquisition_loss_unproven: true,
+            acquisition_loss_proof: None,
             probe_attempts: 0,
             probe_deadline_unix: 0,
         });
@@ -14193,7 +15250,7 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, JOURNAL_SCHEMA_VERSION as i64);
         drop(migrated);
 
         let conn = Connection::open(&path).unwrap();
@@ -14374,8 +15431,8 @@ mod tests {
     }
 
     #[test]
-    fn current_v14_open_requires_a_committed_event_tail_watermark() {
-        let (dir, journal) = open_tmp("current-v14-missing-tail-watermark");
+    fn current_v16_open_requires_a_committed_event_tail_watermark() {
+        let (dir, journal) = open_tmp("current-v16-missing-tail-watermark");
         let path = dir.join("journal.db");
         drop(journal);
 
@@ -14396,7 +15453,7 @@ mod tests {
 
     #[test]
     fn current_writer_cannot_commit_after_its_tail_watermark_disappears() {
-        let (dir, mut journal) = open_tmp("current-v14-writer-missing-tail-watermark");
+        let (dir, mut journal) = open_tmp("current-v15-writer-missing-tail-watermark");
         let path = dir.join("journal.db");
         let before_state = journal.materialized_state().unwrap();
         let before_events = event_count(&journal);
@@ -14438,8 +15495,8 @@ mod tests {
     }
 
     #[test]
-    fn fresh_v14_archive_only_suffix_deletion_fails_the_transactional_tail_watermark() {
-        let (dir, mut journal) = open_tmp("fresh-v14-archive-suffix-deleted");
+    fn fresh_v16_archive_only_suffix_deletion_fails_the_transactional_tail_watermark() {
+        let (dir, mut journal) = open_tmp("fresh-v16-archive-suffix-deleted");
         prime_ready(&mut journal, "scope-1");
         let before = journal.materialized_state().unwrap();
         let through_event_id: i64 = journal

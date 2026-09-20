@@ -110,6 +110,7 @@ fn github_down_health_is_not_ready_while_control_live() {
 #[test]
 fn slot_kill_drops_one_unit_of_capacity() {
     let dir = scratch("iso");
+    bootstrap_state(&dir);
     let mut journal = Journal::open(dir.join("journal.db")).unwrap();
     prime_two_ready(&mut journal);
     drop(journal);
@@ -235,7 +236,6 @@ fn slot_kill_drops_one_unit_of_capacity() {
 #[test]
 fn guardian_completes_a_cycle_without_job_execution() {
     let dir = scratch("guard");
-    Journal::open(dir.join("journal.db")).unwrap();
     let output = Command::new(runner())
         .args(["guardian", "--state-dir", dir.to_str().unwrap(), "--once"])
         .env_remove("GITHUB_TOKEN")
@@ -251,16 +251,13 @@ fn guardian_completes_a_cycle_without_job_execution() {
 }
 
 #[test]
-fn packaged_units_have_no_controller_partof_to_workers() {
+fn packaged_node_units_have_no_controller_partof_to_workers() {
     let controller = include_str!("../debian/velnor-controller@.service");
     let slot = include_str!("../debian/velnor-slot@.service");
-    let job = include_str!("../debian/velnor-job@.service");
     assert!(!controller.lines().any(|line| line.starts_with("PartOf=")));
     assert!(!slot.lines().any(|line| line.starts_with("PartOf=")));
-    assert!(!job.lines().any(|line| line.starts_with("PartOf=")));
     assert!(slot.contains("velnor-runner slot"));
     assert!(slot.contains("--generation 1"));
-    assert!(job.contains("KillMode=control-group"));
     assert!(include_str!("../debian/velnor-guardian.service").contains("velnor-runner guardian"));
     assert!(!include_str!("../debian/velnor-guardian.service")
         .lines()
@@ -321,10 +318,6 @@ fn packaged_units_have_no_controller_partof_to_workers() {
         "job process is the transitional executor"
     );
     assert!(!daemon_src_has_args_json());
-    assert!(
-        !job.contains("--once"),
-        "packaged job unit must not pass --once: {job}"
-    );
     let postinst = include_str!("../debian/postinst");
     assert!(
         postinst.contains("NEVER") && postinst.contains("restart"),
@@ -400,16 +393,44 @@ fn kill_pid(pid: u32) {
 }
 
 fn run_runner(dir: &Path, args: &[&str]) -> std::process::ExitStatus {
-    let stdout = std::fs::File::create(dir.join("cmd.out")).unwrap();
-    let stderr = std::fs::File::create(dir.join("cmd.err")).unwrap();
-    Command::new(runner())
+    let stdout_path = command_log_path(dir, "out");
+    let stderr_path = command_log_path(dir, "err");
+    let stdout = std::fs::File::create(&stdout_path).unwrap();
+    let stderr = std::fs::File::create(&stderr_path).unwrap();
+    let status = Command::new(runner())
         .args(args)
         .env_remove("GITHUB_TOKEN")
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
         .status()
-        .unwrap()
+        .unwrap();
+    if status.success() {
+        let _ = std::fs::remove_file(stdout_path);
+        let _ = std::fs::remove_file(stderr_path);
+    }
+    status
+}
+
+fn command_log_path(dir: &Path, stream: &str) -> PathBuf {
+    let name = dir
+        .file_name()
+        .expect("test state directory has a final path component")
+        .to_string_lossy();
+    dir.with_file_name(format!("{name}.cmd.{stream}"))
+}
+
+fn bootstrap_state(dir: &Path) {
+    let output = Command::new(runner())
+        .args(["guardian", "--state-dir", dir.to_str().unwrap(), "--once"])
+        .env_remove("GITHUB_TOKEN")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "fresh state bootstrap failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -464,6 +485,7 @@ fn direct_controller_capacity_is_exact_for_zero_one_and_four() {
 #[test]
 fn contaminated_capacity_fails_closed_across_controller_restart_reconcile() {
     let dir = scratch("legacy-restart-reconcile");
+    bootstrap_state(&dir);
     let mut journal = Journal::open(dir.join("journal.db")).unwrap();
     assert!(
         !journal
@@ -512,8 +534,12 @@ fn contaminated_capacity_fails_closed_across_controller_restart_reconcile() {
 }
 
 fn cmd_err(dir: &Path) -> String {
-    let cmd = std::fs::read_to_string(dir.join("cmd.err")).unwrap_or_default();
-    let controller = std::fs::read_to_string(dir.join("controller.err")).unwrap_or_default();
+    let cmd_path = command_log_path(dir, "err");
+    let cmd = std::fs::read_to_string(&cmd_path).unwrap_or_default();
+    let _ = std::fs::remove_file(cmd_path);
+    let controller_path = command_log_path(dir, "controller.err");
+    let controller = std::fs::read_to_string(&controller_path).unwrap_or_default();
+    let _ = std::fs::remove_file(controller_path);
     match (cmd.is_empty(), controller.is_empty()) {
         (true, true) => String::new(),
         (false, true) => cmd,
@@ -659,6 +685,8 @@ impl SupervisedProcessGuard {
         for pid in self.slot_pids.iter().copied() {
             terminate_test_process(pid, &self.dir, &self.scope);
         }
+        let _ = std::fs::remove_file(command_log_path(&self.dir, "controller.out"));
+        let _ = std::fs::remove_file(command_log_path(&self.dir, "controller.err"));
     }
 }
 
@@ -690,6 +718,19 @@ fn wait_for_supervised_slots_with_timeout(
                 "supervised controller exited before N={expected} slots: {}",
                 cmd_err(&dir)
             ));
+        }
+        // Opening SQLite creates journal.db. Let startup publish its durable
+        // ownership marker first, or this observer can turn a fresh root into
+        // apparent preexisting state and make initialization fail closed.
+        if !dir.join(".owned-initialized").is_file() || !dir.join("owned").is_dir() {
+            if std::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "timed out waiting for ownership initialization before N={expected} slots: {}",
+                    cmd_err(&dir)
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            continue;
         }
         if let Ok(state) =
             Journal::open(dir.join("journal.db")).and_then(|journal| journal.load_state())
@@ -762,10 +803,10 @@ fn supervised_controller_capacity_is_exact_for_one_and_four() {
             .env_remove("GITHUB_TOKEN")
             .stdin(Stdio::null())
             .stdout(Stdio::from(
-                std::fs::File::create(dir.join("controller.out")).unwrap(),
+                std::fs::File::create(command_log_path(&dir, "controller.out")).unwrap(),
             ))
             .stderr(Stdio::from(
-                std::fs::File::create(dir.join("controller.err")).unwrap(),
+                std::fs::File::create(command_log_path(&dir, "controller.err")).unwrap(),
             ))
             .spawn()
             .unwrap();
@@ -837,10 +878,10 @@ fn supervised_process_guard_cleans_up_after_fault_injected_panic() {
             .env_remove("GITHUB_TOKEN")
             .stdin(Stdio::null())
             .stdout(Stdio::from(
-                std::fs::File::create(dir.join("controller.out")).unwrap(),
+                std::fs::File::create(command_log_path(&dir, "controller.out")).unwrap(),
             ))
             .stderr(Stdio::from(
-                std::fs::File::create(dir.join("controller.err")).unwrap(),
+                std::fs::File::create(command_log_path(&dir, "controller.err")).unwrap(),
             ))
             .spawn()
             .unwrap();
@@ -881,10 +922,10 @@ fn supervised_process_guard_cleans_up_after_fault_injected_timeout() {
             .env_remove("GITHUB_TOKEN")
             .stdin(Stdio::null())
             .stdout(Stdio::from(
-                std::fs::File::create(dir.join("controller.out")).unwrap(),
+                std::fs::File::create(command_log_path(&dir, "controller.out")).unwrap(),
             ))
             .stderr(Stdio::from(
-                std::fs::File::create(dir.join("controller.err")).unwrap(),
+                std::fs::File::create(command_log_path(&dir, "controller.err")).unwrap(),
             ))
             .spawn()
             .unwrap();
@@ -962,6 +1003,7 @@ fn controller_does_not_stamp_ready_without_proofs() {
 #[test]
 fn controller_rejects_boolean_routing_stamp() {
     let dir = scratch("bool-route");
+    bootstrap_state(&dir);
     std::fs::write(
         dir.join("routing.json"),
         br#"{"valid":true,"group_valid":true}"#,
@@ -996,6 +1038,7 @@ fn controller_rejects_boolean_routing_stamp() {
 #[test]
 fn controller_reconciles_routing_independently_of_scheduler() {
     let dir = scratch("route-recon");
+    bootstrap_state(&dir);
     let policy = matching_routing();
     let mut evidence = matching_routing();
     evidence.selected_repositories = vec!["other/repo".into()];
@@ -1244,6 +1287,7 @@ fn observe_slot_session_rejects_inert_live_pid() {
 #[test]
 fn controller_keeps_ready_when_exec_exists_without_assignment() {
     let dir = scratch("no-synth");
+    bootstrap_state(&dir);
     let mut journal = Journal::open(dir.join("journal.db")).unwrap();
     prime_named_ready(&mut journal, "own");
     drop(journal);
@@ -1283,6 +1327,7 @@ fn controller_keeps_ready_when_exec_exists_without_assignment() {
 #[test]
 fn controller_does_not_assign_rest_queued_ids() {
     let dir = scratch("owned");
+    bootstrap_state(&dir);
     let mut journal = Journal::open(dir.join("journal.db")).unwrap();
     prime_named_ready(&mut journal, "own");
     drop(journal);
@@ -1358,8 +1403,9 @@ fn controller_applies_dependency_false_without_github() {
 }
 
 #[test]
-fn job_once_without_ownership_fails() {
+fn job_cli_rejects_non_waiter_identity() {
     let dir = scratch("job-noown");
+    bootstrap_state(&dir);
     let mut journal = Journal::open(dir.join("journal.db")).unwrap();
     prime_named_ready(&mut journal, "job-noown");
     drop(journal);
@@ -1392,106 +1438,12 @@ fn job_once_without_ownership_fails() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !output.status.success(),
-        "unowned job must not run: {stderr}"
+        "job CLI must reject non-waiter identities: {stderr}"
     );
     assert!(
-        stderr.contains("has no generation-owned record"),
-        "worker must reject missing durable job ownership after launch intent: {stderr}"
+        stderr.contains("must use a wait- identity"),
+        "job CLI must admit only waiter and recovery identities: {stderr}"
     );
-    std::fs::remove_dir_all(dir).ok();
-}
-
-#[test]
-fn job_once_without_exec_persists_only_after_ownership() {
-    let dir = scratch("job-own-once");
-    let mut journal = Journal::open(dir.join("journal.db")).unwrap();
-    prime_named_ready(&mut journal, "jobown");
-    use velnor_model::JobId;
-    let request_id = JobId("runner-request-1".into());
-    let job_id = JobId("slot-1-worker".into());
-    assert!(
-        !journal
-            .apply(Event::JobAcquisitionIntended {
-                slot_id: SlotId("jobown-1".into()),
-                job_id: request_id.clone(),
-                generation: Generation::INITIAL,
-                message_id: "msg-1".into(),
-                runner_request_id: Some(request_id.0.clone()),
-                run_service_url: "https://run.example/run".into(),
-                intended_unix: 1_000,
-            })
-            .unwrap()
-            .rejected,
-        "acquisition intent fixture must be accepted"
-    );
-    assert!(
-        !journal
-            .apply(Event::JobAcquisitionResolved {
-                provisional_job_id: request_id,
-                acquired_job_id: job_id.clone(),
-                plan_id: "plan-1".into(),
-                generation: Generation::INITIAL,
-                runner_request_id: Some("runner-request-1".into()),
-                permit_lease: None,
-            })
-            .unwrap()
-            .rejected,
-        "resolved acquisition fixture must be accepted"
-    );
-    assert!(
-        !journal
-            .apply(Event::JobOwned {
-                job_id,
-                slot_id: SlotId("jobown-1".into()),
-                attempt: 1,
-                generation: Generation::INITIAL,
-                worker: "velnor-job@slot-1-worker".into(),
-                accepted_unix: 0,
-            })
-            .unwrap()
-            .rejected,
-        "owned-job fixture must be accepted"
-    );
-    drop(journal);
-    velnor_runner::node::cleanup::claim_owned(&dir, "slot-1-worker", Generation::INITIAL.0)
-        .unwrap();
-    let launch_token = velnor_runner::node::cleanup::with_dead_owned_pid_intent(
-        &dir,
-        "slot-1-worker",
-        Generation::INITIAL.0,
-        |token| Ok(token.to_owned()),
-    )
-    .unwrap()
-    .expect("fixture must publish a fresh worker launch intent");
-    let output = Command::new(runner())
-        .args([
-            "job",
-            "--state-dir",
-            dir.to_str().unwrap(),
-            "--job-id",
-            "slot-1-worker",
-            "--launch-token",
-            &launch_token,
-            "--generation",
-            "1",
-            "--once",
-            "--scope",
-            "jobown",
-            "--slot-index",
-            "1",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let state = Journal::open(dir.join("journal.db"))
-        .unwrap()
-        .load_state()
-        .unwrap();
-    assert_eq!(state.jobs[0].phase, velnor_model::JobPhase2::Running);
     std::fs::remove_dir_all(dir).ok();
 }
 
@@ -1499,23 +1451,41 @@ fn job_once_without_exec_persists_only_after_ownership() {
 fn daemon_acquisition_path_marks_job_running_at_start() {
     use velnor_model::JobId;
     use velnor_runner::node::complete::{
-        confirm_acquisition, intend_acquisition, record_job_started, resolve_acquisition,
+        confirm_acquisition, intend_acquisition_with_permit, record_job_started,
+        resolve_acquisition_for_request_with_permit,
     };
     let dir = scratch("daemon-running");
     let mut journal = Journal::open(dir.join("journal.db")).unwrap();
     prime_named_ready(&mut journal, "daemonrun");
     let slot_id = SlotId("daemonrun-1".into());
     let job_id = JobId("daemon-job-1".into());
-    let generation = intend_acquisition(
+    let runner_request_id = "msg-1";
+    let permit_lease = velnor_control::journal::NativePermitLease {
+        holder: format!("native/v1/test/{runner_request_id}"),
+        ledger_path: dir.join("permit-ledger.db").to_string_lossy().into_owned(),
+        generation: 7,
+    };
+    let generation = intend_acquisition_with_permit(
         &mut journal,
         &job_id,
         &slot_id,
         "msg-1",
+        runner_request_id,
         "https://run.example/run",
         1_000,
+        permit_lease.clone(),
     )
     .unwrap();
-    resolve_acquisition(&mut journal, &job_id, &job_id, "plan-1", generation).unwrap();
+    resolve_acquisition_for_request_with_permit(
+        &mut journal,
+        &job_id,
+        &job_id,
+        "plan-1",
+        generation,
+        runner_request_id,
+        permit_lease,
+    )
+    .unwrap();
     confirm_acquisition(&mut journal, &job_id, &slot_id, generation).unwrap();
     assert_eq!(
         journal.load_state().unwrap().jobs[0].phase,
@@ -1535,6 +1505,7 @@ fn daemon_acquisition_path_marks_job_running_at_start() {
 #[test]
 fn controller_sends_pending_completion_outbox() {
     let dir = scratch("outbox");
+    bootstrap_state(&dir);
     let mut journal = Journal::open(dir.join("journal.db")).unwrap();
     prime_named_ready(&mut journal, "out");
     use velnor_control::journal::payload_checksum;
@@ -1577,12 +1548,12 @@ fn controller_sends_pending_completion_outbox() {
                 slot_id: SlotId("out-1".into()),
                 attempt: 1,
                 generation: Generation::INITIAL,
-                worker: "velnor-job@slot-1-worker".into(),
+                worker: "wait-out-1".into(),
                 accepted_unix: 0,
             })
             .unwrap()
             .rejected,
-        "owned-job fixture must be accepted"
+        "JobOwned event fixture must be accepted"
     );
     let payload = b"conclusion=success";
     assert!(

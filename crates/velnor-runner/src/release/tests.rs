@@ -310,7 +310,6 @@ fn runner_units_do_not_own_the_shared_runtime_directory() {
             "guardian",
             include_str!("../../debian/velnor-guardian.service"),
         ),
-        ("job", include_str!("../../debian/velnor-job@.service")),
         ("slot", include_str!("../../debian/velnor-slot@.service")),
     ] {
         assert!(

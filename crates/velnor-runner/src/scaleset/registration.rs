@@ -48,8 +48,18 @@ impl RegistrationPlan {
             (None, Some(name)) if name.is_empty() => {
                 anyhow::bail!("scale-set registration set name is empty");
             }
-            _ => Ok(()),
+            _ => {}
         }
+        let mut effective_labels = self.labels.clone();
+        if effective_labels.is_empty() {
+            if let Some(name) = self.set_name.as_ref() {
+                // GitHub derives a `System` label from the set name when a
+                // new scale set has no explicit labels.
+                effective_labels.push(name.clone());
+            }
+        }
+        crate::platform::validate_no_hosted_image_labels(&effective_labels)?;
+        Ok(())
     }
 }
 
@@ -76,13 +86,24 @@ pub async fn reconcile_registration(
 ) -> Result<ReconciledSet> {
     plan.validate()?;
     let (group_id, group_name) = resolve_group(client, plan).await?;
-    match plan.set_id {
+    let reconciled = match plan.set_id {
         Some(id) => adopt_by_id(client, plan, id, group_id, &group_name).await,
         None => {
             let name = plan.set_name.clone().unwrap_or_default();
             get_or_create_by_name(client, plan, &name, group_id, &group_name).await
         }
-    }
+    }?;
+    validate_reconciled_set_labels(&reconciled.set)?;
+    Ok(reconciled)
+}
+
+fn validate_reconciled_set_labels(set: &RunnerScaleSet) -> Result<()> {
+    let labels = set
+        .labels
+        .iter()
+        .map(|label| label.name.clone())
+        .collect::<Vec<_>>();
+    crate::platform::validate_no_hosted_image_labels(&labels)
 }
 
 async fn resolve_group(client: &ScaleSetClient, plan: &RegistrationPlan) -> Result<(i32, String)> {
@@ -302,6 +323,63 @@ mod tests {
         };
         assert!(empty_name.validate().is_err());
         assert!(plan().validate().is_ok());
+    }
+
+    #[test]
+    fn plan_rejects_hosted_image_labels_and_name_derived_labels() {
+        for label in [
+            "ubuntu-24.04",
+            " UBUNTU-LATEST ",
+            "MacOs-26",
+            "WINDOWS-2025",
+        ] {
+            let invalid = RegistrationPlan {
+                labels: vec![label.to_owned()],
+                ..plan()
+            };
+            let error = invalid.validate().unwrap_err().to_string();
+            assert!(error.contains(label), "{error}");
+        }
+
+        let invalid_name_derived = RegistrationPlan {
+            set_name: Some("Ubuntu-Latest".into()),
+            labels: Vec::new(),
+            ..plan()
+        };
+        let error = invalid_name_derived.validate().unwrap_err().to_string();
+        assert!(error.contains("Ubuntu-Latest"), "{error}");
+    }
+
+    #[test]
+    fn adopted_or_reconciled_scale_set_labels_are_checked_after_the_response() {
+        let set = RunnerScaleSet {
+            id: 7,
+            name: "velnor-set".into(),
+            runner_group_id: 3,
+            runner_group_name: "velnor".into(),
+            labels: vec![ScaleSetLabel {
+                label_type: "System".into(),
+                name: "WINDOWS-2025".into(),
+            }],
+            runner_setting: RunnerSetting::default(),
+            created_on: String::new(),
+            runner_jit_config_url: String::new(),
+            statistics: None,
+        };
+        let empty_plan = RegistrationPlan {
+            set_id: Some(set.id),
+            set_name: None,
+            labels: Vec::new(),
+            ..plan()
+        };
+        assert!(empty_plan.validate().is_ok());
+        assert!(!labels_drifted(&set.labels, &empty_plan.labels));
+
+        let error = validate_reconciled_set_labels(&set)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("WINDOWS-2025"), "{error}");
     }
 
     #[test]

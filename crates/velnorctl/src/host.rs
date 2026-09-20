@@ -348,6 +348,7 @@ fn resume_host_state(
 enum OwnershipMarkerState {
     Missing,
     Live,
+    UnpublishedIntentLive,
     Dead,
     Ambiguous,
 }
@@ -364,29 +365,14 @@ fn ownership_marker_state(
     isolation_id: &str,
     generation: u64,
 ) -> OwnershipMarkerState {
-    let path = velnor_runner::node::cleanup::owned_path(state_dir, isolation_id, generation);
-    let metadata = match fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return OwnershipMarkerState::Missing;
+    match velnor_runner::node::cleanup::owned_pid_liveness(state_dir, isolation_id, generation) {
+        Ok(velnor_runner::node::cleanup::OwnedPidLiveness::Absent) => OwnershipMarkerState::Missing,
+        Ok(velnor_runner::node::cleanup::OwnedPidLiveness::Live) => OwnershipMarkerState::Live,
+        Ok(velnor_runner::node::cleanup::OwnedPidLiveness::UnpublishedIntentLive) => {
+            OwnershipMarkerState::UnpublishedIntentLive
         }
-        Err(_) => return OwnershipMarkerState::Ambiguous,
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return OwnershipMarkerState::Ambiguous;
-    }
-    let Some(pid) =
-        velnor_runner::node::cleanup::read_owned_pid(state_dir, isolation_id, generation)
-    else {
-        return OwnershipMarkerState::Ambiguous;
-    };
-    if pid == 0 {
-        return OwnershipMarkerState::Ambiguous;
-    }
-    if velnor_runner::node::prove::pid_is_alive(pid) {
-        OwnershipMarkerState::Live
-    } else {
-        OwnershipMarkerState::Dead
+        Ok(velnor_runner::node::cleanup::OwnedPidLiveness::Dead) => OwnershipMarkerState::Dead,
+        Err(_) => OwnershipMarkerState::Ambiguous,
     }
 }
 
@@ -398,18 +384,29 @@ fn reconnect_ownership(
     let waiter_id = format!("wait-{}", job.slot_id.0);
     let waiter = ownership_marker_state(state_dir, &waiter_id, job.generation.0);
 
-    if matches!(worker, OwnershipMarkerState::Live) || matches!(waiter, OwnershipMarkerState::Live)
-    {
+    if matches!(
+        worker,
+        OwnershipMarkerState::Live | OwnershipMarkerState::UnpublishedIntentLive
+    ) || matches!(
+        waiter,
+        OwnershipMarkerState::Live | OwnershipMarkerState::UnpublishedIntentLive
+    ) {
         return ReconnectOwnership::Live;
     }
 
-    // Completing is a durable remote-acknowledgement phase. Its worker may
-    // already have removed its marker, so completion replay remains allowed
-    // when no active actor is proven. Assigned/Running, in contrast, require
-    // a persisted dead worker proof before controller orphan recovery may
-    // release the slot.
+    // Completing has a durable outbox payload that recovery can replay after
+    // the worker stops. Missing owner markers are enough to permit that replay;
+    // malformed or unreadable markers remain Ambiguous above. Assigned and
+    // Running have no terminal outbox proof, so they require a persisted dead
+    // worker marker before recovery may release the slot.
     if job.phase == velnor_model::JobPhase2::Completing {
-        return ReconnectOwnership::Dead;
+        return if matches!(worker, OwnershipMarkerState::Ambiguous)
+            || matches!(waiter, OwnershipMarkerState::Ambiguous)
+        {
+            ReconnectOwnership::Ambiguous
+        } else {
+            ReconnectOwnership::Dead
+        };
     }
 
     if matches!(worker, OwnershipMarkerState::Dead)
@@ -921,9 +918,9 @@ fn resolve_repo_url(repo: Option<&str>, url: Option<&str>) -> Result<String, Com
 }
 
 /// Whether an on-demand host on `arch` may claim the x64 target pack
-/// (`ubuntu-24.04`, `ubuntu-latest`, `hetzner-sentry-ci`). An arm64 host
-/// claiming those labels would attract jobs it cannot run natively and
-/// would impersonate Sentry's pool identity, so only x86_64 claims them.
+/// (`hetzner-sentry-ci`, `velnor-target-mvp-x64`). An arm64 host claiming
+/// those labels would attract jobs it cannot run natively and would
+/// impersonate Sentry's pool identity, so only x86_64 claims them.
 fn arch_claims_x64_target_pack(arch: &str) -> bool {
     matches!(arch, "x86_64" | "x64")
 }
@@ -1505,6 +1502,24 @@ mod tests {
     }
 
     #[test]
+    fn x64_host_claims_the_velnor_owned_x64_target_pack() {
+        let normalized = velnor_runner::runner::normalize_labels(
+            host_start_labels("untrusted"),
+            arch_claims_x64_target_pack("x86_64"),
+            false,
+        );
+        assert_eq!(
+            normalized,
+            vec![
+                "hetzner-sentry-ci",
+                "self-hosted",
+                "velnor-target-mvp",
+                "velnor-target-mvp-x64"
+            ]
+        );
+    }
+
+    #[test]
     fn host_start_labels_exclude_the_trust_gated_label() {
         let labels = host_start_labels("untrusted");
         assert_eq!(labels, vec!["self-hosted", "velnor-target-mvp"]);
@@ -1544,7 +1559,11 @@ mod tests {
         );
         assert_eq!(
             normalized,
-            vec!["self-hosted", "ubuntu-24.04-arm", "velnor-target-mvp"]
+            vec![
+                "self-hosted",
+                "velnor-target-mvp",
+                "velnor-target-mvp-arm64"
+            ]
         );
         assert!(
             !normalized
@@ -1565,9 +1584,9 @@ mod tests {
             normalized,
             vec![
                 "self-hosted",
-                "ubuntu-24.04-arm",
                 velnor_runner::runner::TRUST_GATED_RUNNER_LABEL,
-                "velnor-target-mvp"
+                "velnor-target-mvp",
+                "velnor-target-mvp-arm64"
             ]
         );
     }
@@ -1667,6 +1686,7 @@ mod tests {
         ));
         let config_dir = root.join("config");
         std::fs::create_dir_all(&config_dir).expect("config directory");
+        std::fs::create_dir_all(config_dir.join("owned")).expect("owned directory");
         let state_db = root.join("state.db");
         let store = Arc::new(Store::open(&state_db).expect("store"));
         let store_instance = velnor_runner::scaffold::operational_instance_slug();
@@ -1785,6 +1805,7 @@ mod tests {
                 job_id: job.clone(),
                 generation,
                 message_id: "msg-1".into(),
+                runner_request_id: None,
                 run_service_url: "https://run.example/run".into(),
                 intended_unix: 1_000,
             },
@@ -1847,6 +1868,65 @@ mod tests {
         pid
     }
 
+    fn write_owned_pid_fixture(config_dir: &Path, isolation_id: &str, generation: u64, pid: u32) {
+        let owned_dir = config_dir.join("owned");
+        std::fs::create_dir_all(&owned_dir).expect("owned directory");
+        let process_identity = velnor_runner::node::cleanup::process_identity(pid)
+            .expect("read fixture process identity");
+        let record = serde_json::json!({
+            "pid": pid,
+            "process_identity": process_identity,
+            "launch_token": null,
+        });
+        let bytes = serde_json::to_vec(&record).expect("serialize marker fixture");
+        std::fs::write(
+            velnor_runner::node::cleanup::owned_path(config_dir, isolation_id, generation),
+            bytes,
+        )
+        .expect("write marker fixture");
+    }
+
+    struct LiveOwnedMarkerChild(std::process::Child);
+
+    impl Drop for LiveOwnedMarkerChild {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn spawn_live_owned_intent_fixture(
+        config_dir: &Path,
+        isolation_id: &str,
+        generation: u64,
+    ) -> LiveOwnedMarkerChild {
+        std::fs::create_dir_all(config_dir).expect("config directory");
+        std::fs::create_dir_all(config_dir.join("owned")).expect("owned directory");
+        let child = velnor_runner::node::cleanup::with_dead_owned_pid_intent(
+            config_dir,
+            isolation_id,
+            generation,
+            |launch_token| {
+                let launch_argument = format!("--launch-token={launch_token}");
+                std::process::Command::new("/bin/sh")
+                    .args([
+                        "-c",
+                        "sleep 120",
+                        "velnor-host-marker-fixture",
+                        &launch_argument,
+                    ])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .map_err(anyhow::Error::from)
+            },
+        )
+        .expect("publish launch intent and child")
+        .expect("fixture generation was unowned");
+        LiveOwnedMarkerChild(child)
+    }
+
     #[test]
     fn reconnect_allows_completing_job_without_owned_pid() {
         use velnor_control::ports::{MutationKind, MutationPort, MutationRequest};
@@ -1884,6 +1964,48 @@ mod tests {
     }
 
     #[test]
+    fn reconnect_refuses_completing_job_with_ambiguous_owner_marker() {
+        use velnor_model::JobPhase2;
+
+        let root = host_resume_root("completing-ambiguous-owner");
+        let config_dir = root.join("config");
+        std::fs::create_dir_all(&config_dir).expect("config directory");
+        assert_eq!(
+            ownership_marker_state(
+                &config_dir,
+                "job-complete-ambiguous",
+                velnor_model::Generation::INITIAL.0,
+            ),
+            OwnershipMarkerState::Ambiguous,
+            "missing owned/ parent is unknown evidence, not an absent owner"
+        );
+        std::fs::create_dir_all(config_dir.join("owned")).expect("owned directory");
+        let mut journal = Journal::open(config_dir.join("journal.db")).expect("journal");
+        seed_job_phase(
+            &mut journal,
+            "slot-6",
+            "job-complete-ambiguous",
+            JobPhase2::Completing,
+        );
+        drop(journal);
+        std::fs::write(
+            velnor_runner::node::cleanup::owned_path(
+                &config_dir,
+                "job-complete-ambiguous",
+                velnor_model::Generation::INITIAL.0,
+            ),
+            b"malformed owner evidence",
+        )
+        .expect("malformed marker");
+
+        let error = resume_host_state(&config_dir, &root.join("state.db"), "primary")
+            .expect_err("ambiguous owner evidence must block reconnect");
+        assert_eq!(error.reason, "host.active_jobs");
+        assert!(error.message.contains("job-complete-ambiguous"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn reconnect_refuses_completing_job_with_live_waiter() {
         use velnor_model::JobPhase2;
 
@@ -1898,13 +2020,11 @@ mod tests {
             JobPhase2::Completing,
         );
         drop(journal);
-        velnor_runner::node::cleanup::write_owned_pid(
+        let _live_waiter = spawn_live_owned_intent_fixture(
             &config_dir,
             "wait-slot-6",
             velnor_model::Generation::INITIAL.0,
-            std::process::id(),
-        )
-        .expect("waiter pid");
+        );
 
         let error = resume_host_state(&config_dir, &root.join("state.db"), "primary")
             .expect_err("live waiter");
@@ -1927,13 +2047,16 @@ mod tests {
         let mut journal = Journal::open(config_dir.join("journal.db")).expect("journal");
         seed_job_phase(&mut journal, "slot-6", "job-live", JobPhase2::Running);
         drop(journal);
-        velnor_runner::node::cleanup::write_owned_pid(
+        let _live_worker = spawn_live_owned_intent_fixture(
             &config_dir,
             "job-live",
             velnor_model::Generation::INITIAL.0,
-            std::process::id(),
-        )
-        .expect("owned pid");
+        );
+        assert_eq!(
+            ownership_marker_state(&config_dir, "job-live", velnor_model::Generation::INITIAL.0,),
+            OwnershipMarkerState::UnpublishedIntentLive,
+            "PID-zero intent with an exact live process token is occupied ownership"
+        );
 
         let error = resume_host_state(&config_dir, &root.join("state.db"), "primary")
             .expect_err("live worker");
@@ -1952,20 +2075,17 @@ mod tests {
         let mut journal = Journal::open(config_dir.join("journal.db")).expect("journal");
         seed_job_phase(&mut journal, "slot-6", "job-wait", JobPhase2::Running);
         drop(journal);
-        velnor_runner::node::cleanup::write_owned_pid(
+        write_owned_pid_fixture(
             &config_dir,
             "job-wait",
             velnor_model::Generation::INITIAL.0,
             dead_pid(),
-        )
-        .expect("dead job pid");
-        velnor_runner::node::cleanup::write_owned_pid(
+        );
+        let _live_waiter = spawn_live_owned_intent_fixture(
             &config_dir,
             "wait-slot-6",
             velnor_model::Generation::INITIAL.0,
-            std::process::id(),
-        )
-        .expect("waiter pid");
+        );
 
         let error = resume_host_state(&config_dir, &root.join("state.db"), "primary")
             .expect_err("live waiter");
@@ -1998,13 +2118,12 @@ mod tests {
             let mut journal = Journal::open(config_dir.join("journal.db")).expect("journal");
             seed_job_phase(&mut journal, "slot-6", job_id, phase);
             journal.set_drain(2).expect("drain marker");
-            velnor_runner::node::cleanup::write_owned_pid(
+            write_owned_pid_fixture(
                 &config_dir,
                 job_id,
                 velnor_model::Generation::INITIAL.0,
                 dead_pid(),
-            )
-            .expect("dead worker pid");
+            );
             drop(journal);
 
             resume_host_state(&config_dir, &state_db, "primary")

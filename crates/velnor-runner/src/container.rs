@@ -77,11 +77,14 @@ fn is_docker_control_env(name: &str) -> bool {
 /// (`--pids-limit`, oomd, `MemoryHigh`) were considered and rejected:
 /// the spec forbids ceilings, and the installer fails closed on any
 /// surviving one (postinst + preflight assert infinity).
-const QUOTA_FLAGS: [&str; 12] = [
+const QUOTA_FLAGS: [&str; 15] = [
     "--cpus",
     "--cpu-period",
     "--cpu-quota",
     "--cpu-shares",
+    "-c", // Docker alias for --cpu-shares.
+    "--cpu-rt-period",
+    "--cpu-rt-runtime",
     "--cpuset-cpus",
     "--cpuset-mems",
     "-m",
@@ -97,25 +100,42 @@ fn is_quota_flag(option: &str) -> bool {
     QUOTA_FLAGS.contains(&name)
 }
 
-fn append_options_without_quota(command: &mut impl FlagSink, options: &[String]) {
+/// Remove CPU/RAM/PID ceiling flags and inline or separate values. Admission
+/// and emission share this list and token handling so their backstops cannot
+/// drift. `on_drop` receives each flag with any attached or separate value.
+pub(crate) fn strip_quota_container_options(
+    options: &[String],
+    mut on_drop: impl FnMut(&str),
+) -> Vec<String> {
+    let mut stripped = Vec::with_capacity(options.len());
     let mut index = 0;
     while index < options.len() {
         let option = &options[index];
         if is_quota_flag(option) {
-            index += 1;
-            // `--flag value` form: skip the value too. `--flag=value` and a
-            // bare flag carry nothing further.
-            if !option.contains('=')
+            let consumes_value = !option.contains('=')
                 && options
-                    .get(index)
-                    .is_some_and(|value| !value.starts_with('-'))
-            {
-                index += 1;
-            }
+                    .get(index + 1)
+                    .is_some_and(|value| !value.starts_with('-'));
+            let dropped = if option.contains('=') {
+                option.clone()
+            } else if consumes_value {
+                format!("{option} {}", options[index + 1])
+            } else {
+                option.clone()
+            };
+            on_drop(&dropped);
+            index += if consumes_value { 2 } else { 1 };
             continue;
         }
-        command.flag(option.clone());
+        stripped.push(option.clone());
         index += 1;
+    }
+    stripped
+}
+
+fn append_options_without_quota(command: &mut impl FlagSink, options: &[String]) {
+    for option in strip_quota_container_options(options, |_| {}) {
+        command.flag(option);
     }
 }
 
@@ -2244,17 +2264,68 @@ mod tests {
         );
     }
 
+    #[test]
+    fn job_container_emission_strips_cpu_share_and_realtime_quota_forms() {
+        let mut job = spec();
+        job.options = vec![
+            "-c".into(),
+            "1024".into(),
+            "-c=2048".into(),
+            "--cpu-rt-period".into(),
+            "1000000".into(),
+            "--cpu-rt-period=2000000".into(),
+            "--cpu-rt-runtime".into(),
+            "950000".into(),
+            "--cpu-rt-runtime=500000".into(),
+            "--label".into(),
+            "workflow".into(),
+        ];
+        let args = rendered(&job.start_args().unwrap());
+        let options_end = args
+            .iter()
+            .position(|arg| arg == "--")
+            .expect("docker arguments must separate options from the image command");
+        let docker_options = &args[..options_end];
+
+        for quota in ["-c", "--cpu-rt-period", "--cpu-rt-runtime"] {
+            assert!(
+                !docker_options
+                    .iter()
+                    .any(|arg| arg == quota || arg.starts_with(&format!("{quota}="))),
+                "unbounded emission must strip {quota}, got {args:?}"
+            );
+        }
+        assert!(
+            !docker_options.iter().any(|arg| {
+                matches!(
+                    arg.as_str(),
+                    "1024" | "1000000" | "950000" | "2000000" | "500000"
+                )
+            }),
+            "quota values must be stripped with their flags: {args:?}"
+        );
+        assert!(
+            docker_options
+                .windows(2)
+                .any(|pair| pair[0] == "--label" && pair[1] == "workflow"),
+            "{args:?}"
+        );
+    }
+
     /// The emission strip list covers every Docker CPU/RAM/PID ceiling
     /// flag, however spelled: shrinking this list would silently admit a
     /// ceiling, so the list itself is pinned, not just the stripping
     /// behavior. (Accepted risk, audit F4: no ceilings by spec §4.3.)
     #[test]
     fn quota_strip_list_covers_every_ceiling_flag() {
-        const CEILINGS: [&str; 12] = [
+        const CEILINGS: [&str; 15] = [
             "--cpus",
             "--cpu-period",
             "--cpu-quota",
             "--cpu-shares",
+            "-c",
+            "--cpu-rt-period",
+            "--cpu-rt-runtime",
             "--cpuset-cpus",
             "--cpuset-mems",
             "-m",

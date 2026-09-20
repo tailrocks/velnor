@@ -2046,6 +2046,14 @@ fn validate_workflow(workflow: &WorkflowSection) -> Result<(), GeneratorError> {
                 "[workflow] velnor_labels must not contain empty labels",
             ));
         }
+        if let Some(label) = labels
+            .iter()
+            .find(|label| crate::s2::provider::is_github_hosted_image_label(label))
+        {
+            return Err(GeneratorError::usage(format!(
+                "[workflow] velnor_labels cannot use GitHub-hosted image prefix `{label}`; local selectors need Velnor-owned labels"
+            )));
+        }
     }
     if workflow
         .velnor_runner_group
@@ -2105,6 +2113,11 @@ fn validate_trusted_label(workflow: &WorkflowSection) -> Result<(), GeneratorErr
         return Err(GeneratorError::usage(
             "[workflow] velnor_trusted_label must not be empty",
         ));
+    }
+    if crate::s2::provider::is_github_hosted_image_label(label) {
+        return Err(GeneratorError::usage(format!(
+            "[workflow] velnor_trusted_label cannot use GitHub-hosted image prefix `{label}`; local selectors need Velnor-owned labels"
+        )));
     }
     if Some(label) == workflow.velnor_runner_group.as_deref() {
         return Err(GeneratorError::usage(
@@ -4805,6 +4818,45 @@ mod tests {
             error
                 .to_string()
                 .contains("[workflow] velnor_trusted_label must not repeat"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn local_velnor_labels_reject_github_hosted_image_prefixes() {
+        for label in [
+            "ubuntu-24.04",
+            " UBUNTU-LATEST ",
+            "MacOs-26",
+            "WINDOWS-2025",
+        ] {
+            let config = config_for(&format!(
+                "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nvelnor_labels = [\"self-hosted\", \"{label}\"]\n"
+            ));
+            let error = must_fail(
+                config.validate(&[], &[], &BTreeSet::new()),
+                "Velnor labels with hosted image prefixes must fail validation",
+            );
+            assert!(error.to_string().contains(label), "{error}");
+            assert!(
+                error.to_string().contains("GitHub-hosted image prefix"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_trusted_label_rejects_github_hosted_image_prefixes() {
+        let config = config_for(
+            "schema = 1\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow]\nvelnor_trusted_label = \"WINDOWS-2025\"\n",
+        );
+        let error = must_fail(
+            config.validate(&[], &[], &BTreeSet::new()),
+            "Velnor trusted label with hosted image prefix must fail validation",
+        );
+        assert!(error.to_string().contains("WINDOWS-2025"), "{error}");
+        assert!(
+            error.to_string().contains("GitHub-hosted image prefix"),
             "{error}"
         );
     }

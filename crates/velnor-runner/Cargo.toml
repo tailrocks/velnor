@@ -171,6 +171,7 @@ hyper-util = { version = "0.1", default-features = false, features = ["tokio", "
 [dev-dependencies]
 rusqlite.workspace = true
 wiremock = "=0.6.5"
+velnor-control = { path = "../velnor-control", version = "0.1.0", features = ["test-support"] }
 
 [features]
 default = []

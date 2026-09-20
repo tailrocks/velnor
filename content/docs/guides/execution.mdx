@@ -17,30 +17,42 @@ sequenceDiagram
     participant G as GitHub
     participant B as Broker
     participant V as Native Velnor runner
+    participant C as Shared permit ledger
+    participant F as Work filesystem
+    participant S as Runtime-store leases
     participant E as Docker or microVM
     participant R as Run/Results services
     G->>B: Queue eligible job
     V->>B: Create session and long-poll
     B-->>V: RunnerJobRequest reference
-    V->>B: Acknowledge Busy
+    V->>B: Acknowledge Busy (when requested)
+    V->>C: Commit shared max_jobs permit
     V->>R: Acquire job payload
-    V->>V: Claim, validate, and admit
-    V->>E: Preflight, reserve, prepare, execute
+    V->>V: Claim and strictly admit
+    V->>R: Renew job lease
+    V->>F: Reserve disk peak after admission
+    V->>S: Publish runtime-store leases
+    V->>E: Prepare, start, execute
     V->>R: Step status, logs, lease renewal
     V->>E: Collect and tear down
     V->>R: Complete job
 ```
 
-The broker message is a delivery notification, not the full job. Velnor
-acquires the payload from the Run Service, then claims the job locally. A host
-lock and atomic in-flight marker fence duplicate delivery.
+The broker message is a delivery notification, not the full job. Before
+fetching the payload, Velnor commits a shared `max_jobs` permit and records a
+durable acquisition intent. If no permit is free, it leaves the broker offer
+unacquired for redelivery. Velnor then fetches the payload from the Run Service
+and claims the job locally. A host lock and atomic in-flight marker fence
+duplicate delivery. Strict Native action admission happens after the fetch;
+the permit is a concurrency grant, not action approval.
 
-Native admission happens before checkout, downloads, container creation,
-cache or artifact work, leases, or injection of job execution credentials. It
-checks the trust policy, capability manifest, action graph, job shape, and
-selected backend. Rejection is fail-closed.
+Strict Native admission happens before checkout, downloads, container
+creation, runtime-store leases, cache or artifact work, or injection of job
+execution credentials. It checks the trust policy, capability manifest,
+action graph, job shape, and selected backend. Rejection is fail-closed.
 
-After admission, Velnor reserves capacity, renews the GitHub job lease,
+After admission, Velnor starts GitHub job-lease renewal, reserves a separate
+disk peak, then publishes runtime-store leases before workflow steps. It then
 normalizes the workspace and environment, executes ordered steps, publishes
 step and timeline updates, drains publishers, reports completion, and cleans
 up. Teardown is mandatory; the result records whether cleanup completed.
@@ -50,8 +62,10 @@ up. Teardown is mandatory; the result records whether cleanup completed.
 This section covers the Native lane's action-closure admission. The Scale Set
 adapter classifies offers from event and owner/repository fields, then hands
 acquired jobs to the official Actions runner; it does not resolve the Native
-action closure. Offers with unparseable event names, missing owner/repository
-fields, `pull_request*` events, or `workflow_run` are classified as unknown.
+action closure. Offers with unparseable event names or missing owner/repository
+fields, plus offers whose event name starts with `pull_request` or equals
+`workflow_run` under ASCII case-insensitive comparison, are classified as
+`unknown`.
 Unknown Scale Set offers are demoted to `Observed` and are never admitted or
 acquired. Other parseable event names with nonempty owner and repository fields
 are classified as trusted. See
@@ -134,7 +148,9 @@ Stated, not implied by omission:
   checkout always passes `submodules: false`; there is no submodule support.
 - **`actions/cache` subpaths other than `restore` and `save`.**
 - **Kache and the former Velnor compiler-cache service.**
-- **macOS and Windows.** Execution is Linux-only and macOS labels are rejected.
+- **macOS and Windows.** Execution is Linux-only. Native and Scale Set
+  registration plus local workflow selectors reject `ubuntu-*`, `macos-*`,
+  and `windows-*` labels; GitHub-hosted selectors can use those image labels.
   A Mac can still host Linux container jobs through its Docker VM; see the
   [macOS on-demand host](/guides/macos-host) guide.
 
@@ -296,8 +312,9 @@ separate stores and are unaffected by Mr Boxington's GC.
 Native Docker jobs run unbounded: no `--cpus`/`--memory` flag, no slice CPU/RAM
 ceiling, and no compiler partition is imposed — builders see the whole
 machine. The shared host-wide `max_jobs=N` ledger is a ceiling; Native slot
-count caps Native concurrency, and configured worker capacity caps Scale Set
-demand. Either lane can stay below `N`. Full policy:
+count caps Native concurrency. Scale Set polls set `X-ScaleSetMaxCapacity` to
+free permits in the shared host-wide ledger across both lanes, or zero when
+ledger capacity is unavailable. Either lane can stay below `N`. Full policy:
 [Storage and resource budgets](/operations/storage-and-resources).
 
 #### Choosing sccache instead
@@ -374,9 +391,11 @@ group is the termination fallback.
 ephemeral JIT runner and polls GitHub independently. A ready slot waits on the
 broker; REST queued-job listings are diagnostic and do not assign work.
 
-These slot and wait settings apply to Native broker jobs. Scale Set offers use
-durable demand, configured worker capacity, and the shared host-wide permit
-ledger; see [Scale Set job flow](/concepts/architecture#scale-set-job-flow).
+These slot and wait settings apply to Native broker jobs. For each Scale Set,
+GitHub's `TotalAssignedJobs` statistic sets the desired local worker population;
+Velnor has no per-set capacity field. Permit reservations and subsequent job
+acquisitions remain bounded by the shared host-wide permit ledger. See
+[Scale Set job flow](/concepts/architecture#scale-set-job-flow).
 
 Velnor limits both unassigned queue waiting and acquired-job capacity waiting.
 The defaults are 300 seconds for queue wait and 120 seconds for disk-capacity
@@ -430,9 +449,12 @@ Host process groups are signalled with `kill(-pgid, …)`, so a step's whole
 process tree goes, not just the process Velnor spawned. Containers are
 signalled with `docker kill --signal`; a container that is already gone or not
 running counts as terminated. A shared fan-out deadline bounds the whole pass;
-past it only `SIGKILL` is sent. Roughly 45 seconds after the request the token
-escalates to `Forced` and runs a second pass covering the job and service
-containers.
+past it only `SIGKILL` is sent. A valid finite, nonnegative broker
+`JobCancelMessage.Timeout` in seconds or exact `hh:mm:ss` form is used as the
+raw grace before `Forced`, including zero. Missing, malformed, negative,
+non-finite, out-of-range, or unrepresentable values use the 45-second fallback.
+Time strings with extra components also use that fallback. The `Forced` pass
+covers the job and service containers.
 
 A target that survives `SIGKILL` is recorded as a survivor with its name and
 logged; there is no further escalation.
@@ -480,12 +502,17 @@ is true:
   loop rather than one request;
 - **6 hours** have passed since the intent was committed.
 
-An entry whose budget is spent becomes *unresolvable*: the payload file is
-removed and the slot is freed, and **GitHub is never told the job finished** —
-the run service will time the job out. The reason is preserved permanently in
-the journal, as one of "the run service permanently refused this completion
-payload", "the durable completion send budget is spent", or "the completion
-resolution deadline passed". The journal exposes these for inspection; an
+An entry whose budget is spent becomes *unresolvable*: Velnor stops local
+delivery attempts, removes the payload file, frees the slot, and preserves the
+reason in the journal. A permanent refusal is an explicit response. If
+transport retries or the deadline expire without an acknowledgement, the Run
+Service may have accepted the payload before its response was lost; GitHub's
+outcome is unknown until checked. If the Run Service did not receive it, it
+may time out the job. The journal records Velnor's local budget decision;
+check GitHub's job state for the remote outcome. Reasons include "the run
+service permanently refused this
+completion payload", "the durable completion send budget is spent", and "the
+completion resolution deadline passed". An
 abandoned entry no longer counts toward outbox age.
 
 A run-service response saying the job is already terminal remotely is not a

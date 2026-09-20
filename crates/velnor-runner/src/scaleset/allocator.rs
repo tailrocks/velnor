@@ -26,7 +26,6 @@
 //! host processes, so pid liveness can neither adopt nor sweep them.
 //! Crash recovery for this lane is reconcile-by-holder, never pid-based.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use velnor_control::permit_ledger::{
@@ -70,6 +69,9 @@ impl ScaleSetAllocator {
     ///   that moved twice under one acquire (retry the poll).
     pub fn acquire(&self, holder: &str) -> Result<Option<ScaleSetPermitGuard>, AllocatorError> {
         let mut ledger = PermitLedger::open(&self.ledger_path).map_err(AllocatorError::Storage)?;
+        // Retain the resolved DB identity used by this connection. A guard
+        // must never follow a later retarget of the allocator's raw path.
+        let pinned_ledger_path = ledger.path().to_path_buf();
         let observed = velnor_control::permit_ledger::unix_now();
         ledger
             .observe_demand(holder, PermitLane::ScaleSet, "", observed, observed)
@@ -77,33 +79,48 @@ impl ScaleSetAllocator {
         for _ in 0..3 {
             let generation = ledger.generation().map_err(AllocatorError::Storage)?;
             match ledger
-                .acquire(
+                .acquire_with_lease_generation(
                     holder,
                     PermitLane::ScaleSet,
                     PermitState::Acquiring,
                     generation,
                     None,
+                    None,
                 )
                 .map_err(AllocatorError::Storage)?
             {
-                AcquireOutcome::Acquired => {
-                    return Ok(Some(ScaleSetPermitGuard::owned(&self.ledger_path, holder)));
+                (AcquireOutcome::Acquired, Some(lease_generation)) => {
+                    return Ok(Some(ScaleSetPermitGuard::owned(
+                        &pinned_ledger_path,
+                        holder,
+                        lease_generation,
+                    )));
                 }
                 // Duplicate delivery holds once: the attempt proceeds on
                 // the existing row and releases nothing. (No pid adoption:
                 // scale-set holders are requests, not processes; holder
                 // liveness is the worker record's job.)
-                AcquireOutcome::AlreadyHeld => {
+                (AcquireOutcome::AlreadyHeld, Some(lease_generation)) => {
                     return Ok(Some(ScaleSetPermitGuard::unowned(
-                        &self.ledger_path,
+                        &pinned_ledger_path,
                         holder,
+                        lease_generation,
                     )));
                 }
-                AcquireOutcome::Full | AcquireOutcome::Deferred | AcquireOutcome::Closed => {
-                    return Ok(None)
+                (AcquireOutcome::Acquired | AcquireOutcome::AlreadyHeld, None) => {
+                    return Err(AllocatorError::Storage(LedgerError::DemandSourcesUnready(
+                        "successful Scale Set acquire returned no lease generation".to_owned(),
+                    )));
                 }
-                AcquireOutcome::StaleGeneration => continue,
-                AcquireOutcome::NotConfigured => return Err(AllocatorError::NotConfigured),
+                (
+                    AcquireOutcome::Full
+                    | AcquireOutcome::Deferred
+                    | AcquireOutcome::NotReady
+                    | AcquireOutcome::Closed,
+                    _,
+                ) => return Ok(None),
+                (AcquireOutcome::StaleGeneration, _) => continue,
+                (AcquireOutcome::NotConfigured, _) => return Err(AllocatorError::NotConfigured),
             }
         }
         Err(AllocatorError::Contended)
@@ -132,26 +149,23 @@ impl ScaleSetAllocator {
     }
 }
 
-/// Daemon-startup reconcile over BOTH lanes' attested live sets, then
-/// sweep dead native attempts.
+/// Daemon-startup reconcile over BOTH lanes' attested live sets.
 ///
 /// * `scaleset_alive`: `(holder, state)` attested from the worker
 ///   registry (recorded workers that are not terminally cleaned).
-/// * `native_alive`: holders attested from native in-flight markers
-///   (C2's startup passes these; empty until the native wiring lands).
-/// * `is_alive`: host pid liveness probe for the sweep. Only dead
-///   unprotected uncertain NATIVE rows are swept; scale-set rows are
-///   never swept (no pid) and never deleted here.
+/// * `native_alive`: holders attested from native in-flight markers.
 ///
-/// Post-merge this is the one startup call both lanes share: a single
-/// [`PermitLedger::reconcile`] attests both lanes at once (two separate
-/// reconciles would mark the other lane's live rows uncertain).
+/// Process death or absence from one daemon's local roots does not prove
+/// that owned cleanup or peer-daemon handoff completed. Unattested rows
+/// stay uncertain and counted until their owning lifecycle releases them.
+///
+/// This single call attests both lanes at once; separate reconciles would
+/// mark the other lane's live rows uncertain.
 pub fn startup_reconcile(
     ledger_path: &Path,
     scaleset_alive: &[(&str, PermitState)],
     native_alive: &[&str],
-    is_alive: &dyn Fn(u32) -> bool,
-) -> Result<(ReconcileReport, Vec<String>), LedgerError> {
+) -> Result<ReconcileReport, LedgerError> {
     let mut ledger = PermitLedger::open(ledger_path)?;
     let mut attested: Vec<(&str, PermitLane, PermitState)> = scaleset_alive
         .iter()
@@ -162,13 +176,9 @@ pub fn startup_reconcile(
             .iter()
             .map(|holder| (*holder, PermitLane::Native, PermitState::Running)),
     );
-    let report = ledger.reconcile(&attested)?;
-    let protected: BTreeSet<String> = attested
-        .iter()
-        .map(|(holder, _, _)| (*holder).to_string())
-        .collect();
-    let swept = ledger.sweep_dead_uncertain(is_alive, &protected)?;
-    Ok((report, swept))
+    let generation = ledger.generation()?;
+    let roster = velnor_control::permit_ledger::read_demand_source_roster(ledger_path)?;
+    ledger.reconcile_host_roster(&roster, generation, &attested)
 }
 
 /// One scale-set acquisition's held permit. Releases on drop unless
@@ -177,6 +187,8 @@ pub fn startup_reconcile(
 pub struct ScaleSetPermitGuard {
     ledger_path: PathBuf,
     holder: String,
+    /// Immutable identity for the exact row this handle acquired or observed.
+    permit_generation: u64,
     /// False when this attempt never spent a permit (duplicate delivery
     /// onto an existing hold): drop does nothing.
     owns_permit: bool,
@@ -189,19 +201,26 @@ impl ScaleSetPermitGuard {
         &self.holder
     }
 
-    fn owned(ledger_path: &Path, holder: &str) -> Self {
+    #[must_use]
+    pub fn permit_generation(&self) -> u64 {
+        self.permit_generation
+    }
+
+    fn owned(ledger_path: &Path, holder: &str, permit_generation: u64) -> Self {
         Self {
             ledger_path: ledger_path.to_path_buf(),
             holder: holder.to_string(),
+            permit_generation,
             owns_permit: true,
             disarmed: false,
         }
     }
 
-    fn unowned(ledger_path: &Path, holder: &str) -> Self {
+    fn unowned(ledger_path: &Path, holder: &str, permit_generation: u64) -> Self {
         Self {
             ledger_path: ledger_path.to_path_buf(),
             holder: holder.to_string(),
+            permit_generation,
             owns_permit: false,
             disarmed: false,
         }
@@ -214,20 +233,15 @@ impl ScaleSetPermitGuard {
             return;
         }
         match PermitLedger::open(&self.ledger_path) {
-            Ok(mut ledger) => match ledger.generation() {
-                Ok(generation) => {
-                    if let Err(error) = ledger.transition(&self.holder, state, generation) {
-                        eprintln!(
-                            "Warning: scale-set permit transition to {state:?} failed for {}: {error}",
-                            self.holder
-                        );
-                    }
+            Ok(mut ledger) => {
+                match ledger.transition_if_generation(&self.holder, state, self.permit_generation) {
+                    Ok(true) | Ok(false) => {}
+                    Err(error) => eprintln!(
+                        "Warning: scale-set permit transition to {state:?} failed for {}: {error}",
+                        self.holder
+                    ),
                 }
-                Err(error) => eprintln!(
-                    "Warning: permit ledger generation read failed for {}: {error}",
-                    self.holder
-                ),
-            },
+            }
             Err(error) => eprintln!(
                 "Warning: permit ledger open failed for {}: {error}",
                 self.holder
@@ -253,7 +267,8 @@ impl ScaleSetPermitGuard {
         if !self.owns_permit {
             return;
         }
-        if let Err(error) = release_permit(&self.ledger_path, &self.holder) {
+        if let Err(error) = release_permit(&self.ledger_path, &self.holder, self.permit_generation)
+        {
             eprintln!(
                 "Warning: permit ledger release failed for {}: {error}",
                 self.holder
@@ -270,20 +285,15 @@ impl ScaleSetPermitGuard {
             return;
         }
         match PermitLedger::open(&self.ledger_path) {
-            Ok(mut ledger) => match ledger.generation() {
-                Ok(generation) => {
-                    if let Err(error) = ledger.retain_uncertain(&self.holder, generation) {
-                        eprintln!(
-                            "Warning: uncertain scale-set permit retention failed for {}: {error}",
-                            self.holder
-                        );
-                    }
+            Ok(mut ledger) => {
+                match ledger.retain_uncertain_if_generation(&self.holder, self.permit_generation) {
+                    Ok(true) | Ok(false) => {}
+                    Err(error) => eprintln!(
+                        "Warning: uncertain scale-set permit retention failed for {}: {error}",
+                        self.holder
+                    ),
                 }
-                Err(error) => eprintln!(
-                    "Warning: permit ledger generation read failed for {}: {error}",
-                    self.holder
-                ),
-            },
+            }
             Err(error) => eprintln!(
                 "Warning: permit ledger open failed for {}: {error}",
                 self.holder
@@ -300,7 +310,9 @@ impl Drop for ScaleSetPermitGuard {
         // Every non-terminal return makes this demand regrantable with its
         // original age. The permit and demand transition share one
         // transaction. Callers retain uncertain holds after cleanup fails.
-        if let Err(error) = release_permit_to_eligible(&self.ledger_path, &self.holder) {
+        if let Err(error) =
+            release_permit_to_eligible(&self.ledger_path, &self.holder, self.permit_generation)
+        {
             eprintln!(
                 "Warning: permit ledger release failed for {}: {error}",
                 self.holder
@@ -309,22 +321,34 @@ impl Drop for ScaleSetPermitGuard {
     }
 }
 
-fn release_permit(ledger_path: &Path, holder: &str) -> Result<bool, LedgerError> {
+fn release_permit(
+    ledger_path: &Path,
+    holder: &str,
+    expected_lease_generation: u64,
+) -> Result<bool, LedgerError> {
     let mut ledger = PermitLedger::open(ledger_path)?;
-    ledger.release(holder)
+    ledger.release_if_generation(holder, expected_lease_generation)
 }
 
-fn release_permit_to_eligible(ledger_path: &Path, holder: &str) -> Result<bool, LedgerError> {
+fn release_permit_to_eligible(
+    ledger_path: &Path,
+    holder: &str,
+    expected_lease_generation: u64,
+) -> Result<bool, LedgerError> {
     let mut ledger = PermitLedger::open(ledger_path)?;
-    ledger.release_to_eligible(holder)
+    ledger.release_to_eligible_if_generation(holder, expected_lease_generation)
 }
 
 /// Release one holder's permit from outside the acquiring attempt
 /// (worker recovery converging a crashed attempt after it completes and
 /// cleans the job). Best-effort: whatever is missed converges via the
 /// next reconcile.
-pub fn release_permit_best_effort(ledger_path: &Path, holder: &str) {
-    match release_permit(ledger_path, holder) {
+pub fn release_permit_best_effort(
+    ledger_path: &Path,
+    holder: &str,
+    expected_lease_generation: u64,
+) {
+    match release_permit(ledger_path, holder, expected_lease_generation) {
         Ok(true) => {}
         Ok(false) => {
             eprintln!("permit ledger: holder {holder} already released; nothing to converge");
@@ -395,8 +419,11 @@ mod tests {
     fn configure(path: &Path, max_jobs: u32) {
         let mut ledger = PermitLedger::open(path).unwrap();
         ledger.set_max_jobs(max_jobs).unwrap();
-        ledger.begin_epoch().unwrap();
-        ledger.reconcile(&[]).unwrap();
+        let generation = ledger.begin_epoch().unwrap();
+        let roster = velnor_control::permit_ledger::read_demand_source_roster(path).unwrap();
+        ledger
+            .reconcile_host_roster(&roster, generation, &[])
+            .unwrap();
     }
 
     #[test]
@@ -458,6 +485,79 @@ mod tests {
     }
 
     #[test]
+    fn stale_same_holder_guard_cannot_release_replacement_lease() {
+        let path = temp_ledger_path("stale-guard");
+        configure(&path, 1);
+        let allocator = ScaleSetAllocator::open(&path);
+        let holder = permit_holder(7, 9001);
+        let first = allocator.acquire(&holder).unwrap().unwrap();
+        let old_generation = first.permit_generation();
+        std::mem::forget(first);
+
+        let mut ledger = PermitLedger::open(&path).unwrap();
+        assert!(ledger
+            .release_to_eligible_if_generation(&holder, old_generation)
+            .unwrap());
+        drop(ledger);
+        let replacement = allocator.acquire(&holder).unwrap().unwrap();
+        let replacement_generation = replacement.permit_generation();
+        assert_ne!(old_generation, replacement_generation);
+
+        // Simulate the delayed Drop of an old guard after same-holder
+        // reacquisition. It must leave the replacement occupied.
+        drop(ScaleSetPermitGuard::owned(&path, &holder, old_generation));
+        let ledger = PermitLedger::open(&path).unwrap();
+        assert_eq!(
+            ledger.permit_lease_generation(&holder).unwrap(),
+            Some(replacement_generation)
+        );
+        assert_eq!(allocator.occupied().unwrap(), 1);
+        drop(replacement);
+        assert_eq!(allocator.occupied().unwrap(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn acquired_scaleset_guard_keeps_ledger_target_after_symlink_retarget() {
+        use std::os::unix::fs::symlink;
+
+        let first_path = temp_ledger_path("pinned-ledger-first");
+        let second_path = temp_ledger_path("pinned-ledger-second");
+        configure(&first_path, 1);
+        configure(&second_path, 1);
+        let alias = first_path.parent().unwrap().join("ledger-alias.db");
+        symlink(&first_path, &alias).unwrap();
+
+        let holder = permit_holder(7, 9002);
+        let first_guard = ScaleSetAllocator::open(&alias)
+            .acquire(&holder)
+            .unwrap()
+            .expect("first ledger grants");
+        let second_guard = ScaleSetAllocator::open(&second_path)
+            .acquire(&holder)
+            .unwrap()
+            .expect("second ledger grants independently");
+        let second_generation = second_guard.permit_generation();
+
+        std::fs::remove_file(&alias).unwrap();
+        symlink(&second_path, &alias).unwrap();
+        drop(first_guard);
+
+        let first_ledger = PermitLedger::open(&first_path).unwrap();
+        assert_eq!(first_ledger.occupied().unwrap(), 0);
+        let second_ledger = PermitLedger::open(&second_path).unwrap();
+        assert_eq!(second_ledger.occupied().unwrap(), 1);
+        assert_eq!(
+            second_ledger.permit_lease_generation(&holder).unwrap(),
+            Some(second_generation)
+        );
+
+        drop(second_guard);
+        std::fs::remove_dir_all(first_path.parent().unwrap()).unwrap();
+        std::fs::remove_dir_all(second_path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
     fn unconfigured_ledger_refuses() {
         let path = temp_ledger_path("unconfigured");
         // Opened but never configured: no N, no epoch, no reconcile.
@@ -480,9 +580,8 @@ mod tests {
         // Epoch began but reconcile has not run: do not advertise.
         assert_eq!(allocator.advertised_free().unwrap(), None);
 
-        let (report, swept) = startup_reconcile(&path, &[], &[], &|_| true).unwrap();
+        let report = startup_reconcile(&path, &[], &[]).unwrap();
         assert!(report.adopted.is_empty());
-        assert!(swept.is_empty());
         assert_eq!(allocator.advertised_free().unwrap(), Some(4));
 
         let _guard = allocator
@@ -502,6 +601,7 @@ mod tests {
             .acquire(&permit_holder(7, 4242))
             .unwrap()
             .expect("grants");
+        let lease_generation = guard.permit_generation();
         guard.mark_uncertain_and_disarm();
         // Still occupied: the reservation is visible, not freed.
         assert_eq!(allocator.occupied().unwrap(), 1);
@@ -511,7 +611,7 @@ mod tests {
             Some(PermitState::Uncertain)
         );
         // Recovery converges it once the residue is gone.
-        release_permit_best_effort(&path, &permit_holder(7, 4242));
+        release_permit_best_effort(&path, &permit_holder(7, 4242), lease_generation);
         assert_eq!(allocator.occupied().unwrap(), 0);
     }
 
@@ -573,16 +673,14 @@ mod tests {
         // New epoch (daemon restart), then ONE reconcile attesting both.
         let mut ledger = PermitLedger::open(&path).unwrap();
         ledger.begin_epoch().unwrap();
-        let (report, swept) = startup_reconcile(
+        let report = startup_reconcile(
             &path,
             &[("scaleset/7/4242", PermitState::Running)],
             &["native/req-1"],
-            &|_| true,
         )
         .unwrap();
         assert!(report.marked_uncertain.is_empty(), "{report:?}");
         assert_eq!(report.confirmed.len(), 2);
-        assert!(swept.is_empty());
         assert_eq!(allocator.advertised_free().unwrap(), Some(2));
     }
 }

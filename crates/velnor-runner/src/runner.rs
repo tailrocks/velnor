@@ -462,16 +462,25 @@ impl ConfigureLock {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct InFlightJobRecord {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct InFlightJobRecord {
     plan_id: String,
     job_id: String,
     run_service_url: String,
     billing_owner_id: Option<String>,
-    /// Host-wide permit holder (`native/<broker request id>`) spent for
-    /// this job. Crash recovery converges the permit through this handle:
-    /// reconcile attests it as live work, and recorded-job completion
-    /// releases it after cleanup. Empty on markers predating the ledger.
+    /// Original broker request identity, retained after the journal row is
+    /// retargeted to the acquired run-service job ID.
+    #[serde(default)]
+    runner_request_id: String,
+    /// Slot generation that owned this job. `None` is a legacy marker with
+    /// ambiguous generation; recovery must retain it rather than consult the
+    /// current slot generation.
+    #[serde(default)]
+    generation: Option<u64>,
+    /// Scope-bound permit holder (`native/v1/<scope hash>/<request id>`)
+    /// spent for this job. Crash recovery releases it only after terminal completion
+    /// and storage cleanup have succeeded. Empty on markers predating the
+    /// ledger.
     #[serde(default)]
     permit_holder: String,
     /// Resolved ledger database the holder above was spent from. Recorded
@@ -479,12 +488,70 @@ struct InFlightJobRecord {
     /// `--permit-ledger`; empty falls back to the host-wide default.
     #[serde(default)]
     permit_ledger: String,
+    /// Permit-ledger holder generation. This prevents replay of an old marker
+    /// from releasing a later reacquisition of the same request holder.
+    #[serde(default)]
+    permit_generation: Option<u64>,
+}
+
+impl InFlightJobRecord {
+    pub(crate) fn job_id(&self) -> &str {
+        &self.job_id
+    }
+
+    pub(crate) fn generation(&self) -> Option<u64> {
+        self.generation
+    }
 }
 
 const MAX_IN_FLIGHT_JOB_BYTES: usize = 64 * 1024;
+const IN_FLIGHT_JOB_LOCK_NAME: &str = ".in-flight-job.lock";
+
+/// Serialize publication and terminal cleanup of one slot's in-flight marker.
+/// Without this lock, a cleanup retry can read an old record, race a new
+/// publication after the old marker is removed, then unlink the new marker.
+#[derive(Debug)]
+struct InFlightJobLock {
+    _file: File,
+}
+
+impl InFlightJobLock {
+    fn acquire(config_dir: &Path) -> Result<Self> {
+        fs::create_dir_all(config_dir)
+            .with_context(|| format!("create runner config directory {}", config_dir.display()))?;
+        let path = config_dir.join(IN_FLIGHT_JOB_LOCK_NAME);
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        let file = options
+            .open(&path)
+            .with_context(|| format!("open in-flight marker lock {}", path.display()))?;
+        if !file
+            .metadata()
+            .with_context(|| format!("stat in-flight marker lock {}", path.display()))?
+            .is_file()
+        {
+            bail!(
+                "in-flight marker lock is not a regular file: {}",
+                path.display()
+            );
+        }
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
+            .with_context(|| format!("lock in-flight marker {}", path.display()))?;
+        Ok(Self { _file: file })
+    }
+}
 
 fn in_flight_job_path(config_dir: &Path) -> PathBuf {
     config_dir.join("in-flight-job.json")
+}
+
+#[cfg(test)]
+pub(crate) fn test_in_flight_job_path(config_dir: &Path) -> PathBuf {
+    in_flight_job_path(config_dir)
 }
 
 /// A provisional acquisition is keyed by the broker request until the acquire
@@ -530,6 +597,26 @@ fn open_slot_journal(
     Ok(Some((journal, slot_id)))
 }
 
+fn native_permit_lease(
+    permit_guard: &crate::permit_guard::NativePermitGuard,
+) -> Result<velnor_control::journal::NativePermitLease> {
+    // NativePermitGuard pins the canonical ledger identity during acquire.
+    // Re-resolving a raw alias here could bind the journal lease to another
+    // database if its symlink changed after the permit was spent.
+    let ledger_path = permit_guard.ledger_path();
+    let ledger_path = ledger_path.to_str().ok_or_else(|| {
+        anyhow::anyhow!(
+            "native permit ledger path is not valid UTF-8: {}",
+            ledger_path.display()
+        )
+    })?;
+    Ok(velnor_control::journal::NativePermitLease {
+        holder: permit_guard.holder().to_owned(),
+        ledger_path: ledger_path.to_owned(),
+        generation: permit_guard.permit_generation(),
+    })
+}
+
 /// Occupy the slot *before* `acquirejob` is called.
 ///
 /// This is the write that closes the lost-acquisition window: a crash between
@@ -542,19 +629,22 @@ fn intend_run_service_acquisition_in_journal(
     runner_request_id: &str,
     message_id: &str,
     run_service_url: &str,
+    permit_lease: &velnor_control::journal::NativePermitLease,
 ) -> Result<()> {
     let Some((mut journal, slot_id)) =
         open_slot_journal(journal_dir, config_dir, "intend a run-service acquisition")?
     else {
         return Ok(());
     };
-    crate::node::complete::intend_acquisition(
+    crate::node::complete::intend_acquisition_with_permit(
         &mut journal,
         &provisional_job_id(runner_request_id),
         &slot_id,
         message_id,
+        runner_request_id,
         run_service_url,
         unix_epoch_now(),
+        permit_lease.clone(),
     )?;
     Ok(())
 }
@@ -591,6 +681,7 @@ fn resolve_run_service_acquisition_in_journal(
     runner_request_id: &str,
     run_service_url: &str,
     identity: &AcquiredJobIdentity,
+    permit_lease: &velnor_control::journal::NativePermitLease,
 ) -> Result<bool> {
     // `Ok(None)` is a configless runner: no journal-managed slot, no row to
     // repair, and journal acceptance has always been a no-op there.
@@ -604,16 +695,27 @@ fn resolve_run_service_acquisition_in_journal(
         .materialized_state()
         .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
     if let Some(job) = state.jobs.iter().find(|job| job.job_id == provisional) {
-        crate::node::complete::resolve_acquisition(
+        if job.runner_request_id != runner_request_id
+            || job.permit_lease.as_ref() != Some(permit_lease)
+        {
+            bail!(
+                "provisional acquisition {} does not match request {} and exact native permit lease",
+                provisional.0,
+                runner_request_id
+            );
+        }
+        crate::node::complete::resolve_acquisition_for_request_with_permit(
             &mut journal,
             &provisional,
             &velnor_model::JobId(identity.job_id.clone()),
             &identity.plan_id,
             job.generation,
+            runner_request_id,
+            permit_lease.clone(),
         )?;
         return Ok(false);
     }
-    crate::node::complete::reintend_resolved_acquisition(
+    crate::node::complete::reintend_resolved_acquisition_with_permit(
         &mut journal,
         &velnor_model::JobId(identity.job_id.clone()),
         &slot_id,
@@ -621,6 +723,7 @@ fn resolve_run_service_acquisition_in_journal(
         &identity.plan_id,
         run_service_url,
         unix_epoch_now(),
+        permit_lease.clone(),
     )
 }
 
@@ -636,12 +739,135 @@ fn acquire_skip_abandons_intent(category: BrokerErrorCategory) -> bool {
     matches!(category, BrokerErrorCategory::Terminal)
 }
 
+fn matching_provisional_acquisition_for_request(
+    journal: &velnor_control::journal::Journal,
+    runner_request_id: &str,
+    expected_permit_lease: &velnor_control::journal::NativePermitLease,
+) -> Result<Option<velnor_control::journal::JobRecord>> {
+    let provisional = provisional_job_id(runner_request_id);
+    let state = journal
+        .materialized_state()
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+    let matching_records: Vec<_> = state
+        .jobs
+        .iter()
+        .filter(|job| job.job_id == provisional || job.runner_request_id == runner_request_id)
+        .cloned()
+        .collect();
+    if matching_records.len() > 1 {
+        bail!(
+            "cannot abandon acquisition {}: multiple journal rows share request identity {}",
+            provisional.0,
+            runner_request_id
+        );
+    }
+    let Some(record) = matching_records.into_iter().next() else {
+        return Ok(None);
+    };
+    if record.runner_request_id != runner_request_id
+        || record.permit_lease.as_ref() != Some(expected_permit_lease)
+    {
+        bail!(
+            "cannot abandon acquisition {}: journal row no longer matches request {} and the recorded native permit lease",
+            record.job_id.0,
+            runner_request_id
+        );
+    }
+    if record.job_id != provisional || !record.provisional {
+        bail!(
+            "cannot abandon acquisition {}: the exact request row is no longer provisional",
+            runner_request_id
+        );
+    }
+    Ok(Some(record))
+}
+
+/// Persist an exact confirmed acquisition-loss proof before releasing its
+/// native permit. A missing or mismatched row must keep the permit held because
+/// recovery would otherwise have no exact release proof.
+fn record_run_service_acquisition_loss_proof_in_journal(
+    journal_dir: &Path,
+    config_dir: &Path,
+    runner_request_id: &str,
+    expected_permit_lease: &velnor_control::journal::NativePermitLease,
+    proof_source: velnor_control::journal::AcquisitionLossSource,
+) -> Result<()> {
+    if !matches!(
+        proof_source,
+        velnor_control::journal::AcquisitionLossSource::AcquireJobNotSent
+            | velnor_control::journal::AcquisitionLossSource::AcquireJobNotFound
+    ) {
+        bail!("cannot pre-record acquisition-loss proof for {proof_source:?}");
+    }
+    let Some((mut journal, _)) =
+        open_slot_journal(journal_dir, config_dir, "record an acquisition-loss proof")?
+    else {
+        // Configless runners and runners without a journal-managed slot have
+        // no provisional row to replay.
+        return Ok(());
+    };
+    let record = matching_provisional_acquisition_for_request(
+        &journal,
+        runner_request_id,
+        expected_permit_lease,
+    )?
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "cannot record acquisition-loss proof: no durable request row for {runner_request_id}"
+        )
+    })?;
+    crate::node::complete::record_acquisition_loss_proof(
+        &mut journal,
+        &record.job_id,
+        record.generation,
+        velnor_control::journal::AcquisitionLossProof {
+            source: proof_source,
+            permit_lease: expected_permit_lease.clone(),
+        },
+    )
+}
+
+fn release_acquisition_loss_proof(
+    proof: &velnor_control::journal::AcquisitionLossProof,
+) -> Result<()> {
+    let lease = &proof.permit_lease;
+    let released = match proof.source {
+        velnor_control::journal::AcquisitionLossSource::AcquireJobNotSent => {
+            let mut ledger =
+                velnor_control::permit_ledger::PermitLedger::open(Path::new(&lease.ledger_path))
+                    .map_err(|error| anyhow::anyhow!("{error:#}"))?;
+            ledger
+                .release_to_eligible_if_generation(&lease.holder, lease.generation)
+                .map_err(|error| anyhow::anyhow!("{error:#}"))?
+        }
+        velnor_control::journal::AcquisitionLossSource::AcquireJobNotFound
+        | velnor_control::journal::AcquisitionLossSource::RenewJobNotOurs => {
+            crate::permit_guard::release_permit_cancelled_if_generation(
+                Path::new(&lease.ledger_path),
+                &lease.holder,
+                lease.generation,
+            )?
+        }
+    };
+    if !released {
+        bail!(
+            "exact native permit lease {} generation {} is not confirmed released for {:?}",
+            lease.holder,
+            lease.generation,
+            proof.source
+        );
+    }
+    Ok(())
+}
+
 /// Drop a provisional row the run service says is gone, freeing the slot now
 /// instead of at the next restart.
 fn abandon_run_service_acquisition_in_journal(
     journal_dir: &Path,
     config_dir: &Path,
     runner_request_id: &str,
+    expected_permit_lease: &velnor_control::journal::NativePermitLease,
+    proof_source: velnor_control::journal::AcquisitionLossSource,
     reason: &str,
 ) -> Result<()> {
     let Some((mut journal, _)) =
@@ -650,17 +876,78 @@ fn abandon_run_service_acquisition_in_journal(
         return Ok(());
     };
     let provisional = provisional_job_id(runner_request_id);
-    let Some(generation) = journal
-        .materialized_state()
-        .map_err(|error| anyhow::anyhow!("journal: {error}"))?
-        .jobs
-        .iter()
-        .find(|job| job.job_id == provisional && job.provisional)
-        .map(|job| job.generation)
+    let Some(record) = matching_provisional_acquisition_for_request(
+        &journal,
+        runner_request_id,
+        expected_permit_lease,
+    )?
     else {
         return Ok(());
     };
-    crate::node::complete::abandon_acquisition(&mut journal, &provisional, generation, reason)
+    let proof = velnor_control::journal::AcquisitionLossProof {
+        source: proof_source,
+        permit_lease: expected_permit_lease.clone(),
+    };
+    match proof_source {
+        velnor_control::journal::AcquisitionLossSource::AcquireJobNotSent
+        | velnor_control::journal::AcquisitionLossSource::AcquireJobNotFound => {
+            if record.acquisition_loss_proof.as_ref() != Some(&proof) {
+                bail!(
+                    "cannot abandon acquisition {}: durable pre-release proof for {proof_source:?} is missing",
+                    record.job_id.0
+                );
+            }
+        }
+        velnor_control::journal::AcquisitionLossSource::RenewJobNotOurs => {}
+    }
+    crate::node::complete::abandon_acquisition(
+        &mut journal,
+        &provisional,
+        record.generation,
+        proof,
+        reason,
+    )
+}
+
+/// Persist the proof, release the exact native lease for that outcome, then
+/// append the terminal event. The durable row bridges every failure between
+/// those steps so startup can retry the idempotent release and terminal append.
+fn settle_confirmed_run_service_acquisition_loss(
+    mut permit_guard: crate::permit_guard::NativePermitGuard,
+    journal_dir: &Path,
+    config_dir: &Path,
+    runner_request_id: &str,
+    permit_lease: &velnor_control::journal::NativePermitLease,
+    proof_source: velnor_control::journal::AcquisitionLossSource,
+    reason: &str,
+) -> Result<()> {
+    permit_guard.retain_until_terminal();
+    record_run_service_acquisition_loss_proof_in_journal(
+        journal_dir,
+        config_dir,
+        runner_request_id,
+        permit_lease,
+        proof_source,
+    )?;
+    match proof_source {
+        velnor_control::journal::AcquisitionLossSource::AcquireJobNotSent => permit_guard
+            .release_to_eligible()
+            .context("requeue the exact permit for a confirmed unsent acquire")?,
+        velnor_control::journal::AcquisitionLossSource::AcquireJobNotFound => permit_guard
+            .release_cancelled()
+            .context("release the exact permit for a confirmed unavailable request")?,
+        velnor_control::journal::AcquisitionLossSource::RenewJobNotOurs => {
+            bail!("renewjob proof must use provisional-acquisition recovery")
+        }
+    };
+    abandon_run_service_acquisition_in_journal(
+        journal_dir,
+        config_dir,
+        runner_request_id,
+        permit_lease,
+        proof_source,
+        reason,
+    )
 }
 
 /// Ask the run service whether a provisional row is really ours.
@@ -744,12 +1031,15 @@ async fn resolve_provisional_acquisitions_at_startup(
     // The probe closure the journal drives must be synchronous, so ask the run
     // service first and hand the recorded answers over. Only rows that are
     // still probeable are asked: a row past its budget, or one the acquire
-    // reply never named, is settled by the journal without a renewal.
+    // reply never named, stays provisional without another renewal.
     let now = unix_epoch_now();
     let mut verdicts: std::collections::HashMap<String, crate::node::complete::AcquisitionVerdict> =
         std::collections::HashMap::new();
     for row in pending {
-        if row.plan_id.is_empty() || row.probe_budget_exhausted(now) {
+        if row.acquisition_loss_proof.is_some()
+            || row.plan_id.is_empty()
+            || row.probe_budget_exhausted(now)
+        {
             continue;
         }
         verdicts.insert(
@@ -757,13 +1047,17 @@ async fn resolve_provisional_acquisitions_at_startup(
             probe_provisional_acquisition(run_service, &row).await,
         );
     }
-    let resolved =
-        crate::node::complete::resolve_provisional_acquisitions(&mut journal, now, |row| {
+    let resolved = crate::node::complete::resolve_provisional_acquisitions(
+        &mut journal,
+        now,
+        |row| {
             verdicts
                 .get(&row.job_id.0)
                 .copied()
                 .unwrap_or(crate::node::complete::AcquisitionVerdict::Indeterminate)
-        });
+        },
+        release_acquisition_loss_proof,
+    );
     match resolved {
         Ok(resolved) => {
             for outcome in resolved {
@@ -780,6 +1074,88 @@ async fn resolve_provisional_acquisitions_at_startup(
             sanitized_retry_error(&error)
         ),
     }
+}
+
+/// Resolve a provisional acquisition from a controller-owned recovery waiter.
+/// This path returns before any broker session or workflow work is started, so
+/// an Assigned slot can be probed even when its normal Ready waiter cannot run.
+pub(crate) async fn resolve_provisional_acquisitions_for_recovery(config_dir: &Path) -> Result<()> {
+    let journal_dir = crate::node::complete::journal_dir_near(config_dir);
+    let Some((mut journal, _)) = open_slot_journal(
+        &journal_dir,
+        config_dir,
+        "resolve a controller-recovered run-service acquisition",
+    )?
+    else {
+        return Ok(());
+    };
+    let pending: Vec<velnor_control::journal::JobRecord> = journal
+        .materialized_state()?
+        .jobs
+        .into_iter()
+        .filter(|job| job.provisional)
+        .collect();
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    // A credential/config failure is an indeterminate probe, not evidence that
+    // this runner lost the lease. Charge the same durable bounded budget used
+    // for transport and authentication failures so recovery remains retryable
+    // without issuing a request carrying fabricated credentials.
+    let run_service = match config::load(config_dir) {
+        Ok(stored) => match oauth_access_token(&stored).await {
+            Ok(token) => Some(RunServiceClient::new(token.token)?),
+            Err(error) => {
+                eprintln!(
+                    "Warning: controller recovery cannot obtain run-service credentials: {}",
+                    sanitized_retry_error(&error)
+                );
+                None
+            }
+        },
+        Err(error) => {
+            eprintln!(
+                "Warning: controller recovery cannot obtain run-service credentials: {}",
+                sanitized_retry_error(&error)
+            );
+            None
+        }
+    };
+    let now = unix_epoch_now();
+    let mut verdicts: std::collections::HashMap<String, crate::node::complete::AcquisitionVerdict> =
+        std::collections::HashMap::new();
+    for row in &pending {
+        if row.acquisition_loss_proof.is_some()
+            || row.plan_id.is_empty()
+            || row.probe_budget_exhausted(now)
+        {
+            continue;
+        }
+        let verdict = match &run_service {
+            Some(client) => probe_provisional_acquisition(client, row).await,
+            None => crate::node::complete::AcquisitionVerdict::Indeterminate,
+        };
+        verdicts.insert(row.job_id.0.clone(), verdict);
+    }
+    let resolved = crate::node::complete::resolve_provisional_acquisitions(
+        &mut journal,
+        now,
+        |row| {
+            verdicts
+                .get(&row.job_id.0)
+                .copied()
+                .unwrap_or(crate::node::complete::AcquisitionVerdict::Indeterminate)
+        },
+        release_acquisition_loss_proof,
+    )?;
+    for outcome in resolved {
+        eprintln!(
+            "controller recovery acquisition {} resolved: verdict={:?} abandoned={}",
+            outcome.job_id.0, outcome.verdict, outcome.abandoned
+        );
+    }
+    Ok(())
 }
 
 /// Promote the retargeted row to ownership. The run-service acquire path
@@ -855,6 +1231,7 @@ fn mark_run_service_job_started_in_journal(
     }
 }
 
+#[cfg(test)]
 fn persist_in_flight_job(
     config_dir: &Path,
     run_service_job: &RunServiceJobContext,
@@ -867,42 +1244,184 @@ fn persist_in_flight_job(
         job_id: job.job_id.clone(),
         run_service_url: run_service_job.run_service_url.clone(),
         billing_owner_id: run_service_job.billing_owner_id.clone(),
+        runner_request_id: permit_request_id(permit_holder)
+            .unwrap_or_default()
+            .to_owned(),
+        generation: None,
         permit_holder: permit_holder.to_owned(),
         permit_ledger: permit_ledger.to_string_lossy().into_owned(),
+        permit_generation: None,
     };
+    persist_in_flight_job_record(config_dir, &record)
+}
+
+#[cfg(test)]
+fn permit_request_id(holder: &str) -> Option<&str> {
+    if let Some(scoped) = holder.strip_prefix("native/v1/") {
+        let (scope_hash, request_id) = scoped.split_once('/')?;
+        if scope_hash.len() != 64 || !scope_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        return (!request_id.is_empty()).then_some(request_id);
+    }
+    holder
+        .strip_prefix("native/")
+        .filter(|request_id| !request_id.is_empty())
+}
+
+/// Build the durable marker only after acquisition identity and journal
+/// correlation are known. A slot-managed runner must match the exact durable
+/// request row before it may publish a marker that recovery can later release.
+fn persist_acquired_in_flight_job(
+    config_dir: &Path,
+    run_service_job: &RunServiceJobContext,
+    identity: &AcquiredJobIdentity,
+    runner_request_id: &str,
+    permit_guard: &crate::permit_guard::NativePermitGuard,
+) -> Result<()> {
+    let permit_lease = native_permit_lease(permit_guard)?;
+    let generation = match open_slot_journal(
+        &run_service_job.journal_dir,
+        config_dir,
+        "persist an acquired in-flight job",
+    )? {
+        Some((journal, _slot_id)) => {
+            let state = journal
+                .materialized_state()
+                .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+            let row = state
+                .jobs
+                .iter()
+                .find(|row| row.job_id.0 == identity.job_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "journal has no acquired-job row for in-flight job {}",
+                        identity.job_id
+                    )
+                })?;
+            if row.runner_request_id != runner_request_id
+                || row.permit_lease.as_ref() != Some(&permit_lease)
+            {
+                bail!(
+                    "journal request correlation or exact native permit lease for acquired job {} does not match request {} and active lease {} generation {}",
+                    identity.job_id,
+                    runner_request_id,
+                    permit_lease.holder,
+                    permit_lease.generation
+                );
+            }
+            Some(row.generation.0)
+        }
+        None => None,
+    };
+    let record = InFlightJobRecord {
+        plan_id: identity.plan_id.clone(),
+        job_id: identity.job_id.clone(),
+        run_service_url: run_service_job.run_service_url.clone(),
+        billing_owner_id: run_service_job.billing_owner_id.clone(),
+        runner_request_id: runner_request_id.to_owned(),
+        generation,
+        permit_holder: permit_lease.holder.clone(),
+        permit_ledger: permit_lease.ledger_path,
+        permit_generation: Some(permit_lease.generation),
+    };
+    persist_in_flight_job_record(config_dir, &record)
+}
+
+fn persist_in_flight_job_record(config_dir: &Path, record: &InFlightJobRecord) -> Result<()> {
+    persist_in_flight_job_record_with(config_dir, record, || Ok(()))
+}
+
+fn persist_in_flight_job_record_with(
+    config_dir: &Path,
+    record: &InFlightJobRecord,
+    before_publish: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    persist_in_flight_job_record_with_temp(
+        config_dir,
+        record,
+        &in_flight_job_temp_name(),
+        before_publish,
+    )
+}
+
+fn persist_in_flight_job_record_with_temp(
+    config_dir: &Path,
+    record: &InFlightJobRecord,
+    temp_name: &str,
+    before_publish: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let _lock = InFlightJobLock::acquire(config_dir)?;
+    fs::create_dir_all(config_dir)
+        .with_context(|| format!("create runner config directory {}", config_dir.display()))?;
     let path = in_flight_job_path(config_dir);
-    let bytes = serde_json::to_vec_pretty(&record).context("serialize in-flight job")?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("in-flight marker path has no parent"))?;
+    let bytes = serde_json::to_vec_pretty(record).context("serialize in-flight job")?;
+    let temporary = parent.join(temp_name);
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
-    options.mode(0o600);
-    match options.open(&path) {
-        Ok(mut file) => {
-            file.write_all(&bytes)
-                .with_context(|| format!("write {}", path.display()))?;
-            file.sync_all()
-                .with_context(|| format!("sync {}", path.display()))?;
-            sync_directory(path.parent())?;
-            Ok(())
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let existing = load_in_flight_job(config_dir)?.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "in-flight job lease {} existed then became unreadable",
+    options
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let mut file = options
+        .open(&temporary)
+        .with_context(|| format!("create temporary in-flight marker {}", temporary.display()))?;
+    let result = (|| -> Result<()> {
+        file.write_all(&bytes)
+            .with_context(|| format!("write temporary in-flight marker {}", temporary.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync temporary in-flight marker {}", temporary.display()))?;
+        before_publish()?;
+        // Hard-link publication is an atomic no-replace operation. A normal
+        // rename could overwrite a different live job's slot marker.
+        match fs::hard_link(&temporary, &path) {
+            Ok(()) => {
+                fs::remove_file(&temporary).with_context(|| {
+                    format!("remove temporary in-flight marker {}", temporary.display())
+                })?;
+                sync_directory(Some(parent))?;
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let existing = load_in_flight_job(config_dir)?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "in-flight marker {} existed then became unreadable",
+                        path.display()
+                    )
+                })?;
+                if existing == *record {
+                    fs::remove_file(&temporary).with_context(|| {
+                        format!("remove temporary in-flight marker {}", temporary.display())
+                    })?;
+                    sync_directory(Some(parent))?;
+                    Ok(())
+                } else {
+                    bail!(
+                        "slot already owns in-flight job {}; refusing to admit {}",
+                        existing.job_id,
+                        record.job_id
+                    );
+                }
+            }
+            Err(error) => Err(error).with_context(|| {
+                format!(
+                    "publish in-flight marker without replacement {}",
                     path.display()
                 )
-            })?;
-            if existing.job_id == job.job_id {
-                return Ok(());
-            }
-            anyhow::bail!(
-                "slot already owns in-flight job {}; refusing to admit {}",
-                existing.job_id,
-                job.job_id
-            );
+            }),
         }
-        Err(error) => Err(error).with_context(|| format!("create exclusive {}", path.display())),
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
     }
+    result
+}
+
+fn in_flight_job_temp_name() -> String {
+    format!("in-flight-job.json.tmp-{}", uuid::Uuid::new_v4().simple())
 }
 
 fn sync_directory(path: Option<&Path>) -> Result<()> {
@@ -947,6 +1466,27 @@ fn load_in_flight_job(config_dir: &Path) -> Result<Option<InFlightJobRecord>> {
     Ok(Some(record))
 }
 
+fn load_expected_in_flight_job(
+    config_dir: &Path,
+    expected: Option<&InFlightJobRecord>,
+) -> Result<Option<InFlightJobRecord>> {
+    let Some(record) = load_in_flight_job(config_dir)? else {
+        return Ok(None);
+    };
+    if let Some(expected) = expected
+        && &record != expected
+    {
+        bail!(
+            "in-flight marker changed before terminal recovery: found job {} generation {:?}, expected job {} generation {:?}",
+            record.job_id,
+            record.generation,
+            expected.job_id,
+            expected.generation
+        );
+    }
+    Ok(Some(record))
+}
+
 fn read_bounded_marker(path: &Path, limit: usize) -> Result<Vec<u8>> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -975,6 +1515,13 @@ fn read_bounded_marker(path: &Path, limit: usize) -> Result<Vec<u8>> {
 }
 
 fn clear_in_flight_job(config_dir: &Path) -> Result<()> {
+    clear_in_flight_job_with_sync(config_dir, |slot_dir| sync_directory(Some(slot_dir)))
+}
+
+fn clear_in_flight_job_with_sync(
+    config_dir: &Path,
+    sync_slot_directory: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
     let path = in_flight_job_path(config_dir);
     match fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -991,7 +1538,10 @@ fn clear_in_flight_job(config_dir: &Path) -> Result<()> {
         }
         Ok(_) => {
             fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
-            sync_directory(path.parent())?;
+            let parent = path
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("in-flight marker path has no parent"))?;
+            sync_slot_directory(parent)?;
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
@@ -999,15 +1549,153 @@ fn clear_in_flight_job(config_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn clear_in_flight_job_if_matches(config_dir: &Path, job_id: &str) -> Result<bool> {
-    let Some(record) = load_in_flight_job(config_dir)? else {
-        return Ok(false);
-    };
-    if record.job_id != job_id {
-        return Ok(false);
+/// Run every durable cleanup before unlinking the occupancy marker. A failed
+/// storage or permit transaction leaves the marker available for replay.
+fn finish_in_flight_job_cleanup(
+    slot_dir: &Path,
+    record: Option<&InFlightJobRecord>,
+    release_storage: impl FnOnce(&InFlightJobRecord) -> Result<()>,
+    release_permit: impl FnOnce() -> Result<()>,
+) -> Result<bool> {
+    if let Some(record) = record {
+        release_storage(record)?;
     }
-    clear_in_flight_job(config_dir)?;
-    Ok(true)
+    release_permit()?;
+    if record.is_some() {
+        clear_in_flight_job(slot_dir)?;
+    }
+    Ok(record.is_some())
+}
+
+fn release_recorded_permit(record: &InFlightJobRecord) -> Result<()> {
+    if record.permit_holder.is_empty() {
+        // Markers predating the native permit ledger carry no permit pointer.
+        return Ok(());
+    }
+    let permit_generation = record.permit_generation.ok_or_else(|| {
+        anyhow::anyhow!(
+            "in-flight job {} has a permit holder but no permit generation",
+            record.job_id
+        )
+    })?;
+    let ledger_path = if record.permit_ledger.is_empty() {
+        crate::permit_guard::default_permit_ledger_path()
+    } else {
+        PathBuf::from(&record.permit_ledger)
+    };
+    let canonical_ledger_path = ledger_path.canonicalize().with_context(|| {
+        format!(
+            "canonicalize recorded permit ledger {}",
+            ledger_path.display()
+        )
+    })?;
+    if canonical_ledger_path != ledger_path {
+        bail!(
+            "in-flight job {} records a noncanonical permit ledger path {}; preserve the marker for operator recovery",
+            record.job_id,
+            ledger_path.display()
+        );
+    }
+    let released = crate::permit_guard::release_permit_if_generation(
+        &ledger_path,
+        &record.permit_holder,
+        permit_generation,
+    )
+    .with_context(|| {
+        format!(
+            "release native permit {} generation {} for in-flight job {}",
+            record.permit_holder, permit_generation, record.job_id
+        )
+    })?;
+    if !released {
+        bail!(
+            "terminal cleanup did not confirm release of native permit {} generation {} for in-flight job {}",
+            record.permit_holder,
+            permit_generation,
+            record.job_id
+        );
+    }
+    Ok(())
+}
+
+/// Active completion owns this guard, so it can release the exact permit
+/// before clearing its marker. A different marker belongs to another job and
+/// remains untouched.
+fn release_active_in_flight_job(
+    slot_dir: &Path,
+    job_id: &str,
+    permit_guard: &mut crate::permit_guard::NativePermitGuard,
+) -> Result<bool> {
+    let _marker_lock = InFlightJobLock::acquire(slot_dir)?;
+    let marker = load_in_flight_job(slot_dir)?;
+    let record = marker
+        .as_ref()
+        .filter(|record| record.job_id == job_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!("active cleanup has no matching in-flight marker for job {job_id}")
+        })?;
+    if record.permit_holder.is_empty() {
+        bail!(
+            "in-flight marker for job {} has no permit holder to verify active ownership",
+            record.job_id
+        );
+    }
+    if permit_guard.teardown_release().is_none() {
+        bail!(
+            "active guard does not own the permit recorded for in-flight job {}",
+            record.job_id
+        );
+    }
+    let expected_generation = record.permit_generation.ok_or_else(|| {
+        anyhow::anyhow!(
+            "in-flight marker for job {} has a permit holder but no permit generation",
+            record.job_id
+        )
+    })?;
+    let active_lease = native_permit_lease(permit_guard)?;
+    if record.permit_holder != permit_guard.holder() {
+        bail!(
+            "in-flight marker permit holder {} does not match active guard {}",
+            record.permit_holder,
+            permit_guard.holder()
+        );
+    }
+    if expected_generation != active_lease.generation {
+        bail!(
+            "in-flight marker permit generation {} does not match active guard generation {}",
+            expected_generation,
+            active_lease.generation
+        );
+    }
+    if !record.permit_ledger.is_empty() && record.permit_ledger != active_lease.ledger_path {
+        bail!(
+            "in-flight marker permit ledger {} does not match active guard {}",
+            record.permit_ledger,
+            active_lease.ledger_path
+        );
+    }
+
+    finish_in_flight_job_cleanup(
+        slot_dir,
+        Some(record),
+        |record| {
+            let sink = crate::ops::global().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "operational store sink unavailable while releasing storage reservation for job {}",
+                    record.job_id
+                )
+            })?;
+            sink.release_storage_reservation(&record.job_id)
+                .context("release active job storage reservation")?;
+            Ok(())
+        },
+        || {
+            permit_guard
+                .try_release()
+                .context("release active native permit before in-flight marker")?;
+            Ok(())
+        },
+    )
 }
 
 fn recorded_job_journal_state(journal_dir: &Path, job_id: &str) -> RunServiceJobJournalState {
@@ -1091,6 +1779,7 @@ fn queued_jobs_to_cancel(
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) async fn complete_recorded_in_flight_job(
     slot_dir: &Path,
     stored: &StoredRunnerConfig,
@@ -1100,6 +1789,22 @@ pub(crate) async fn complete_recorded_in_flight_job(
         stored,
         Some("stale_busy".to_string()),
         "GitHub DELETE 422 / offline+busy: fail-closed leftover job so the runner lease can be released",
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn complete_recorded_in_flight_job_for_record(
+    slot_dir: &Path,
+    stored: &StoredRunnerConfig,
+    expected: &InFlightJobRecord,
+) -> Result<bool> {
+    complete_recorded_in_flight_job_with_failure(
+        slot_dir,
+        stored,
+        Some("stale_busy".to_string()),
+        "GitHub DELETE 422 / offline+busy: fail-closed leftover job so the runner lease can be released",
+        Some(expected),
     )
     .await
 }
@@ -1109,18 +1814,37 @@ pub(crate) async fn complete_recorded_in_flight_job(
 /// The durable conclusion is authoritative; recovery must not replace a
 /// successful job with the generic synthetic failure used for an unknown
 /// worker outcome.
-pub(crate) async fn complete_recorded_in_flight_job_with_terminal_conclusion(
+pub(crate) async fn complete_recorded_in_flight_job_with_terminal_conclusion_for_record(
     slot_dir: &Path,
     stored: &StoredRunnerConfig,
     terminal_conclusion: &str,
+    expected: &InFlightJobRecord,
 ) -> Result<bool> {
-    let Some(record) = load_in_flight_job(slot_dir)? else {
+    complete_recorded_in_flight_job_with_terminal_conclusion_expected(
+        slot_dir,
+        stored,
+        terminal_conclusion,
+        expected,
+    )
+    .await
+}
+
+async fn complete_recorded_in_flight_job_with_terminal_conclusion_expected(
+    slot_dir: &Path,
+    stored: &StoredRunnerConfig,
+    terminal_conclusion: &str,
+    expected: &InFlightJobRecord,
+) -> Result<bool> {
+    let Some(record) = load_expected_in_flight_job(slot_dir, Some(expected))? else {
         return Ok(false);
     };
+    let cleanup_record = record.clone();
     let conclusion = parse_recorded_terminal_conclusion(terminal_conclusion)?;
     let token = match oauth_access_token(stored).await {
         Ok(token) => token,
-        Err(error) if release_in_flight_after_registration_gone(slot_dir, &error)? => {
+        Err(error)
+            if release_in_flight_after_registration_gone(slot_dir, &error, &cleanup_record)? =>
+        {
             return Ok(true);
         }
         Err(error) => return Err(error),
@@ -1129,14 +1853,14 @@ pub(crate) async fn complete_recorded_in_flight_job_with_terminal_conclusion(
     let journal_dir = crate::node::complete::journal_dir_near(slot_dir);
     let ctx = RunServiceJobContext {
         client,
-        run_service_url: record.run_service_url,
-        billing_owner_id: record.billing_owner_id,
+        run_service_url: record.run_service_url.clone(),
+        billing_owner_id: record.billing_owner_id.clone(),
         journal_state: recorded_job_journal_state(&journal_dir, &record.job_id),
         journal_dir,
         step_log_pages_root: StepLogPages::root(slot_dir),
     };
     let identity = AcquiredJobIdentity {
-        plan_id: record.plan_id,
+        plan_id: record.plan_id.clone(),
         job_id: record.job_id.clone(),
     };
     let completion =
@@ -1152,7 +1876,7 @@ pub(crate) async fn complete_recorded_in_flight_job_with_terminal_conclusion(
     )
     .await
     .context("send recovered terminal completion")?;
-    cleanup_recorded_in_flight_job(slot_dir)?;
+    cleanup_recorded_in_flight_job_for_record(slot_dir, &cleanup_record)?;
     Ok(true)
 }
 
@@ -1161,15 +1885,17 @@ fn parse_recorded_terminal_conclusion(value: &str) -> Result<TaskResult> {
         .with_context(|| format!("unsupported durable terminal conclusion {value:?}"))
 }
 
-pub(crate) async fn complete_recorded_in_flight_job_after_journal_acceptance(
+pub(crate) async fn complete_recorded_in_flight_job_after_journal_acceptance_for_record(
     slot_dir: &Path,
     stored: &StoredRunnerConfig,
+    expected: &InFlightJobRecord,
 ) -> Result<bool> {
     complete_recorded_in_flight_job_with_failure(
         slot_dir,
         stored,
         Some("journal_acceptance".to_string()),
         "durable in-flight marker had no accepted journal ownership; fail-closed leftover job so the runner lease can be released",
+        Some(expected),
     )
     .await
 }
@@ -1179,13 +1905,17 @@ async fn complete_recorded_in_flight_job_with_failure(
     stored: &StoredRunnerConfig,
     infrastructure_failure_category: Option<String>,
     reason: &str,
+    expected: Option<&InFlightJobRecord>,
 ) -> Result<bool> {
-    let Some(record) = load_in_flight_job(slot_dir)? else {
+    let Some(record) = load_expected_in_flight_job(slot_dir, expected)? else {
         return Ok(false);
     };
+    let cleanup_record = record.clone();
     let token = match oauth_access_token(stored).await {
         Ok(token) => token,
-        Err(error) if release_in_flight_after_registration_gone(slot_dir, &error)? => {
+        Err(error)
+            if release_in_flight_after_registration_gone(slot_dir, &error, &cleanup_record)? =>
+        {
             return Ok(true);
         }
         Err(error) => return Err(error),
@@ -1194,14 +1924,14 @@ async fn complete_recorded_in_flight_job_with_failure(
     let journal_dir = crate::node::complete::journal_dir_near(slot_dir);
     let ctx = RunServiceJobContext {
         client,
-        run_service_url: record.run_service_url,
-        billing_owner_id: record.billing_owner_id,
+        run_service_url: record.run_service_url.clone(),
+        billing_owner_id: record.billing_owner_id.clone(),
         journal_state: recorded_job_journal_state(&journal_dir, &record.job_id),
         journal_dir,
         step_log_pages_root: StepLogPages::root(slot_dir),
     };
     let identity = AcquiredJobIdentity {
-        plan_id: record.plan_id,
+        plan_id: record.plan_id.clone(),
         job_id: record.job_id.clone(),
     };
     if let Err(error) = complete_acquired_job_failure(
@@ -1214,12 +1944,12 @@ async fn complete_recorded_in_flight_job_with_failure(
     )
     .await
     {
-        if release_in_flight_after_registration_gone(slot_dir, &error)? {
+        if release_in_flight_after_registration_gone(slot_dir, &error, &cleanup_record)? {
             return Ok(true);
         }
         return Err(error);
     }
-    cleanup_recorded_in_flight_job(slot_dir)?;
+    cleanup_recorded_in_flight_job_for_record(slot_dir, &cleanup_record)?;
     Ok(true)
 }
 
@@ -1228,14 +1958,25 @@ async fn complete_recorded_in_flight_job_with_failure(
 /// The completion intent and outbox are already durable, so this path must not
 /// manufacture a replacement failure payload. The journal acknowledgement is
 /// committed only after the exact payload is accepted remotely.
-pub(crate) async fn replay_recorded_completion(
+pub(crate) async fn replay_recorded_completion_for_record(
     slot_dir: &Path,
     stored: &StoredRunnerConfig,
     journal_dir: &Path,
+    expected: &InFlightJobRecord,
 ) -> Result<bool> {
-    let Some(record) = load_in_flight_job(slot_dir)? else {
+    replay_recorded_completion_expected(slot_dir, stored, journal_dir, expected).await
+}
+
+async fn replay_recorded_completion_expected(
+    slot_dir: &Path,
+    stored: &StoredRunnerConfig,
+    journal_dir: &Path,
+    expected: &InFlightJobRecord,
+) -> Result<bool> {
+    let Some(record) = load_expected_in_flight_job(slot_dir, Some(expected))? else {
         return Ok(false);
     };
+    let cleanup_record = record.clone();
     let mut journal = velnor_control::journal::Journal::open(journal_dir.join("journal.db"))
         .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
     let (generation, payload_sha256) = {
@@ -1295,7 +2036,7 @@ pub(crate) async fn replay_recorded_completion(
         },
     )
     .await?;
-    cleanup_recorded_in_flight_job(slot_dir)?;
+    cleanup_recorded_in_flight_job_for_record(slot_dir, &cleanup_record)?;
     Ok(true)
 }
 
@@ -1345,13 +2086,44 @@ fn load_recorded_completion_payload(
 /// Finish local cleanup after a prior terminal remote acknowledgement.
 ///
 /// The journal removes the job at `RemoteAcked`, before this local cleanup can
-/// run. A crash or storage error in that gap must remain retryable from the
-/// durable marker; callers must invoke this only after the journal proves the
-/// remote terminal transition.
-pub(crate) fn cleanup_recorded_in_flight_job(slot_dir: &Path) -> Result<bool> {
+/// run. Release the storage reservation and permit before unlinking the
+/// marker; any error leaves that durable recovery pointer for replay. Callers
+/// must invoke this only after the journal proves the remote terminal state.
+/// Clean a marker only if its identity still matches the marker inspected by
+/// controller recovery. This prevents a delayed recovery callback from
+/// releasing a replacement job's storage and permit after the slot advanced.
+pub(crate) fn cleanup_recorded_in_flight_job_for_record(
+    slot_dir: &Path,
+    expected: &InFlightJobRecord,
+) -> Result<bool> {
+    cleanup_recorded_in_flight_job_for_record_with(slot_dir, expected, |_| Ok(()))
+}
+
+pub(crate) fn cleanup_recorded_in_flight_job_for_record_with(
+    slot_dir: &Path,
+    expected: &InFlightJobRecord,
+    before_release: impl FnOnce(&InFlightJobRecord) -> Result<()>,
+) -> Result<bool> {
+    let _lock = InFlightJobLock::acquire(slot_dir)?;
     let Some(record) = load_in_flight_job(slot_dir)? else {
         return Ok(false);
     };
+    if &record != expected {
+        bail!(
+            "in-flight marker changed before terminal cleanup: found job {} generation {:?}, expected job {} generation {:?}",
+            record.job_id,
+            record.generation,
+            expected.job_id,
+            expected.generation
+        );
+    }
+    before_release(&record)?;
+    finish_in_flight_job_cleanup(slot_dir, Some(&record), release_recorded_storage, || {
+        release_recorded_permit(&record)
+    })
+}
+
+fn release_recorded_storage(record: &InFlightJobRecord) -> Result<()> {
     let sink = crate::ops::global().ok_or_else(|| {
         anyhow::anyhow!(
             "operational store sink unavailable while releasing stale reservation for job {}",
@@ -1359,29 +2131,47 @@ pub(crate) fn cleanup_recorded_in_flight_job(slot_dir: &Path) -> Result<bool> {
         )
     })?;
     sink.release_storage_reservation(&record.job_id)
-        .context("release stale in-flight job storage reservation")?;
-    clear_in_flight_job(slot_dir)?;
-    // The crashed attempt's permit converges here: terminal work and owned
-    // cleanup are confirmed, so its reservation is freed. Best-effort;
-    // whatever is missed converges via the next reconcile and sweep.
-    // Markers predating the ledger carry no holder and release nothing.
-    if !record.permit_holder.is_empty() {
-        let ledger_path = if record.permit_ledger.is_empty() {
-            crate::permit_guard::default_permit_ledger_path()
-        } else {
-            PathBuf::from(&record.permit_ledger)
-        };
-        crate::permit_guard::release_permit_best_effort(&ledger_path, &record.permit_holder);
+        .context("release stale in-flight job storage reservation")
+}
+
+fn cleanup_recorded_in_flight_job_with(
+    slot_dir: &Path,
+    release_storage: impl FnOnce(&InFlightJobRecord) -> Result<()>,
+) -> Result<bool> {
+    cleanup_recorded_in_flight_job_with_expected(slot_dir, None, release_storage)
+}
+
+fn cleanup_recorded_in_flight_job_with_expected(
+    slot_dir: &Path,
+    expected: Option<(&str, Option<u64>)>,
+    release_storage: impl FnOnce(&InFlightJobRecord) -> Result<()>,
+) -> Result<bool> {
+    let _lock = InFlightJobLock::acquire(slot_dir)?;
+    let Some(record) = load_in_flight_job(slot_dir)? else {
+        return Ok(false);
+    };
+    if let Some((expected_job_id, expected_generation)) = expected {
+        if record.job_id != expected_job_id || record.generation != expected_generation {
+            bail!(
+                "in-flight marker changed before cleanup: found job {} generation {:?}, expected job {} generation {:?}",
+                record.job_id,
+                record.generation,
+                expected_job_id,
+                expected_generation
+            );
+        }
     }
-    Ok(true)
+    finish_in_flight_job_cleanup(slot_dir, Some(&record), release_storage, || {
+        release_recorded_permit(&record)
+    })
 }
 
 pub(crate) fn recorded_in_flight_job_exists(slot_dir: &Path) -> Result<bool> {
     Ok(load_in_flight_job(slot_dir)?.is_some())
 }
 
-pub(crate) fn recorded_in_flight_job_id(slot_dir: &Path) -> Result<Option<String>> {
-    Ok(load_in_flight_job(slot_dir)?.map(|record| record.job_id))
+pub(crate) fn recorded_in_flight_job_record(slot_dir: &Path) -> Result<Option<InFlightJobRecord>> {
+    load_in_flight_job(slot_dir)
 }
 
 /// One completed job's durations, as written to the typed `job-timing.jsonl`
@@ -1773,6 +2563,10 @@ fn assess_registry_lookup(lookup: Option<&ListedRunner>, strikes_before: u32) ->
 }
 
 pub async fn configure(args: ConfigureArgs) -> Result<()> {
+    configure_for_host_arch(args, std::env::consts::ARCH).await
+}
+
+async fn configure_for_host_arch(args: ConfigureArgs, host_arch: &str) -> Result<()> {
     let dir = config::config_dir(args.config_dir)?;
     let _configure_lock = ConfigureLock::acquire(&dir)?;
     let scope = GitHubScope::parse(&args.url)?;
@@ -1790,9 +2584,10 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
         args.target_mvp_labels,
         args.target_mvp_arm_label,
     );
+    platform::validate_no_hosted_image_labels(&labels)?;
     validate_linux_only_labels(&labels)?;
     validate_trusted_label_requires_trusted_scope(&labels, args.trust_scope.as_deref())?;
-    platform::validate_arm_label_matches_host(&labels, std::env::consts::ARCH)?;
+    platform::validate_arm_label_matches_host(&labels, host_arch)?;
 
     let pat = if args.dry_run {
         None
@@ -2435,20 +3230,29 @@ fn registration_was_deleted(error: &anyhow::Error) -> bool {
 fn release_in_flight_after_registration_gone(
     slot_dir: &Path,
     error: &anyhow::Error,
+    expected: &InFlightJobRecord,
 ) -> Result<bool> {
     if !registration_was_deleted(error) {
         return Ok(false);
     }
-    if crate::ops::global().is_some() {
-        cleanup_recorded_in_flight_job(slot_dir)?;
-    } else if recorded_in_flight_job_exists(slot_dir)? {
-        clear_in_flight_job(slot_dir)?;
+    cleanup_recorded_in_flight_job_for_record(slot_dir, expected)?;
+    Ok(true)
+}
+
+fn release_in_flight_after_registration_gone_with(
+    slot_dir: &Path,
+    error: &anyhow::Error,
+    release_storage: impl FnOnce(&InFlightJobRecord) -> Result<()>,
+) -> Result<bool> {
+    if !registration_was_deleted(error) {
+        return Ok(false);
     }
+    cleanup_recorded_in_flight_job_with(slot_dir, release_storage)?;
     Ok(true)
 }
 
 pub async fn run(args: RunArgs) -> Result<()> {
-    run_with_jit_prewarmer(args, None, RunnerStorageMode::ExplicitLocal).await
+    run_with_jit_prewarmer(args, None, RunnerStorageMode::ExplicitLocal, None).await
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2509,6 +3313,7 @@ async fn run_with_jit_prewarmer(
     mut args: RunArgs,
     prewarm_trigger: Option<oneshot::Sender<()>>,
     storage_mode: RunnerStorageMode,
+    disk_admission: Option<DiskAdmissionContext>,
 ) -> Result<()> {
     // Node/job workers bypass the service CLI conversion, so establish the
     // process-local trust boundary before any store or capability path runs.
@@ -2542,6 +3347,8 @@ async fn run_with_jit_prewarmer(
     wait_for_prior_slot_teardown(&dir).await?;
     preflight_before_executable_run(&args, &dir).map_err(local_failure)?;
     let stored = config::load(&dir).map_err(local_identity_unavailable)?;
+    platform::validate_no_hosted_image_labels(&stored.settings.labels)
+        .map_err(local_identity_unavailable)?;
     let agent_id = stored.settings.agent_id.ok_or_else(|| {
         local_identity_unavailable(anyhow::anyhow!(
             "runner is not configured: missing agent_id"
@@ -2557,6 +3364,7 @@ async fn run_with_jit_prewarmer(
         token,
         prewarm_trigger,
         storage_layout,
+        disk_admission,
     )
     .await
 }
@@ -2975,10 +3783,38 @@ fn slot_action_on_poll(draining: bool, busy: bool) -> SlotAction {
 /// The journal leg is
 /// TTL-cached, so this 100ms poll costs one zero-timeout `SELECT` per TTL
 /// window at most.
-async fn wait_for_capacity_block_signal_in(journal_path: Option<&Path>) {
-    while !effective_capacity_blocked(journal_path) {
+async fn wait_for_capacity_block_signal_in(
+    journal_path: Option<&Path>,
+    disk_admission: Option<&DiskAdmissionContext>,
+) {
+    while !effective_capacity_blocked(journal_path)
+        && !disk_admission.is_some_and(|context| context.signal.blocked())
+    {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+#[derive(Debug)]
+struct AbortOnDropTask(JoinHandle<()>);
+
+impl Drop for AbortOnDropTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn start_disk_deregister_cancellation(
+    signal: Arc<DiskAdmissionSignal>,
+    cancellation: crate::execution::cancel::JobCancellation,
+    canceled: Arc<AtomicBool>,
+) -> AbortOnDropTask {
+    AbortOnDropTask(tokio::spawn(async move {
+        signal.until_deregistered().await;
+        canceled.store(true, Ordering::SeqCst);
+        crate::execution::cancel::active()
+            .unwrap_or(cancellation)
+            .request(crate::execution::cancel::CancelReason::DaemonShutdown);
+    }))
 }
 
 fn start_drain_listener(config_base: PathBuf) {
@@ -3546,82 +4382,1119 @@ async fn sleep_slot_retry_or_drain_in(delay: Duration, journal_path: Option<&Pat
     }
 }
 
-/// Minimum free disk space below which a slot parks instead of registering
-/// runners whose jobs are doomed.
-const DISK_MIN_FREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiskRootRequirement {
+    path: PathBuf,
+    min_free_bytes: u64,
+    reclaim_work_root: bool,
+    /// Docker daemon paths are useful only when the daemon-visible path also
+    /// exists in this process's filesystem namespace. Never stat a local
+    /// ancestor and mistake it for capacity on a remote daemon.
+    must_exist_locally: bool,
+    /// Some daemon-owned roots have no trustworthy host-namespace capacity
+    /// probe. Carry that source fact explicitly instead of probing a similarly
+    /// named local path.
+    probe_error: Option<String>,
+}
 
-/// Returns a problem description when any of the slot's writable roots is
-/// low on space. An unmeasurable root is also a problem: admission cannot
-/// prove that the next job has its required disk budget.
-fn disk_space_problem(config_base: &Path, work_dir: Option<&Path>) -> Option<String> {
-    let mut roots: Vec<&Path> = vec![config_base];
-    if let Some(work_dir) = work_dir {
-        roots.push(work_dir);
-    }
-    let probe = work_dir.unwrap_or(config_base);
-    if let Some(percent) = crate::leftover_disk::disk_usage_percent(probe)
-        && percent >= crate::leftover_disk::HARD_PRESSURE_PERCENT
-    {
-        // H0.4: never park for disk without first reclaiming leftover
-        // job UUID trees and dangling untagged images.
-        let backend = crate::execution::load_execution_file(config_base, None)
-            .ok()
-            .map(|file| file.backend());
-        if let Err(error) =
-            crate::leftover_disk::reclaim_production_if_hard_pressure_for(backend, percent)
-        {
-            eprintln!(
-                "leftover-after-Velnor reclaim failed: {}",
-                sanitized_retry_error(&error)
-            );
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DiskAdmissionReason {
+    version: u8,
+    owner: String,
+    slot: usize,
+    pid: u32,
+    reason: String,
+}
+
+/// Shared per-owner disk reasons. Each owner holds its own lock for its whole
+/// lifetime; another slot can prune a marker only after it proves that lock is
+/// abandoned. The registry lock serializes reason updates with admission
+/// checks, while a shared hold can span the run-service acquisition boundary.
+#[derive(Debug)]
+struct DiskAdmissionFence {
+    directory: PathBuf,
+    owner: String,
+    slot: usize,
+    _owner_lock: File,
+}
+
+/// Proof that this slot durably stopped admission before starting disk reclaim.
+/// The owner fence stays alive for the whole blocking reclaim task, so another
+/// slot cannot prune the marker and admit work while deletion is in progress.
+#[derive(Debug)]
+pub(crate) struct DiskReclaimCapability {
+    _owner_fence: Arc<DiskAdmissionFence>,
+}
+
+#[derive(Debug)]
+struct DiskAdmissionGuard {
+    _registry_lock: File,
+}
+
+#[derive(Debug, Clone)]
+struct DiskAdmissionContext {
+    roots: Arc<Vec<DiskRootRequirement>>,
+    fence: Arc<DiskAdmissionFence>,
+    slot: usize,
+    signal: Arc<DiskAdmissionSignal>,
+    reclaim_layout: Arc<crate::storage::StorageLayout>,
+    reclaim_backend: Option<velnor_model::ExecutionBackendKind>,
+}
+
+#[derive(Debug, Default)]
+struct DiskAdmissionSignal {
+    blocked: AtomicBool,
+    deregistered: AtomicBool,
+    deregistration_reason_published: AtomicBool,
+    notify: tokio::sync::Notify,
+    deregister_notify: tokio::sync::Notify,
+}
+
+impl DiskAdmissionSignal {
+    fn set_blocked(&self, blocked: bool) {
+        self.blocked.store(blocked, Ordering::SeqCst);
+        if blocked {
+            self.notify.notify_waiters();
         }
     }
-    for root in roots {
-        let free = match free_space_bytes(root) {
-            Some(free) => free,
-            None => {
-                return Some(format!(
-                    "cannot measure disk space at {}; refusing admission",
-                    root.display()
+
+    fn blocked(&self) -> bool {
+        self.blocked.load(Ordering::SeqCst)
+    }
+
+    async fn until_blocked(&self) {
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if self.blocked() {
+            return;
+        }
+        notified.await;
+    }
+
+    fn set_deregistered(&self) {
+        self.set_blocked(true);
+        self.deregistered.store(true, Ordering::SeqCst);
+        self.deregister_notify.notify_waiters();
+    }
+
+    async fn until_deregistered(&self) {
+        let notified = self.deregister_notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if self.deregistered.load(Ordering::SeqCst) {
+            return;
+        }
+        notified.await;
+    }
+}
+
+impl DiskAdmissionFence {
+    fn new(run_root: &Path, slot: usize) -> Result<Self> {
+        let directory = run_root.join("disk-admission");
+        fs::create_dir_all(&directory).with_context(|| {
+            format!(
+                "create shared disk-admission directory {}",
+                directory.display()
+            )
+        })?;
+        let owner = uuid::Uuid::new_v4().simple().to_string();
+        let owner_lock_path = directory.join(format!("{owner}.lock"));
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        let owner_lock = options.open(&owner_lock_path).with_context(|| {
+            format!(
+                "create disk-admission owner lock {}",
+                owner_lock_path.display()
+            )
+        })?;
+        rustix::fs::flock(&owner_lock, rustix::fs::FlockOperation::LockExclusive)
+            .with_context(|| format!("lock disk-admission owner {}", owner_lock_path.display()))?;
+        Ok(Self {
+            directory,
+            owner,
+            slot,
+            _owner_lock: owner_lock,
+        })
+    }
+
+    fn reason_path(&self, owner: &str) -> PathBuf {
+        self.directory.join(format!("{owner}.json"))
+    }
+
+    fn owner_lock_path(&self, owner: &str) -> PathBuf {
+        self.directory.join(format!("{owner}.lock"))
+    }
+
+    fn try_registry_lock(&self, exclusive: bool) -> Result<Option<File>> {
+        fs::create_dir_all(&self.directory).with_context(|| {
+            format!(
+                "create shared disk-admission directory {}",
+                self.directory.display()
+            )
+        })?;
+        let path = self.directory.join("registry.lock");
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        let file = options
+            .open(&path)
+            .with_context(|| format!("open disk-admission registry lock {}", path.display()))?;
+        let operation = if exclusive {
+            rustix::fs::FlockOperation::NonBlockingLockExclusive
+        } else {
+            rustix::fs::FlockOperation::NonBlockingLockShared
+        };
+        match rustix::fs::flock(&file, operation) {
+            Ok(()) => Ok(Some(file)),
+            Err(error) if error == rustix::io::Errno::WOULDBLOCK => Ok(None),
+            Err(error) => Err(anyhow::Error::new(error)
+                .context(format!("lock disk-admission registry {}", path.display()))),
+        }
+    }
+
+    fn write_reason_locked(&self, reason: &str) -> Result<()> {
+        let record = DiskAdmissionReason {
+            version: 1,
+            owner: self.owner.clone(),
+            slot: self.slot,
+            pid: std::process::id(),
+            reason: reason.to_owned(),
+        };
+        let bytes = serde_json::to_vec(&record)?;
+        let temporary = self.directory.join(format!(
+            ".{}.{}.tmp",
+            self.owner,
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        let mut file = options
+            .open(&temporary)
+            .with_context(|| format!("create disk-admission reason {}", temporary.display()))?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        fs::rename(&temporary, self.reason_path(&self.owner))?;
+        File::open(&self.directory)?.sync_all()?;
+        Ok(())
+    }
+
+    fn clear_reason_locked(&self) -> Result<()> {
+        match fs::remove_file(self.reason_path(&self.owner)) {
+            Ok(()) => File::open(&self.directory)?.sync_all()?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        Ok(())
+    }
+
+    /// List live foreign reasons. With `prune_stale`, an entry is removed
+    /// only while holding its owner lock, which proves that its process has
+    /// exited. An unreadable or malformed entry remains a blocking reason.
+    fn active_reasons_locked(&self, prune_stale: bool) -> Result<Vec<String>> {
+        let mut reasons = Vec::new();
+        for entry in fs::read_dir(&self.directory).with_context(|| {
+            format!("read disk-admission directory {}", self.directory.display())
+        })? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            if !entry.file_type()?.is_file() {
+                reasons.push(format!(
+                    "unreadable disk-admission marker {}",
+                    path.display()
                 ));
+                continue;
+            }
+            let owner = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .filter(|owner| {
+                    owner.len() == 32 && owner.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!("invalid disk-admission marker name {}", path.display())
+                })?;
+            let lock_path = self.owner_lock_path(owner);
+            let mut lock_options = OpenOptions::new();
+            lock_options.read(true).write(true);
+            #[cfg(unix)]
+            lock_options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+            let lock_file = lock_options.open(&lock_path).with_context(|| {
+                format!("open disk-admission owner lock {}", lock_path.display())
+            })?;
+            match rustix::fs::flock(
+                &lock_file,
+                rustix::fs::FlockOperation::NonBlockingLockExclusive,
+            ) {
+                Ok(()) if prune_stale => match fs::remove_file(&path) {
+                    Ok(()) => {
+                        let _ = fs::remove_file(&lock_path);
+                        File::open(&self.directory)?.sync_all()?;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                },
+                Ok(()) => {
+                    // It became stale after the exclusive prune pass. Ignore
+                    // the unowned reason for this admission check.
+                }
+                Err(error) if error == rustix::io::Errno::WOULDBLOCK => {
+                    let reason = fs::read(&path)
+                        .ok()
+                        .and_then(|bytes| {
+                            serde_json::from_slice::<DiskAdmissionReason>(&bytes).ok()
+                        })
+                        .filter(|record| record.owner == owner && record.version == 1)
+                        .map(|record| record.reason)
+                        .unwrap_or_else(|| "malformed active disk-admission marker".to_owned());
+                    reasons.push(reason);
+                }
+                Err(error) => {
+                    return Err(anyhow::Error::new(error).context(format!(
+                        "probe disk-admission owner lock {}",
+                        lock_path.display()
+                    )))
+                }
+            }
+        }
+        Ok(reasons)
+    }
+
+    fn publish_reason(&self, reason: &str) -> Result<bool> {
+        let Some(_registry_lock) = self.try_registry_lock(true)? else {
+            return Ok(false);
+        };
+        if fs::read(self.reason_path(&self.owner))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<DiskAdmissionReason>(&bytes).ok())
+            .is_some_and(|record| {
+                record.version == 1 && record.owner == self.owner && record.reason == reason
+            })
+        {
+            return Ok(true);
+        }
+        self.write_reason_locked(reason)?;
+        Ok(true)
+    }
+
+    fn clear_own_reason(&self) -> Result<bool> {
+        let Some(_registry_lock) = self.try_registry_lock(true)? else {
+            return Ok(false);
+        };
+        self.clear_reason_locked()?;
+        Ok(true)
+    }
+
+    fn has_live_reasons(&self) -> Result<Option<bool>> {
+        let Some(_registry_lock) = self.try_registry_lock(true)? else {
+            return Ok(None);
+        };
+        Ok(Some(!self.active_reasons_locked(true)?.is_empty()))
+    }
+}
+
+impl Drop for DiskAdmissionFence {
+    fn drop(&mut self) {
+        // If another acquisition holds a shared registry lock, leave the
+        // marker behind. The next reader will acquire this owner's now-free
+        // lock and prune it; we never block slot shutdown on another daemon.
+        if let Ok(Some(_registry_lock)) = self.try_registry_lock(true) {
+            let _ = self.clear_reason_locked();
+        }
+    }
+}
+
+impl DiskAdmissionContext {
+    fn new(
+        roots: Vec<DiskRootRequirement>,
+        layout: &crate::storage::StorageLayout,
+        slot: usize,
+        reclaim_backend: Option<velnor_model::ExecutionBackendKind>,
+    ) -> Result<Self> {
+        Ok(Self {
+            roots: Arc::new(roots),
+            fence: Arc::new(DiskAdmissionFence::new(&layout.run_root, slot)?),
+            slot,
+            signal: Arc::new(DiskAdmissionSignal::default()),
+            reclaim_layout: Arc::new(layout.clone()),
+            reclaim_backend,
+        })
+    }
+
+    fn block(&self, reason: &str) {
+        let _ = self.publish_block_reason(reason);
+    }
+
+    fn block_for_reclaim(&self, reason: &str) -> Option<DiskReclaimCapability> {
+        self.publish_block_reason(reason)
+            .then(|| DiskReclaimCapability {
+                _owner_fence: Arc::clone(&self.fence),
+            })
+    }
+
+    fn publish_block_reason(&self, reason: &str) -> bool {
+        self.signal.set_blocked(true);
+        match self.fence.publish_reason(reason) {
+            Ok(true) => true,
+            Ok(false) => {
+                eprintln!(
+                    "daemon slot-{}: disk admission registry is busy; reclaim requires a durable block reason",
+                    self.slot
+                );
+                false
+            }
+            Err(error) => {
+                eprintln!(
+                    "daemon slot-{}: could not persist disk admission reason: {}",
+                    self.slot,
+                    sanitized_retry_error(&error)
+                );
+                false
+            }
+        }
+    }
+
+    fn deregister(&self, reason: &str) {
+        self.signal.set_deregistered();
+        match self.fence.publish_reason(reason) {
+            Ok(true) => self
+                .signal
+                .deregistration_reason_published
+                .store(true, Ordering::SeqCst),
+            Ok(false) => eprintln!(
+                "daemon slot-{}: disk admission registry is busy; will not deregister until the reason is durable",
+                self.slot
+            ),
+            Err(error) => eprintln!(
+                "daemon slot-{}: could not persist disk admission reason: {}",
+                self.slot,
+                sanitized_retry_error(&error)
+            ),
+        }
+    }
+
+    fn recover(&self) -> Result<bool> {
+        if !self.fence.clear_own_reason()? {
+            self.signal.set_blocked(true);
+            return Ok(false);
+        }
+        match self.fence.has_live_reasons()? {
+            Some(blocked) => {
+                self.signal.set_blocked(blocked);
+                Ok(!blocked)
+            }
+            None => {
+                self.signal.set_blocked(true);
+                Ok(false)
+            }
+        }
+    }
+
+    fn try_admission_guard(&self, reason: &str) -> Result<Option<DiskAdmissionGuard>> {
+        if self.signal.blocked() {
+            return Ok(None);
+        }
+        let registry_lock = match self.fence.try_registry_lock(true) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
+                self.signal.set_blocked(true);
+                return Ok(None);
+            }
+            Err(error) => {
+                self.signal.set_blocked(true);
+                eprintln!(
+                    "daemon slot-{}: disk admission registry unavailable: {}",
+                    self.slot,
+                    sanitized_retry_error(&error)
+                );
+                return Ok(None);
             }
         };
-        if free < DISK_MIN_FREE_BYTES {
-            let needed = DISK_MIN_FREE_BYTES.saturating_sub(free);
-            let cache_report = crate::cache::reclaim_for_disk_pressure(needed);
-            if !cache_report.deleted.is_empty() || !cache_report.failures.is_empty() {
+        if !disk_roots_healthy(&self.roots) {
+            self.signal.set_blocked(true);
+            if let Err(error) = self.fence.write_reason_locked(reason) {
                 eprintln!(
-                    "disk-pressure cache reclaim freed {} bytes across {} entries ({} failures)",
-                    cache_report.freed_bytes,
-                    cache_report.deleted.len(),
-                    cache_report.failures.len()
+                    "daemon slot-{}: could not persist disk admission reason: {}",
+                    self.slot,
+                    sanitized_retry_error(&error)
                 );
             }
-            let backend = crate::execution::load_execution_file(config_base, None)
-                .ok()
-                .map(|file| file.backend())
-                .unwrap_or(velnor_model::ExecutionBackendKind::MicroVm);
-            let _ = crate::leftover_disk::reclaim_production_leftovers_for(backend, false);
-            let free = match free_space_bytes(root) {
-                Some(free) => free,
-                None => {
-                    return Some(format!(
-                        "cannot remeasure disk space at {}; refusing admission",
-                        root.display()
-                    ));
-                }
-            };
-            if free < DISK_MIN_FREE_BYTES {
-                return Some(format!(
-                    "low disk space at {} ({} MiB free, need {} MiB)",
-                    root.display(),
-                    free / (1024 * 1024),
-                    DISK_MIN_FREE_BYTES / (1024 * 1024)
-                ));
+            return Ok(None);
+        }
+        if let Err(error) = self.fence.clear_reason_locked() {
+            self.signal.set_blocked(true);
+            eprintln!(
+                "daemon slot-{}: could not clear disk admission reason: {}",
+                self.slot,
+                sanitized_retry_error(&error)
+            );
+            return Ok(None);
+        }
+        match self.fence.active_reasons_locked(true) {
+            Ok(reasons) if reasons.is_empty() => {}
+            Ok(_) => {
+                self.signal.set_blocked(true);
+                return Ok(None);
+            }
+            Err(error) => {
+                self.signal.set_blocked(true);
+                eprintln!(
+                    "daemon slot-{}: disk admission reason scan failed: {}",
+                    self.slot,
+                    sanitized_retry_error(&error)
+                );
+                return Ok(None);
+            }
+        }
+        drop(registry_lock);
+
+        // Close the race between a clean snapshot and a sibling publishing a
+        // pressure reason. The second probe occurs while holding the shared
+        // registry lock, which remains held through the run-service acquire.
+        let shared_lock = match self.fence.try_registry_lock(false) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
+                self.signal.set_blocked(true);
+                return Ok(None);
+            }
+            Err(error) => {
+                self.signal.set_blocked(true);
+                eprintln!(
+                    "daemon slot-{}: disk admission registry unavailable: {}",
+                    self.slot,
+                    sanitized_retry_error(&error)
+                );
+                return Ok(None);
+            }
+        };
+        if self.signal.blocked() || !disk_roots_healthy(&self.roots) {
+            self.signal.set_blocked(true);
+            return Ok(None);
+        }
+        match self.fence.active_reasons_locked(false) {
+            Ok(reasons) if reasons.is_empty() => {}
+            Ok(_) => {
+                self.signal.set_blocked(true);
+                return Ok(None);
+            }
+            Err(error) => {
+                self.signal.set_blocked(true);
+                eprintln!(
+                    "daemon slot-{}: disk admission reason scan failed: {}",
+                    self.slot,
+                    sanitized_retry_error(&error)
+                );
+                return Ok(None);
+            }
+        }
+        Ok(Some(DiskAdmissionGuard {
+            _registry_lock: shared_lock,
+        }))
+    }
+
+    fn recheck_under_guard(&self) -> bool {
+        if self.signal.blocked() || !disk_roots_healthy(&self.roots) {
+            self.signal.set_blocked(true);
+            false
+        } else {
+            true
+        }
+    }
+}
+
+fn disk_roots_healthy(roots: &[DiskRootRequirement]) -> bool {
+    !roots.is_empty()
+        && disk_space_measurements(roots)
+            .iter()
+            .all(|measurement| match measurement {
+                crate::host_capacity::DiskRootMeasurement::Measured {
+                    available_bytes,
+                    min_free_bytes,
+                    ..
+                } => available_bytes >= min_free_bytes,
+                crate::host_capacity::DiskRootMeasurement::Unmeasurable { .. } => false,
+            })
+}
+
+fn push_disk_root(
+    roots: &mut Vec<DiskRootRequirement>,
+    path: impl Into<PathBuf>,
+    min_free_bytes: u64,
+    must_exist_locally: bool,
+) {
+    let path = path.into();
+    if let Some(existing) = roots.iter_mut().find(|root| root.path == path) {
+        // Repeated exact paths use the strongest requirement. Distinct paths
+        // stay distinct even when they currently share a filesystem: a nested
+        // mount can separate them later without changing this inventory.
+        existing.min_free_bytes = existing.min_free_bytes.max(min_free_bytes);
+        existing.must_exist_locally |= must_exist_locally;
+    } else {
+        roots.push(DiskRootRequirement {
+            path,
+            min_free_bytes,
+            reclaim_work_root: false,
+            must_exist_locally,
+            probe_error: None,
+        });
+    }
+}
+
+fn push_disk_work_root(
+    roots: &mut Vec<DiskRootRequirement>,
+    path: impl Into<PathBuf>,
+    min_free_bytes: u64,
+) {
+    let path = path.into();
+    push_disk_root(roots, path.clone(), min_free_bytes, false);
+    roots
+        .iter_mut()
+        .find(|root| root.path == path)
+        .expect("the work root was just inserted or already present")
+        .reclaim_work_root = true;
+}
+
+fn parent_or_current(path: &Path) -> PathBuf {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Resolve every path the native slot may write. Job data gets the 2 GiB
+/// floor; databases, lock roots, and small diagnostic files get a smaller
+/// explicit floor. The machine still refuses if any required root is unknown.
+fn disk_root_requirements_for_run(
+    args: &RunArgs,
+    config_dir: &Path,
+    config_base: Option<&Path>,
+    storage_layout: &crate::storage::StorageLayout,
+    scale_set_config: Option<&Path>,
+) -> Vec<DiskRootRequirement> {
+    use crate::host_capacity::{DEFAULT_CONTROL_ROOT_FREE_BYTES, DEFAULT_MIN_FREE_BYTES};
+
+    let mut roots = Vec::new();
+    if let Some(config_base) = config_base {
+        push_disk_root(&mut roots, config_base, DEFAULT_MIN_FREE_BYTES, false);
+    }
+    push_disk_root(&mut roots, config_dir, DEFAULT_MIN_FREE_BYTES, false);
+    // Step-log pages have a 32-job count retention limit, but no per-page byte
+    // limit, so they are job-data storage rather than tiny control metadata.
+    push_disk_root(
+        &mut roots,
+        config_dir.join("logs/pages"),
+        DEFAULT_MIN_FREE_BYTES,
+        false,
+    );
+    let work_root = slot_work_dir(config_dir, args.work_dir.as_deref());
+    push_disk_work_root(&mut roots, &work_root, DEFAULT_MIN_FREE_BYTES);
+
+    // Cache stores use the resolved cache root in packaged and explicit local
+    // layouts. Legacy copies can still live under `work_root`, which is
+    // already a separate requirement above.
+    push_disk_root(
+        &mut roots,
+        &storage_layout.cache_root,
+        DEFAULT_MIN_FREE_BYTES,
+        false,
+    );
+    push_disk_root(
+        &mut roots,
+        &storage_layout.run_root,
+        DEFAULT_CONTROL_ROOT_FREE_BYTES,
+        false,
+    );
+    push_disk_root(
+        &mut roots,
+        storage_layout.run_root.join("disk-admission"),
+        DEFAULT_CONTROL_ROOT_FREE_BYTES,
+        false,
+    );
+    push_disk_root(
+        &mut roots,
+        &storage_layout.log_root,
+        DEFAULT_CONTROL_ROOT_FREE_BYTES,
+        false,
+    );
+    push_disk_root(
+        &mut roots,
+        storage_layout.lib_root.join("buildkit-owners"),
+        DEFAULT_CONTROL_ROOT_FREE_BYTES,
+        false,
+    );
+    if let Some(config_base) = config_base {
+        push_disk_root(
+            &mut roots,
+            config_base.join("logs"),
+            DEFAULT_CONTROL_ROOT_FREE_BYTES,
+            false,
+        );
+    }
+
+    let backend = crate::execution::load_execution_file(config_dir, None)
+        .ok()
+        .map(|file| file.backend());
+    if backend == Some(velnor_model::ExecutionBackendKind::MicroVm) {
+        // Use the execution backend's exact fallback. Packaged units without
+        // VELNOR_STORAGE_ROOT write to /var/lib/velnor/microvm, even when the
+        // general storage layout was supplied by another caller.
+        let isolation_root = crate::execution::microvm_isolation_root();
+        // Guest disks and jailer chroots can grow with active jobs.
+        push_disk_root(
+            &mut roots,
+            isolation_root.join("jailer"),
+            DEFAULT_MIN_FREE_BYTES,
+            false,
+        );
+        push_disk_root(
+            &mut roots,
+            isolation_root.join("disks"),
+            DEFAULT_MIN_FREE_BYTES,
+            false,
+        );
+        push_disk_root(
+            &mut roots,
+            isolation_root.join("vsock"),
+            DEFAULT_CONTROL_ROOT_FREE_BYTES,
+            false,
+        );
+        push_disk_root(
+            &mut roots,
+            "/var/run/netns",
+            DEFAULT_CONTROL_ROOT_FREE_BYTES,
+            false,
+        );
+    } else if backend == Some(velnor_model::ExecutionBackendKind::Docker) {
+        // Docker's RootDir is in the daemon's mount namespace. An accepted
+        // Unix socket may still reach Docker Desktop, OrbStack, or a forwarded
+        // daemon, so statvfs on a same-spelled local path is not proof.
+        roots.push(DiskRootRequirement {
+            path: PathBuf::from("<Docker Engine RootDir>"),
+            min_free_bytes: DEFAULT_MIN_FREE_BYTES,
+            reclaim_work_root: false,
+            must_exist_locally: false,
+            probe_error: Some(
+                "Docker Engine RootDir is outside a proven local mount namespace".to_owned(),
+            ),
+        });
+    } else {
+        roots.push(DiskRootRequirement {
+            path: config_dir.join("execution.toml"),
+            min_free_bytes: DEFAULT_MIN_FREE_BYTES,
+            reclaim_work_root: false,
+            must_exist_locally: false,
+            probe_error: Some(
+                "execution backend is not measurable; cannot inventory its writable roots"
+                    .to_owned(),
+            ),
+        });
+    }
+
+    if let Some(path) = args.state_db.as_deref() {
+        push_disk_root(
+            &mut roots,
+            parent_or_current(path),
+            DEFAULT_CONTROL_ROOT_FREE_BYTES,
+            false,
+        );
+    }
+    let run_state_db = args
+        .state_db
+        .clone()
+        .unwrap_or_else(crate::ops::state_db_path);
+    push_disk_root(
+        &mut roots,
+        parent_or_current(&run_state_db),
+        DEFAULT_CONTROL_ROOT_FREE_BYTES,
+        false,
+    );
+    if config_base.is_some() {
+        push_disk_root(
+            &mut roots,
+            crate::node::complete::journal_dir_near(config_dir),
+            DEFAULT_CONTROL_ROOT_FREE_BYTES,
+            false,
+        );
+        // The supervisor also writes its operational store, whose default
+        // differs from the slot-local state DB when no explicit path is set.
+        push_disk_root(
+            &mut roots,
+            parent_or_current(&crate::ops::state_db_path()),
+            DEFAULT_CONTROL_ROOT_FREE_BYTES,
+            false,
+        );
+    }
+    let ledger = crate::permit_guard::resolve_permit_ledger_path(args.permit_ledger.as_deref());
+    match canonical_disk_file_parent(&ledger) {
+        Ok(parent) => push_disk_root(&mut roots, parent, DEFAULT_CONTROL_ROOT_FREE_BYTES, false),
+        Err(error) => roots.push(DiskRootRequirement {
+            path: parent_or_current(&ledger),
+            min_free_bytes: DEFAULT_CONTROL_ROOT_FREE_BYTES,
+            reclaim_work_root: false,
+            must_exist_locally: false,
+            probe_error: Some(format!(
+                "cannot resolve permit-ledger filesystem: {error:#}"
+            )),
+        }),
+    }
+    if let Some(path) = args.dump_job_message.as_deref() {
+        push_disk_root(
+            &mut roots,
+            parent_or_current(path),
+            DEFAULT_CONTROL_ROOT_FREE_BYTES,
+            false,
+        );
+    }
+    if let Some(path) = args.docker_host_work_dir.as_deref() {
+        push_disk_root(&mut roots, path, DEFAULT_MIN_FREE_BYTES, true);
+    }
+
+    if let Some(path) = scale_set_config
+        && crate::scaleset::lane_configured(Some(path))
+        && let Ok(file) = crate::scaleset::load_file_config(path)
+    {
+        let state_db = file.state_db.unwrap_or_else(crate::ops::state_db_path);
+        push_disk_root(
+            &mut roots,
+            parent_or_current(&state_db),
+            DEFAULT_CONTROL_ROOT_FREE_BYTES,
+            false,
+        );
+        let worker_state = file
+            .worker_state_dir
+            .unwrap_or_else(|| config_dir.join("scaleset-workers"));
+        push_disk_root(&mut roots, worker_state, DEFAULT_MIN_FREE_BYTES, false);
+    }
+
+    roots
+}
+
+/// Resolve the directory `PermitLedger::open` will use after canonicalizing
+/// the file path. Missing path suffixes stay beneath their closest existing
+/// ancestor; symlinks in that prefix are resolved before the disk root is
+/// recorded.
+fn canonical_disk_file_parent(path: &Path) -> Result<PathBuf> {
+    let mut suffix = Vec::new();
+    let mut candidate = path;
+    let mut canonical_ancestor = loop {
+        if candidate.exists() {
+            break candidate
+                .canonicalize()
+                .with_context(|| format!("canonicalize {}", candidate.display()))?;
+        }
+        if fs::symlink_metadata(candidate).is_ok() {
+            bail!(
+                "{} is a dangling or unresolved symlink",
+                candidate.display()
+            );
+        }
+        let name = candidate
+            .file_name()
+            .context("permit-ledger path has no file name")?;
+        suffix.push(name.to_os_string());
+        candidate = candidate
+            .parent()
+            .context("permit-ledger path has no existing ancestor")?;
+    };
+    for component in suffix.into_iter().rev() {
+        canonical_ancestor.push(component);
+    }
+    canonical_ancestor
+        .parent()
+        .map(Path::to_path_buf)
+        .context("canonical permit-ledger file has no parent")
+}
+
+/// Measure every required path independently. A missing daemon-visible Docker
+/// work path is unknown; its local ancestor is not evidence about the Engine's
+/// filesystem. Docker's private image/container data root is not discoverable
+/// from these bind-mount paths; statvfs counts it only when it shares a probed
+/// filesystem.
+fn disk_space_measurements(
+    roots: &[DiskRootRequirement],
+) -> Vec<crate::host_capacity::DiskRootMeasurement> {
+    let mut measurements = Vec::with_capacity(roots.len());
+    for root in roots {
+        if let Some(error) = &root.probe_error {
+            measurements.push(crate::host_capacity::DiskRootMeasurement::Unmeasurable {
+                root: root.path.clone(),
+                error: error.clone(),
+            });
+            continue;
+        }
+        if root.must_exist_locally && !root.path.is_dir() {
+            measurements.push(crate::host_capacity::DiskRootMeasurement::Unmeasurable {
+                root: root.path.clone(),
+                error: "daemon-visible path is not a local directory; local statvfs cannot prove its capacity".to_string(),
+            });
+            continue;
+        }
+        match crate::host_capacity::HostCapacity::probe(&root.path) {
+            Ok(capacity) => {
+                measurements.push(crate::host_capacity::DiskRootMeasurement::Measured {
+                    root: root.path.clone(),
+                    available_bytes: capacity.available_bytes,
+                    min_free_bytes: root.min_free_bytes,
+                    filesystem_id: capacity.filesystem_id,
+                });
+            }
+            Err(error) => {
+                measurements.push(crate::host_capacity::DiskRootMeasurement::Unmeasurable {
+                    root: root.path.clone(),
+                    error: format!("{error:#}"),
+                });
             }
         }
     }
-    None
+    measurements
+}
+
+fn observe_disk_roots(
+    context: &DiskAdmissionContext,
+    pressure: &mut crate::host_capacity::DiskPressure,
+) -> crate::host_capacity::DiskObservation {
+    let measurements = disk_space_measurements(&context.roots);
+    pressure.observe_roots(&measurements)
+}
+
+fn disk_observation_note(observation: &crate::host_capacity::DiskObservation) -> String {
+    match observation {
+        crate::host_capacity::DiskObservation::Measured {
+            root,
+            available_bytes,
+            min_free_bytes,
+            ..
+        } => format!(
+            "{} has {} MiB free; floor is {} MiB",
+            root.display(),
+            available_bytes / (1024 * 1024),
+            min_free_bytes / (1024 * 1024)
+        ),
+        crate::host_capacity::DiskObservation::Unmeasurable { root, error, .. } => {
+            format!("cannot measure {}: {error}", root.display())
+        }
+        crate::host_capacity::DiskObservation::NoRoots { .. } => {
+            "no writable disk roots to measure".to_owned()
+        }
+    }
+}
+
+fn disk_admission_reason(observation: &crate::host_capacity::DiskObservation) -> String {
+    match observation {
+        crate::host_capacity::DiskObservation::Measured { root, .. } => {
+            format!(
+                "writable root below its free-space floor: {}",
+                root.display()
+            )
+        }
+        crate::host_capacity::DiskObservation::Unmeasurable { root, .. } => {
+            format!("writable root capacity is unknown: {}", root.display())
+        }
+        crate::host_capacity::DiskObservation::NoRoots { .. } => {
+            "writable root inventory is empty".to_owned()
+        }
+    }
+}
+
+fn disk_action_phase(action: crate::host_capacity::DiskAction) -> u8 {
+    match action {
+        crate::host_capacity::DiskAction::Admit => 0,
+        crate::host_capacity::DiskAction::Reclaim => 1,
+        crate::host_capacity::DiskAction::RefuseUntil { .. } => 2,
+        crate::host_capacity::DiskAction::Drain => 3,
+        crate::host_capacity::DiskAction::Deregister => 4,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiskDeregisterDisposition {
+    RetryFencePublication,
+    HandOffToDurableRecovery,
+    DeleteRegistration,
+}
+
+fn disk_deregister_disposition(
+    reason_published: bool,
+    durable_work_present: bool,
+) -> DiskDeregisterDisposition {
+    if !reason_published {
+        DiskDeregisterDisposition::RetryFencePublication
+    } else if durable_work_present {
+        DiskDeregisterDisposition::HandOffToDurableRecovery
+    } else {
+        DiskDeregisterDisposition::DeleteRegistration
+    }
+}
+
+fn disk_deregister_recovery_handoff(slot_index: usize) -> anyhow::Error {
+    anyhow::anyhow!(
+        "daemon slot-{slot_index} disk deregistration is handing durable work to controller recovery"
+    )
+}
+
+fn disk_slot_has_durable_work(slot_dir: &Path, journal_dir: &Path) -> Result<bool> {
+    if recorded_in_flight_job_exists(slot_dir)? {
+        return Ok(true);
+    }
+    let Some((journal, slot_id)) = open_slot_journal(
+        journal_dir,
+        slot_dir,
+        "inspect durable work before deregistration",
+    )?
+    else {
+        return Ok(false);
+    };
+    let state = journal
+        .materialized_state()
+        .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
+    Ok(state
+        .jobs
+        .iter()
+        .any(|job| job.slot_id == slot_id && job.provisional))
+}
+
+fn abandon_disk_blocked_unsent_acquisition(
+    context: &DiskAdmissionContext,
+    admission_guard: Option<DiskAdmissionGuard>,
+    permit_guard: crate::permit_guard::NativePermitGuard,
+    journal_dir: &Path,
+    config_dir: &Path,
+    runner_request_id: &str,
+    permit_lease: &velnor_control::journal::NativePermitLease,
+    reason: &str,
+) -> Result<()> {
+    // The shared registry guard must be released before `block` takes the
+    // exclusive registry lock to publish the cross-slot reason.
+    drop(admission_guard);
+    context.block(reason);
+    // The request has not been polled yet, so write an exact recovery proof
+    // before requeueing. If either release or the terminal event fails,
+    // startup can replay the proof against the same immutable lease.
+    settle_confirmed_run_service_acquisition_loss(
+        permit_guard,
+        journal_dir,
+        config_dir,
+        runner_request_id,
+        permit_lease,
+        velnor_control::journal::AcquisitionLossSource::AcquireJobNotSent,
+        reason,
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiskReclaimTarget {
+    minimum_available_bytes: u64,
+    filesystem_id: u64,
+    measured_root: PathBuf,
+    reclaim_work_root: Option<PathBuf>,
+}
+
+fn apply_disk_observation(
+    context: &DiskAdmissionContext,
+    observation: &crate::host_capacity::DiskObservation,
+    config_base: &Path,
+    slot_index: usize,
+) -> bool {
+    let action = observation.action();
+    let reason = disk_admission_reason(observation);
+    match action {
+        crate::host_capacity::DiskAction::Admit => match context.recover() {
+            Ok(ready) => ready,
+            Err(error) => {
+                context.block("disk admission fence recovery failed");
+                eprintln!(
+                    "daemon slot-{slot_index}: disk admission fence unavailable: {}",
+                    sanitized_retry_error(&error)
+                );
+                false
+            }
+        },
+        crate::host_capacity::DiskAction::Reclaim => {
+            let capability = context.block_for_reclaim(&reason);
+            if let Some(target) = disk_reclaim_target(observation, &context.roots) {
+                let Some(capability) = capability else {
+                    eprintln!(
+                        "daemon slot-{slot_index}: skip disk reclaim because the admission block reason is not durable"
+                    );
+                    return false;
+                };
+                let reclaim_config = config_base.to_path_buf();
+                let reclaim_layout = Arc::clone(&context.reclaim_layout);
+                let reclaim_backend = context.reclaim_backend;
+                tokio::task::spawn_blocking(move || {
+                    let report = crate::cache::reclaim_for_disk_pressure(
+                        capability,
+                        target.minimum_available_bytes,
+                        target.filesystem_id,
+                        &target.measured_root,
+                        target.reclaim_work_root.as_deref(),
+                        reclaim_backend,
+                        &reclaim_layout,
+                    );
+                    daemon_forensic_log(
+                        &reclaim_config,
+                        &format!(
+                            "daemon slot-{slot_index} disk reclaim freed {} bytes",
+                            report.freed_bytes
+                        ),
+                    );
+                });
+            } else {
+                eprintln!(
+                    "daemon slot-{slot_index}: skip disk reclaim because the limiting filesystem identity is unknown"
+                );
+            }
+            false
+        }
+        crate::host_capacity::DiskAction::RefuseUntil { .. }
+        | crate::host_capacity::DiskAction::Drain => {
+            context.block(&reason);
+            false
+        }
+        crate::host_capacity::DiskAction::Deregister => {
+            context.deregister(&reason);
+            false
+        }
+    }
+}
+
+fn disk_reclaim_target(
+    observation: &crate::host_capacity::DiskObservation,
+    roots: &[DiskRootRequirement],
+) -> Option<DiskReclaimTarget> {
+    match observation {
+        crate::host_capacity::DiskObservation::Measured {
+            root,
+            min_free_bytes,
+            filesystem_id,
+            ..
+        } => filesystem_id.map(|filesystem_id| DiskReclaimTarget {
+            minimum_available_bytes: *min_free_bytes,
+            filesystem_id,
+            measured_root: root.clone(),
+            reclaim_work_root: roots
+                .iter()
+                .find(|requirement| requirement.path == *root && requirement.reclaim_work_root)
+                .map(|requirement| requirement.path.clone()),
+        }),
+        crate::host_capacity::DiskObservation::Unmeasurable { .. }
+        | crate::host_capacity::DiskObservation::NoRoots { .. } => None,
+    }
 }
 
 /// Free bytes on the filesystem holding `path`, via the bounded `statvfs`
@@ -3679,7 +5552,7 @@ pub(crate) async fn run_daemon_slot(
     let storage_mode = daemon_storage_mode(&args);
     if args.url.is_none() {
         let slot_args = daemon_slot_run_args(&args, &config_base, slot_index, slots)?;
-        return run_with_jit_prewarmer(slot_args, None, storage_mode).await;
+        return run_with_jit_prewarmer(slot_args, None, storage_mode, None).await;
     }
 
     // Let the normal job-runner preflight classify missing, corrupt, or
@@ -3703,6 +5576,25 @@ pub(crate) async fn run_daemon_slot(
         start_drain_listener(config_base.clone());
     }
 
+    // Resolve the slot's write roots once. The exact per-slot `_work` child,
+    // packaged cache, local stores, and control roots stay stable across JIT
+    // cycles; the shared fence lives beside other host runtime coordination.
+    let slot_config_dir = daemon_slot_config_dir(&config_base, slot_index, slots);
+    let root_run_args = daemon_slot_run_args(&args, &config_base, slot_index, slots)?;
+    let storage_layout = select_runner_storage_layout(&slot_config_dir, storage_mode)?;
+    let disk_roots = disk_root_requirements_for_run(
+        &root_run_args,
+        &slot_config_dir,
+        Some(&config_base),
+        &storage_layout,
+        args.scale_set_config.as_deref(),
+    );
+    let disk_backend = crate::execution::load_execution_file(&slot_config_dir, None)
+        .ok()
+        .map(|file| file.backend());
+    let disk_admission =
+        DiskAdmissionContext::new(disk_roots, &storage_layout, slot_index, disk_backend)?;
+
     let mut cycle = 1_u64;
     let mut local_failure_streak: u32 = 0;
     // The requested identity is fixed for this worker's lifetime, so drift
@@ -3712,7 +5604,6 @@ pub(crate) async fn run_daemon_slot(
     // Disk pressure is a bounded state machine rather than an indefinite park.
     // The slot reclaims, then refuses admission against a deadline, then drains
     // — it never sleeps and retries forever with no terminal state.
-    let disk_root = args.work_dir.clone().unwrap_or_else(|| config_base.clone());
     let mut disk_pressure =
         crate::host_capacity::DiskPressure::new(crate::host_capacity::DiskPolicy::default());
     let drain_journal_path = config_base.join("journal.db");
@@ -3720,6 +5611,19 @@ pub(crate) async fn run_daemon_slot(
         if slot_action_on_poll(effective_capacity_blocked(Some(&drain_journal_path)), false)
             == SlotAction::DeregisterAndExit
         {
+            let slot_dir = daemon_slot_config_dir(&config_base, slot_index, slots);
+            let journal_dir = crate::node::complete::journal_dir_near(&slot_dir);
+            match disk_slot_has_durable_work(&slot_dir, &journal_dir) {
+                Ok(true) => return Err(disk_deregister_recovery_handoff(slot_index)),
+                Ok(false) => {}
+                Err(error) => {
+                    eprintln!(
+                        "daemon slot-{slot_index}: cannot inspect durable work before drain cleanup: {}",
+                        sanitized_retry_error(&error)
+                    );
+                    return Err(disk_deregister_recovery_handoff(slot_index));
+                }
+            }
             let note = format!("slot-{slot_index} draining: deleting registration and exiting");
             println!("{note}");
             daemon_forensic_log(&config_base, &note);
@@ -3736,80 +5640,110 @@ pub(crate) async fn run_daemon_slot(
             .await;
             return Ok(());
         }
-        if let Some(note) = disk_space_problem(&config_base, args.work_dir.as_deref()) {
-            // Registering runners whose jobs are doomed (and whose curl
-            // transport needs temp files) only burns API budget. Which of
-            // refuse, drain or deregister that means is the policy's decision,
-            // and every one of them is bounded.
-            let action = match crate::host_capacity::HostCapacity::probe(&disk_root) {
-                Ok(capacity) => disk_pressure.observe(
-                    capacity.available_bytes,
-                    unix_millis_now().saturating_div(1_000),
-                ),
-                Err(error) => {
-                    // An unmeasurable host is not a healthy one, and it is also
-                    // not evidence for escalating. Refuse for one interval and
-                    // re-measure.
-                    eprintln!(
-                        "daemon slot-{slot_index}: cannot measure free space, refusing admission for now: {error:#}"
-                    );
-                    crate::host_capacity::DiskAction::RefuseUntil {
-                        remaining: Duration::from_secs(60),
-                    }
-                }
-            };
-            match action {
-                crate::host_capacity::DiskAction::Admit => {}
-                crate::host_capacity::DiskAction::Reclaim => {
-                    let message = format!("daemon slot-{slot_index} reclaiming disk: {note}");
-                    eprintln!("{message}");
-                    crate::sd_notify::status(&message);
-                    daemon_forensic_log(&config_base, &message);
-                    let report = crate::cache::reclaim_for_disk_pressure(
-                        crate::host_capacity::DEFAULT_MIN_FREE_BYTES,
-                    );
-                    daemon_forensic_log(
-                        &config_base,
-                        &format!(
-                            "daemon slot-{slot_index} reclaim freed {} bytes",
-                            report.freed_bytes
-                        ),
-                    );
-                    continue;
-                }
-                crate::host_capacity::DiskAction::RefuseUntil { remaining } => {
-                    // The operator is told how long the slot will keep refusing
-                    // before it sheds itself, which is the difference between a
-                    // bounded wait and a mystery.
-                    let message = format!(
-                        "daemon slot-{slot_index} refusing jobs for lack of disk, draining in {}s: {note}",
+        let observation = observe_disk_roots(&disk_admission, &mut disk_pressure);
+        let action = observation.action();
+        let note = disk_observation_note(&observation);
+        let admitted =
+            apply_disk_observation(&disk_admission, &observation, &config_base, slot_index);
+        match action {
+            crate::host_capacity::DiskAction::Admit if !admitted => {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+            crate::host_capacity::DiskAction::Admit => {}
+            crate::host_capacity::DiskAction::Reclaim => {
+                let message = format!("daemon slot-{slot_index} reclaiming disk: {note}");
+                eprintln!("{message}");
+                crate::sd_notify::status(&message);
+                daemon_forensic_log(&config_base, &message);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+            crate::host_capacity::DiskAction::RefuseUntil { remaining } => {
+                let message = match &observation {
+                    crate::host_capacity::DiskObservation::Unmeasurable { .. }
+                    | crate::host_capacity::DiskObservation::NoRoots { .. } => format!(
+                        "daemon slot-{slot_index} refusing jobs until disk capacity can be measured; rechecking within 60s, unknown deadline {}s: {note}",
                         remaining.as_secs()
-                    );
-                    eprintln!("{message}");
-                    crate::sd_notify::status(&message);
-                    daemon_forensic_log(&config_base, &message);
-                    let nap = remaining.min(Duration::from_secs(60));
-                    sleep_slot_retry_or_drain_in(nap, Some(&drain_journal_path)).await;
+                    ),
+                    crate::host_capacity::DiskObservation::Measured { .. } => format!(
+                        "daemon slot-{slot_index} refusing jobs for lack of disk, rechecking within 60s; drain deadline {}s: {note}",
+                        remaining.as_secs()
+                    ),
+                };
+                eprintln!("{message}");
+                crate::sd_notify::status(&message);
+                daemon_forensic_log(&config_base, &message);
+                sleep_slot_retry_or_drain_in(
+                    remaining.min(Duration::from_secs(60)),
+                    Some(&drain_journal_path),
+                )
+                .await;
+                continue;
+            }
+            crate::host_capacity::DiskAction::Drain => {
+                let message = format!(
+                    "daemon slot-{slot_index} disk drain grace active; refusing new jobs for up to {}s: {note}",
+                    disk_pressure.policy().drain_deadline.as_secs()
+                );
+                eprintln!("{message}");
+                crate::sd_notify::status(&message);
+                daemon_forensic_log(&config_base, &message);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+            crate::host_capacity::DiskAction::Deregister => {
+                let reason_published = disk_admission
+                    .signal
+                    .deregistration_reason_published
+                    .load(Ordering::SeqCst);
+                if !reason_published {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
                     continue;
                 }
-                crate::host_capacity::DiskAction::Drain
-                | crate::host_capacity::DiskAction::Deregister => {
-                    let message = format!(
-                        "daemon slot-{slot_index} draining: disk stayed below the floor past the deadline: {note}"
-                    );
-                    eprintln!("{message}");
-                    crate::sd_notify::status(&message);
-                    daemon_forensic_log(&config_base, &message);
-                    cleanup_failed_daemon_slot(
-                        &args,
-                        &config_base,
-                        slot_index,
-                        slots,
-                        cycle,
-                        &durable_slot,
-                    )
-                    .await;
-                    return Ok(());
+                let slot_dir = daemon_slot_config_dir(&config_base, slot_index, slots);
+                let journal_dir = crate::node::complete::journal_dir_near(&slot_dir);
+                let durable_work = match disk_slot_has_durable_work(&slot_dir, &journal_dir) {
+                    Ok(present) => present,
+                    Err(error) => {
+                        eprintln!(
+                            "daemon slot-{slot_index}: cannot inspect durable work before disk deregistration: {}",
+                            sanitized_retry_error(&error)
+                        );
+                        true
+                    }
+                };
+                match disk_deregister_disposition(reason_published, durable_work) {
+                    DiskDeregisterDisposition::RetryFencePublication => {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        continue;
+                    }
+                    DiskDeregisterDisposition::HandOffToDurableRecovery => {
+                        let message = format!(
+                            "daemon slot-{slot_index} disk deadline expired with durable in-flight work; preserving marker for controller recovery"
+                        );
+                        eprintln!("{message}");
+                        daemon_forensic_log(&config_base, &message);
+                        return Err(disk_deregister_recovery_handoff(slot_index));
+                    }
+                    DiskDeregisterDisposition::DeleteRegistration => {
+                        let message = format!(
+                            "daemon slot-{slot_index} disk deadline expired; no active durable job remains, deleting registration"
+                        );
+                        eprintln!("{message}");
+                        crate::sd_notify::status(&message);
+                        daemon_forensic_log(&config_base, &message);
+                        cleanup_failed_daemon_slot(
+                            &args,
+                            &config_base,
+                            slot_index,
+                            slots,
+                            cycle,
+                            &durable_slot,
+                        )
+                        .await;
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -3818,12 +5752,14 @@ pub(crate) async fn run_daemon_slot(
         // configuration would request. Labels, group, name and scope are
         // fixed at JIT-config creation, so drift is retired through the same
         // delete-and-re-register path as a lost registration.
-        if let Some(drift) = stored_jit_config_drift_at(
-            &args,
-            &daemon_slot_config_dir(&config_base, slot_index, slots),
-            slot_index,
-            slots,
-        ) {
+        if action != crate::host_capacity::DiskAction::Deregister
+            && let Some(drift) = stored_jit_config_drift_at(
+                &args,
+                &daemon_slot_config_dir(&config_base, slot_index, slots),
+                slot_index,
+                slots,
+            )
+        {
             if stale_identity_retired {
                 eprintln!(
                     "daemon slot-{slot_index}: freshly registered JIT config still reports drift ({drift}); keeping it to avoid registration churn"
@@ -3855,26 +5791,72 @@ pub(crate) async fn run_daemon_slot(
         if !args.once {
             slot_args.once = true;
         }
-        let (prewarm_trigger, prewarm_waiter) = if args.once {
-            (None, None)
-        } else {
-            let (trigger, receiver) = oneshot::channel();
-            let prewarm_args = args.clone();
-            let prewarm_base = config_base.clone();
-            let prewarm_waiter = tokio::spawn(async move {
-                prewarm_successor_after_job(
-                    receiver,
-                    &prewarm_args,
-                    &prewarm_base,
-                    slot_index,
-                    slots,
-                    cycle,
-                )
-                .await
-            });
-            (Some(trigger), Some(prewarm_waiter))
+        let (prewarm_trigger, prewarm_waiter) =
+            if args.once || action == crate::host_capacity::DiskAction::Deregister {
+                (None, None)
+            } else {
+                let (trigger, receiver) = oneshot::channel();
+                let prewarm_args = args.clone();
+                let prewarm_base = config_base.clone();
+                let prewarm_waiter = tokio::spawn(async move {
+                    prewarm_successor_after_job(
+                        receiver,
+                        &prewarm_args,
+                        &prewarm_base,
+                        slot_index,
+                        slots,
+                        cycle,
+                    )
+                    .await
+                });
+                (Some(trigger), Some(prewarm_waiter))
+            };
+        let run_future = run_with_jit_prewarmer(
+            slot_args,
+            prewarm_trigger,
+            storage_mode,
+            Some(disk_admission.clone()),
+        );
+        tokio::pin!(run_future);
+        let mut disk_watch = tokio::time::interval(Duration::from_secs(2));
+        disk_watch.tick().await;
+        let mut last_disk_phase = disk_action_phase(action);
+        let run_result = loop {
+            tokio::select! {
+                result = &mut run_future => break result,
+                _ = disk_watch.tick() => {
+                    let observation = observe_disk_roots(&disk_admission, &mut disk_pressure);
+                    let observed_action = observation.action();
+                    apply_disk_observation(
+                        &disk_admission,
+                        &observation,
+                        &config_base,
+                        slot_index,
+                    );
+                    let phase = disk_action_phase(observed_action);
+                    if phase != last_disk_phase {
+                        let message = format!(
+                            "daemon slot-{slot_index} disk action changed to {observed_action:?}: {}",
+                            disk_observation_note(&observation)
+                        );
+                        eprintln!("{message}");
+                        crate::sd_notify::status(&message);
+                        daemon_forensic_log(&config_base, &message);
+                        last_disk_phase = phase;
+                    }
+                }
+            }
         };
-        let run_result = run_with_jit_prewarmer(slot_args, prewarm_trigger, storage_mode).await;
+        // Close the completion-edge race: pressure may cross a deadline on the
+        // same executor turn that finished the current job.
+        let final_observation = observe_disk_roots(&disk_admission, &mut disk_pressure);
+        let disk_action_after_run = final_observation.action();
+        apply_disk_observation(
+            &disk_admission,
+            &final_observation,
+            &config_base,
+            slot_index,
+        );
         if let Some(prewarm_waiter) = prewarm_waiter
             && let Err(join_error) = prewarm_waiter.await
         {
@@ -3882,6 +5864,79 @@ pub(crate) async fn run_daemon_slot(
                 "daemon slot-{slot_index} successor JIT prewarm task failed: {}",
                 sanitized_retry_error(&join_error)
             );
+        }
+        if disk_action_after_run == crate::host_capacity::DiskAction::Deregister {
+            let reason_published = disk_admission
+                .signal
+                .deregistration_reason_published
+                .load(Ordering::SeqCst);
+            if !reason_published {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                cycle += 1;
+                continue;
+            }
+            let slot_dir = daemon_slot_config_dir(&config_base, slot_index, slots);
+            let journal_dir = crate::node::complete::journal_dir_near(&slot_dir);
+            let durable_work = match disk_slot_has_durable_work(&slot_dir, &journal_dir) {
+                Ok(present) => present,
+                Err(error) => {
+                    eprintln!(
+                        "daemon slot-{slot_index}: cannot inspect durable work after disk deregistration: {}",
+                        sanitized_retry_error(&error)
+                    );
+                    true
+                }
+            };
+            match disk_deregister_disposition(reason_published, durable_work) {
+                DiskDeregisterDisposition::RetryFencePublication => {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    cycle += 1;
+                    continue;
+                }
+                DiskDeregisterDisposition::HandOffToDurableRecovery => {
+                    if let Err(error) = &run_result {
+                        let message = format!(
+                            "daemon slot-{slot_index} disk deregistration preserving durable in-flight state for controller recovery: {}",
+                            sanitized_retry_error(error)
+                        );
+                        eprintln!("{message}");
+                        daemon_forensic_log(&config_base, &message);
+                    }
+                    return Err(disk_deregister_recovery_handoff(slot_index));
+                }
+                DiskDeregisterDisposition::DeleteRegistration => {
+                    let message = format!(
+                        "daemon slot-{slot_index} disk deregistration completed after durable job recovery"
+                    );
+                    eprintln!("{message}");
+                    daemon_forensic_log(&config_base, &message);
+                    cleanup_failed_daemon_slot(
+                        &args,
+                        &config_base,
+                        slot_index,
+                        slots,
+                        cycle,
+                        &durable_slot,
+                    )
+                    .await;
+                    return Ok(());
+                }
+            }
+        }
+        if disk_action_after_run != crate::host_capacity::DiskAction::Admit
+            || disk_admission.signal.blocked()
+        {
+            if let Err(error) = &run_result {
+                let message = format!(
+                    "daemon slot-{slot_index} retaining JIT identity while disk admission is fenced: {}",
+                    sanitized_retry_error(error)
+                );
+                eprintln!("{message}");
+                daemon_forensic_log(&config_base, &message);
+            }
+            cycle += 1;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
         }
         if let Err(error) = run_result {
             let error_detail = sanitized_retry_error(&error);
@@ -4785,29 +6840,30 @@ async fn configure_daemon_slots(
     Ok(usable_slots)
 }
 
-/// Open the host-wide `max_jobs=N` permit ledger: adopt `N` (set on first
-/// start, keep the configured value on later starts unless this start
-/// carries an explicit `--max-jobs`), begin a new epoch, reconcile durable
-/// occupancy against this daemon's in-flight markers, and sweep dead
-/// attempts. Fail-closed: no daemon pass may supervise slots without the
-/// capacity authority.
-/// Attested scale-set holders for the startup reconcile: every demand
-/// row in a permit state, read from the lane's state db. Unconfigured
-/// lane attests nothing. A corrupt demand store fails the pass loudly —
-/// the lane could not run against it either.
-fn attest_scaleset_demand_holders(
-    args: &DaemonArgs,
-) -> Result<Vec<(String, velnor_control::permit_ledger::PermitState)>> {
+/// Effective Scale Set state DB. Relative paths use the daemon's current
+/// working directory, matching `ScaleSetDaemon::open_production`.
+fn scaleset_state_db_path(args: &DaemonArgs) -> Result<Option<PathBuf>> {
     let Some(config_path) = args.scale_set_config.as_deref() else {
-        return Ok(Vec::new());
+        return Ok(None);
     };
     let file = crate::scaleset::load_file_config(config_path)?;
-    let state_db = file
-        .state_db
-        .clone()
-        .unwrap_or_else(|| daemon_state_db_path(args));
-    crate::scaleset::reconcile::attest_demand_holders(&state_db)
-        .map_err(|error| anyhow::anyhow!("attest scale-set demand holders: {error:#}"))
+    Ok(Some(
+        file.state_db.unwrap_or_else(|| daemon_state_db_path(args)),
+    ))
+}
+
+fn require_host_roster_path(path: &Path, members: &[PathBuf], kind: &str) -> Result<PathBuf> {
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("resolve configured {kind} path {}", path.display()))?;
+    if !members.iter().any(|member| member == &canonical) {
+        bail!(
+            "configured {kind} path {} is missing from the authoritative host roster {}; add the matching entry and restart all daemons",
+            canonical.display(),
+            velnor_control::permit_ledger::HOST_DEMAND_SOURCE_ROSTER_PATH
+        );
+    }
+    Ok(canonical)
 }
 
 /// The daemon's operational state db: the explicit flag wins, otherwise
@@ -4919,6 +6975,48 @@ fn init_host_permit_ledger(args: &DaemonArgs, config_base: &Path, slots: usize) 
         crate::permit_guard::resolve_permit_ledger_path(args.permit_ledger.as_deref());
     let mut ledger =
         PermitLedger::open(&ledger_path).map_err(|error| anyhow::anyhow!("{error:#}"))?;
+    let canonical_ledger_path = ledger.path().to_path_buf();
+    // Close peer admission before inspecting any roster/source file. The
+    // complete host roster below reopens this generation only after every
+    // configured source and native marker root is attested.
+    let generation = ledger
+        .begin_epoch()
+        .map_err(|error| anyhow::anyhow!("{error:#}"))?;
+
+    let scale_set_db = scaleset_state_db_path(args)?;
+    if let Some(path) = scale_set_db.as_deref() {
+        if !path.is_file() {
+            bail!(
+                "configured Scale Set demand database {} is missing; provision the file explicitly, add it as a demand-db entry in {}, then restart all daemons",
+                path.display(),
+                velnor_control::permit_ledger::HOST_DEMAND_SOURCE_ROSTER_PATH
+            );
+        }
+    }
+    let roster = velnor_control::permit_ledger::read_demand_source_roster(&canonical_ledger_path)
+        .map_err(|error| anyhow::anyhow!("{error:#}"))?;
+    if roster.ledger_path.as_deref() != Some(canonical_ledger_path.as_path()) {
+        bail!("host roster ledger identity does not match the canonical ledger path");
+    }
+    require_host_roster_path(
+        &daemon_state_db_path(args),
+        &roster.state_db_paths,
+        "daemon state database",
+    )?;
+    if let Some(path) = scale_set_db.as_deref() {
+        require_host_roster_path(path, &roster.paths, "Scale Set demand database")?;
+        require_host_roster_path(path, &roster.state_db_paths, "Scale Set state database")?;
+        crate::scaleset::DemandStore::open(path)
+            .with_context(|| format!("open Scale Set demand source {}", path.display()))?;
+    }
+    for slot_dir in daemon_slot_config_dirs(config_base, slots)? {
+        require_host_roster_path(
+            &slot_dir,
+            &roster.native_marker_dirs,
+            "native slot marker directory",
+        )?;
+    }
+    recover_pending_scale_set_publications(&mut ledger, &roster)?;
     // Adopt, don't clobber: a second scope daemon's slot fallback must
     // never rewrite the host-wide N another daemon configured.
     let (max_jobs, resized) =
@@ -4927,69 +7025,173 @@ fn init_host_permit_ledger(args: &DaemonArgs, config_base: &Path, slots: usize) 
     if resized {
         println!(
             "Host permit ledger {}: configured max_jobs={max_jobs}.",
-            ledger_path.display()
+            canonical_ledger_path.display()
         );
     } else {
         println!(
             "Host permit ledger {}: adopted configured max_jobs={max_jobs} (pass an explicit --max-jobs to resize).",
-            ledger_path.display()
+            canonical_ledger_path.display()
         );
     }
-    let generation = ledger
-        .begin_epoch()
-        .map_err(|error| anyhow::anyhow!("{error:#}"))?;
-    // Live work is attested from slot in-flight markers. An unreadable
-    // marker only withholds attestation: the row goes uncertain and is
-    // retained (its pid is alive) or swept (its pid is dead and no other
-    // marker references the holder).
-    let mut alive = Vec::new();
-    for slot_dir in daemon_slot_config_dirs(config_base, slots)? {
-        match load_in_flight_job(&slot_dir) {
-            Ok(Some(record)) if !record.permit_holder.is_empty() => {
-                alive.push(record.permit_holder);
-            }
-            Ok(_) => {}
-            Err(error) => {
-                eprintln!(
-                    "Warning: permit ledger reconcile skipped unreadable marker {}: {error:#}",
-                    slot_dir.display()
-                );
-            }
-        }
-    }
-    // Scale-set lane (D1): attest recorded scale-set holders from the
-    // demand store so the ONE startup reconcile covers both lanes. Two
-    // separate reconciles would mark the other lane's live rows
-    // uncertain; unattested rows are still only marked, never deleted.
-    let scaleset_alive = attest_scaleset_demand_holders(args)?;
-    drop(ledger);
-    let scaleset_refs: Vec<(&str, velnor_control::permit_ledger::PermitState)> = scaleset_alive
-        .iter()
-        .map(|(holder, state)| (holder.as_str(), *state))
-        .collect();
-    let native_refs: Vec<&str> = alive.iter().map(String::as_str).collect();
-    let (report, swept) = crate::scaleset::allocator::startup_reconcile(
-        &ledger_path,
-        &scaleset_refs,
-        &native_refs,
-        &crate::permit_guard::pid_alive,
-    )
-    .map_err(|error| anyhow::anyhow!("{error:#}"))?;
+    let report =
+        reconcile_host_permit_roster(&mut ledger, &roster, generation, scale_set_db.as_deref())?;
     println!(
-        "Host permit ledger {}: max_jobs={max_jobs} generation={generation} confirmed={} adopted={} uncertain={} swept={}.",
-        ledger_path.display(),
+        "Host permit ledger {}: max_jobs={max_jobs} generation={generation} confirmed={} adopted={} uncertain={}.",
+        canonical_ledger_path.display(),
         report.confirmed.len(),
         report.adopted.len(),
-        report.marked_uncertain.len(),
-        swept.len()
+        report.marked_uncertain.len()
     );
     for holder in report.marked_uncertain {
         println!("Host permit ledger: retained uncertain reservation for {holder}.");
     }
-    for holder in swept {
-        println!("Host permit ledger: swept dead attempt {holder}.");
+    Ok(())
+}
+
+/// Replay global-first Scale Set publications before source attestation can
+/// open admission. The host ledger commits queue age plus enough immutable
+/// offer metadata to recreate a source row if the process stopped before its
+/// local insert.
+pub(crate) fn recover_pending_scale_set_publications(
+    ledger: &mut velnor_control::permit_ledger::PermitLedger,
+    roster: &velnor_control::permit_ledger::PermitDemandSourceRoster,
+) -> Result<()> {
+    for pending in ledger
+        .pending_scale_set_demand_publications()
+        .map_err(|error| anyhow::anyhow!("{error:#}"))?
+    {
+        let source = pending.source_db.canonicalize().with_context(|| {
+            format!(
+                "resolve pending demand source {}",
+                pending.source_db.display()
+            )
+        })?;
+        if !roster.paths.iter().any(|registered| registered == &source) {
+            bail!(
+                "pending Scale Set publication names unregistered source {}; admission remains closed",
+                source.display()
+            );
+        }
+        if !source.is_file() {
+            bail!(
+                "pending Scale Set publication source {} is missing; restore that configured database before admission",
+                source.display()
+            );
+        }
+        let _source_lock = crate::scaleset::reconcile::lock_demand_source_lifecycle(&source)
+            .with_context(|| format!("lock pending demand source {}", source.display()))?;
+        let mut demand = crate::scaleset::DemandStore::open(&source)
+            .with_context(|| format!("open pending demand source {}", source.display()))?;
+        demand
+            .restore_pending_offer(&pending)
+            .with_context(|| format!("replay pending Scale Set holder {}", pending.holder))?;
     }
     Ok(())
+}
+
+/// Reconcile every durable source from the fixed host roster. Production
+/// startup and each Scale Set listener generation restart use this path; a
+/// local lane snapshot cannot open shared host admission.
+pub(crate) fn reconcile_host_permit_roster(
+    ledger: &mut velnor_control::permit_ledger::PermitLedger,
+    roster: &velnor_control::permit_ledger::PermitDemandSourceRoster,
+    expected_generation: u64,
+    required_demand_db: Option<&Path>,
+) -> Result<velnor_control::permit_ledger::ReconcileReport> {
+    use velnor_control::permit_ledger::{PermitLane, PermitState};
+
+    recover_pending_scale_set_publications(ledger, roster)?;
+    if let Some(path) = required_demand_db {
+        require_host_roster_path(path, &roster.paths, "Scale Set demand database")?;
+    }
+    let mut attested: Vec<(String, PermitLane, PermitState)> = Vec::new();
+    let mut demand_sources = roster.paths.clone();
+    demand_sources.sort();
+    let mut demand_locks = Vec::with_capacity(demand_sources.len());
+    for source in &demand_sources {
+        let (lock, holders) = crate::scaleset::reconcile::lock_and_attest_demand_holders(source)
+            .with_context(|| format!("attest Scale Set demand source {}", source.display()))?;
+        demand_locks.push(lock);
+        attested.extend(
+            holders
+                .into_iter()
+                .map(|(holder, state)| (holder, PermitLane::ScaleSet, state)),
+        );
+    }
+    let mut marker_dirs = roster.native_marker_dirs.clone();
+    marker_dirs.sort();
+    let marker_locks = marker_dirs
+        .iter()
+        .map(|marker_dir| {
+            InFlightJobLock::acquire(marker_dir)
+                .with_context(|| format!("lock native marker root {}", marker_dir.display()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    for marker_dir in &marker_dirs {
+        match load_in_flight_job(marker_dir)
+            .with_context(|| format!("read native slot marker root {}", marker_dir.display()))?
+        {
+            Some(record) if !record.permit_holder.is_empty() => {
+                let expected_lease = record.permit_generation.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "native marker for {} lacks an immutable permit lease id; retain it and repair through the recorded cleanup path",
+                        record.job_id
+                    )
+                })?;
+                if !record.permit_ledger.is_empty()
+                    && Path::new(&record.permit_ledger).canonicalize()? != ledger.path()
+                {
+                    bail!(
+                        "native marker for {} names a different permit ledger {}; expected {}",
+                        record.job_id,
+                        record.permit_ledger,
+                        ledger.path().display()
+                    );
+                }
+                let held_lease = ledger.permit_lease_generation(&record.permit_holder)?;
+                let demand_state = ledger
+                    .demand(&record.permit_holder)?
+                    .map(|demand| demand.state);
+                if !native_marker_should_attest(expected_lease, held_lease, demand_state)? {
+                    // The durable terminal demand proves cleanup release
+                    // committed before marker unlink. Keep the marker for
+                    // controller replay, but never recreate its old lease.
+                    continue;
+                }
+                attested.push((
+                    record.permit_holder,
+                    PermitLane::Native,
+                    PermitState::Running,
+                ));
+            }
+            Some(_) | None => {}
+        }
+    }
+    let attested: Vec<(&str, PermitLane, PermitState)> = attested
+        .iter()
+        .map(|(holder, lane, state)| (holder.as_str(), *lane, *state))
+        .collect();
+    let report = ledger
+        .reconcile_host_roster(roster, expected_generation, &attested)
+        .map_err(|error| anyhow::anyhow!("full-host permit reconcile: {error:#}"))?;
+    drop(marker_locks);
+    drop(demand_locks);
+    Ok(report)
+}
+
+fn native_marker_should_attest(
+    expected_lease: u64,
+    held_lease: Option<u64>,
+    demand_state: Option<velnor_control::permit_ledger::DemandState>,
+) -> Result<bool> {
+    use velnor_control::permit_ledger::DemandState;
+    match held_lease {
+        Some(lease) if lease == expected_lease => Ok(true),
+        None if demand_state == Some(DemandState::Terminal) => Ok(false),
+        seen => anyhow::bail!(
+            "native marker records permit lease {expected_lease}, but ledger holds {seen:?} with demand state {demand_state:?}; refusing stale-marker re-adoption"
+        ),
+    }
 }
 
 fn reserve_capacity_permits(config_base: &Path, args: &DaemonArgs, desired: u32) -> Result<()> {
@@ -5118,15 +7320,14 @@ async fn delete_runner_keeping_busy_identity(
     {
         Ok(()) => {
             if let Some(dir) = slot_dir {
-                let has_in_flight_job = load_in_flight_job(dir)
+                let expected = load_in_flight_job(dir)
                     .map_err(local_failure)
                     .with_context(|| {
                         format!(
                             "inspect in-flight job after remote runner deletion of runner id {agent_id}; local identity preserved"
                         )
-                    })?
-                    .is_some();
-                if has_in_flight_job {
+                    })?;
+                if let Some(expected) = expected {
                     let stored = config::load(dir)
                         .map_err(local_failure)
                         .with_context(|| {
@@ -5134,7 +7335,7 @@ async fn delete_runner_keeping_busy_identity(
                                 "load runner identity before completing in-flight job for runner id {agent_id}; local identity preserved"
                             )
                         })?;
-                    complete_recorded_in_flight_job(dir, &stored)
+                    complete_recorded_in_flight_job_for_record(dir, &stored, &expected)
                         .await
                         .map_err(local_failure)
                         .with_context(|| {
@@ -5155,21 +7356,32 @@ async fn delete_runner_keeping_busy_identity(
         // 30s GitHub HTTP timeout; quarantine never blocks the slot.
         Err(error) if error.downcast_ref::<RunnerBusyConflict>().is_some() => {
             if let Some(dir) = slot_dir {
-                let stored = config::load(dir)
+                let expected = load_in_flight_job(dir)
                     .map_err(local_failure)
                     .with_context(|| {
                         format!(
-                            "load runner identity before completing in-flight job for runner id {agent_id}; local identity preserved"
+                            "inspect in-flight job before retrying deletion of runner id {agent_id}; local identity preserved"
                         )
                     })?;
-                let completed = complete_recorded_in_flight_job(dir, &stored)
-                    .await
-                    .map_err(local_failure)
-                    .with_context(|| {
-                        format!(
-                            "complete recorded in-flight job before retrying deletion of runner id {agent_id}; local identity preserved"
-                        )
-                    })?;
+                let completed = if let Some(expected) = expected {
+                    let stored = config::load(dir)
+                        .map_err(local_failure)
+                        .with_context(|| {
+                            format!(
+                                "load runner identity before completing in-flight job for runner id {agent_id}; local identity preserved"
+                            )
+                        })?;
+                    complete_recorded_in_flight_job_for_record(dir, &stored, &expected)
+                        .await
+                        .map_err(local_failure)
+                        .with_context(|| {
+                            format!(
+                                "complete recorded in-flight job before retrying deletion of runner id {agent_id}; local identity preserved"
+                            )
+                        })?
+                } else {
+                    false
+                };
                 if completed {
                     match RegistrationClient::new()?
                         .delete_runner(scope, pat, agent_id)
@@ -6651,6 +8863,7 @@ async fn run_v2(
     token: OAuthAccessToken,
     mut prewarm_trigger: Option<oneshot::Sender<()>>,
     storage_layout: crate::storage::StorageLayout,
+    disk_admission: Option<DiskAdmissionContext>,
 ) -> Result<()> {
     // Disk peak is reserved only while a job is executing (see
     // `reserve_job_peak_capacity` in `handle_job_request`). Idle JIT slots
@@ -6767,6 +8980,15 @@ async fn run_v2(
             // expects from a departing runner; the session is deleted below.
             let message = tokio::select! {
                 biased;
+                () = async {
+                    match disk_admission.as_ref() {
+                        Some(context) => context.signal.until_blocked().await,
+                        None => std::future::pending::<()>().await,
+                    }
+                }, if disk_admission.is_some() => {
+                    forensics.lifecycle("broker long-poll cancelled: disk admission is fenced");
+                    None
+                }
                 () = until_draining() => {
                     forensics.lifecycle("broker long-poll cancelled: daemon drain requested");
                     None
@@ -6795,6 +9017,13 @@ async fn run_v2(
                     // Daemon drain (SIGTERM): an idle slot exits at the poll
                     // boundary; the slot loop above deletes the registration.
                     forensics.lifecycle("idle slot exiting: daemon drain requested");
+                    break 'poll;
+                }
+                if disk_admission
+                    .as_ref()
+                    .is_some_and(|context| context.signal.blocked())
+                {
+                    forensics.lifecycle("idle slot leaving broker session: disk admission is fenced");
                     break 'poll;
                 }
                 fail_if_idle_timeout_elapsed(idle_started, idle_timeout)?;
@@ -6898,6 +9127,7 @@ async fn run_v2(
                     &forensics,
                     &mut prewarm_trigger,
                     message,
+                    disk_admission.as_ref(),
                 )
                 .instrument(message_span)
                 .await?
@@ -6994,6 +9224,7 @@ fn reserve_job_peak_capacity(
     storage_layout: &crate::storage::StorageLayout,
     config_dir: &Path,
     args: &RunArgs,
+    disk_admission: Option<&DiskAdmissionContext>,
 ) -> Result<crate::capacity::Reservation> {
     let work_root = crate::container::daemon_shared_root(
         args.work_dir
@@ -7029,7 +9260,13 @@ fn reserve_job_peak_capacity(
                 ..storage_layout.clone()
             };
             if needed > 0 {
-                let _ = crate::cache::reclaim(&reclaim_layout, needed, &active)?;
+                if let Some(capability) = disk_admission.and_then(|context| {
+                    context.block_for_reclaim("host capacity reservation triggered disk reclaim")
+                }) {
+                    let _ = crate::cache::reclaim(capability, &reclaim_layout, needed, &active)?;
+                } else {
+                    eprintln!("skip capacity reclaim: durable disk-admission fence unavailable");
+                }
             }
             let free_after = free_space_bytes(&work_root).unwrap_or(free);
             controller
@@ -7566,6 +9803,67 @@ async fn poll_broker_message(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn native_permit_scope_identity(github_url: &str) -> Result<String> {
+    const JIT_SUFFIX: &str = "/actions/runners/generate-jitconfig";
+    let scope = crate::protocol::GitHubScope::parse(github_url)?;
+    scope
+        .jit_config_url
+        .as_str()
+        .strip_suffix(JIT_SUFFIX)
+        .map(str::to_owned)
+        .context("canonical JIT endpoint has no scope suffix")
+}
+
+fn rekey_legacy_native_request(
+    ledger: &mut velnor_control::permit_ledger::PermitLedger,
+    request_id: &str,
+    canonical_scope: &str,
+) -> Result<()> {
+    use velnor_control::permit_ledger::{DemandState, PermitLane};
+
+    let legacy_holder = format!("native/{request_id}");
+    let Some(legacy_demand) = ledger.demand(&legacy_holder)? else {
+        if ledger.permit_lease_generation(&legacy_holder)?.is_some() {
+            anyhow::bail!(
+                "legacy holder has a lease but no demand scope; preserve it for marker recovery"
+            );
+        }
+        return Ok(());
+    };
+    if legacy_demand.lane != PermitLane::Native {
+        anyhow::bail!("legacy native holder is recorded for another lane");
+    }
+    let previous_scope = native_permit_scope_identity(&legacy_demand.scope)
+        .context("legacy native demand scope cannot be verified")?;
+    if previous_scope != canonical_scope {
+        // Request IDs are only unique within their GitHub authority. A
+        // different verified scope remains a distinct old queue entry.
+        return Ok(());
+    }
+    if ledger.permit_lease_generation(&legacy_holder)?.is_some() {
+        anyhow::bail!(
+            "matching legacy native holder still has a permit; keep its old marker identity until cleanup completes"
+        );
+    }
+    if !matches!(
+        legacy_demand.state,
+        DemandState::Eligible | DemandState::Granted
+    ) {
+        anyhow::bail!(
+            "matching legacy native demand is {:?}; closed identity cannot be re-keyed",
+            legacy_demand.state
+        );
+    }
+    let scoped_holder = crate::permit_guard::native_permit_holder(canonical_scope, request_id);
+    ledger.rekey_legacy_native_demand(
+        &legacy_holder,
+        &scoped_holder,
+        &legacy_demand.scope,
+        canonical_scope,
+    )?;
+    Ok(())
+}
+
 async fn handle_v2_message(
     broker: &BrokerClient,
     run_service: &RunServiceClient,
@@ -7579,6 +9877,7 @@ async fn handle_v2_message(
     forensics: &SlotForensics,
     prewarm_trigger: &mut Option<oneshot::Sender<()>>,
     message: crate::protocol::TaskAgentMessage,
+    disk_admission: Option<&DiskAdmissionContext>,
 ) -> Result<V2MessageAction> {
     println!(
         "Received broker message {} type {}.",
@@ -7652,15 +9951,30 @@ async fn handle_v2_message(
     }
     let reference: RunnerJobRequestRef =
         serde_json::from_str(&message.body).context("parse RunnerJobRequestRef")?;
+    let scope_identity = match native_permit_scope_identity(&stored.settings.github_url) {
+        Ok(scope) => scope,
+        Err(error) => {
+            forensics.broker(&format!(
+                "admission SKIPPED request={} GitHub scope identity unavailable",
+                reference.runner_request_id
+            ));
+            eprintln!(
+                "Warning: skipping broker message {}: could not establish canonical GitHub scope ({error:#}); waiting for redelivery.",
+                message.message_id
+            );
+            return Ok(V2MessageAction::None);
+        }
+    };
     // Persist this observation in the shared permit ledger before any
     // admission fence can skip it. Redelivery refreshes liveness but keeps
     // the original first-seen age and host-wide sequence. An unreadable
     // demand authority must fail closed; acquiring without this observation
     // could let native work overtake older Scale Set demand.
-    let permit_holder = crate::permit_guard::native_permit_holder(&reference.runner_request_id);
+    let permit_holder =
+        crate::permit_guard::native_permit_holder(&scope_identity, &reference.runner_request_id);
     let ledger_path =
         crate::permit_guard::resolve_permit_ledger_path(args.permit_ledger.as_deref());
-    let observed_unix = velnor_control::permit_ledger::unix_now();
+    let (observed_unix, observed_subsec_nanos) = velnor_control::permit_ledger::unix_now_parts();
     let mut demand_ledger = match velnor_control::permit_ledger::PermitLedger::open(&ledger_path) {
         Ok(ledger) => ledger,
         Err(error) => {
@@ -7675,11 +9989,27 @@ async fn handle_v2_message(
             return Ok(V2MessageAction::None);
         }
     };
-    if let Err(error) = demand_ledger.observe_demand(
+    if let Err(error) = rekey_legacy_native_request(
+        &mut demand_ledger,
+        &reference.runner_request_id,
+        &scope_identity,
+    ) {
+        forensics.broker(&format!(
+            "admission SKIPPED request={} legacy holder identity requires recovery",
+            reference.runner_request_id
+        ));
+        eprintln!(
+            "Warning: skipping broker message {}: legacy native permit identity cannot be safely re-keyed ({error:#}); waiting for redelivery.",
+            message.message_id
+        );
+        return Ok(V2MessageAction::None);
+    }
+    if let Err(error) = demand_ledger.observe_demand_with_subsecond(
         &permit_holder,
         velnor_control::permit_ledger::PermitLane::Native,
-        &stored.settings.github_url,
+        &scope_identity,
         observed_unix,
+        observed_subsec_nanos,
         observed_unix,
     ) {
         forensics.broker(&format!(
@@ -7698,6 +10028,20 @@ async fn handle_v2_message(
     // A cordoned slot must leave the broker session before acknowledging or
     // acquiring a request. The scheduler can then redeliver to another
     // eligible runner; this slot never claims and discards unrelated work.
+    let ack_disk_guard = if let Some(disk_admission) = disk_admission {
+        match disk_admission.try_admission_guard("before broker Busy acknowledgement")? {
+            Some(guard) => Some(guard),
+            None => {
+                forensics.broker(&format!(
+                    "ack/acquire SKIPPED request={} disk admission fenced",
+                    reference.runner_request_id
+                ));
+                return Ok(V2MessageAction::Shutdown);
+            }
+        }
+    } else {
+        None
+    };
     if effective_capacity_blocked(Some(&acquisition_drain_journal)) {
         forensics.broker(&format!(
             "acquire SKIPPED request={} admission fence active",
@@ -7730,6 +10074,7 @@ async fn handle_v2_message(
             sanitized_retry_error(&error)
         );
     }
+    drop(ack_disk_guard);
     let run_service_url = reference
         .run_service_url
         .as_deref()
@@ -7742,6 +10087,20 @@ async fn handle_v2_message(
     // Unified capacity fence: never start an acquisition while cordoned or
     // draining. The broker redelivers to a live runner; this slot exits at
     // its next idle poll boundary.
+    let disk_admission_guard = if let Some(disk_admission) = disk_admission {
+        match disk_admission.try_admission_guard("before native permit acquisition")? {
+            Some(guard) => Some(guard),
+            None => {
+                forensics.broker(&format!(
+                    "acquire SKIPPED request={} disk admission fenced",
+                    reference.runner_request_id
+                ));
+                return Ok(V2MessageAction::Shutdown);
+            }
+        }
+    } else {
+        None
+    };
     if effective_capacity_blocked(Some(&acquisition_drain_journal)) {
         forensics.broker(&format!(
             "acquire SKIPPED request={} capacity fence active",
@@ -7754,7 +10113,7 @@ async fn handle_v2_message(
     let mut permit_guard = match crate::permit_guard::NativePermitGuard::acquire(
         &ledger_path,
         permit_holder,
-        &stored.settings.github_url,
+        &scope_identity,
     ) {
         Ok(Some(guard)) => guard,
         Ok(None) => {
@@ -7776,12 +10135,34 @@ async fn handle_v2_message(
             return Ok(V2MessageAction::None);
         }
     };
+    if permit_guard.teardown_release().is_none() {
+        let note = format!(
+            "acquire SKIPPED request={} an existing live holder owns this request",
+            reference.runner_request_id
+        );
+        forensics.broker(&note);
+        println!("{note}; waiting for redelivery.");
+        return Ok(V2MessageAction::None);
+    }
+    let permit_lease = native_permit_lease(&permit_guard)?;
+    if let Some(disk_admission) = disk_admission
+        && !disk_admission.recheck_under_guard()
+    {
+        drop(disk_admission_guard);
+        disk_admission.block("disk capacity failed recheck before durable acquisition intent");
+        return Ok(V2MessageAction::Shutdown);
+    }
+    if effective_capacity_blocked(Some(&acquisition_drain_journal)) {
+        drop(disk_admission_guard);
+        return Ok(V2MessageAction::Shutdown);
+    }
     if let Err(error) = intend_run_service_acquisition_in_journal(
         &acquisition_journal_dir,
         config_dir,
         &reference.runner_request_id,
         &message.message_id.to_string(),
         run_service_url,
+        &permit_lease,
     ) {
         forensics.broker(&format!(
             "acquire SKIPPED request={} durable intent failed: {}",
@@ -7801,6 +10182,34 @@ async fn handle_v2_message(
     // cancelled or unwound after the server commits but before a result is
     // delivered to this task.
     permit_guard.retain_until_terminal();
+    if let Some(disk_admission) = disk_admission
+        && !disk_admission.recheck_under_guard()
+    {
+        let reason = "disk capacity failed recheck before run-service acquire";
+        if let Err(error) = abandon_disk_blocked_unsent_acquisition(
+            disk_admission,
+            disk_admission_guard,
+            permit_guard,
+            &acquisition_journal_dir,
+            config_dir,
+            &reference.runner_request_id,
+            &permit_lease,
+            reason,
+        ) {
+            let note = format!(
+                "acquire SKIPPED request={} disk fence closed before run-service acquire; provisional cleanup failed: {}",
+                reference.runner_request_id, sanitized_retry_error(&error)
+            );
+            eprintln!("{note}");
+            forensics.lifecycle(&note);
+            return Ok(V2MessageAction::Shutdown);
+        }
+        forensics.lifecycle(&format!(
+            "acquire SKIPPED request={} disk fence closed before run-service acquire; permit requeued for redelivery",
+            reference.runner_request_id
+        ));
+        return Ok(V2MessageAction::Shutdown);
+    }
     let acquire_result = tokio::select! {
         result = run_service
         .acquire_job(
@@ -7810,7 +10219,10 @@ async fn handle_v2_message(
             reference.billing_owner_id.as_deref(),
         )
         .instrument(pickup_span) => result,
-        _ = wait_for_capacity_block_signal_in(Some(&acquisition_drain_journal)) => {
+        _ = wait_for_capacity_block_signal_in(
+            Some(&acquisition_drain_journal),
+            disk_admission,
+        ) => {
             forensics.lifecycle(&format!(
                 "acquire canceled by daemon drain request={}",
                 reference.runner_request_id
@@ -7822,6 +10234,7 @@ async fn handle_v2_message(
             return Ok(V2MessageAction::Shutdown);
         }
     };
+    drop(disk_admission_guard);
     let job_value = match acquire_result {
         Ok(job_value) => job_value,
         Err(error) => {
@@ -7874,10 +10287,16 @@ async fn handle_v2_message(
             // then crash. Its row stays for the renewjob probe, which is
             // the only oracle that can tell.
             if acquire_skip_abandons_intent(category) {
-                if let Err(error) = abandon_run_service_acquisition_in_journal(
+                // Persist confirmed not-found proof before cancelling the
+                // exact lease. A failed terminal append can then replay that
+                // same release and drop only its matching provisional row.
+                if let Err(error) = settle_confirmed_run_service_acquisition_loss(
+                    permit_guard,
                     &acquisition_journal_dir,
                     config_dir,
                     &reference.runner_request_id,
+                    &permit_lease,
+                    velnor_control::journal::AcquisitionLossSource::AcquireJobNotFound,
                     "the run service reports the broker message is gone",
                 ) {
                     eprintln!(
@@ -7886,7 +10305,6 @@ async fn handle_v2_message(
                         sanitized_retry_error(&error)
                     );
                 }
-                permit_guard.release_cancelled();
             } else {
                 // Conflict does not identify the holder; the service may
                 // have assigned this request before the reply was lost.
@@ -7921,6 +10339,7 @@ async fn handle_v2_message(
         &reference.runner_request_id,
         run_service_url,
         &acquired_identity,
+        &permit_lease,
     ) {
         Ok(rebuilt) => rebuilt,
         Err(error) => {
@@ -7944,6 +10363,31 @@ async fn handle_v2_message(
         journal_state: RunServiceJobJournalState::Acquired,
         step_log_pages_root: StepLogPages::root(config_dir),
     };
+    let Some(job_claim) = JobClaim::try_acquire(
+        &storage_layout.run_root,
+        &acquired_identity.plan_id,
+        &acquired_identity.job_id,
+    )?
+    else {
+        println!(
+            "Skipping duplicate delivery of run-service job {}; another local slot owns it.",
+            acquired_identity.job_id
+        );
+        permit_guard
+            .release()
+            .context("release duplicate-delivery permit")?;
+        return Ok(V2MessageAction::JobHandled);
+    };
+    if let Err(error) = persist_acquired_in_flight_job(
+        config_dir,
+        &fallback_run_service_job,
+        &acquired_identity,
+        &reference.runner_request_id,
+        &permit_guard,
+    ) {
+        permit_guard.mark_uncertain_and_disarm();
+        return Err(error).context("persist acquired job marker before parsing job message");
+    }
     let job: AgentJobRequestMessage = match serde_json::from_value(job_value) {
         Ok(job) => job,
         Err(error) => {
@@ -7964,7 +10408,8 @@ async fn handle_v2_message(
             }
             // No workflow or container was started, and the run service
             // accepted terminal completion for this acquired job.
-            permit_guard.release();
+            release_active_in_flight_job(config_dir, &acquired_identity.job_id, &mut permit_guard)
+                .context("release malformed acquired job")?;
             return Err(error).context("parse acquired run-service job");
         }
     };
@@ -7992,7 +10437,8 @@ async fn handle_v2_message(
                 )));
             }
             // This failure is before workflow setup or container ownership.
-            permit_guard.release();
+            release_active_in_flight_job(config_dir, &acquired_identity.job_id, &mut permit_guard)
+                .context("release job after run-service client setup failure")?;
             return Err(error).context("build run-service client from acquired job");
         }
     };
@@ -8022,9 +10468,11 @@ async fn handle_v2_message(
         broker_cancellation,
         runner_name,
         job,
+        job_claim,
         forensics,
         duration_ms(pickup_started.elapsed()),
         permit_guard,
+        disk_admission,
     )
     .await?;
     Ok(V2MessageAction::JobHandled)
@@ -8040,23 +10488,26 @@ async fn handle_job_request(
     broker_cancellation: BrokerCancellationContext,
     runner_name: &str,
     job: AgentJobRequestMessage,
+    job_claim: JobClaim,
     forensics: &SlotForensics,
     pickup_ms: u64,
     mut permit_guard: crate::permit_guard::NativePermitGuard,
+    disk_admission: Option<&DiskAdmissionContext>,
 ) -> Result<()> {
-    let capacity_run_root = &storage_layout.run_root;
+    // The durable in-flight marker already exists at this boundary. Install
+    // disk deregistration cancellation before any journal/store/API await, so
+    // the bounded drain deadline cannot expire unseen during setup.
+    let canceled = Arc::new(AtomicBool::new(false));
+    let job_cancellation = crate::execution::cancel::JobCancellation::new(None);
+    let _job_cancellation_active = crate::execution::cancel::set_active(job_cancellation.clone());
+    let _disk_deregister_cancellation = disk_admission.map(|context| {
+        start_disk_deregister_cancellation(
+            Arc::clone(&context.signal),
+            job_cancellation.clone(),
+            canceled.clone(),
+        )
+    });
     let journal_dir = crate::node::complete::journal_dir_near(config_dir);
-    let Some(job_claim) = JobClaim::try_acquire(capacity_run_root, &job.plan.plan_id, &job.job_id)?
-    else {
-        println!(
-            "Skipping duplicate delivery of run-service job {}; another local slot owns it.",
-            job.job_id
-        );
-        // The local job claim proves another slot owns this work; this
-        // duplicate request has no independent execution or teardown.
-        permit_guard.release();
-        return Ok(());
-    };
     println!(
         "Parsed job request {} for job '{}' ({} step(s), {} endpoint(s)).",
         job.request_id,
@@ -8078,23 +10529,8 @@ async fn handle_job_request(
     let queue_time_present = job_queue_time_present(&job);
     crate::runtime_env::stamp_admitted_job_queue_time(&mut job);
     let queue_ms = duration_ms(job_queued_for(&job, SystemTime::now()));
-    if let Err(persist_error) = persist_in_flight_job(
-        config_dir,
-        &run_service_job,
-        &job,
-        permit_guard.holder(),
-        permit_guard.ledger_path(),
-    ) {
-        return fail_closed_after_in_flight_persist_error(
-            config_dir,
-            &run_service_job,
-            &acquired_identity,
-            &job,
-            persist_error,
-        )
-        .await;
-    }
-    // The job is recorded and executing: the acquiring permit is running.
+    // The durable marker predates parsing so pre-execution terminal paths are
+    // recoverable. Mark Running only after the typed job reaches this handler.
     permit_guard.transition_running();
     let mut run_service_job = run_service_job;
     if let Err(acceptance_error) =
@@ -8106,6 +10542,7 @@ async fn handle_job_request(
             &acquired_identity,
             &job,
             acceptance_error,
+            &mut permit_guard,
         )
         .await;
     }
@@ -8137,7 +10574,8 @@ async fn handle_job_request(
             .await;
             completion
                 .context("failed to complete the job rejected for execution backend selection")?;
-            clear_in_flight_job(config_dir).context("failed to clear completed in-flight job")?;
+            release_active_in_flight_job(config_dir, &job.job_id, &mut permit_guard)
+                .context("failed to release completed in-flight job")?;
             anyhow::bail!("{REASON}: {error}");
         }
     };
@@ -8250,7 +10688,8 @@ async fn handle_job_request(
             )
             .await;
             completion.context("failed to complete the rejected job")?;
-            clear_in_flight_job(config_dir).context("failed to clear completed in-flight job")?;
+            release_active_in_flight_job(config_dir, &job.job_id, &mut permit_guard)
+                .context("failed to release completed in-flight job")?;
             bail!("{reason}");
         }
         Some(telemetry_admission)
@@ -8266,7 +10705,8 @@ async fn handle_job_request(
         )
         .await;
         completion.context("failed to complete the job rejected for store unavailability")?;
-        clear_in_flight_job(config_dir).context("failed to clear completed in-flight job")?;
+        release_active_in_flight_job(config_dir, &job.job_id, &mut permit_guard)
+            .context("failed to release completed in-flight job")?;
         bail!("{REASON}");
     };
 
@@ -8376,7 +10816,7 @@ async fn handle_job_request(
                         // candidate scope for all concurrent holders.
                         let holder_scope = format!("{scope}/{lease_holder}");
                         crate::capacity::ScopeLease::acquire(
-                            capacity_run_root,
+                            &storage_layout.run_root,
                             class,
                             &holder_scope,
                             stale_after,
@@ -8418,8 +10858,8 @@ async fn handle_job_request(
                 FailureRemediation::WorkflowPolicy,
             )
             .await?;
-            clear_in_flight_job(config_dir)
-                .context("failed to clear acknowledged in-flight job")?;
+            release_active_in_flight_job(config_dir, &job.job_id, &mut permit_guard)
+                .context("failed to release acknowledged in-flight job")?;
             bail!("cannot execute scripts because step mapping failed");
         };
         if let Err(error) =
@@ -8434,8 +10874,8 @@ async fn handle_job_request(
                 FailureRemediation::WorkflowPolicy,
             )
             .await?;
-            clear_in_flight_job(config_dir)
-                .context("failed to clear acknowledged in-flight job")?;
+            release_active_in_flight_job(config_dir, &job.job_id, &mut permit_guard)
+                .context("failed to release acknowledged in-flight job")?;
             return Err(error);
         }
         // Strict capability admission is unconditional: there is no bypass. The
@@ -8452,8 +10892,8 @@ async fn handle_job_request(
                 FailureRemediation::WorkflowPolicy,
             )
             .await?;
-            clear_in_flight_job(config_dir)
-                .context("failed to clear acknowledged in-flight job")?;
+            release_active_in_flight_job(config_dir, &job.job_id, &mut permit_guard)
+                .context("failed to release acknowledged in-flight job")?;
             return Err(error);
         }
         let admission_graph = match admit_job_closure(
@@ -8477,8 +10917,8 @@ async fn handle_job_request(
                     remediation,
                 )
                 .await?;
-                clear_in_flight_job(config_dir)
-                    .context("failed to clear acknowledged in-flight job")?;
+                release_active_in_flight_job(config_dir, &job.job_id, &mut permit_guard)
+                    .context("failed to release acknowledged in-flight job")?;
                 return Err(error);
             }
         };
@@ -8494,7 +10934,6 @@ async fn handle_job_request(
         // step/reason. Never Success. Never leave GitHub without a terminal
         // conclusion.
         let stored_for_refresh = broker_cancellation.stored.clone();
-        let canceled = Arc::new(AtomicBool::new(false));
         let registration_lost = Arc::new(AtomicBool::new(false));
         let renewal = start_run_service_lock_renewal(
             run_service_job.client.clone(),
@@ -8510,9 +10949,6 @@ async fn handle_job_request(
         // group with the thing that can actually terminate it. The poller
         // drives this token; the executor reads it, which is what makes
         // `cancelled()` and the `success()`/`failure()` pair truthful.
-        let job_cancellation = crate::execution::cancel::JobCancellation::new(None);
-        let _job_cancellation_active =
-            crate::execution::cancel::set_active(job_cancellation.clone());
         // The ladder targets the job owns must outlive the poller task: the
         // poller breaks right after `request()` on broker-driven cancel
         // paths, so guards owned by the task deregister before escalation and
@@ -8561,7 +10997,8 @@ async fn handle_job_request(
         let mut emitted_pressure = false;
         let mut emitted_no_progress = false;
         let job_peak_reservation = loop {
-            let reserve_result = reserve_job_peak_capacity(storage_layout, config_dir, args);
+            let reserve_result =
+                reserve_job_peak_capacity(storage_layout, config_dir, args, disk_admission);
             let last_error = reserve_result
                 .as_ref()
                 .err()
@@ -8656,8 +11093,8 @@ async fn handle_job_request(
                     .await;
                     renewal.abort();
                     completion?;
-                    clear_in_flight_job(config_dir)
-                        .context("failed to clear acknowledged in-flight job")?;
+                    release_active_in_flight_job(config_dir, &job.job_id, &mut permit_guard)
+                        .context("failed to release acknowledged in-flight job")?;
                     bail!("{reason}");
                 }
                 crate::capacity::PreExecutionWaitDecision::AbortCanceled => {
@@ -8674,8 +11111,8 @@ async fn handle_job_request(
                     .await;
                     renewal.abort();
                     completion?;
-                    clear_in_flight_job(config_dir)
-                        .context("failed to clear acknowledged in-flight job")?;
+                    release_active_in_flight_job(config_dir, &job.job_id, &mut permit_guard)
+                        .context("failed to release acknowledged in-flight job")?;
                     bail!("job canceled while waiting for host disk capacity");
                 }
                 crate::capacity::PreExecutionWaitDecision::AbortCapacityTimeout => {
@@ -8707,8 +11144,8 @@ async fn handle_job_request(
                     .await;
                     renewal.abort();
                     completion?;
-                    clear_in_flight_job(config_dir)
-                        .context("failed to clear acknowledged in-flight job")?;
+                    release_active_in_flight_job(config_dir, &job.job_id, &mut permit_guard)
+                        .context("failed to release acknowledged in-flight job")?;
                     bail!("{reason}");
                 }
             }
@@ -8728,8 +11165,8 @@ async fn handle_job_request(
                     FailureRemediation::DaemonApi,
                 )
                 .await?;
-                clear_in_flight_job(config_dir)
-                    .context("failed to clear acknowledged in-flight job")?;
+                release_active_in_flight_job(config_dir, &job.job_id, &mut permit_guard)
+                    .context("failed to release acknowledged in-flight job")?;
                 return Err(error).context("acquire storage leases for active job");
             }
         };
@@ -8921,10 +11358,12 @@ async fn handle_job_request(
                 let teardown_result = if let Some(teardown) = teardown {
                     start_failed_execution_teardown(
                         teardown_config_dir.clone(),
+                        job.job_id.clone(),
                         teardown,
                         forensics.clone(),
                         job_claim,
                         teardown_permit,
+                        completion.is_ok(),
                     )
                     .await
                 } else {
@@ -8948,14 +11387,23 @@ async fn handle_job_request(
                         }
                     };
                 }
+                if completion.is_ok() && had_teardown {
+                    permit_guard.disarm_after_confirmed_teardown();
+                }
                 completion?;
                 if !had_teardown {
-                    clear_in_flight_job(&teardown_config_dir)
-                        .context("failed to clear acknowledged in-flight job")?;
+                    release_active_in_flight_job(
+                        &teardown_config_dir,
+                        &job.job_id,
+                        &mut permit_guard,
+                    )
+                    .context("failed to release acknowledged in-flight job")?;
                 }
                 // Completion and any owned teardown are confirmed. Do not
                 // let Drop requeue this already-served demand.
-                permit_guard.release();
+                permit_guard
+                    .release()
+                    .context("release permit after failed-job completion")?;
                 return Err(join_error).context("join Docker job execution thread");
             }
         };
@@ -9017,10 +11465,12 @@ async fn handle_job_request(
                     let teardown_result = if let Some(teardown) = teardown {
                         start_failed_execution_teardown(
                             teardown_config_dir.clone(),
+                            job.job_id.clone(),
                             teardown,
                             forensics.clone(),
                             job_claim,
                             teardown_permit,
+                            completion.is_ok(),
                         )
                         .await
                     } else {
@@ -9042,14 +11492,23 @@ async fn handle_job_request(
                             }
                         };
                     }
+                    if completion.is_ok() && had_teardown {
+                        permit_guard.disarm_after_confirmed_teardown();
+                    }
                     completion?;
                     if !had_teardown {
-                        clear_in_flight_job(&teardown_config_dir)
-                            .context("failed to clear acknowledged in-flight job")?;
+                        release_active_in_flight_job(
+                            &teardown_config_dir,
+                            &job.job_id,
+                            &mut permit_guard,
+                        )
+                        .context("failed to release acknowledged in-flight job")?;
                     }
                     // Completion and any owned teardown are confirmed. Do
                     // not let Drop requeue this already-served demand.
-                    permit_guard.release();
+                    permit_guard
+                        .release()
+                        .context("release permit after failed-job completion")?;
                     return Err(error);
                 }
             }
@@ -9175,9 +11634,13 @@ async fn handle_job_request(
                 permit_guard.mark_uncertain_and_disarm();
                 return Err(error);
             }
+            // The teardown owner committed the permit release and removed
+            // the marker. Do not perform another ledger transaction after
+            // that final durable cleanup step.
+            permit_guard.disarm_after_confirmed_teardown();
         } else {
-            clear_in_flight_job(&teardown_config_dir)
-                .context("failed to clear acknowledged in-flight job")?;
+            release_active_in_flight_job(&teardown_config_dir, &job.job_id, &mut permit_guard)
+                .context("failed to release acknowledged in-flight job")?;
             record_job_timing(&teardown_config_dir, forensics, &timing_record);
         }
         println!(
@@ -9221,17 +11684,25 @@ async fn handle_job_request(
             &journal_dir,
         )
         .await?;
-        clear_in_flight_job(config_dir).context("failed to clear acknowledged in-flight job")?;
+        release_active_in_flight_job(config_dir, &job.job_id, &mut permit_guard)
+            .context("failed to release acknowledged in-flight job")?;
         println!("No-op job completed and message acknowledged.");
     } else {
         println!(
             "Dry-run job inspection only; job was not acknowledged. Omit --dry-run-jobs to execute."
         );
     }
-    // Terminal success: owned cleanup is confirmed (the teardown thread
-    // released the row already on teardown paths; this frees it on the
-    // teardown-free paths). The drop guard backs every early return.
-    permit_guard.release();
+    if should_execute_job(args) || args.complete_noop {
+        // Terminal success: cleanup above released the permit before its
+        // marker. This call is an idempotent disarm after teardown paths.
+        permit_guard
+            .release()
+            .context("release terminal native permit")?;
+    } else {
+        // Inspection-only dry runs keep their durable occupancy marker and
+        // permit until a later owner can complete the job.
+        permit_guard.mark_uncertain_and_disarm();
+    }
     Ok(())
 }
 
@@ -10863,22 +13334,9 @@ impl JobCancelMessage {
     /// treat anything unparseable as absent rather than as zero — a zero grace
     /// would silently turn a graceful cancellation into an immediate kill.
     fn grace(&self) -> Option<Duration> {
-        let raw = self.timeout.as_deref()?.trim();
-        if raw.is_empty() {
-            return None;
-        }
-        if let Ok(seconds) = raw.parse::<f64>() {
-            return (seconds.is_finite() && seconds >= 0.0)
-                .then(|| Duration::from_secs_f64(seconds));
-        }
-        let mut parts = raw.split(':');
-        let hours: u64 = parts.next()?.parse().ok()?;
-        let minutes: u64 = parts.next()?.parse().ok()?;
-        let seconds: f64 = parts.next()?.parse().ok()?;
-        if !seconds.is_finite() || seconds < 0.0 {
-            return None;
-        }
-        Some(Duration::from_secs(hours * 3600 + minutes * 60) + Duration::from_secs_f64(seconds))
+        self.timeout
+            .as_deref()
+            .and_then(crate::execution::cancel::parse_server_cancel_timeout)
     }
 }
 
@@ -12431,34 +14889,164 @@ async fn start_post_completion_teardown(
     job_claim: JobClaim,
     permit: Option<crate::permit_guard::TeardownPermitRelease>,
 ) -> Result<()> {
+    let expected_job_id = timing_record.job_id.clone();
     start_teardown_task(
         config_dir,
+        expected_job_id,
         teardown,
         forensics,
         Some(timing_record),
         job_claim,
         permit,
+        true,
     )
     .await
 }
 
 async fn start_failed_execution_teardown(
     config_dir: PathBuf,
+    expected_job_id: String,
     teardown: TeardownHandle,
     forensics: SlotForensics,
     job_claim: JobClaim,
     permit: Option<crate::permit_guard::TeardownPermitRelease>,
+    release_marker_after_teardown: bool,
 ) -> Result<()> {
-    start_teardown_task(config_dir, teardown, forensics, None, job_claim, permit).await
+    start_teardown_task(
+        config_dir,
+        expected_job_id,
+        teardown,
+        forensics,
+        None,
+        job_claim,
+        permit,
+        release_marker_after_teardown,
+    )
+    .await
+}
+
+fn cleanup_confirmed_teardown_job(
+    config_dir: &Path,
+    expected_job_id: &str,
+    permit: Option<&crate::permit_guard::TeardownPermitRelease>,
+) -> Result<bool> {
+    cleanup_confirmed_teardown_job_with(
+        config_dir,
+        expected_job_id,
+        permit,
+        |job_id| {
+            let sink = crate::ops::global().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "operational store sink unavailable while releasing post-teardown storage reservation for job {job_id}"
+                )
+            })?;
+            sink.release_storage_reservation(job_id)
+                .context("release post-teardown storage reservation")?;
+            Ok(())
+        },
+        || {
+            if let Some(permit) = permit {
+                permit
+                    .release_confirmed_cleanup()
+                    .context("release post-teardown native permit")?;
+            }
+            Ok(())
+        },
+        |slot_dir| sync_directory(Some(slot_dir)),
+    )
+}
+
+fn cleanup_confirmed_teardown_job_with(
+    config_dir: &Path,
+    expected_job_id: &str,
+    permit: Option<&crate::permit_guard::TeardownPermitRelease>,
+    mut release_storage: impl FnMut(&str) -> Result<()>,
+    mut release_permit: impl FnMut() -> Result<()>,
+    mut sync_slot_directory: impl FnMut(&Path) -> Result<()>,
+) -> Result<bool> {
+    let _marker_lock = InFlightJobLock::acquire(config_dir)?;
+    let record = load_in_flight_job(config_dir)?;
+    if let Some(record) = record.as_ref() {
+        if record.job_id != expected_job_id {
+            bail!(
+                "in-flight marker belongs to job {}, but teardown owns job {}",
+                record.job_id,
+                expected_job_id
+            );
+        }
+        if let Some(permit) = permit {
+            if record.permit_holder.is_empty() {
+                bail!(
+                    "in-flight job {} has no permit holder but teardown owns a release handle",
+                    record.job_id
+                );
+            }
+            if record.permit_holder != permit.holder() {
+                bail!(
+                    "in-flight marker permit holder {} does not match teardown handle {}",
+                    record.permit_holder,
+                    permit.holder()
+                );
+            }
+            let expected_generation = record.permit_generation.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "in-flight marker for job {} has a permit holder but no permit generation",
+                    record.job_id
+                )
+            })?;
+            if expected_generation != permit.permit_generation() {
+                bail!(
+                    "in-flight marker permit generation {} does not match teardown handle generation {}",
+                    expected_generation,
+                    permit.permit_generation()
+                );
+            }
+            if !record.permit_ledger.is_empty() {
+                let canonical_teardown_ledger =
+                    permit.ledger_path().canonicalize().with_context(|| {
+                        format!(
+                            "canonicalize teardown permit ledger {}",
+                            permit.ledger_path().display()
+                        )
+                    })?;
+                if Path::new(&record.permit_ledger) != canonical_teardown_ledger {
+                    bail!(
+                        "in-flight marker permit ledger {} does not match teardown handle {}",
+                        record.permit_ledger,
+                        canonical_teardown_ledger.display()
+                    );
+                }
+            }
+        } else if !record.permit_holder.is_empty() {
+            bail!(
+                "in-flight job {} has a permit holder but teardown owns no release handle",
+                record.job_id
+            );
+        }
+    }
+
+    // Marker absence can mean the previous attempt unlinked it but failed
+    // while syncing the directory. Replay the idempotent storage release and
+    // generation-fenced permit release, then sync before accepting cleanup.
+    release_storage(expected_job_id)?;
+    release_permit()?;
+    if record.is_some() {
+        clear_in_flight_job_with_sync(config_dir, |slot_dir| sync_slot_directory(slot_dir))?;
+    } else {
+        sync_slot_directory(config_dir)?;
+    }
+    Ok(true)
 }
 
 async fn start_teardown_task(
     config_dir: PathBuf,
+    expected_job_id: String,
     teardown: TeardownHandle,
     forensics: SlotForensics,
     mut timing_record: Option<JobTimingRecord>,
     job_claim: JobClaim,
     permit: Option<crate::permit_guard::TeardownPermitRelease>,
+    release_marker_after_teardown: bool,
 ) -> Result<()> {
     let timing_config_dir = config_dir.clone();
     let task = std::thread::spawn(move || {
@@ -12475,24 +15063,22 @@ async fn start_teardown_task(
                         "forensics.lifecycle event=teardown-done timestamp={}",
                         unix_now_iso8601()
                     );
-                    // The lease is occupancy, not a GitHub-completion flag.
-                    // Clearing it here — after Docker and workspace cleanup —
-                    // is what makes persist_in_flight_job refuse a second job
-                    // while this slot's containers can still exist.
-                    if let Err(error) = clear_in_flight_job(&timing_config_dir) {
-                        let detail = format!("post-completion in-flight release failed: {error:#}");
-                        forensics.lifecycle(&detail);
-                        eprintln!("Warning: {detail}; retrying until the slot lease is released");
-                        std::thread::sleep(Duration::from_secs(1));
-                        continue;
-                    }
-                    // Owned cleanup is confirmed (containers gone, lease
-                    // released): free the host-wide permit. Best-effort;
-                    // whatever is missed converges via the next reconcile
-                    // and sweep. Runs even after a join timeout retained
-                    // the row as uncertain.
-                    if let Some(permit) = permit.as_ref() {
-                        permit.release_confirmed_cleanup();
+                    if release_marker_after_teardown {
+                        // The permit and storage reservation must commit
+                        // before the marker stops blocking slot reuse. Errors
+                        // retry with the durable marker still present (or
+                        // replay by known job id if unlink already happened).
+                        if let Err(error) = cleanup_confirmed_teardown_job(
+                            &timing_config_dir,
+                            &expected_job_id,
+                            permit.as_ref(),
+                        ) {
+                            let detail = format!("post-completion local cleanup failed: {error:#}");
+                            forensics.lifecycle(&detail);
+                            eprintln!("Warning: {detail}; retrying until cleanup commits");
+                            std::thread::sleep(Duration::from_secs(1));
+                            continue;
+                        }
                     }
                     return Ok(());
                 }
@@ -15617,6 +18203,7 @@ async fn fail_closed_after_journal_acceptance_error(
     acquired_identity: &AcquiredJobIdentity,
     job: &AgentJobRequestMessage,
     acceptance_error: anyhow::Error,
+    permit_guard: &mut crate::permit_guard::NativePermitGuard,
 ) -> Result<()> {
     let reason = format!(
         "local journal rejected acquired GitHub job {}: {acceptance_error:#}; no workflow steps will execute",
@@ -15644,7 +18231,7 @@ async fn fail_closed_after_journal_acceptance_error(
     }
 
     let cleanup = if completion.is_ok() {
-        clear_in_flight_job_if_matches(config_dir, &acquired_identity.job_id)
+        release_active_in_flight_job(config_dir, &acquired_identity.job_id, permit_guard)
     } else {
         Ok(false)
     };
@@ -15664,61 +18251,6 @@ async fn fail_closed_after_journal_acceptance_error(
     if let Err(error) = cleanup {
         failure = failure.context(format!(
             "matching in-flight record cleanup after journal acceptance failure also failed: {error:#}"
-        ));
-    }
-    Err(failure)
-}
-
-async fn fail_closed_after_in_flight_persist_error(
-    config_dir: &Path,
-    run_service_job: &RunServiceJobContext,
-    acquired_identity: &AcquiredJobIdentity,
-    job: &AgentJobRequestMessage,
-    persist_error: anyhow::Error,
-) -> Result<()> {
-    let reason = format!(
-        "could not persist acquired GitHub job {} locally: {persist_error:#}; no workflow steps will execute",
-        acquired_identity.job_id
-    );
-    eprintln!("Failing acquired GitHub job closed: {reason}");
-
-    let completion = complete_acquired_job_failure(
-        run_service_job,
-        acquired_identity,
-        Some(job),
-        Some("in_flight_persist".to_string()),
-        &reason,
-        FailureRemediation::DaemonApi,
-    )
-    .await;
-    if let Err(error) = &completion {
-        eprintln!(
-            "Fail-closed completion attempt failed for acquired GitHub job {}: {error:#}",
-            acquired_identity.job_id
-        );
-    }
-
-    let cleanup = if completion.is_ok() {
-        clear_in_flight_job_if_matches(config_dir, &acquired_identity.job_id)
-    } else {
-        Ok(false)
-    };
-    if let Err(error) = &cleanup {
-        eprintln!(
-            "Could not clear matching in-flight record for acquired GitHub job {} after persist failure: {error:#}",
-            acquired_identity.job_id
-        );
-    }
-
-    let mut failure = persist_error.context(reason);
-    if let Err(error) = completion {
-        failure = failure.context(format!(
-            "fail-closed completion attempt also failed: {error:#}"
-        ));
-    }
-    if let Err(error) = cleanup {
-        failure = failure.context(format!(
-            "matching in-flight record cleanup after persist failure also failed: {error:#}"
         ));
     }
     Err(failure)
@@ -16874,27 +19406,30 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
         let Some(agent_id) = stored.settings.agent_id else {
             continue;
         };
+        let Some(expected) = (match load_in_flight_job(&slot_dir) {
+            Ok(record) => record,
+            Err(error) => {
+                eprintln!(
+                    "doctor: refusing to recover unreadable in-flight marker {}: {error:#}",
+                    in_flight_job_path(&slot_dir).display()
+                );
+                continue;
+            }
+        }) else {
+            continue;
+        };
         let runner = mine.iter().find(|runner| runner.id == Some(agent_id));
         let should_complete = match runner {
             Some(runner) => crate::capacity::stale_busy_lease_should_complete_job(
                 runner.status.as_deref(),
                 runner.busy,
             ),
-            None => match load_in_flight_job(&slot_dir) {
-                Ok(record) => record.is_some(),
-                Err(error) => {
-                    eprintln!(
-                        "doctor: refusing to recover unreadable in-flight marker {}: {error:#}",
-                        in_flight_job_path(&slot_dir).display()
-                    );
-                    false
-                }
-            },
+            None => true,
         };
         if !should_complete {
             continue;
         }
-        match complete_recorded_in_flight_job(&slot_dir, &stored).await {
+        match complete_recorded_in_flight_job_for_record(&slot_dir, &stored, &expected).await {
             Ok(true) => eprintln!(
                 "doctor: fail-closed leftover job for runner id {agent_id} so the lease can drop"
             ),
@@ -17016,6 +19551,7 @@ fn status_one(args: &StatusArgs, dir: &Path) -> Result<()> {
 
 fn validate_target_mvp_status(stored: &StoredRunnerConfig) -> Result<()> {
     let mut missing = Vec::new();
+    platform::validate_no_hosted_image_labels(&stored.settings.labels)?;
     validate_linux_only_labels(&stored.settings.labels)?;
     platform::validate_arm_label_matches_host(&stored.settings.labels, std::env::consts::ARCH)?;
     if !stored.settings.use_v2_flow {
@@ -17058,11 +19594,12 @@ fn validate_target_mvp_status(stored: &StoredRunnerConfig) -> Result<()> {
 fn target_mvp_required_x64_labels() -> &'static [&'static str] {
     &[
         "hetzner-sentry-ci",
-        "ubuntu-24.04",
-        "ubuntu-latest",
-        "velnor-target-mvp",
+        TARGET_MVP_COMMON_LABEL,
+        platform::TARGET_MVP_X64_LABEL,
     ]
 }
+
+const TARGET_MVP_COMMON_LABEL: &str = "velnor-target-mvp";
 
 /// The label trust-gated Velnor jobs append to `runs-on`
 /// (`[workflow] velnor_trusted_label` in the adopting repository's generation
@@ -17098,7 +19635,8 @@ pub fn normalize_labels(
         );
     }
     if target_mvp_arm_label {
-        labels.push("ubuntu-24.04-arm".to_string());
+        labels.push(TARGET_MVP_COMMON_LABEL.to_string());
+        labels.push(platform::TARGET_MVP_ARM64_LABEL.to_string());
     }
     labels.sort();
     labels.dedup();
@@ -17168,6 +19706,30 @@ mod tests {
     use crate::executor::STEP_PUBLISH_OVERFLOW_CAPACITY;
     use crate::protocol::acquire_reply_is_definitely_gone;
     use crate::slot_log::LIFECYCLE_LOG;
+
+    #[test]
+    fn permit_holder_preserves_scoped_request_identity() {
+        assert_eq!(
+            permit_request_id(&format!("native/v1/{}/request-42", "a".repeat(64))),
+            Some("request-42")
+        );
+        assert_eq!(
+            permit_request_id("native/legacy-request"),
+            Some("legacy-request")
+        );
+        assert_eq!(permit_request_id("native/v1/missing-request"), None);
+    }
+
+    #[test]
+    fn terminal_native_marker_after_durable_release_is_not_readopted() {
+        use velnor_control::permit_ledger::DemandState;
+
+        assert!(native_marker_should_attest(7, Some(7), Some(DemandState::Terminal)).unwrap());
+        assert!(!native_marker_should_attest(7, None, Some(DemandState::Terminal)).unwrap());
+        assert!(native_marker_should_attest(7, None, Some(DemandState::Eligible)).is_err());
+        assert!(native_marker_should_attest(7, Some(8), Some(DemandState::Terminal)).is_err());
+        assert!(native_marker_should_attest(7, None, None).is_err());
+    }
 
     #[test]
     fn hosted_jit_endpoint_accepts_regional_actions_service_host() {
@@ -17314,6 +19876,388 @@ mod tests {
     }
 
     #[test]
+    fn recorded_cleanup_retains_marker_on_permit_error_and_replays_idempotently() {
+        use velnor_control::permit_ledger::{
+            unix_now, AcquireOutcome, DemandState, PermitLane, PermitLedger, PermitState,
+        };
+
+        let dir = unique_temp_dir("recorded-cleanup-permit-retry");
+        fs::create_dir_all(&dir).unwrap();
+        let blocker = dir.join("ledger-parent-file");
+        fs::write(&blocker, b"not a directory").unwrap();
+        let ledger_path = blocker.join("permit-ledger.db");
+        let holder = "native/recovery-retry";
+        let marker = InFlightJobRecord {
+            plan_id: "plan-1".to_owned(),
+            job_id: "job-retry".to_owned(),
+            run_service_url: "https://run.example/job".to_owned(),
+            billing_owner_id: None,
+            runner_request_id: "recovery-retry".to_owned(),
+            generation: Some(1),
+            permit_holder: holder.to_owned(),
+            permit_ledger: ledger_path.to_string_lossy().into_owned(),
+            permit_generation: Some(1),
+        };
+        fs::write(
+            in_flight_job_path(&dir),
+            serde_json::to_vec(&marker).unwrap(),
+        )
+        .unwrap();
+
+        let mut storage_release_attempts = 0;
+        let error = cleanup_recorded_in_flight_job_with(&dir, |record| {
+            assert_eq!(record.job_id, marker.job_id);
+            storage_release_attempts += 1;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("release native permit"),
+            "{error:#}"
+        );
+        assert_eq!(storage_release_attempts, 1);
+        assert!(
+            in_flight_job_path(&dir).exists(),
+            "a ledger failure must keep the durable recovery pointer"
+        );
+
+        fs::remove_file(&blocker).unwrap();
+        let mut ledger = PermitLedger::open(&ledger_path).unwrap();
+        ledger.set_max_jobs(1).unwrap();
+        let now = unix_now();
+        ledger
+            .observe_demand(holder, PermitLane::Native, "recovery", now, now)
+            .unwrap();
+        let generation = ledger.generation().unwrap();
+        assert_eq!(
+            ledger
+                .acquire(
+                    holder,
+                    PermitLane::Native,
+                    PermitState::Running,
+                    generation,
+                    Some(std::process::id()),
+                )
+                .unwrap(),
+            AcquireOutcome::Acquired
+        );
+        drop(ledger);
+
+        assert!(cleanup_recorded_in_flight_job_with(&dir, |_| {
+            storage_release_attempts += 1;
+            Ok(())
+        })
+        .unwrap());
+        assert_eq!(storage_release_attempts, 2);
+        assert!(
+            !in_flight_job_path(&dir).exists(),
+            "the marker is deleted only after permit release commits"
+        );
+        let ledger = PermitLedger::open(&ledger_path).unwrap();
+        assert_eq!(ledger.holder_state(holder).unwrap(), None);
+        assert_eq!(
+            ledger.demand(holder).unwrap().unwrap().state,
+            DemandState::Terminal
+        );
+
+        assert!(!cleanup_recorded_in_flight_job_with(&dir, |_| {
+            storage_release_attempts += 1;
+            Ok(())
+        })
+        .unwrap());
+        assert_eq!(storage_release_attempts, 2);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn recorded_cleanup_keeps_marker_when_holder_has_a_newer_lease() {
+        use velnor_control::permit_ledger::{
+            unix_now, AcquireOutcome, PermitLane, PermitLedger, PermitState,
+        };
+
+        let dir = unique_temp_dir("recorded-cleanup-newer-lease");
+        fs::create_dir_all(&dir).unwrap();
+        let ledger_path = dir.join("permit-ledger.db");
+        let holder =
+            "native/v1/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/request";
+        let mut ledger = PermitLedger::open(&ledger_path).unwrap();
+        ledger.set_max_jobs(1).unwrap();
+        let now = unix_now();
+        ledger
+            .observe_demand(holder, PermitLane::Native, "recovery", now, now)
+            .unwrap();
+        let generation = ledger.generation().unwrap();
+        let (first, old_lease) = ledger
+            .acquire_with_lease_generation(
+                holder,
+                PermitLane::Native,
+                PermitState::Running,
+                generation,
+                Some(std::process::id()),
+                Some("process-start-one"),
+            )
+            .unwrap();
+        assert_eq!(first, AcquireOutcome::Acquired);
+        let old_lease = old_lease.unwrap();
+        assert!(ledger
+            .release_to_eligible_if_generation(holder, old_lease)
+            .unwrap());
+        let (second, new_lease) = ledger
+            .acquire_with_lease_generation(
+                holder,
+                PermitLane::Native,
+                PermitState::Running,
+                generation,
+                Some(std::process::id()),
+                Some("process-start-two"),
+            )
+            .unwrap();
+        assert_eq!(second, AcquireOutcome::Acquired);
+        let new_lease = new_lease.unwrap();
+        assert_ne!(old_lease, new_lease);
+        drop(ledger);
+
+        let marker = InFlightJobRecord {
+            plan_id: "plan-old".to_owned(),
+            job_id: "job-old".to_owned(),
+            run_service_url: "https://run.example/job".to_owned(),
+            billing_owner_id: None,
+            runner_request_id: "request".to_owned(),
+            generation: Some(1),
+            permit_holder: holder.to_owned(),
+            permit_ledger: ledger_path.to_string_lossy().into_owned(),
+            permit_generation: Some(old_lease),
+        };
+        fs::write(
+            in_flight_job_path(&dir),
+            serde_json::to_vec(&marker).unwrap(),
+        )
+        .unwrap();
+        let mut storage_release_attempts = 0;
+        let error = cleanup_recorded_in_flight_job_with(&dir, |_| {
+            storage_release_attempts += 1;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("did not confirm release"));
+        assert_eq!(storage_release_attempts, 1);
+        assert_eq!(load_in_flight_job(&dir).unwrap(), Some(marker));
+        let ledger = PermitLedger::open(&ledger_path).unwrap();
+        assert_eq!(
+            ledger.permit_lease_generation(holder).unwrap(),
+            Some(new_lease)
+        );
+        assert_eq!(ledger.occupied().unwrap(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn teardown_cleanup_replays_after_marker_unlink_directory_sync_failure() {
+        use std::cell::Cell;
+        use velnor_control::permit_ledger::{DemandState, PermitLedger};
+
+        let dir = unique_temp_dir("teardown-cleanup-sync-retry");
+        fs::create_dir_all(&dir).unwrap();
+        let ledger_path = dir.join("permit-ledger.db");
+        let holder = "native/teardown-sync-retry";
+        let mut ledger = PermitLedger::open(&ledger_path).unwrap();
+        ledger.set_max_jobs(1).unwrap();
+        drop(ledger);
+
+        let mut permit_guard = crate::permit_guard::NativePermitGuard::acquire(
+            &ledger_path,
+            holder.to_owned(),
+            "teardown-sync-retry",
+        )
+        .unwrap()
+        .unwrap();
+        permit_guard.retain_until_terminal();
+        let permit = permit_guard.teardown_release().unwrap();
+        let marker = InFlightJobRecord {
+            plan_id: "plan-sync-retry".to_owned(),
+            job_id: "job-sync-retry".to_owned(),
+            run_service_url: "https://run.example/job".to_owned(),
+            billing_owner_id: None,
+            runner_request_id: "teardown-sync-retry".to_owned(),
+            generation: Some(1),
+            permit_holder: holder.to_owned(),
+            permit_ledger: ledger_path.to_string_lossy().into_owned(),
+            permit_generation: Some(permit.permit_generation()),
+        };
+        persist_in_flight_job_record(&dir, &marker).unwrap();
+
+        let storage_release_attempts = Cell::new(0);
+        let permit_release_attempts = Cell::new(0);
+        let directory_sync_attempts = Cell::new(0);
+        let wrong_job_error = cleanup_confirmed_teardown_job_with(
+            &dir,
+            "job-other",
+            Some(&permit),
+            |_| {
+                storage_release_attempts.set(storage_release_attempts.get() + 1);
+                Ok(())
+            },
+            || {
+                permit_release_attempts.set(permit_release_attempts.get() + 1);
+                permit
+                    .release_confirmed_cleanup()
+                    .context("release test permit")?;
+                Ok(())
+            },
+            |_| {
+                directory_sync_attempts.set(directory_sync_attempts.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(wrong_job_error.to_string().contains("teardown owns job"));
+        assert_eq!(storage_release_attempts.get(), 0);
+        assert_eq!(permit_release_attempts.get(), 0);
+        assert_eq!(directory_sync_attempts.get(), 0);
+        assert_eq!(load_in_flight_job(&dir).unwrap(), Some(marker));
+
+        let first_error = cleanup_confirmed_teardown_job_with(
+            &dir,
+            "job-sync-retry",
+            Some(&permit),
+            |job_id| {
+                assert_eq!(job_id, "job-sync-retry");
+                storage_release_attempts.set(storage_release_attempts.get() + 1);
+                Ok(())
+            },
+            || {
+                permit_release_attempts.set(permit_release_attempts.get() + 1);
+                permit
+                    .release_confirmed_cleanup()
+                    .context("release test permit")?;
+                Ok(())
+            },
+            |slot_dir| {
+                assert_eq!(slot_dir, dir.as_path());
+                assert!(!in_flight_job_path(slot_dir).exists());
+                let attempt = directory_sync_attempts.get() + 1;
+                directory_sync_attempts.set(attempt);
+                if attempt == 1 {
+                    bail!("injected directory sync failure");
+                }
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(first_error
+            .to_string()
+            .contains("injected directory sync failure"));
+        assert!(load_in_flight_job(&dir).unwrap().is_none());
+        assert_eq!(storage_release_attempts.get(), 1);
+        assert_eq!(permit_release_attempts.get(), 1);
+        assert_eq!(directory_sync_attempts.get(), 1);
+
+        assert!(cleanup_confirmed_teardown_job_with(
+            &dir,
+            "job-sync-retry",
+            Some(&permit),
+            |job_id| {
+                assert_eq!(job_id, "job-sync-retry");
+                storage_release_attempts.set(storage_release_attempts.get() + 1);
+                Ok(())
+            },
+            || {
+                permit_release_attempts.set(permit_release_attempts.get() + 1);
+                permit
+                    .release_confirmed_cleanup()
+                    .context("release test permit")?;
+                Ok(())
+            },
+            |slot_dir| {
+                assert_eq!(slot_dir, dir.as_path());
+                assert!(!in_flight_job_path(slot_dir).exists());
+                directory_sync_attempts.set(directory_sync_attempts.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap());
+        assert_eq!(storage_release_attempts.get(), 2);
+        assert_eq!(permit_release_attempts.get(), 2);
+        assert_eq!(directory_sync_attempts.get(), 2);
+        assert!(load_in_flight_job(&dir).unwrap().is_none());
+
+        let ledger = PermitLedger::open(&ledger_path).unwrap();
+        assert_eq!(ledger.holder_state(holder).unwrap(), None);
+        assert_eq!(
+            ledger.demand(holder).unwrap().unwrap().state,
+            DemandState::Terminal
+        );
+        permit_guard.disarm_after_confirmed_teardown();
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn recorded_cleanup_refuses_a_replacement_marker_identity() {
+        let dir = unique_temp_dir("recorded-cleanup-marker-replaced");
+        fs::create_dir_all(&dir).unwrap();
+        let current = InFlightJobRecord {
+            plan_id: "plan-new".into(),
+            job_id: "job-new".into(),
+            run_service_url: "https://example.test/new".into(),
+            billing_owner_id: None,
+            runner_request_id: "request-new".into(),
+            generation: Some(2),
+            permit_holder: String::new(),
+            permit_ledger: String::new(),
+            permit_generation: None,
+        };
+        persist_in_flight_job_record(&dir, &current).unwrap();
+
+        let mut storage_release_attempts = 0;
+        let error =
+            cleanup_recorded_in_flight_job_with_expected(&dir, Some(("job-old", Some(1))), |_| {
+                storage_release_attempts += 1;
+                Ok(())
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("marker changed before cleanup"));
+        assert_eq!(storage_release_attempts, 0);
+        assert_eq!(load_in_flight_job(&dir).unwrap(), Some(current));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn recorded_cleanup_refuses_same_job_with_replacement_request_or_permit_generation() {
+        let dir = unique_temp_dir("recorded-cleanup-full-marker-replaced");
+        fs::create_dir_all(&dir).unwrap();
+        let expected = InFlightJobRecord {
+            plan_id: "plan".into(),
+            job_id: "job-1".into(),
+            run_service_url: "https://example.test/run".into(),
+            billing_owner_id: None,
+            runner_request_id: "request-old".into(),
+            generation: Some(4),
+            permit_holder: "native/request-old".into(),
+            permit_ledger: dir.join("permit-ledger.db").to_string_lossy().into_owned(),
+            permit_generation: Some(8),
+        };
+        persist_in_flight_job_record(&dir, &expected).unwrap();
+        let snapshot = load_in_flight_job(&dir).unwrap().unwrap();
+        clear_in_flight_job(&dir).unwrap();
+
+        let replacement = InFlightJobRecord {
+            runner_request_id: "request-new".into(),
+            permit_holder: "native/request-new".into(),
+            permit_generation: Some(9),
+            ..expected
+        };
+        persist_in_flight_job_record(&dir, &replacement).unwrap();
+
+        let error = cleanup_recorded_in_flight_job_for_record(&dir, &snapshot).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("marker changed before terminal cleanup"));
+        assert_eq!(load_in_flight_job(&dir).unwrap(), Some(replacement));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn gone_registration_releases_in_flight_marker_without_remote_complete() {
         let dir = unique_temp_dir("in-flight-registration-gone");
         fs::create_dir_all(&dir).unwrap();
@@ -17327,7 +20271,7 @@ mod tests {
         ));
         let other = anyhow::anyhow!("oauth unavailable");
 
-        assert!(release_in_flight_after_registration_gone(&dir, &gone).unwrap());
+        assert!(release_in_flight_after_registration_gone_with(&dir, &gone, |_| Ok(())).unwrap());
         assert!(load_in_flight_job(&dir).unwrap().is_none());
 
         fs::write(
@@ -17335,33 +20279,70 @@ mod tests {
             r#"{"plan_id":"plan","job_id":"job","run_service_url":"https://example.test/","billing_owner_id":null}"#,
         )
         .unwrap();
-        assert!(!release_in_flight_after_registration_gone(&dir, &other).unwrap());
+        assert!(!release_in_flight_after_registration_gone_with(&dir, &other, |_| Ok(())).unwrap());
         assert!(load_in_flight_job(&dir).unwrap().is_some());
         fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn persist_in_flight_job_does_not_touch_deterministic_temp_collision() {
+    fn persist_in_flight_job_does_not_replace_a_temporary_path_collision() {
         let dir = unique_temp_dir("in-flight-marker-temp-collision");
         fs::create_dir_all(&dir).unwrap();
-        let collision = dir.join(format!("in-flight-job.json.tmp-{}", std::process::id()));
+        let temp_name = "in-flight-job.json.tmp-collision";
+        let collision = dir.join(temp_name);
         fs::write(&collision, b"must survive").unwrap();
-        let job = minimal_job_with_variables(serde_json::json!({}));
-        let context = RunServiceJobContext {
-            client: RunServiceClient::new("token").unwrap(),
-            run_service_url: "https://example.test/run-service".to_owned(),
+        let record = InFlightJobRecord {
+            plan_id: "plan".into(),
+            job_id: "job".into(),
+            run_service_url: "https://example.test/run-service".into(),
             billing_owner_id: None,
-            journal_dir: dir.clone(),
-            journal_state: RunServiceJobJournalState::Acquired,
-            step_log_pages_root: StepLogPages::root(&dir),
+            runner_request_id: "request".into(),
+            generation: Some(1),
+            permit_holder: String::new(),
+            permit_ledger: String::new(),
+            permit_generation: None,
         };
 
-        persist_in_flight_job(&dir, &context, &job, "native/test-request", Path::new("")).unwrap();
+        assert!(
+            persist_in_flight_job_record_with_temp(&dir, &record, temp_name, || Ok(())).is_err()
+        );
 
         assert_eq!(fs::read(&collision).unwrap(), b"must survive");
+        assert!(load_in_flight_job(&dir).unwrap().is_none());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn in_flight_marker_publication_is_atomic_and_round_trips_recovery_identity() {
+        let dir = unique_temp_dir("in-flight-marker-atomic-publication");
+        fs::create_dir_all(&dir).unwrap();
+        let record = InFlightJobRecord {
+            plan_id: "plan-atomic".to_owned(),
+            job_id: "job-atomic".to_owned(),
+            run_service_url: "https://example.test/run-service".to_owned(),
+            billing_owner_id: Some("billing-owner".to_owned()),
+            runner_request_id: "broker-request".to_owned(),
+            generation: Some(7),
+            permit_holder: "native/broker-request".to_owned(),
+            permit_ledger: "/var/lib/velnor/permit-ledger.db".to_owned(),
+            permit_generation: Some(19),
+        };
+
+        let error = persist_in_flight_job_record_with(&dir, &record, || {
+            bail!("injected crash before marker publication")
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("injected crash"));
+        assert!(
+            load_in_flight_job(&dir).unwrap().is_none(),
+            "failed publication leaves no partial final marker"
+        );
+
+        persist_in_flight_job_record(&dir, &record).unwrap();
         assert_eq!(
-            load_in_flight_job(&dir).unwrap().unwrap().job_id,
-            job.job_id
+            load_in_flight_job(&dir).unwrap(),
+            Some(record),
+            "restart observes a complete record with exact request, slot, and permit generations"
         );
         fs::remove_dir_all(dir).unwrap();
     }
@@ -17412,19 +20393,24 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let target = dir.join("target");
         fs::write(&target, b"must survive").unwrap();
-        let collision = dir.join(format!("in-flight-job.json.tmp-{}", std::process::id()));
+        let temp_name = "in-flight-job.json.tmp-symlink";
+        let collision = dir.join(temp_name);
         std::os::unix::fs::symlink(&target, &collision).unwrap();
-        let job = minimal_job_with_variables(serde_json::json!({}));
-        let context = RunServiceJobContext {
-            client: RunServiceClient::new("token").unwrap(),
-            run_service_url: "https://example.test/run-service".to_owned(),
+        let record = InFlightJobRecord {
+            plan_id: "plan".into(),
+            job_id: "job".into(),
+            run_service_url: "https://example.test/run-service".into(),
             billing_owner_id: None,
-            journal_dir: dir.clone(),
-            journal_state: RunServiceJobJournalState::Acquired,
-            step_log_pages_root: StepLogPages::root(&dir),
+            runner_request_id: "request".into(),
+            generation: Some(1),
+            permit_holder: String::new(),
+            permit_ledger: String::new(),
+            permit_generation: None,
         };
 
-        persist_in_flight_job(&dir, &context, &job, "native/test-request", Path::new("")).unwrap();
+        assert!(
+            persist_in_flight_job_record_with_temp(&dir, &record, temp_name, || Ok(())).is_err()
+        );
 
         assert_eq!(fs::read(&target).unwrap(), b"must survive");
         assert!(fs::symlink_metadata(&collision)
@@ -17458,8 +20444,11 @@ mod tests {
             job_id: "job-1".to_owned(),
             run_service_url: "https://example.test/_apis/v1/AgentPools/1".to_owned(),
             billing_owner_id: None,
+            runner_request_id: "request-1".to_owned(),
+            generation: Some(1),
             permit_holder: "native/test-request".to_owned(),
             permit_ledger: String::new(),
+            permit_generation: Some(1),
         };
         let payload = br#"{"planId":"plan-1","jobId":"job-1","conclusion":"succeeded","outputs":{"answer":{"value":"kept","isSecret":false}}}"#.to_vec();
         let checksum = velnor_control::journal::payload_checksum(&payload);
@@ -19420,6 +22409,16 @@ mod tests {
         assert_eq!(parse(r#"{"JobId":"j","Timeout":""}"#), None);
         assert_eq!(parse(r#"{"JobId":"j","Timeout":"garbage"}"#), None);
         assert_eq!(parse(r#"{"JobId":"j","Timeout":"-5"}"#), None);
+        assert_eq!(
+            parse(r#"{"JobId":"j","Timeout":"18446744073709551615:0:0"}"#),
+            None,
+            "an unrepresentable server timeout must preserve the caller's default grace"
+        );
+        assert_eq!(
+            parse(r#"{"JobId":"j","Timeout":"1e300"}"#),
+            None,
+            "a huge finite server timeout must preserve the caller's default grace"
+        );
     }
 
     /// A grace that arrives after escalation has begun must not extend a
@@ -20255,7 +23254,7 @@ jobs:
         args.url = Some("https://github.com/owner/repo".into());
         args.pat = Some("pat".into());
         args.name = Some("velnor-ci".into());
-        args.labels = vec!["velnor".into(), "ubuntu-24.04".into()];
+        args.labels = vec!["velnor".into(), "velnor-target-mvp-x64".into()];
         args.replace = true;
         args.pool_name = Some("Default".into());
 
@@ -20271,7 +23270,7 @@ jobs:
         );
         assert_eq!(
             configure_args.labels,
-            vec!["velnor".to_string(), "ubuntu-24.04".to_string()]
+            vec!["velnor".to_string(), "velnor-target-mvp-x64".to_string()]
         );
         assert!(!configure_args.replace);
         assert_eq!(configure_args.pool_name.as_deref(), Some("Default"));
@@ -21226,6 +24225,841 @@ jobs:
             run_args.state_db.as_deref(),
             Some(Path::new("/config/state.db"))
         );
+    }
+
+    #[test]
+    fn disk_inventory_resolves_default_and_multislot_work_roots_and_floors() {
+        use crate::host_capacity::{DEFAULT_CONTROL_ROOT_FREE_BYTES, DEFAULT_MIN_FREE_BYTES};
+
+        let base = unique_temp_dir("disk-root-inventory");
+        let slot_dir = daemon_slot_config_dir(&base, 2, 3);
+        fs::create_dir_all(&slot_dir).unwrap();
+        fs::write(
+            slot_dir.join("execution.toml"),
+            "[execution]\nbackend = \"microvm\"\n",
+        )
+        .unwrap();
+        let layout = crate::storage::StorageLayout {
+            cache_root: base.join("cache/velnor/v1"),
+            lib_root: base.join("lib/velnor"),
+            run_root: base.join("run/velnor"),
+            log_root: base.join("log/velnor"),
+            mode: "test",
+        };
+        let mut daemon = daemon_args(3);
+        daemon.work_dir = Some(base.join("shared-work"));
+        let run = daemon_slot_run_args(&daemon, &base, 2, 3).unwrap();
+        let roots = disk_root_requirements_for_run(&run, &slot_dir, Some(&base), &layout, None);
+        let work_root = daemon_slot_child_path(daemon.work_dir.as_deref(), 2, 3).unwrap();
+        assert!(roots.iter().any(|root| root.path == work_root));
+        assert_eq!(
+            roots
+                .iter()
+                .find(|root| root.path == work_root)
+                .unwrap()
+                .min_free_bytes,
+            DEFAULT_MIN_FREE_BYTES
+        );
+        assert_eq!(
+            roots
+                .iter()
+                .find(|root| root.path == layout.cache_root)
+                .unwrap()
+                .min_free_bytes,
+            DEFAULT_MIN_FREE_BYTES
+        );
+        assert_eq!(
+            roots
+                .iter()
+                .find(|root| root.path == layout.run_root)
+                .unwrap()
+                .min_free_bytes,
+            DEFAULT_CONTROL_ROOT_FREE_BYTES
+        );
+        for path in [
+            layout.run_root.join("disk-admission"),
+            layout.lib_root.join("buildkit-owners"),
+            base.join("logs"),
+            PathBuf::from("/var/run/netns"),
+        ] {
+            assert_eq!(
+                roots
+                    .iter()
+                    .find(|root| root.path == path)
+                    .unwrap()
+                    .min_free_bytes,
+                DEFAULT_CONTROL_ROOT_FREE_BYTES,
+                "{path:?} should use the control-file floor"
+            );
+        }
+        let isolation_root = crate::execution::microvm_isolation_root();
+        for path in [isolation_root.join("jailer"), isolation_root.join("disks")] {
+            assert_eq!(
+                roots
+                    .iter()
+                    .find(|root| root.path == path)
+                    .unwrap()
+                    .min_free_bytes,
+                DEFAULT_MIN_FREE_BYTES,
+                "{path:?} should use the job-data floor"
+            );
+        }
+        assert_eq!(
+            roots
+                .iter()
+                .find(|root| root.path == isolation_root.join("vsock"))
+                .unwrap()
+                .min_free_bytes,
+            DEFAULT_CONTROL_ROOT_FREE_BYTES
+        );
+        assert!(roots.iter().any(|root| {
+            root.path == slot_dir.join("logs/pages")
+                && root.min_free_bytes == DEFAULT_MIN_FREE_BYTES
+        }));
+
+        daemon.work_dir = None;
+        let default_run = daemon_slot_run_args(&daemon, &base, 2, 3).unwrap();
+        let default_roots =
+            disk_root_requirements_for_run(&default_run, &slot_dir, Some(&base), &layout, None);
+        assert!(default_roots.iter().any(|root| {
+            root.path == slot_dir.join("_work") && root.min_free_bytes == DEFAULT_MIN_FREE_BYTES
+        }));
+
+        fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn disk_reclaim_target_preserves_the_exact_measured_custom_work_root() {
+        let custom_work = PathBuf::from("/mnt/runner-volume/custom-work");
+        let roots = vec![DiskRootRequirement {
+            path: custom_work.clone(),
+            min_free_bytes: 4096,
+            reclaim_work_root: true,
+            must_exist_locally: false,
+            probe_error: None,
+        }];
+        let observation = crate::host_capacity::DiskObservation::Measured {
+            action: crate::host_capacity::DiskAction::Reclaim,
+            root: custom_work.clone(),
+            available_bytes: 1,
+            min_free_bytes: 4096,
+            filesystem_id: Some(77),
+        };
+
+        let target = disk_reclaim_target(&observation, &roots).unwrap();
+
+        assert_eq!(target.measured_root, custom_work);
+        assert_eq!(target.reclaim_work_root, Some(target.measured_root.clone()));
+        assert_eq!(target.filesystem_id, 77);
+        assert_eq!(target.minimum_available_bytes, 4096);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permit_ledger_disk_root_follows_canonical_symlink_target() {
+        let base = unique_temp_dir("disk-permit-ledger-symlink");
+        let target = base.join("ledger-volume");
+        let alias = base.join("ledger-alias");
+        let alias_files = base.join("ledger-file-aliases");
+        fs::create_dir_all(&target).unwrap();
+        fs::create_dir_all(&alias_files).unwrap();
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+
+        let existing_target = target.join("existing.db");
+        let existing_alias = alias_files.join("existing.db");
+        fs::write(&existing_target, b"ledger").unwrap();
+        std::os::unix::fs::symlink(&existing_target, &existing_alias).unwrap();
+        assert_eq!(
+            canonical_disk_file_parent(&existing_alias).unwrap(),
+            target.canonicalize().unwrap()
+        );
+
+        let missing_alias = alias.join("future.db");
+        assert_eq!(
+            canonical_disk_file_parent(&missing_alias).unwrap(),
+            target.canonicalize().unwrap()
+        );
+        fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn docker_engine_root_is_unknown_without_mount_namespace_proof() {
+        let base = unique_temp_dir("docker-root-unknown");
+        let slot_dir = daemon_slot_config_dir(&base, 1, 1);
+        fs::create_dir_all(&slot_dir).unwrap();
+        fs::write(
+            slot_dir.join("execution.toml"),
+            "[execution]\nbackend = \"docker\"\n",
+        )
+        .unwrap();
+        let layout = crate::storage::StorageLayout {
+            cache_root: base.join("cache"),
+            lib_root: base.join("lib"),
+            run_root: base.join("run"),
+            log_root: base.join("log"),
+            mode: "test",
+        };
+        let args = daemon_slot_run_args(&daemon_args(1), &base, 1, 1).unwrap();
+        let roots = disk_root_requirements_for_run(&args, &slot_dir, Some(&base), &layout, None);
+        let engine_root = roots
+            .iter()
+            .find(|root| root.path == Path::new("<Docker Engine RootDir>"))
+            .unwrap();
+        assert!(engine_root.probe_error.is_some());
+        assert!(matches!(
+            disk_space_measurements(std::slice::from_ref(engine_root)).as_slice(),
+            [crate::host_capacity::DiskRootMeasurement::Unmeasurable { .. }]
+        ));
+
+        fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn disk_admission_fence_shares_pressure_by_reason_and_recovers_after_owner_clear() {
+        let base = unique_temp_dir("disk-fence-owners");
+        let work = base.join("shared-work");
+        fs::create_dir_all(&work).unwrap();
+        let layout = crate::storage::StorageLayout {
+            cache_root: base.join("cache"),
+            lib_root: base.join("lib"),
+            run_root: base.join("run"),
+            log_root: base.join("log"),
+            mode: "test",
+        };
+        let roots = vec![DiskRootRequirement {
+            path: work,
+            min_free_bytes: 1,
+            reclaim_work_root: false,
+            must_exist_locally: false,
+            probe_error: None,
+        }];
+        assert!(
+            crate::host_capacity::HostCapacity::probe(&roots[0].path)
+                .unwrap()
+                .available_bytes
+                > 0
+        );
+        let first = DiskAdmissionContext::new(roots.clone(), &layout, 1, None).unwrap();
+        let second = DiskAdmissionContext::new(roots, &layout, 2, None).unwrap();
+
+        first.block("slot one sees low shared root");
+        assert!(second
+            .try_admission_guard("second slot pre-acquire")
+            .unwrap()
+            .is_none());
+        assert!(first.recover().unwrap());
+        assert!(second.recover().unwrap());
+        assert!(second
+            .try_admission_guard("second slot after recovery")
+            .unwrap()
+            .is_some());
+
+        drop(first);
+        drop(second);
+        fs::remove_dir_all(base).ok();
+    }
+
+    #[tokio::test]
+    async fn disk_reclaim_capability_pins_owner_fence_across_blocking_reclaim() {
+        let base = unique_temp_dir("disk-reclaim-capability-fence");
+        let layout = crate::storage::StorageLayout {
+            cache_root: base.join("cache"),
+            lib_root: base.join("lib"),
+            run_root: base.join("run"),
+            log_root: base.join("log"),
+            mode: "test",
+        };
+        let first = DiskAdmissionContext::new(Vec::new(), &layout, 1, None).unwrap();
+        let second = DiskAdmissionContext::new(Vec::new(), &layout, 2, None).unwrap();
+        let reason_path = first.fence.reason_path(&first.fence.owner);
+        let capability = first
+            .block_for_reclaim("disk pressure on a required root")
+            .expect("reclaim needs a durable admission fence");
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let reclaim = tokio::task::spawn_blocking(move || {
+            let _capability = capability;
+            started_tx.send(()).unwrap();
+            finish_rx.recv().unwrap();
+        });
+        started_rx.recv().unwrap();
+        drop(first);
+
+        let read_reasons = || {
+            let _registry_lock = second.fence.try_registry_lock(true).unwrap().unwrap();
+            second.fence.active_reasons_locked(true).unwrap()
+        };
+        assert!(
+            reason_path.exists(),
+            "the blocking reclaimer pins its owner marker"
+        );
+        assert_eq!(
+            read_reasons(),
+            vec!["disk pressure on a required root".to_owned()],
+            "another slot must see the owner fence while reclaim is active"
+        );
+
+        finish_tx.send(()).unwrap();
+        reclaim.await.unwrap();
+        assert!(
+            read_reasons().is_empty(),
+            "the stale owner marker can be pruned after the blocking reclaimer releases its capability"
+        );
+        drop(second);
+        fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn disk_deregistration_waits_for_durable_reason_when_registry_is_contended() {
+        let base = unique_temp_dir("disk-fence-deregister-contention");
+        let work = base.join("shared-work");
+        fs::create_dir_all(&work).unwrap();
+        let layout = crate::storage::StorageLayout {
+            cache_root: base.join("cache"),
+            lib_root: base.join("lib"),
+            run_root: base.join("run"),
+            log_root: base.join("log"),
+            mode: "test",
+        };
+        let context = DiskAdmissionContext::new(
+            vec![DiskRootRequirement {
+                path: work,
+                min_free_bytes: 1,
+                reclaim_work_root: false,
+                must_exist_locally: false,
+                probe_error: None,
+            }],
+            &layout,
+            1,
+            None,
+        )
+        .unwrap();
+        let guard = context
+            .try_admission_guard("hold shared disk admission registry")
+            .unwrap()
+            .unwrap();
+
+        context.deregister("disk capacity deadline expired");
+        assert!(context.signal.deregistered.load(Ordering::SeqCst));
+        assert!(!context
+            .signal
+            .deregistration_reason_published
+            .load(Ordering::SeqCst));
+        assert!(!context.fence.reason_path(&context.fence.owner).exists());
+
+        drop(guard);
+        context.deregister("disk capacity deadline expired");
+        assert!(context
+            .signal
+            .deregistration_reason_published
+            .load(Ordering::SeqCst));
+        assert!(context.fence.reason_path(&context.fence.owner).exists());
+        drop(context);
+        fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn disk_deregistration_hands_marked_jobs_to_controller_recovery() {
+        assert_eq!(
+            disk_deregister_disposition(false, false),
+            DiskDeregisterDisposition::RetryFencePublication
+        );
+        assert_eq!(
+            disk_deregister_disposition(false, true),
+            DiskDeregisterDisposition::RetryFencePublication
+        );
+        assert_eq!(
+            disk_deregister_disposition(true, true),
+            DiskDeregisterDisposition::HandOffToDurableRecovery
+        );
+        assert_eq!(
+            disk_deregister_disposition(true, false),
+            DiskDeregisterDisposition::DeleteRegistration
+        );
+        assert!(disk_deregister_recovery_handoff(4)
+            .to_string()
+            .contains("controller recovery"));
+    }
+
+    #[test]
+    fn disk_blocked_unsent_acquire_releases_permit_and_journal_before_shutdown() {
+        use velnor_control::permit_ledger::{DemandState, PermitLedger};
+
+        let base = unique_temp_dir("disk-blocked-unsent-acquire");
+        let slot_dir = base.join("slot-1");
+        fs::create_dir_all(&slot_dir).unwrap();
+        drop(ready_slot_journal(&slot_dir));
+
+        let ledger_path = slot_dir.join("permit-ledger.db");
+        let mut ledger = PermitLedger::open(&ledger_path).unwrap();
+        ledger.set_max_jobs(1).unwrap();
+        let generation = ledger.begin_epoch().unwrap();
+        let roster =
+            velnor_control::permit_ledger::read_demand_source_roster(&ledger_path).unwrap();
+        ledger
+            .reconcile_host_roster(&roster, generation, &[])
+            .unwrap();
+        drop(ledger);
+        let scope = "https://github.com/octo/repo";
+        let request_id = "request-1";
+        let holder = crate::permit_guard::native_permit_holder(scope, request_id);
+        let mut permit_guard =
+            crate::permit_guard::NativePermitGuard::acquire(&ledger_path, holder.clone(), scope)
+                .unwrap()
+                .unwrap();
+        permit_guard.retain_until_terminal();
+        let permit_lease = native_permit_lease(&permit_guard).unwrap();
+        intend_run_service_acquisition_in_journal(
+            &slot_dir,
+            &slot_dir,
+            request_id,
+            "message-1",
+            "https://run.example/jobs",
+            &permit_lease,
+        )
+        .unwrap();
+
+        let layout = crate::storage::StorageLayout {
+            cache_root: base.join("cache"),
+            lib_root: base.join("lib"),
+            run_root: base.join("run"),
+            log_root: base.join("log"),
+            mode: "test",
+        };
+        let work = base.join("work");
+        fs::create_dir_all(&work).unwrap();
+        let context = DiskAdmissionContext::new(
+            vec![DiskRootRequirement {
+                path: work,
+                min_free_bytes: 1,
+                reclaim_work_root: false,
+                must_exist_locally: false,
+                probe_error: None,
+            }],
+            &layout,
+            1,
+            None,
+        )
+        .unwrap();
+        let admission_guard = context
+            .try_admission_guard("before post-intent disk recheck")
+            .unwrap()
+            .unwrap();
+        // Model pressure arriving after the shared guard and durable intent,
+        // before the first run-service acquire poll.
+        context.signal.set_blocked(true);
+        assert!(abandon_disk_blocked_unsent_acquisition(
+            &context,
+            Some(admission_guard),
+            permit_guard,
+            &slot_dir,
+            &slot_dir,
+            request_id,
+            &permit_lease,
+            "disk capacity failed recheck before run-service acquire",
+        )
+        .is_ok());
+
+        assert!(context.signal.blocked());
+        assert!(context.fence.reason_path(&context.fence.owner).exists());
+        assert!(context
+            .try_admission_guard("sibling after unsent acquire fence")
+            .unwrap()
+            .is_none());
+        assert!(!disk_slot_has_durable_work(&slot_dir, &slot_dir).unwrap());
+
+        let journal = velnor_control::journal::Journal::open(slot_dir.join("journal.db")).unwrap();
+        let journal_state = journal.materialized_state().unwrap();
+        assert!(journal_state.jobs.is_empty());
+        assert_eq!(journal_state.advertised_capacity(), 1);
+        drop(journal);
+        let ledger = PermitLedger::open(&ledger_path).unwrap();
+        assert_eq!(ledger.occupied().unwrap(), 0);
+        assert_eq!(
+            ledger.demand(&holder).unwrap().unwrap().state,
+            DemandState::Eligible
+        );
+
+        drop(context);
+        fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn disk_blocked_unsent_acquire_replays_after_terminal_event_write_failure() {
+        use velnor_control::permit_ledger::{DemandState, PermitLedger};
+
+        let base = unique_temp_dir("disk-blocked-unsent-acquire-replay");
+        let slot_dir = base.join("slot-1");
+        fs::create_dir_all(&slot_dir).unwrap();
+        drop(ready_slot_journal(&slot_dir));
+
+        let ledger_path = slot_dir.join("permit-ledger.db");
+        let mut ledger = PermitLedger::open(&ledger_path).unwrap();
+        ledger.set_max_jobs(1).unwrap();
+        let generation = ledger.begin_epoch().unwrap();
+        let roster =
+            velnor_control::permit_ledger::read_demand_source_roster(&ledger_path).unwrap();
+        ledger
+            .reconcile_host_roster(&roster, generation, &[])
+            .unwrap();
+        drop(ledger);
+        let scope = "https://github.com/octo/repo";
+        let request_id = "request-1";
+        let holder = crate::permit_guard::native_permit_holder(scope, request_id);
+        let mut permit_guard =
+            crate::permit_guard::NativePermitGuard::acquire(&ledger_path, holder.clone(), scope)
+                .unwrap()
+                .unwrap();
+        permit_guard.retain_until_terminal();
+        let permit_lease = native_permit_lease(&permit_guard).unwrap();
+        intend_run_service_acquisition_in_journal(
+            &slot_dir,
+            &slot_dir,
+            request_id,
+            "message-1",
+            "https://run.example/jobs",
+            &permit_lease,
+        )
+        .unwrap();
+
+        let layout = crate::storage::StorageLayout {
+            cache_root: base.join("cache"),
+            lib_root: base.join("lib"),
+            run_root: base.join("run"),
+            log_root: base.join("log"),
+            mode: "test",
+        };
+        let context = DiskAdmissionContext::new(Vec::new(), &layout, 1, None).unwrap();
+        context.signal.set_blocked(true);
+        let admission_guard = context
+            .try_admission_guard("before post-intent disk recheck")
+            .unwrap()
+            .unwrap();
+
+        // Let the durable proof and real permit release commit, then fail only
+        // the terminal append. Recovery must replay the proof and finish the
+        // same exact lease release idempotently.
+        let journal_path = slot_dir.join("journal.db");
+        rusqlite::Connection::open(&journal_path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_acquisition_lost_test
+                 BEFORE INSERT ON events
+                 WHEN NEW.kind = 'job_acquisition_lost'
+                 BEGIN SELECT RAISE(ABORT, 'injected terminal event failure'); END;",
+            )
+            .unwrap();
+        assert!(abandon_disk_blocked_unsent_acquisition(
+            &context,
+            Some(admission_guard),
+            permit_guard,
+            &slot_dir,
+            &slot_dir,
+            request_id,
+            &permit_lease,
+            "disk capacity failed recheck before run-service acquire",
+        )
+        .is_err());
+
+        let journal = velnor_control::journal::Journal::open(&journal_path).unwrap();
+        let journal_state = journal.materialized_state().unwrap();
+        assert_eq!(journal_state.jobs.len(), 1);
+        assert!(journal_state.jobs[0].provisional);
+        assert_eq!(
+            journal_state.jobs[0].acquisition_loss_proof.as_ref(),
+            Some(&velnor_control::journal::AcquisitionLossProof {
+                source: velnor_control::journal::AcquisitionLossSource::AcquireJobNotSent,
+                permit_lease: permit_lease.clone(),
+            })
+        );
+        assert!(disk_slot_has_durable_work(&slot_dir, &slot_dir).unwrap());
+        drop(journal);
+
+        let ledger = PermitLedger::open(&ledger_path).unwrap();
+        assert_eq!(ledger.occupied().unwrap(), 0);
+        assert_eq!(
+            ledger.demand(&holder).unwrap().unwrap().state,
+            DemandState::Eligible
+        );
+        drop(ledger);
+
+        rusqlite::Connection::open(&journal_path)
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_acquisition_lost_test;")
+            .unwrap();
+        let mut journal = velnor_control::journal::Journal::open(&journal_path).unwrap();
+        let resolved = crate::node::complete::resolve_provisional_acquisitions(
+            &mut journal,
+            unix_epoch_now(),
+            |_| panic!("a durable AcquireJobNotSent proof must bypass renewjob"),
+            release_acquisition_loss_proof,
+        )
+        .unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert!(resolved[0].abandoned);
+        assert!(journal.materialized_state().unwrap().jobs.is_empty());
+        assert!(!disk_slot_has_durable_work(&slot_dir, &slot_dir).unwrap());
+        drop(journal);
+
+        let ledger = PermitLedger::open(&ledger_path).unwrap();
+        assert_eq!(ledger.occupied().unwrap(), 0);
+        assert_eq!(
+            ledger.demand(&holder).unwrap().unwrap().state,
+            DemandState::Eligible
+        );
+
+        drop(context);
+        fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn typed_gone_acquire_replays_after_terminal_event_write_failure() {
+        use velnor_control::permit_ledger::{DemandState, PermitLedger};
+
+        let base = unique_temp_dir("typed-gone-acquire-replay");
+        let slot_dir = base.join("slot-1");
+        fs::create_dir_all(&slot_dir).unwrap();
+        drop(ready_slot_journal(&slot_dir));
+
+        let ledger_path = slot_dir.join("permit-ledger.db");
+        let mut ledger = PermitLedger::open(&ledger_path).unwrap();
+        ledger.set_max_jobs(1).unwrap();
+        let generation = ledger.begin_epoch().unwrap();
+        let roster =
+            velnor_control::permit_ledger::read_demand_source_roster(&ledger_path).unwrap();
+        ledger
+            .reconcile_host_roster(&roster, generation, &[])
+            .unwrap();
+        drop(ledger);
+
+        let scope = "https://github.com/octo/repo";
+        let request_id = "request-1";
+        let holder = crate::permit_guard::native_permit_holder(scope, request_id);
+        let mut permit_guard =
+            crate::permit_guard::NativePermitGuard::acquire(&ledger_path, holder.clone(), scope)
+                .unwrap()
+                .unwrap();
+        permit_guard.retain_until_terminal();
+        let permit_lease = native_permit_lease(&permit_guard).unwrap();
+        intend_run_service_acquisition_in_journal(
+            &slot_dir,
+            &slot_dir,
+            request_id,
+            "message-1",
+            "https://run.example/jobs",
+            &permit_lease,
+        )
+        .unwrap();
+
+        let journal_path = slot_dir.join("journal.db");
+        rusqlite::Connection::open(&journal_path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_acquisition_lost_test
+                 BEFORE INSERT ON events
+                 WHEN NEW.kind = 'job_acquisition_lost'
+                 BEGIN SELECT RAISE(ABORT, 'injected terminal event failure'); END;",
+            )
+            .unwrap();
+        assert!(settle_confirmed_run_service_acquisition_loss(
+            permit_guard,
+            &slot_dir,
+            &slot_dir,
+            request_id,
+            &permit_lease,
+            velnor_control::journal::AcquisitionLossSource::AcquireJobNotFound,
+            "the run service confirms the request is gone",
+        )
+        .is_err());
+
+        let journal = velnor_control::journal::Journal::open(&journal_path).unwrap();
+        let pending = journal.materialized_state().unwrap();
+        assert_eq!(pending.jobs.len(), 1);
+        assert!(pending.jobs[0].provisional);
+        assert_eq!(
+            pending.jobs[0].acquisition_loss_proof.as_ref(),
+            Some(&velnor_control::journal::AcquisitionLossProof {
+                source: velnor_control::journal::AcquisitionLossSource::AcquireJobNotFound,
+                permit_lease: permit_lease.clone(),
+            })
+        );
+        drop(journal);
+
+        let ledger = PermitLedger::open(&ledger_path).unwrap();
+        assert_eq!(ledger.occupied().unwrap(), 0);
+        assert_eq!(
+            ledger.demand(&holder).unwrap().unwrap().state,
+            DemandState::Cancelled
+        );
+        drop(ledger);
+
+        rusqlite::Connection::open(&journal_path)
+            .unwrap()
+            .execute_batch("DROP TRIGGER reject_acquisition_lost_test;")
+            .unwrap();
+        let mut journal = velnor_control::journal::Journal::open(&journal_path).unwrap();
+        let resolved = crate::node::complete::resolve_provisional_acquisitions(
+            &mut journal,
+            unix_epoch_now(),
+            |_| panic!("a durable AcquireJobNotFound proof must bypass renewjob"),
+            release_acquisition_loss_proof,
+        )
+        .unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert!(resolved[0].abandoned);
+        assert!(journal.materialized_state().unwrap().jobs.is_empty());
+        drop(journal);
+
+        let ledger = PermitLedger::open(&ledger_path).unwrap();
+        assert_eq!(ledger.occupied().unwrap(), 0);
+        assert_eq!(
+            ledger.demand(&holder).unwrap().unwrap().state,
+            DemandState::Cancelled
+        );
+
+        fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn acquisition_loss_proof_write_failure_keeps_the_exact_permit_occupied() {
+        use velnor_control::permit_ledger::{DemandState, PermitLedger, PermitState};
+
+        for (name, proof_source) in [
+            (
+                "unsent",
+                velnor_control::journal::AcquisitionLossSource::AcquireJobNotSent,
+            ),
+            (
+                "not-found",
+                velnor_control::journal::AcquisitionLossSource::AcquireJobNotFound,
+            ),
+        ] {
+            let base = unique_temp_dir(&format!("acquisition-loss-proof-write-{name}"));
+            let slot_dir = base.join("slot-1");
+            fs::create_dir_all(&slot_dir).unwrap();
+            drop(ready_slot_journal(&slot_dir));
+
+            let ledger_path = slot_dir.join("permit-ledger.db");
+            let mut ledger = PermitLedger::open(&ledger_path).unwrap();
+            ledger.set_max_jobs(1).unwrap();
+            let generation = ledger.begin_epoch().unwrap();
+            let roster =
+                velnor_control::permit_ledger::read_demand_source_roster(&ledger_path).unwrap();
+            ledger
+                .reconcile_host_roster(&roster, generation, &[])
+                .unwrap();
+            drop(ledger);
+
+            let scope = "https://github.com/octo/repo";
+            let request_id = "request-1";
+            let holder = crate::permit_guard::native_permit_holder(scope, request_id);
+            let mut permit_guard = crate::permit_guard::NativePermitGuard::acquire(
+                &ledger_path,
+                holder.clone(),
+                scope,
+            )
+            .unwrap()
+            .unwrap();
+            permit_guard.retain_until_terminal();
+            let permit_lease = native_permit_lease(&permit_guard).unwrap();
+            intend_run_service_acquisition_in_journal(
+                &slot_dir,
+                &slot_dir,
+                request_id,
+                "message-1",
+                "https://run.example/jobs",
+                &permit_lease,
+            )
+            .unwrap();
+
+            let journal_path = slot_dir.join("journal.db");
+            rusqlite::Connection::open(&journal_path)
+                .unwrap()
+                .execute_batch(
+                    "CREATE TRIGGER reject_acquisition_loss_proof_test
+                     BEFORE INSERT ON events
+                     WHEN NEW.kind = 'job_acquisition_loss_proof_recorded'
+                     BEGIN SELECT RAISE(ABORT, 'injected proof event failure'); END;",
+                )
+                .unwrap();
+            assert!(settle_confirmed_run_service_acquisition_loss(
+                permit_guard,
+                &slot_dir,
+                &slot_dir,
+                request_id,
+                &permit_lease,
+                proof_source,
+                "injected pre-release proof failure",
+            )
+            .is_err());
+
+            let journal = velnor_control::journal::Journal::open(&journal_path).unwrap();
+            let pending = journal.materialized_state().unwrap();
+            assert_eq!(pending.jobs.len(), 1);
+            assert!(pending.jobs[0].provisional);
+            assert!(pending.jobs[0].acquisition_loss_proof.is_none());
+            drop(journal);
+
+            let ledger = PermitLedger::open(&ledger_path).unwrap();
+            assert_eq!(ledger.occupied().unwrap(), 1);
+            assert_eq!(ledger.occupied_in_state(PermitState::Uncertain).unwrap(), 1);
+            assert_eq!(
+                ledger.demand(&holder).unwrap().unwrap().state,
+                DemandState::Terminal
+            );
+            drop(ledger);
+
+            fs::remove_dir_all(base).ok();
+        }
+    }
+
+    #[test]
+    fn provisional_acquisition_intent_blocks_disk_deregistration_cleanup() {
+        let base = unique_temp_dir("disk-deregister-provisional-acquire");
+        fs::create_dir_all(&base).unwrap();
+        drop(ready_slot_journal(&base));
+        let permit_lease = test_native_permit_lease("request-1");
+        intend_run_service_acquisition_in_journal(
+            &base,
+            &base,
+            "request-1",
+            "message-1",
+            "https://run.example/jobs",
+            &permit_lease,
+        )
+        .unwrap();
+
+        assert!(disk_slot_has_durable_work(&base, &base).unwrap());
+        assert_eq!(
+            disk_deregister_disposition(true, true),
+            DiskDeregisterDisposition::HandOffToDurableRecovery
+        );
+
+        fs::remove_dir_all(base).ok();
+    }
+
+    #[tokio::test]
+    async fn disk_deregister_requests_cancel_and_marks_completion_canceled() {
+        let signal = Arc::new(DiskAdmissionSignal::default());
+        let token = crate::execution::cancel::JobCancellation::recording(None);
+        let canceled = Arc::new(AtomicBool::new(false));
+        let listener =
+            start_disk_deregister_cancellation(signal.clone(), token.clone(), canceled.clone());
+
+        signal.set_deregistered();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !canceled.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            token.reason(),
+            Some(crate::execution::cancel::CancelReason::DaemonShutdown)
+        );
+        drop(listener);
     }
 
     #[test]
@@ -22269,6 +26103,17 @@ jobs:
         .to_string()
     }
 
+    fn test_native_permit_lease(request_id: &str) -> velnor_control::journal::NativePermitLease {
+        velnor_control::journal::NativePermitLease {
+            holder: format!("native/v1/test/{request_id}"),
+            ledger_path: std::env::temp_dir()
+                .join(format!("velnor-permit-ledger-{request_id}.db"))
+                .to_string_lossy()
+                .into_owned(),
+            generation: 17,
+        }
+    }
+
     /// A conflict is not proof that this runner lost the job.
     ///
     /// Upstream's `RunServiceError` carries `source`, `statusCode` and
@@ -22289,6 +26134,7 @@ jobs:
             "request-1",
             "msg-1",
             "https://run.example/run",
+            &test_native_permit_lease("request-1"),
         )
         .unwrap();
 
@@ -22323,6 +26169,7 @@ jobs:
             let dir = unique_temp_dir(&format!("acquire-gone-{status}"));
             fs::create_dir_all(&dir).unwrap();
             drop(ready_slot_journal(&dir));
+            let permit_lease = test_native_permit_lease("request-1");
 
             intend_run_service_acquisition_in_journal(
                 &dir,
@@ -22330,15 +26177,26 @@ jobs:
                 "request-1",
                 "msg-1",
                 "https://run.example/run",
+                &permit_lease,
             )
             .unwrap();
 
             let body = run_service_error_body(status);
             assert!(acquire_reply_is_definitely_gone(&body));
+            record_run_service_acquisition_loss_proof_in_journal(
+                &dir,
+                &dir,
+                "request-1",
+                &permit_lease,
+                velnor_control::journal::AcquisitionLossSource::AcquireJobNotFound,
+            )
+            .unwrap();
             abandon_run_service_acquisition_in_journal(
                 &dir,
                 &dir,
                 "request-1",
+                &permit_lease,
+                velnor_control::journal::AcquisitionLossSource::AcquireJobNotFound,
                 "the run service reports the broker message is gone",
             )
             .unwrap();
@@ -22354,6 +26212,72 @@ jobs:
             drop(journal);
             fs::remove_dir_all(&dir).ok();
         }
+    }
+
+    #[test]
+    fn stale_gone_verdict_cannot_drop_a_reacquired_request_lease() {
+        let dir = unique_temp_dir("acquire-gone-reacquired-lease");
+        fs::create_dir_all(&dir).unwrap();
+        drop(ready_slot_journal(&dir));
+        let released_lease = test_native_permit_lease("request-1");
+        intend_run_service_acquisition_in_journal(
+            &dir,
+            &dir,
+            "request-1",
+            "msg-1",
+            "https://run.example/run",
+            &released_lease,
+        )
+        .unwrap();
+
+        let replacement_lease = velnor_control::journal::NativePermitLease {
+            generation: released_lease.generation + 1,
+            ..released_lease.clone()
+        };
+        drop(velnor_control::journal::Journal::open(dir.join("journal.db")).unwrap());
+        let conn = rusqlite::Connection::open(dir.join("journal.db")).unwrap();
+        conn.execute("INSERT INTO journal_write_gate (id) VALUES (1)", [])
+            .unwrap();
+        conn.execute(
+            "UPDATE jobs SET permit_lease = ?1 WHERE job_id = 'request-1'",
+            [serde_json::to_string(&replacement_lease).unwrap()],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM journal_write_gate WHERE id = 1", [])
+            .unwrap();
+        drop(conn);
+
+        let error = abandon_run_service_acquisition_in_journal(
+            &dir,
+            &dir,
+            "request-1",
+            &released_lease,
+            velnor_control::journal::AcquisitionLossSource::AcquireJobNotFound,
+            "stale terminal verdict",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("does not match request"));
+
+        let journal = velnor_control::journal::Journal::open(dir.join("journal.db")).unwrap();
+        let state = journal.materialized_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        assert_eq!(state.jobs[0].permit_lease, Some(replacement_lease));
+        assert!(state.jobs[0].provisional);
+        assert!(!state.jobs[0].acquisition_loss_unproven);
+        drop(journal);
+        let conn = rusqlite::Connection::open(dir.join("journal.db")).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM events WHERE kind = 'job_acquisition_lost'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0,
+            "a stale released lease cannot produce terminal journal proof for its replacement"
+        );
+        drop(conn);
+        fs::remove_dir_all(dir).ok();
     }
 
     /// The abandon policy reads the boundary category, not the reply body:
@@ -22382,6 +26306,7 @@ jobs:
             "request-1",
             "msg-1",
             "https://run.example/run",
+            &test_native_permit_lease("request-1"),
         )
         .unwrap();
         resolve_run_service_acquisition_in_journal(
@@ -22393,6 +26318,7 @@ jobs:
                 plan_id: "plan-1".to_owned(),
                 job_id: "job-1".to_owned(),
             },
+            &test_native_permit_lease("request-1"),
         )
         .unwrap();
 
@@ -22448,6 +26374,7 @@ jobs:
             "request-1",
             "https://run.example/run",
             &identity,
+            &test_native_permit_lease("request-1"),
         )
         .expect("a missing intent must be repaired, not end the run loop");
         assert!(rebuilt, "the caller is told a row was rebuilt");
@@ -22496,6 +26423,7 @@ jobs:
             "request-0",
             "msg-0",
             "https://run.example/run",
+            &test_native_permit_lease("request-0"),
         )
         .unwrap();
         resolve_run_service_acquisition_in_journal(
@@ -22507,6 +26435,7 @@ jobs:
                 plan_id: "plan-1".to_owned(),
                 job_id: "job-1".to_owned(),
             },
+            &test_native_permit_lease("request-0"),
         )
         .unwrap();
         accept_run_service_job_in_journal(&dir, &dir, "job-1").unwrap();
@@ -22514,12 +26443,13 @@ jobs:
         let rebuilt = resolve_run_service_acquisition_in_journal(
             &dir,
             &dir,
-            "request-1",
+            "request-0",
             "https://run.example/run",
             &AcquiredJobIdentity {
                 plan_id: "plan-1".to_owned(),
                 job_id: "job-1".to_owned(),
             },
+            &test_native_permit_lease("request-0"),
         )
         .unwrap();
 
@@ -22551,6 +26481,7 @@ jobs:
                 plan_id: "plan-1".to_owned(),
                 job_id: "job-1".to_owned(),
             },
+            &test_native_permit_lease("request-1"),
         )
         .unwrap();
         assert!(!rebuilt);
@@ -22583,6 +26514,7 @@ jobs:
                 plan_id: "plan-1".to_owned(),
                 job_id: "job-1".to_owned(),
             },
+            &test_native_permit_lease("request-1"),
         )
         .expect_err("a journal that cannot be written must not be skipped");
 
@@ -22984,21 +26916,26 @@ jobs:
         };
         let (mut journal, slot) = ready_slot_journal(&dir);
         let generation = journal.materialized_state().unwrap().slots[0].generation;
-        crate::node::complete::intend_acquisition(
+        let permit_lease = test_native_permit_lease(&provisional_id.0);
+        crate::node::complete::intend_acquisition_with_permit(
             &mut journal,
             &provisional_id,
             &slot,
             "message-1",
+            &provisional_id.0,
             &run_service_url,
             1_000,
+            permit_lease.clone(),
         )
         .unwrap();
-        crate::node::complete::resolve_acquisition(
+        crate::node::complete::resolve_acquisition_for_request_with_permit(
             &mut journal,
             &provisional_id,
             &job_id,
             &identity.plan_id,
             generation,
+            &provisional_id.0,
+            permit_lease,
         )
         .unwrap();
         drop(journal);
@@ -23065,21 +27002,26 @@ jobs:
         let (mut journal, slot) = ready_slot_journal(&dir);
         let generation = journal.materialized_state().unwrap().slots[0].generation;
         let provisional_id = JobId("request-1".to_owned());
-        crate::node::complete::intend_acquisition(
+        let permit_lease = test_native_permit_lease(&provisional_id.0);
+        crate::node::complete::intend_acquisition_with_permit(
             &mut journal,
             &provisional_id,
             &slot,
             "message-1",
+            &provisional_id.0,
             &run_service_url,
             1_000,
+            permit_lease.clone(),
         )
         .unwrap();
-        crate::node::complete::resolve_acquisition(
+        crate::node::complete::resolve_acquisition_for_request_with_permit(
             &mut journal,
             &provisional_id,
             &JobId(identity.job_id.clone()),
             &identity.plan_id,
             generation,
+            &provisional_id.0,
+            permit_lease,
         )
         .unwrap();
         drop(journal);
@@ -23159,6 +27101,7 @@ jobs:
             Path::new(""),
         )
         .unwrap();
+        let mut permit_guard = active_test_native_permit_guard(&config_dir);
 
         let error = fail_closed_after_journal_acceptance_error(
             &config_dir,
@@ -23166,6 +27109,7 @@ jobs:
             &identity,
             &job,
             anyhow::anyhow!("Assigned rejected because slot is stale Assigned"),
+            &mut permit_guard,
         )
         .await
         .unwrap_err();
@@ -23176,6 +27120,7 @@ jobs:
             .chain()
             .any(|cause| cause.to_string().contains("no durable acquisition row")));
         assert!(in_flight_job_path(&config_dir).exists());
+        permit_guard.mark_uncertain_and_disarm();
         server.verify().await;
         fs::remove_dir_all(config_dir).unwrap();
     }
@@ -23240,21 +27185,26 @@ jobs:
         ] {
             assert!(!journal.apply(event).unwrap().rejected);
         }
-        let owned_generation = crate::node::complete::intend_acquisition(
+        let permit_lease = test_native_permit_lease(&job_id.0);
+        let owned_generation = crate::node::complete::intend_acquisition_with_permit(
             &mut journal,
             &job_id,
             &slot,
             "msg-1",
+            &job_id.0,
             "https://run.example/run",
             1_000,
+            permit_lease.clone(),
         )
         .unwrap();
-        crate::node::complete::resolve_acquisition(
+        crate::node::complete::resolve_acquisition_for_request_with_permit(
             &mut journal,
             &job_id,
             &job_id,
             "plan-1",
             owned_generation,
+            &job_id.0,
+            permit_lease,
         )
         .unwrap();
         crate::node::complete::confirm_acquisition(&mut journal, &job_id, &slot, owned_generation)
@@ -23492,6 +27442,7 @@ jobs:
             Path::new(""),
         )
         .unwrap();
+        let mut permit_guard = active_test_native_permit_guard(&config_dir);
 
         let error = fail_closed_after_journal_acceptance_error(
             &config_dir,
@@ -23499,6 +27450,7 @@ jobs:
             &identity,
             &job,
             anyhow::anyhow!("Assigned rejected because slot is stale Assigned"),
+            &mut permit_guard,
         )
         .await
         .unwrap_err();
@@ -23507,6 +27459,7 @@ jobs:
         assert!(rendered.contains("Assigned rejected"));
         assert!(rendered.contains("completion attempt also failed"));
         assert!(in_flight_job_path(&config_dir).exists());
+        permit_guard.mark_uncertain_and_disarm();
         server.verify().await;
         fs::remove_dir_all(config_dir).unwrap();
     }
@@ -24724,6 +28677,7 @@ jobs:
             &SlotForensics::new(PathBuf::from("/tmp"), "test".to_string()),
             &mut prewarm_trigger,
             message,
+            None,
         )
         .await
         .unwrap();
@@ -24738,6 +28692,98 @@ jobs:
         ledger.set_max_jobs(max_jobs).unwrap();
         ledger.begin_epoch().unwrap();
         ledger.reconcile(&[]).unwrap();
+    }
+
+    #[cfg(feature = "test-support")]
+    fn active_test_native_permit_guard(
+        config_dir: &Path,
+    ) -> crate::permit_guard::NativePermitGuard {
+        let ledger_path = config_dir.join("permit-ledger.db");
+        configure_test_permit_ledger(&ledger_path, 1);
+        let scope = "https://github.com/octo/repo";
+        let holder = crate::permit_guard::native_permit_holder(scope, "test-request");
+        let mut guard =
+            crate::permit_guard::NativePermitGuard::acquire(&ledger_path, holder, scope)
+                .unwrap()
+                .unwrap();
+        guard.retain_until_terminal();
+        guard
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn acquired_marker_refuses_a_replaced_journal_permit_lease() {
+        let dir = unique_temp_dir("acquired-marker-replaced-lease");
+        let config_dir = dir.join("slot");
+        fs::create_dir_all(&config_dir).unwrap();
+        let ledger_path = dir.join("permit-ledger.db");
+        configure_test_permit_ledger(&ledger_path, 1);
+
+        let canonical_scope = "https://github.com/octo/repo";
+        let holder = crate::permit_guard::native_permit_holder(canonical_scope, "request-1");
+        let mut guard =
+            crate::permit_guard::NativePermitGuard::acquire(&ledger_path, holder, canonical_scope)
+                .unwrap()
+                .unwrap();
+        guard.retain_until_terminal();
+        let active_lease = native_permit_lease(&guard).unwrap();
+        let journal_lease = velnor_control::journal::NativePermitLease {
+            generation: active_lease.generation + 1,
+            ..active_lease.clone()
+        };
+
+        let journal_dir = config_dir.clone();
+        let (mut journal, slot_id) = ready_slot_journal(&journal_dir);
+        crate::node::complete::intend_acquisition_with_permit(
+            &mut journal,
+            &provisional_job_id("request-1"),
+            &slot_id,
+            "message-1",
+            "request-1",
+            "https://run.example/run",
+            1_000,
+            journal_lease.clone(),
+        )
+        .unwrap();
+        let identity = AcquiredJobIdentity {
+            plan_id: "plan-1".to_owned(),
+            job_id: "job-1".to_owned(),
+        };
+        crate::node::complete::resolve_acquisition_for_request_with_permit(
+            &mut journal,
+            &provisional_job_id("request-1"),
+            &velnor_model::JobId(identity.job_id.clone()),
+            &identity.plan_id,
+            velnor_model::Generation::INITIAL,
+            "request-1",
+            journal_lease.clone(),
+        )
+        .unwrap();
+        drop(journal);
+
+        let run_service_job = RunServiceJobContext {
+            client: RunServiceClient::new("test-token").unwrap(),
+            run_service_url: "https://run.example/run".to_owned(),
+            billing_owner_id: None,
+            journal_dir,
+            journal_state: RunServiceJobJournalState::Acquired,
+            step_log_pages_root: config_dir.clone(),
+        };
+        let error = persist_acquired_in_flight_job(
+            &config_dir,
+            &run_service_job,
+            &identity,
+            "request-1",
+            &guard,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("exact native permit lease"));
+        assert!(
+            !in_flight_job_path(&config_dir).exists(),
+            "reacquired journal row must not publish a marker backed by the stale guard"
+        );
+        guard.mark_uncertain_and_disarm();
+        fs::remove_dir_all(dir).ok();
     }
 
     #[cfg(feature = "test-support")]
@@ -24792,6 +28838,7 @@ jobs:
             &SlotForensics::new(PathBuf::from("/tmp"), "test".to_string()),
             &mut prewarm_trigger,
             message,
+            None,
         )
         .await
         .unwrap();
@@ -24880,6 +28927,7 @@ jobs:
             &SlotForensics::new(PathBuf::from("/tmp"), "test".to_string()),
             &mut prewarm_trigger,
             message,
+            None,
         )
         .await
         .unwrap();
@@ -24912,9 +28960,8 @@ jobs:
                 "custom",
                 "hetzner-sentry-ci",
                 "self-hosted",
-                "ubuntu-24.04",
-                "ubuntu-latest",
-                "velnor-target-mvp"
+                "velnor-target-mvp",
+                "velnor-target-mvp-x64"
             ]
         );
     }
@@ -24947,13 +28994,67 @@ jobs:
             vec![
                 "hetzner-sentry-ci",
                 "self-hosted",
-                "ubuntu-24.04",
-                "ubuntu-24.04-arm",
-                "ubuntu-latest",
                 "velnor",
-                "velnor-target-mvp"
+                "velnor-target-mvp",
+                "velnor-target-mvp-arm64",
+                "velnor-target-mvp-x64"
             ]
         );
+    }
+
+    #[test]
+    fn arm_only_target_labels_include_the_common_workflow_selector() {
+        assert_eq!(
+            normalize_labels(Vec::new(), false, true),
+            vec![
+                "self-hosted",
+                "velnor",
+                TARGET_MVP_COMMON_LABEL,
+                platform::TARGET_MVP_ARM64_LABEL
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn configure_arm_only_labels_match_the_local_workflow_selector() {
+        let dir = unique_temp_dir("configure-arm-only-selector");
+        configure_for_host_arch(
+            ConfigureArgs {
+                url: "https://github.com/owner/repo".into(),
+                pat: None,
+                name: Some("velnor-arm-target".into()),
+                labels: Vec::new(),
+                target_mvp_labels: false,
+                target_mvp_arm_label: true,
+                replace: false,
+                pool_id: None,
+                pool_name: None,
+                pool_id_pre_resolved: false,
+                dry_run: true,
+                config_dir: Some(dir.clone()),
+                trust_scope: None,
+            },
+            "aarch64",
+        )
+        .await
+        .unwrap();
+
+        let stored = config::load(&dir).unwrap();
+        let selector = [
+            "self-hosted",
+            TARGET_MVP_COMMON_LABEL,
+            platform::TARGET_MVP_ARM64_LABEL,
+        ];
+        assert!(
+            selector.iter().all(|required| stored
+                .settings
+                .labels
+                .iter()
+                .any(|label| label.as_str() == *required)),
+            "configured arm-only runner does not match selector {selector:?}: {:?}",
+            stored.settings.labels
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -24966,6 +29067,39 @@ jobs:
             .unwrap_err()
             .to_string();
         assert!(error.contains("only claim it when Docker can provide ARM64 Linux job containers"));
+    }
+
+    #[tokio::test]
+    async fn configure_rejects_github_hosted_image_labels_case_insensitively() {
+        for label in [
+            "ubuntu-24.04",
+            " UBUNTU-LATEST ",
+            "MacOs-26",
+            "WINDOWS-2025",
+        ] {
+            let dir = unique_temp_dir("configure-hosted-image-label");
+            let error = configure(ConfigureArgs {
+                url: "https://github.com/owner/repo".into(),
+                pat: None,
+                name: Some("velnor-invalid-label".into()),
+                labels: vec![label.to_owned()],
+                target_mvp_labels: false,
+                target_mvp_arm_label: false,
+                replace: false,
+                pool_id: None,
+                pool_name: None,
+                pool_id_pre_resolved: false,
+                dry_run: true,
+                config_dir: Some(dir.clone()),
+                trust_scope: None,
+            })
+            .await
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains(label), "{error}");
+            assert!(config::load(&dir).is_err(), "invalid labels were persisted");
+            fs::remove_dir_all(dir).ok();
+        }
     }
 
     #[test]

@@ -29,7 +29,7 @@ use super::complete;
 use super::exec::load_exec_config;
 use super::health::HealthServer;
 use super::prove;
-use super::slot::{heartbeat_path, slot_id, SlotHeartbeat};
+use super::slot::slot_id;
 use super::watchdog::{feed_after_cycle, LocalCycle};
 
 /// Bound live JIT requests during startup/recovery without making the GitHub
@@ -67,6 +67,38 @@ const CONTROLLER_CHILD_DRAIN_TIMEOUT: Duration = Duration::from_secs(30 + 5 + 5 
 /// bound before it can prove session liveness or readiness.
 const SLOT_HEARTBEAT_MAX_AGE: Duration = Duration::from_secs(10);
 const SUPERVISION_METRICS_INTERVAL: Duration = Duration::from_secs(1);
+
+struct SlotChild {
+    generation: Generation,
+    child: Child,
+}
+
+type SlotChildren = HashMap<String, SlotChild>;
+
+trait ProcessHandle {
+    fn process(&self) -> &Child;
+    fn process_mut(&mut self) -> &mut Child;
+}
+
+impl ProcessHandle for Child {
+    fn process(&self) -> &Child {
+        self
+    }
+
+    fn process_mut(&mut self) -> &mut Child {
+        self
+    }
+}
+
+impl ProcessHandle for SlotChild {
+    fn process(&self) -> &Child {
+        &self.child
+    }
+
+    fn process_mut(&mut self) -> &mut Child {
+        &mut self.child
+    }
+}
 
 /// Steady-state floor between live GitHub probes. The reconcile loop ticks
 /// every 2s, but several fleets share one PAT with a 5000 req/hr budget:
@@ -331,7 +363,16 @@ struct MetricsSnapshot {
     slot_processes: usize,
     job_processes: usize,
     waiter_processes: usize,
-    reconcile_duration_ms: u64,
+    last_wall_duration_ms: u64,
+    reconcile: ReconcileTelemetry,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ReconcileTelemetry {
+    completed_cycles: u64,
+    wall_duration_ms_total: u64,
+    controller_cpu_user_us_at_boundary: u64,
+    controller_cpu_system_us_at_boundary: u64,
 }
 
 impl Default for MetricsSnapshot {
@@ -340,7 +381,8 @@ impl Default for MetricsSnapshot {
             slot_processes: 0,
             job_processes: 0,
             waiter_processes: 0,
-            reconcile_duration_ms: 1,
+            last_wall_duration_ms: 1,
+            reconcile: ReconcileTelemetry::default(),
         }
     }
 }
@@ -400,9 +442,9 @@ impl MetricsPublisher {
 
     fn update(
         &self,
-        slots: &HashMap<String, Child>,
+        slots: &SlotChildren,
         jobs: &HashMap<String, Child>,
-        reconcile_duration_ms: u64,
+        last_wall_duration_ms: u64,
     ) {
         let (job_processes, waiter_processes) = job_process_counts(jobs.keys());
         // A poisoned metrics lock must not crash the controller: the state is
@@ -415,7 +457,35 @@ impl MetricsPublisher {
         state.snapshot.slot_processes = slots.len();
         state.snapshot.job_processes = job_processes;
         state.snapshot.waiter_processes = waiter_processes;
-        state.snapshot.reconcile_duration_ms = reconcile_duration_ms.max(1);
+        state.snapshot.last_wall_duration_ms = last_wall_duration_ms.max(1);
+    }
+
+    fn reconcile_completed(
+        &self,
+        slots: &SlotChildren,
+        jobs: &HashMap<String, Child>,
+        last_wall_duration_ms: u64,
+    ) {
+        let (job_processes, waiter_processes) = job_process_counts(jobs.keys());
+        let (controller_cpu_user_us, controller_cpu_system_us) = process_cpu_usage();
+        // Metrics state is plain data, so recovering a poisoned guard is
+        // sound just as it is in `update`.
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.snapshot.slot_processes = slots.len();
+        state.snapshot.job_processes = job_processes;
+        state.snapshot.waiter_processes = waiter_processes;
+        let last_wall_duration_ms = last_wall_duration_ms.max(1);
+        state.snapshot.last_wall_duration_ms = last_wall_duration_ms;
+        let reconcile = &mut state.snapshot.reconcile;
+        reconcile.completed_cycles = reconcile.completed_cycles.saturating_add(1);
+        reconcile.wall_duration_ms_total = reconcile
+            .wall_duration_ms_total
+            .saturating_add(last_wall_duration_ms);
+        reconcile.controller_cpu_user_us_at_boundary = controller_cpu_user_us;
+        reconcile.controller_cpu_system_us_at_boundary = controller_cpu_system_us;
     }
 
     async fn stop_and_publish(&mut self) -> anyhow::Result<()> {
@@ -466,13 +536,15 @@ fn publish_metrics_snapshot(
         current.slot_processes,
         current.job_processes,
         current.waiter_processes,
-        current.reconcile_duration_ms,
+        current.last_wall_duration_ms,
+        current.reconcile,
     )?;
     Ok(true)
 }
 
 pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     std::fs::create_dir_all(&args.state_dir)?;
+    cleanup::initialize_owned_directory(&args.state_dir)?;
     let mut journal = Journal::open(args.state_dir.join("journal.db"))?;
     let server = HealthServer::bind(&args.state_dir)?;
     journal.apply(Event::ControlLive)?;
@@ -480,7 +552,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     journal.apply(Event::DesiredCapacity {
         ready: args.desired_ready,
     })?;
-    let mut slots: HashMap<String, Child> = HashMap::new();
+    let mut slots = SlotChildren::new();
     let mut jobs: HashMap<String, Child> = HashMap::new();
     let mut heartbeats: HashMap<String, (u32, u64)> = HashMap::new();
     let mut startup_deadlines: HashMap<String, Instant> = HashMap::new();
@@ -488,8 +560,16 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     let mut last_outbox_reconcile = Instant::now() - OUTBOX_RECONCILIATION_INTERVAL;
     let mut pacing = GithubPacing::default();
     let mut ready_announced = false;
-    let mut last_reconcile_duration_ms = 1;
-    publish_controller_metrics(&args.state_dir, 0, 0, 0, 0, 1)?;
+    let mut last_wall_duration_ms = 1;
+    publish_controller_metrics(
+        &args.state_dir,
+        0,
+        0,
+        0,
+        0,
+        1,
+        ReconcileTelemetry::default(),
+    )?;
     let mut metrics = MetricsPublisher::start(&args.state_dir);
     let lifecycle = args.lifecycle.as_ref().and_then(ActiveLifecycle::bind);
     loop {
@@ -500,7 +580,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
         if should_drain(crate::runner::draining(), &journal, lifecycle.as_ref()) {
             drain_edge(&mut journal, lifecycle.as_ref());
             drain_children(&journal, &mut slots, &mut jobs).await?;
-            metrics.update(&slots, &jobs, last_reconcile_duration_ms);
+            metrics.update(&slots, &jobs, last_wall_duration_ms);
             metrics.stop_and_publish().await?;
             return Ok(());
         }
@@ -520,9 +600,8 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             lifecycle.as_ref(),
         )
         .await?;
-        let reconcile_duration_ms = cycle_started.elapsed().as_millis().max(1) as u64;
-        last_reconcile_duration_ms = reconcile_duration_ms;
-        metrics.update(&slots, &jobs, reconcile_duration_ms);
+        last_wall_duration_ms = cycle_started.elapsed().as_millis().max(1) as u64;
+        metrics.reconcile_completed(&slots, &jobs, last_wall_duration_ms);
         let _ = feed_after_cycle(cycle, !ready_announced);
         ready_announced = true;
         if args.once {
@@ -531,7 +610,7 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             // through the same ownership path used by the normal loop.
             reap(&mut slots);
             reap(&mut jobs);
-            metrics.update(&slots, &jobs, reconcile_duration_ms);
+            metrics.update(&slots, &jobs, last_wall_duration_ms);
             metrics.stop_and_publish().await?;
             return Ok(());
         }
@@ -547,7 +626,8 @@ fn publish_controller_metrics(
     slot_processes: usize,
     job_processes: usize,
     waiter_processes: usize,
-    reconcile_p95_ms: u64,
+    last_wall_duration_ms: u64,
+    reconcile: ReconcileTelemetry,
 ) -> anyhow::Result<()> {
     let wal_bytes = std::fs::metadata(state_dir.join("journal.db-wal"))
         .map(|metadata| metadata.len())
@@ -559,10 +639,18 @@ fn publish_controller_metrics(
         "slot_processes": slot_processes,
         "job_processes": job_processes,
         "waiter_processes": waiter_processes,
-        "reconcile_duration_ms": { "p95": reconcile_p95_ms },
-        "journal": { "transactions": sequence.saturating_add(1), "wal_bytes": wal_bytes },
+        "reconcile": {
+            "last_wall_duration_ms": last_wall_duration_ms,
+            "completed_cycles": reconcile.completed_cycles,
+            "wall_duration_ms_total": reconcile.wall_duration_ms_total,
+        },
+        "journal": { "wal_bytes": wal_bytes },
         "cpu": {
             "controller": { "user_us": user_us, "system_us": system_us },
+            "controller_at_reconcile_boundary": {
+                "user_us": reconcile.controller_cpu_user_us_at_boundary,
+                "system_us": reconcile.controller_cpu_system_us_at_boundary,
+            },
             "phases": {
                 "journal": zero_cpu_phase(),
                 "filesystem": zero_cpu_phase(),
@@ -834,11 +922,11 @@ fn reconcile_lifecycle_admission(
 /// receives SIGTERM. Active in-flight job workers remain alive for completion.
 async fn drain_children(
     journal: &Journal,
-    slots: &mut HashMap<String, Child>,
+    slots: &mut SlotChildren,
     jobs: &mut HashMap<String, Child>,
 ) -> anyhow::Result<()> {
     for child in slots.values() {
-        request_child_shutdown(child)?;
+        request_child_shutdown(&child.child)?;
     }
 
     // Ready-slot broker waiters and real job workers share the `jobs` map.
@@ -942,7 +1030,7 @@ async fn reconcile_once(
     args: &ControllerArgs,
     journal: &mut Journal,
     server: &HealthServer,
-    slots: &mut HashMap<String, Child>,
+    slots: &mut SlotChildren,
     jobs: &mut HashMap<String, Child>,
     heartbeats: &mut HashMap<String, (u32, u64)>,
     startup_deadlines: &mut HashMap<String, Instant>,
@@ -960,7 +1048,8 @@ async fn reconcile_once(
     // Ingest a surviving slot's heartbeat before deciding whether its permit
     // needs repair. On controller restart the child handle is gone, so the
     // heartbeat is the only fresh local proof that prevents a double spawn.
-    ingest_slot_heartbeats(args, journal, total as usize, heartbeats)?;
+    let mut verified_heartbeats =
+        ingest_slot_heartbeats(args, journal, total as usize, slots, heartbeats)?;
     reconcile_lifecycle_admission(journal, lifecycle)?;
     let state = journal.materialized_state()?;
     // The loop top exits on drain, so this closes the race where another
@@ -978,13 +1067,14 @@ async fn reconcile_once(
             .unwrap_or(Generation::INITIAL);
         let fenced = slot.is_some_and(|slot| slot.phase == SlotPhase2::Fenced);
         let admission_blocked = slot_has_admission_block(&state, &id, generation);
-        let heartbeat_fresh = prove::slot_heartbeat_is_fresh(
-            &args.state_dir,
+        let heartbeat_fresh = slot_heartbeat_is_fresh_from_cache(
+            args,
             &id,
             generation,
-            SLOT_HEARTBEAT_MAX_AGE,
+            slots,
+            &mut verified_heartbeats,
         );
-        let acting = slot_is_acting(&args.state_dir, &state, jobs, &id, generation);
+        let acting = slot_is_acting(&args.state_dir, &state, jobs, &id, generation)?;
         // A leftover deadline from before/during a job must not fire the
         // instant the journal row is gone. The waiter is still the broker
         // actor; fencing the supervisor while that waiter lives splits
@@ -994,7 +1084,14 @@ async fn reconcile_once(
             startup_deadlines.remove(&id.0);
         } else if args.spawn_slots
             && !fenced
-            && stale_slot_deadline_reached(args, slot, &id, startup_deadlines, Instant::now())
+            && stale_slot_deadline_reached(
+                args,
+                slot,
+                &id,
+                startup_deadlines,
+                slots,
+                Instant::now(),
+            )
         {
             fence_stale_slot_actor(args, journal, slots, jobs, &id, generation).await?;
             startup_deadlines.remove(&id.0);
@@ -1008,7 +1105,20 @@ async fn reconcile_once(
                 .await?;
         }
         let fenced_generation =
-            fenced_slot_recovery_generation(slot, &args.state_dir, &state, jobs);
+            if let Some(fenced_slot) = slot.filter(|slot| slot.phase == SlotPhase2::Fenced) {
+                let exec = load_exec_config(&args.state_dir)?;
+                let slot_dir =
+                    recovery_slot_config_dir(&args.state_dir, &exec, &state, &fenced_slot.slot_id)?;
+                fenced_slot_recovery_generation(
+                    Some(fenced_slot),
+                    &args.state_dir,
+                    &slot_dir,
+                    &state,
+                    jobs,
+                )?
+            } else {
+                None
+            };
         let generation = fenced_generation.unwrap_or(generation);
         let process_alive = heartbeat_fresh;
         if fenced && fenced_generation.is_none() {
@@ -1016,7 +1126,7 @@ async fn reconcile_once(
         }
         if fenced_generation.is_none()
             && (admission_blocked
-                || child_owns_slot(&args.state_dir, &state, jobs, &id, generation)
+                || child_owns_slot(&args.state_dir, &state, jobs, &id, generation)?
                 || !permit_needs_reconciliation(slot, generation, args.spawn_slots, process_alive))
         {
             continue;
@@ -1063,55 +1173,74 @@ async fn reconcile_once(
         }
     }
 
-    let mut proof_effects = Vec::new();
     let execution = crate::execution::load_execution_file(&args.state_dir, None)?;
     let executor = prove::observe_executor(&args.state_dir, execution.backend());
     let snapshot = journal.materialized_state()?;
+    let snapshot_generations: HashMap<&str, Generation> = snapshot
+        .slots
+        .iter()
+        .map(|slot| (slot.slot_id.0.as_str(), slot.generation))
+        .collect();
     let now = tokio::time::Instant::now();
+    let mut proof_events = Vec::new();
     for index in 1..=total {
         let id = slot_id(&args.scope, index as usize);
-        let generation = snapshot
-            .slots
-            .iter()
-            .find(|slot| slot.slot_id == id)
-            .map(|slot| slot.generation)
+        let generation = snapshot_generations
+            .get(id.0.as_str())
+            .copied()
             .unwrap_or(Generation::INITIAL);
         if executor {
-            proof_effects.extend(
-                journal
-                    .apply(Event::ExecutorProven {
-                        slot_id: id.clone(),
-                        generation,
-                    })?
-                    .commands,
-            );
+            proof_events.push(Event::ExecutorProven {
+                slot_id: id.clone(),
+                generation,
+            });
         }
-        if prove::slot_heartbeat_is_fresh(&args.state_dir, &id, generation, SLOT_HEARTBEAT_MAX_AGE)
-        {
-            proof_effects.extend(
-                journal
-                    .apply(Event::SessionLive {
-                        slot_id: id.clone(),
-                        generation,
-                    })?
-                    .commands,
-            );
+        if slot_heartbeat_is_fresh_from_cache(
+            args,
+            &id,
+            generation,
+            slots,
+            &mut verified_heartbeats,
+        ) {
+            proof_events.push(Event::SessionLive {
+                slot_id: id,
+                generation,
+            });
         }
-        let state = journal.materialized_state()?;
-        if let Some(slot) = state.slots.iter().find(|slot| slot.slot_id == id)
-            && slot.ready_proof().is_ok()
-            && !slot.registered
-            && pacing.registration_due(&id.0, now)
-        {
-            proof_effects.extend(
-                journal
-                    .apply(Event::RegistrationIntended {
-                        slot_id: id,
-                        generation,
-                    })?
-                    .commands,
-            );
+    }
+    let mut proof_effects = Vec::new();
+    for outcome in journal.apply_observation_batch(proof_events)? {
+        proof_effects.extend(outcome.commands);
+    }
+
+    let state = journal.materialized_state()?;
+    let state_slots: HashMap<&str, &SlotRecord> = state
+        .slots
+        .iter()
+        .map(|slot| (slot.slot_id.0.as_str(), slot))
+        .collect();
+    let mut registration_events = Vec::new();
+    for index in 1..=total {
+        let id = slot_id(&args.scope, index as usize);
+        let Some(slot) = state_slots.get(id.0.as_str()).copied() else {
+            continue;
+        };
+        let generation = snapshot_generations
+            .get(id.0.as_str())
+            .copied()
+            .unwrap_or(Generation::INITIAL);
+        if slot.ready_proof().is_ok() && !slot.registered && pacing.registration_due(&id.0, now) {
+            registration_events.push(Event::RegistrationIntended {
+                slot_id: id,
+                generation,
+            });
         }
+    }
+    // The journal rechecks each intent against current admission state while
+    // holding its write transaction, so a concurrent state change still
+    // fails closed.
+    for outcome in journal.apply_observation_batch(registration_events)? {
+        proof_effects.extend(outcome.commands);
     }
     let mut registrations = Vec::new();
     for command in proof_effects {
@@ -1134,21 +1263,24 @@ async fn reconcile_once(
             }
         }
     }
-    register_runners(args, journal, pacing, registrations, remote_deadline).await?;
+    let _newly_ready_slots =
+        register_runners(args, journal, pacing, registrations, remote_deadline).await?;
 
+    spawn_provisional_recovery_waiters(args, journal, jobs)?;
     spawn_ready_waiters(args, journal, jobs)?;
     reap(jobs);
     let outbox_reconcile_due = last_outbox_reconcile.elapsed() >= OUTBOX_RECONCILIATION_INTERVAL;
-    reclaim_orphaned_jobs(
+    reclaim_orphaned_jobs_with_children(
         args,
         journal,
+        jobs,
         remote_deadline,
         outbox_reconcile_due,
         crate::docker::client::host_call,
     )
     .await?;
     if outbox_reconcile_due {
-        reconcile_orphaned_outboxes(args, journal)?;
+        reconcile_orphaned_outboxes(args, journal, jobs)?;
         *last_outbox_reconcile = Instant::now();
     }
 
@@ -1217,7 +1349,7 @@ where
 async fn execute_effect(
     args: &ControllerArgs,
     journal: &mut Journal,
-    slots: &mut HashMap<String, Child>,
+    slots: &mut SlotChildren,
     startup_deadlines: &mut HashMap<String, Instant>,
     pacing: &mut GithubPacing,
     remote_deadline: tokio::time::Instant,
@@ -1277,7 +1409,8 @@ async fn register_runner(
         vec![(slot_id, generation)],
         remote_deadline,
     )
-    .await
+    .await?;
+    Ok(())
 }
 
 /// Configure independent, already-proven slots concurrently, then commit the
@@ -1290,18 +1423,27 @@ async fn register_runners(
     pacing: &mut GithubPacing,
     registrations: Vec<(SlotId, Generation)>,
     remote_deadline: tokio::time::Instant,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<HashSet<(SlotId, Generation)>> {
     if registrations.is_empty() {
-        return Ok(());
+        return Ok(HashSet::new());
     }
     super::scheduler::production_scheduler().ensure_current()?;
     let exec = match load_exec_config(&args.state_dir) {
         Ok(exec) => exec,
         Err(error) => {
             eprintln!("JIT registration skipped: cannot load daemon execution config: {error:#}");
-            return Ok(());
+            return Ok(HashSet::new());
         }
     };
+
+    let already_ready = journal
+        .materialized_state()?
+        .slots
+        .into_iter()
+        .filter(|slot| slot.phase == SlotPhase2::Ready)
+        .map(|slot| (slot.slot_id, slot.generation))
+        .collect::<HashSet<_>>();
+    let mut newly_ready = HashSet::new();
 
     let config_base = exec
         .config_dir
@@ -1398,19 +1540,30 @@ async fn register_runners(
             continue;
         }
         let ready = journal.apply(Event::ReadyAttempt {
-            slot_id,
+            slot_id: slot_id.clone(),
             generation,
         })?;
-        for nested in ready.commands {
-            if let SideEffect::AdvertiseCapacity { permits } = nested {
-                std::fs::write(
-                    args.state_dir.join("advertised-capacity"),
-                    permits.to_string(),
-                )?;
+        if !ready.rejected {
+            for nested in ready.commands {
+                if let SideEffect::AdvertiseCapacity { permits } = nested {
+                    std::fs::write(
+                        args.state_dir.join("advertised-capacity"),
+                        permits.to_string(),
+                    )?;
+                }
+            }
+            if !already_ready.contains(&(slot_id.clone(), generation))
+                && journal.materialized_state()?.slots.iter().any(|slot| {
+                    slot.slot_id == slot_id
+                        && slot.generation == generation
+                        && slot.phase == SlotPhase2::Ready
+                })
+            {
+                newly_ready.insert((slot_id, generation));
             }
         }
     }
-    Ok(())
+    Ok(newly_ready)
 }
 
 /// Reconcile the durable local registration claim against GitHub. A JIT
@@ -1817,6 +1970,23 @@ fn spawn_ready_waiters(
     journal: &Journal,
     jobs: &mut HashMap<String, Child>,
 ) -> anyhow::Result<()> {
+    spawn_ready_waiters_with(args, journal, jobs, maybe_spawn_job)
+}
+
+fn spawn_ready_waiters_with(
+    args: &ControllerArgs,
+    journal: &Journal,
+    jobs: &mut HashMap<String, Child>,
+    mut spawn: impl FnMut(
+        &ControllerArgs,
+        &Journal,
+        &mut HashMap<String, Child>,
+        &str,
+        u64,
+        Option<&SlotId>,
+        bool,
+    ) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
     let Ok(exec) = load_exec_config(&args.state_dir) else {
         return Ok(());
     };
@@ -1837,38 +2007,295 @@ fn spawn_ready_waiters(
             continue;
         }
         // Journal Ready is not physical idleness. A live waiter, a persisted
-        // waiter pid after controller restart, or an in-flight lease whose
-        // containers are still tearing down must keep this slot unspawnable.
+        // waiter owner, or an in-flight lease whose containers are still
+        // tearing down must keep this slot unspawnable.
         if child_owns_slot(
             &args.state_dir,
             &state,
             jobs,
             &slot.slot_id,
             slot.generation,
-        ) {
+        )? {
             continue;
         }
-        match recovery_slot_config_dir(&args.state_dir, &exec, &state, &slot.slot_id) {
-            Ok(slot_dir) => {
-                if crate::runner::recorded_in_flight_job_exists(&slot_dir)? {
-                    continue;
-                }
-            }
-            Err(_) => continue,
+        let Ok(slot_dir) = recovery_slot_config_dir(&args.state_dir, &exec, &state, &slot.slot_id)
+        else {
+            continue;
+        };
+        if crate::runner::recorded_in_flight_job_exists(&slot_dir)? {
+            continue;
+        }
+        let Some(stored) = load_local_runner_config(&slot_dir)? else {
+            continue;
+        };
+        if !ready_waiter_config_matches(&exec, &args.scope, &slot.slot_id, &stored) {
+            continue;
         }
         let waiter_id = format!("wait-{}", slot.slot_id.0);
         if jobs.contains_key(&waiter_id) {
             continue;
         }
-        maybe_spawn_job(
+        let waiter_liveness =
+            cleanup::owned_pid_liveness(&args.state_dir, &waiter_id, slot.generation.0)?;
+        // The exact persisted JIT identity and the absence of an in-flight
+        // lease establish that this Ready slot needs a waiter. A missing owner
+        // marker after restart is therefore recoverable once live owners have
+        // already been excluded above.
+        if !waiter_marker_allows_spawn(waiter_liveness) {
+            continue;
+        }
+        spawn(
             args,
             journal,
             jobs,
             &waiter_id,
             slot.generation.0,
             Some(&slot.slot_id),
+            false,
         )?;
     }
+    Ok(())
+}
+
+fn waiter_marker_allows_spawn(liveness: cleanup::OwnedPidLiveness) -> bool {
+    match liveness {
+        cleanup::OwnedPidLiveness::Dead | cleanup::OwnedPidLiveness::Absent => true,
+        cleanup::OwnedPidLiveness::Live | cleanup::OwnedPidLiveness::UnpublishedIntentLive => false,
+    }
+}
+
+/// A persisted Ready row may start a waiter after controller restart only
+/// when its slot-local JIT config still names the exact current registration.
+/// The durable daemon exec config plus runner.json carry this identity; missing
+/// or drifted fields fail closed instead of borrowing mutable in-memory state.
+fn ready_waiter_config_matches(
+    exec: &crate::args::DaemonArgs,
+    controller_scope: &str,
+    slot: &SlotId,
+    stored: &config::StoredRunnerConfig,
+) -> bool {
+    let Some(url) = exec.url.as_deref() else {
+        return false;
+    };
+    let Some(slot_index) = slot
+        .0
+        .rsplit_once('-')
+        .and_then(|(_, index)| index.parse::<usize>().ok())
+    else {
+        return false;
+    };
+    if slot_index == 0 || slot_index > exec.slots || slot_id(controller_scope, slot_index) != *slot
+    {
+        return false;
+    }
+
+    let Some(requested_scope) = jit_scope_identity(url) else {
+        return false;
+    };
+    if jit_scope_identity(&stored.settings.github_url).as_deref() != Some(&requested_scope) {
+        return false;
+    }
+
+    let requested_labels = crate::runner::normalize_labels(
+        exec.labels.clone(),
+        exec.target_mvp_labels,
+        exec.target_mvp_arm_label,
+    );
+    let requested_labels: std::collections::BTreeSet<&str> =
+        requested_labels.iter().map(String::as_str).collect();
+    let stored_labels: std::collections::BTreeSet<&str> =
+        stored.settings.labels.iter().map(String::as_str).collect();
+    if stored_labels != requested_labels {
+        return false;
+    }
+
+    let runner_group_matches = match exec.pool_name.as_deref().filter(|name| !name.is_empty()) {
+        Some(_) if exec.pool_id_pre_resolved => {
+            stored.settings.pool_id == Some(exec.pool_id.unwrap_or(1))
+        }
+        Some(_) if exec.dry_run_registration && exec.pool_id.is_some() => {
+            stored.settings.pool_id == Some(exec.pool_id.unwrap_or(1))
+        }
+        Some(name) => stored
+            .settings
+            .pool_name
+            .as_deref()
+            .is_some_and(|stored| stored.eq_ignore_ascii_case(name)),
+        None => stored.settings.pool_id == Some(exec.pool_id.unwrap_or(1)),
+    };
+    if !runner_group_matches {
+        return false;
+    }
+
+    let host = crate::runner::github_runner_host_slug();
+    let instance = exec.name.as_deref().unwrap_or("local");
+    let slot_zero = slot_index - 1;
+    let current_agent = crate::runner::compose_github_runner_name(&host, instance, slot_zero);
+    let agent_name_matches = stored.settings.agent_name == current_agent
+        || stored
+            .settings
+            .agent_name
+            .rsplit_once("-next-")
+            .and_then(|(_, suffix)| suffix.split_once('-'))
+            .and_then(|(pid, cycle)| Some((pid.parse::<u32>().ok()?, cycle.parse::<u64>().ok()?)))
+            .is_some_and(|(pid, cycle)| {
+                crate::runner::compose_github_runner_successor_name(
+                    &host, instance, slot_zero, pid, cycle,
+                ) == stored.settings.agent_name
+            });
+    if !agent_name_matches {
+        return false;
+    }
+
+    let requires_trusted_scope = stored_labels
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case(crate::runner::TRUST_GATED_RUNNER_LABEL));
+    if requires_trusted_scope
+        && !crate::runner::github_trust_scope_allows_host_docker(&exec.trust_scope)
+    {
+        return false;
+    }
+
+    stored.settings.agent_id.is_some_and(|id| id > 0)
+        && stored.settings.use_v2_flow
+        && stored
+            .settings
+            .server_url_v2
+            .as_deref()
+            .is_some_and(|url| !url.is_empty())
+        && stored.settings.ephemeral
+        && stored.settings.disable_update
+        && stored.credentials.is_some()
+}
+
+fn jit_scope_identity(url: &str) -> Option<String> {
+    let scope = GitHubScope::parse(url).ok()?;
+    let mut url = url::Url::parse(&scope.original_url).ok()?;
+    url.set_query(None);
+    url.set_fragment(None);
+    let path = url.path().trim_end_matches('/').to_owned();
+    url.set_path(&path);
+    Some(url.to_string().to_ascii_lowercase())
+}
+
+/// A provisional Assigned row cannot start its normal Ready waiter, yet the
+/// slot worker is the only place that previously ran the renewjob oracle.
+/// Launch one marked recovery-only waiter only when the row carries the plan,
+/// exact permit lease, and remaining probe budget needed to make progress.
+/// Planless, exhausted, and pre-migration rows stay durably fenced; repeatedly
+/// spawning a helper cannot resolve them safely.
+fn spawn_provisional_recovery_waiters(
+    args: &ControllerArgs,
+    journal: &Journal,
+    jobs: &mut HashMap<String, Child>,
+) -> anyhow::Result<()> {
+    spawn_provisional_recovery_waiters_with(args, journal, jobs, maybe_spawn_job)
+}
+
+fn spawn_provisional_recovery_waiters_with(
+    args: &ControllerArgs,
+    journal: &Journal,
+    jobs: &mut HashMap<String, Child>,
+    mut spawn: impl FnMut(
+        &ControllerArgs,
+        &Journal,
+        &mut HashMap<String, Child>,
+        &str,
+        u64,
+        Option<&SlotId>,
+        bool,
+    ) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let state = journal.materialized_state()?;
+    if state.drain_active || state.admission_blocked {
+        return Ok(());
+    }
+    let now = epoch_now();
+    let eligible_rows: Vec<_> = state
+        .jobs
+        .iter()
+        .filter(|job| {
+            job.provisional
+                && job.phase == JobPhase2::Assigned
+                && !job.plan_id.is_empty()
+                && !job.probe_budget_exhausted(now)
+                && job.permit_lease.is_some()
+        })
+        .collect();
+    if eligible_rows.is_empty() {
+        return Ok(());
+    }
+
+    // A recovery child resolves every eligible provisional row when it
+    // starts. Precompute row ownership by slot once and start at most one
+    // child, so N rows cause one fleet probe pass rather than N passes.
+    let mut slot_owners: HashMap<(String, u64), (usize, bool)> = HashMap::new();
+    for job in state.jobs.iter().filter(|job| job.phase.occupies_slot()) {
+        let owners = slot_owners
+            .entry((job.slot_id.0.clone(), job.generation.0))
+            .or_default();
+        if job.provisional {
+            owners.0 += 1;
+        } else {
+            owners.1 = true;
+        }
+    }
+    let assigned_slots: HashSet<(String, u64)> = state
+        .slots
+        .iter()
+        .filter(|slot| slot.phase == SlotPhase2::Assigned)
+        .map(|slot| (slot.slot_id.0.clone(), slot.generation.0))
+        .collect();
+
+    for row in &eligible_rows {
+        let waiter_id = format!("wait-{}", row.slot_id.0);
+        if jobs.contains_key(&row.job_id.0) || jobs.contains_key(&waiter_id) {
+            // Any owned child may itself be resolving this fleet's pending
+            // acquisitions. Do not overlap its one-pass probe.
+            return Ok(());
+        }
+        let worker_liveness =
+            cleanup::owned_pid_liveness(&args.state_dir, &row.job_id.0, row.generation.0)?;
+        let waiter_liveness =
+            cleanup::owned_pid_liveness(&args.state_dir, &waiter_id, row.generation.0)?;
+        if !matches!(
+            worker_liveness,
+            cleanup::OwnedPidLiveness::Absent | cleanup::OwnedPidLiveness::Dead
+        ) || waiter_liveness != cleanup::OwnedPidLiveness::Dead
+        {
+            // The child probes every eligible row. One live, unpublished, or
+            // owner-unknown row prevents this fleet-wide pass from starting.
+            return Ok(());
+        }
+    }
+
+    let candidate = eligible_rows.into_iter().find(|row| {
+        let key = (row.slot_id.0.clone(), row.generation.0);
+        let exactly_one_provisional =
+            slot_owners
+                .get(&key)
+                .is_some_and(|(provisional_count, has_other_owner)| {
+                    *provisional_count == 1 && !*has_other_owner
+                });
+        let assigned_slot = assigned_slots.contains(&key);
+        exactly_one_provisional && assigned_slot
+    });
+    let Some(row) = candidate else {
+        return Ok(());
+    };
+
+    // The recovery role validates this exact slot against the journal before
+    // it begins the single fleet-wide provisional probe pass.
+    let waiter_id = format!("wait-{}", row.slot_id.0);
+    spawn(
+        args,
+        journal,
+        jobs,
+        &waiter_id,
+        row.generation.0,
+        Some(&row.slot_id),
+        true,
+    )?;
     Ok(())
 }
 
@@ -1896,30 +2323,25 @@ fn stop_idle_waiters(
     Ok(())
 }
 
-/// Force-remove a provably dead worker's containers before its slot returns
-/// to Ready. Best-effort by design: a wedged Docker daemon must not wedge
-/// slot recovery (capacity loss is worse than a leaked container), so
-/// failures are loud warnings, never errors.
+/// Force-remove a provably dead worker's containers before its slot permit
+/// and marker can be released. A Docker error keeps the marker and permit held
+/// so the controller can retry cleanup on its next cycle.
 fn teardown_orphaned_job_containers(
     job_id: &str,
     docker_backend: bool,
     docker: impl FnMut(&[String]) -> anyhow::Result<String>,
-) {
+) -> anyhow::Result<()> {
     if !docker_backend {
-        return;
+        return Ok(());
     }
     // Docker ownership labels use the exact job-container identity emitted by
     // the GitHub adapter (`velnor-job-<job_id>`), not the Run Service's raw
     // job id. Keep this conversion at the orphan-teardown boundary so every
     // controller recovery path uses the same key as normal execution.
     let job_container = crate::github_adapter::job_container_name_for_id(job_id);
-    if let Err(error) =
-        crate::docker_lease::force_remove_job_owned_containers(&job_container, docker)
-    {
-        eprintln!(
-            "Warning: orphan recovery for job {job_id} could not remove its containers: {error:#}"
-        );
-    }
+    crate::docker_lease::force_remove_job_owned_containers(&job_container, docker)
+        .with_context(|| format!("remove containers owned by orphaned job {job_id}"))?;
+    Ok(())
 }
 
 /// Return slots occupied by job workers that died without a terminal
@@ -1930,29 +2352,99 @@ async fn reclaim_orphaned_jobs(
     journal: &mut Journal,
     remote_deadline: tokio::time::Instant,
     scan_persisted_markers: bool,
+    docker: impl FnMut(&[String]) -> anyhow::Result<String>,
+) -> anyhow::Result<()> {
+    reclaim_orphaned_jobs_with_children(
+        args,
+        journal,
+        &HashMap::new(),
+        remote_deadline,
+        scan_persisted_markers,
+        docker,
+    )
+    .await
+}
+
+async fn reclaim_orphaned_jobs_with_children(
+    args: &ControllerArgs,
+    journal: &mut Journal,
+    owned_children: &HashMap<String, Child>,
+    remote_deadline: tokio::time::Instant,
+    scan_persisted_markers: bool,
+    docker: impl FnMut(&[String]) -> anyhow::Result<String>,
+) -> anyhow::Result<()> {
+    reclaim_orphaned_jobs_with_marker_cleanup(
+        args,
+        journal,
+        owned_children,
+        remote_deadline,
+        scan_persisted_markers,
+        docker,
+        |slot_dir, record| {
+            crate::runner::cleanup_recorded_in_flight_job_for_record_with(
+                slot_dir,
+                record,
+                |record| {
+                    let generation = record.generation().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "in-flight marker for job {} has no recorded generation",
+                            record.job_id()
+                        )
+                    })?;
+                    cleanup::remove_outbox(&args.state_dir, record.job_id(), generation)
+                },
+            )
+        },
+    )
+    .await
+}
+
+async fn reclaim_orphaned_jobs_with_marker_cleanup(
+    args: &ControllerArgs,
+    journal: &mut Journal,
+    owned_children: &HashMap<String, Child>,
+    remote_deadline: tokio::time::Instant,
+    scan_persisted_markers: bool,
     mut docker: impl FnMut(&[String]) -> anyhow::Result<String>,
+    mut cleanup_marker: impl FnMut(&Path, &crate::runner::InFlightJobRecord) -> anyhow::Result<bool>,
 ) -> anyhow::Result<()> {
     let state = journal.materialized_state()?;
-    let orphan_jobs: Vec<_> = state
+    let mut orphan_jobs = Vec::new();
+    for job in state
         .jobs
         .iter()
-        .filter(|job| job.phase.occupies_slot())
-        // A ready-slot waiter is spawned before GitHub assigns a job, so its
-        // durable ownership marker is keyed by the waiter identity rather
-        // than the later journal job id. Check both markers independently:
-        // a stale job marker must not suppress a live waiter marker.
-        .filter(|job| {
-            let waiter_id = format!("wait-{}", job.slot_id.0);
-            let job_worker_live =
-                cleanup::read_owned_pid(&args.state_dir, &job.job_id.0, job.generation.0)
-                    .is_some_and(prove::pid_is_alive);
-            let waiter_live =
-                cleanup::read_owned_pid(&args.state_dir, &waiter_id, job.generation.0)
-                    .is_some_and(prove::pid_is_alive);
-            !(job_worker_live || waiter_live)
-        })
-        .cloned()
-        .collect();
+        .filter(|job| job.phase.occupies_slot() && !job.provisional)
+    {
+        // Controller-spawned slot waiters keep their waiter identity while
+        // running broker jobs. Until the journal records any other owner role,
+        // that waiter marker is the required death proof. Child handles remain
+        // stronger local proof than persisted markers.
+        let waiter_id = format!("wait-{}", job.slot_id.0);
+        if owned_children.contains_key(&job.job_id.0) || owned_children.contains_key(&waiter_id) {
+            continue;
+        }
+        let worker_liveness =
+            cleanup::owned_pid_liveness(&args.state_dir, &job.job_id.0, job.generation.0)?;
+        let waiter_liveness =
+            cleanup::owned_pid_liveness(&args.state_dir, &waiter_id, job.generation.0)?;
+        if matches!(
+            worker_liveness,
+            cleanup::OwnedPidLiveness::Live | cleanup::OwnedPidLiveness::UnpublishedIntentLive
+        ) || matches!(
+            waiter_liveness,
+            cleanup::OwnedPidLiveness::Live | cleanup::OwnedPidLiveness::UnpublishedIntentLive
+        ) {
+            continue;
+        }
+        if !waiter_owned_job_markers_prove_death(worker_liveness, waiter_liveness) {
+            eprintln!(
+                "Warning: orphan recovery for job {} deferred; worker or waiter ownership remains unknown",
+                job.job_id.0
+            );
+            continue;
+        }
+        orphan_jobs.push(job.clone());
+    }
 
     if orphan_jobs.is_empty() && !scan_persisted_markers {
         return Ok(());
@@ -1995,9 +2487,8 @@ async fn reclaim_orphaned_jobs(
         .map(|file| file.backend());
     let docker_backend =
         velnor_model::ExecutionBackendKind::permits_host_docker_maintenance(backend);
-    let mut teardown = |job_id: &str| {
-        teardown_orphaned_job_containers(job_id, docker_backend, &mut docker);
-    };
+    let mut teardown =
+        |job_id: &str| teardown_orphaned_job_containers(job_id, docker_backend, &mut docker);
 
     for job in orphan_jobs {
         // One Completing row must not abort the fleet cycle. Log and move on
@@ -2024,58 +2515,87 @@ async fn reclaim_orphaned_jobs(
         return Ok(());
     }
 
-    // A prior RemoteAcked event removes the journal job before local storage
-    // release and marker deletion. Scan every exact persisted slot path so a
-    // crash in that gap remains retryable even though no job row remains.
+    // A prior RemoteAcked event removes the journal job before container,
+    // storage, and permit cleanup finish. Scan every exact persisted slot
+    // path so a crash in that gap remains retryable without a job row.
     let current = journal.materialized_state()?;
     for slot in &state.slots {
         let slot_dir = recovery_slot_config_dir(&args.state_dir, &exec, &state, &slot.slot_id)?;
-        let Some(marker_job_id) = crate::runner::recorded_in_flight_job_id(&slot_dir)? else {
+        let Some(marker_record) = crate::runner::recorded_in_flight_job_record(&slot_dir)? else {
             continue;
         };
+        let marker_job_id = marker_record.job_id().to_owned();
+        let marker_generation = marker_record.generation().ok_or_else(|| {
+            anyhow::anyhow!(
+                "legacy in-flight marker for job {} has no recorded generation; retaining it for operator recovery",
+                marker_job_id
+            )
+        })?;
+        let marker_generation = Generation(marker_generation);
         if let Some(job) = current
             .jobs
             .iter()
             .find(|job| job.job_id.0 == marker_job_id)
         {
-            if job.slot_id != slot.slot_id || job.generation != slot.generation {
+            if job.slot_id != slot.slot_id || job.generation != marker_generation {
                 return Err(anyhow::anyhow!(
-                    "in-flight marker job {} does not match journal slot {} generation {}",
+                    "in-flight marker job {} generation {} does not match journal slot {} job generation {}",
                     marker_job_id,
+                    marker_generation.0,
                     slot.slot_id.0,
-                    slot.generation.0
+                    job.generation.0
                 ));
             }
             continue;
         }
+        let waiter_id = format!("wait-{}", slot.slot_id.0);
+        if owned_children.contains_key(&marker_job_id) || owned_children.contains_key(&waiter_id) {
+            // A Child handle is authoritative even if the worker has not
+            // published its PID marker yet. RemoteAcked ends remote ownership,
+            // not the process that still needs to finish local cleanup.
+            continue;
+        }
         let remote_acked =
-            journal.has_remote_terminal_ack(&JobId(marker_job_id.clone()), slot.generation)?;
-        if !remote_acked {
-            // A ready-slot waiter persists the in-flight marker before journal
-            // admission while its ownership pid is still keyed `wait-{slot}`;
-            // the `write_owned_pid(job_id)` marker appears only when the job
-            // worker spawns. Consult both markers independently: a live owner
-            // defers recovery, and only a genuinely dead worker and waiter
-            // make the marker safe to reclaim.
-            let waiter_id = format!("wait-{}", slot.slot_id.0);
-            let worker_pid =
-                cleanup::read_owned_pid(&args.state_dir, &marker_job_id, slot.generation.0);
-            let waiter_pid =
-                cleanup::read_owned_pid(&args.state_dir, &waiter_id, slot.generation.0);
-            if worker_pid.is_none() && waiter_pid.is_none() {
-                return Err(anyhow::anyhow!(
-                    "marker-only in-flight job {} has no valid worker or waiter ownership pid",
-                    marker_job_id
-                ));
-            }
-            if worker_pid.is_some_and(prove::pid_is_alive)
-                || waiter_pid.is_some_and(prove::pid_is_alive)
-            {
-                // The marker can legitimately exist between persistence and
-                // journal admission. Never terminalize a live owner in that
-                // window; the next reconciliation tick will retry.
-                continue;
-            }
+            journal.has_remote_terminal_ack(&JobId(marker_job_id.clone()), marker_generation)?;
+        let locally_abandoned = journal
+            .unresolvable_completions()?
+            .iter()
+            .any(|completion| {
+                completion.job_id.0 == marker_job_id && completion.generation == marker_generation
+            });
+        // RemoteAcked proves terminal completion, not that the waiter
+        // finished local cleanup. Require its marker to prove death; a
+        // job-keyed marker is optional but must be dead if present.
+        let worker_liveness =
+            cleanup::owned_pid_liveness(&args.state_dir, &marker_job_id, marker_generation.0)?;
+        let waiter_liveness =
+            cleanup::owned_pid_liveness(&args.state_dir, &waiter_id, marker_generation.0)?;
+        if matches!(
+            worker_liveness,
+            cleanup::OwnedPidLiveness::Live | cleanup::OwnedPidLiveness::UnpublishedIntentLive
+        ) || matches!(
+            waiter_liveness,
+            cleanup::OwnedPidLiveness::Live | cleanup::OwnedPidLiveness::UnpublishedIntentLive
+        ) {
+            // The marker can legitimately exist while an owner retries local
+            // cleanup after its remote acknowledgement. Defer all mutation.
+            continue;
+        }
+        if !waiter_owned_job_markers_prove_death(worker_liveness, waiter_liveness) {
+            return Err(anyhow::anyhow!(
+                "marker-only in-flight job {} has unknown worker or waiter ownership",
+                marker_job_id
+            ));
+        }
+        // Owner death must be followed by container cleanup before the permit
+        // or marker can be released.
+        teardown(&marker_job_id)?;
+        if remote_acked || locally_abandoned {
+            // Local payload loss and bounded completion abandonment are also
+            // durable terminal outcomes. They do not authorize a remote send,
+            // but they do prove this marker's job no longer owns a slot.
+            cleanup_marker(&slot_dir, &marker_record)?;
+        } else {
             let Some(stored) = load_local_runner_config(&slot_dir)? else {
                 return Err(anyhow::anyhow!(
                     "runner credentials missing while recovering marker-only in-flight job {}",
@@ -2084,8 +2604,10 @@ async fn reclaim_orphaned_jobs(
             };
             let Some(cleaned) = defer_remote_recovery_on_timeout(
                 remaining_remote_budget(remote_deadline),
-                crate::runner::complete_recorded_in_flight_job_after_journal_acceptance(
-                    &slot_dir, &stored,
+                crate::runner::complete_recorded_in_flight_job_after_journal_acceptance_for_record(
+                    &slot_dir,
+                    &stored,
+                    &marker_record,
                 ),
                 "complete marker-only in-flight job after journal acceptance gap",
             )
@@ -2100,8 +2622,6 @@ async fn reclaim_orphaned_jobs(
                 ));
             }
         }
-        cleanup::remove_outbox(&args.state_dir, &marker_job_id, slot.generation.0)?;
-        crate::runner::cleanup_recorded_in_flight_job(&slot_dir)?;
         if crate::runner::recorded_in_flight_job_exists(&slot_dir)? {
             return Err(anyhow::anyhow!(
                 "orphaned in-flight marker remained for job {}",
@@ -2120,10 +2640,14 @@ async fn recover_one_orphaned_job(
     state: &velnor_control::journal::FleetState,
     job: &velnor_control::journal::JobRecord,
     remote_deadline: tokio::time::Instant,
-    teardown: &mut impl FnMut(&str),
+    teardown: &mut impl FnMut(&str) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let slot_dir = recovery_slot_config_dir(&args.state_dir, exec, state, &job.slot_id)?;
-    let marker_job_id = crate::runner::recorded_in_flight_job_id(&slot_dir)?;
+    let marker_record = crate::runner::recorded_in_flight_job_record(&slot_dir)?;
+    let marker_job_id = marker_record
+        .as_ref()
+        .map(|record| record.job_id().to_owned());
+    let mut tore_down = false;
     let pending_completion = job.phase == JobPhase2::Completing
         && state.outbox.iter().any(|row| {
             row.job_id == job.job_id
@@ -2131,14 +2655,22 @@ async fn recover_one_orphaned_job(
                 && row.intended
                 && !row.remote_acked
         });
-    if let Some(marker_job_id) = marker_job_id.as_deref()
-        && marker_job_id != job.job_id.0
-    {
-        anyhow::bail!(
-            "in-flight marker job {} does not match orphan job {}",
-            marker_job_id,
-            job.job_id.0
-        );
+    if let Some(record) = marker_record.as_ref() {
+        if record.job_id() != job.job_id.0 {
+            anyhow::bail!(
+                "in-flight marker job {} does not match orphan job {}",
+                record.job_id(),
+                job.job_id.0
+            );
+        }
+        if record.generation() != Some(job.generation.0) {
+            anyhow::bail!(
+                "in-flight marker for orphan job {} has generation {:?}, expected {}",
+                record.job_id(),
+                record.generation(),
+                job.generation.0
+            );
+        }
     }
     if job.phase == JobPhase2::Completing
         && !pending_completion
@@ -2154,11 +2686,21 @@ async fn recover_one_orphaned_job(
         return Ok(());
     }
     if let Some(stored) = load_local_runner_config(&slot_dir)? {
-        if marker_job_id.is_some() {
+        if let Some(expected_marker) = marker_record.as_ref() {
+            // The ownership filter above proved both the worker and waiter
+            // are dead. Tear down owned containers before any terminal
+            // replay can release the permit and marker.
+            teardown(&job.job_id.0)?;
+            tore_down = true;
             let cleanup = if pending_completion {
                 match defer_remote_recovery_on_timeout(
                     remaining_remote_budget(remote_deadline),
-                    crate::runner::replay_recorded_completion(&slot_dir, &stored, &args.state_dir),
+                    crate::runner::replay_recorded_completion_for_record(
+                        &slot_dir,
+                        &stored,
+                        &args.state_dir,
+                        expected_marker,
+                    ),
                     "replay recorded completion during orphan recovery",
                 )
                 .await
@@ -2179,11 +2721,9 @@ async fn recover_one_orphaned_job(
                                 })
                         {
                             // A spent budget abandons the row and restores the
-                            // slot to Ready. The dead worker's containers must
-                            // not strand behind that Ready slot.
-                            if abandon_if_budget_spent(args, journal, &row)? {
-                                teardown(&job.job_id.0);
-                            }
+                            // slot to Ready. Containers were torn down before
+                            // replay, while the marker still blocked reuse.
+                            abandon_if_budget_spent(args, journal, &row)?;
                         }
                         return Ok(());
                     }
@@ -2191,8 +2731,11 @@ async fn recover_one_orphaned_job(
             } else if let Some(conclusion) = job.terminal_conclusion.as_deref() {
                 match defer_remote_recovery_on_timeout(
                     remaining_remote_budget(remote_deadline),
-                    crate::runner::complete_recorded_in_flight_job_with_terminal_conclusion(
-                        &slot_dir, &stored, conclusion,
+                    crate::runner::complete_recorded_in_flight_job_with_terminal_conclusion_for_record(
+                        &slot_dir,
+                        &stored,
+                        conclusion,
+                        expected_marker,
                     ),
                     "complete recorded terminal conclusion during orphan recovery",
                 )
@@ -2210,7 +2753,11 @@ async fn recover_one_orphaned_job(
             } else {
                 match defer_remote_recovery_on_timeout(
                     remaining_remote_budget(remote_deadline),
-                    crate::runner::complete_recorded_in_flight_job(&slot_dir, &stored),
+                    crate::runner::complete_recorded_in_flight_job_for_record(
+                        &slot_dir,
+                        &stored,
+                        expected_marker,
+                    ),
                     "complete recorded in-flight job during orphan recovery",
                 )
                 .await
@@ -2257,10 +2804,12 @@ async fn recover_one_orphaned_job(
     }
     let current = journal.materialized_state()?;
     if current.jobs.iter().all(|row| row.job_id != job.job_id) {
-        // complete_recorded_in_flight_job already committed the terminal
-        // acknowledgement and removed this job from the journal. The worker
-        // is still dead: tear down leftover containers before Ready.
-        teardown(&job.job_id.0);
+        // Marker-backed terminal paths already removed containers while the
+        // marker still blocked reuse. Markerless recovery reaches this branch
+        // only after the journal itself removed the row.
+        if !tore_down {
+            teardown(&job.job_id.0)?;
+        }
         return Ok(());
     }
     if pending_completion {
@@ -2270,11 +2819,13 @@ async fn recover_one_orphaned_job(
         );
         return Ok(());
     }
-    // The worker is dead (both ownership pids are gone), so any
+    // The role-specific owner markers prove the worker is dead, so any
     // container still carrying this job's label is a leak. Remove them
     // before the slot returns to Ready; after JobWorkerLost no path
     // would ever touch them again.
-    teardown(&job.job_id.0);
+    if !tore_down {
+        teardown(&job.job_id.0)?;
+    }
     let lost = journal.apply(Event::JobWorkerLost {
         job_id: job.job_id.clone(),
         generation: job.generation,
@@ -2312,83 +2863,53 @@ where
 }
 
 /// Reconcile files left by a crash between durable outbox publication and
-/// `CompletionIntended`. A live ownership marker keeps the writer's file from
-/// being deleted during that tiny window; a dead or absent owner makes the
-/// file safe to remove because no journal intent can authorize a send.
-fn reconcile_orphaned_outboxes(args: &ControllerArgs, journal: &Journal) -> anyhow::Result<()> {
-    let outbox_dir = args.state_dir.join("outbox");
-    let metadata = match std::fs::symlink_metadata(&outbox_dir) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            return Err(anyhow::anyhow!(
-                "completion outbox directory must not be a symlink: {}",
-                outbox_dir.display()
-            ));
-        }
-        Ok(metadata) if !metadata.is_dir() => {
-            return Err(anyhow::anyhow!(
-                "completion outbox path is not a directory: {}",
-                outbox_dir.display()
-            ));
-        }
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    let _ = metadata;
+/// `CompletionIntended`. Live child handles and ownership markers keep the
+/// writer's file from being deleted during that tiny window. The worker may
+/// still be registered as `wait-{slot}` while completing its acquired job, so
+/// a matching active journal row maps the outbox job id back to that waiter.
+/// Unknown ownership keeps the payload until a later reconciliation can prove
+/// that every possible writer is dead.
+fn reconcile_orphaned_outboxes(
+    args: &ControllerArgs,
+    journal: &Journal,
+    owned_children: &HashMap<String, Child>,
+) -> anyhow::Result<()> {
     let state = journal.materialized_state()?;
-    for entry in std::fs::read_dir(&outbox_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        let name = entry.file_name();
-        let name = name
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("completion outbox filename is not UTF-8"))?;
-        let file_metadata = std::fs::symlink_metadata(&path)?;
-        #[cfg(unix)]
-        if cleanup::outbox_quarantine_pid(name)?.is_some() {
-            if file_metadata.file_type().is_symlink() || !file_metadata.is_dir() {
-                return Err(anyhow::anyhow!(
-                    "completion outbox quarantine is not a directory: {}",
-                    path.display()
-                ));
-            }
-            if !cleanup::remove_stale_outbox_quarantine(&args.state_dir, name)? {
-                continue;
-            }
-            continue;
-        }
-        if file_metadata.file_type().is_symlink() || !file_metadata.is_file() {
-            return Err(anyhow::anyhow!(
-                "completion outbox entry is not a regular file: {}",
-                path.display()
-            ));
-        }
+    let abandoned = journal
+        .unresolvable_completions()?
+        .into_iter()
+        .map(|completion| (completion.job_id.0, completion.generation.0))
+        .collect::<HashSet<_>>();
+    cleanup::reconcile_outbox_entries(&args.state_dir, |name| {
         let (job_id, generation, temporary) = parse_outbox_entry_name(name)?;
+        if abandoned.contains(&(job_id.clone(), generation)) {
+            return Ok(false);
+        }
         let row = state
             .outbox
             .iter()
             .find(|row| row.job_id.0 == job_id && row.generation.0 == generation);
         let keep = if temporary {
-            outbox_owner_is_live(&args.state_dir, &job_id, generation)?
+            outbox_owner_requires_retention(
+                &args.state_dir,
+                &job_id,
+                generation,
+                &state,
+                owned_children,
+            )
         } else {
-            row.is_some_and(|row| row.intended && !row.remote_acked)
-                || row.is_none() && outbox_owner_is_live(&args.state_dir, &job_id, generation)?
+            row.is_some_and(|row| row.intended && !row.remote_acked && !row.abandoned)
+                || row.is_none()
+                    && outbox_owner_requires_retention(
+                        &args.state_dir,
+                        &job_id,
+                        generation,
+                        &state,
+                        owned_children,
+                    )
         };
-        if keep {
-            continue;
-        }
-        if temporary {
-            std::fs::remove_file(&path)?;
-            #[cfg(unix)]
-            std::fs::OpenOptions::new()
-                .read(true)
-                .open(&outbox_dir)?
-                .sync_all()?;
-        } else {
-            cleanup::remove_outbox(&args.state_dir, &job_id, generation)?;
-        }
-    }
-    Ok(())
+        Ok(keep)
+    })
 }
 
 fn parse_outbox_name(name: &str) -> anyhow::Result<(String, u64)> {
@@ -2423,28 +2944,72 @@ fn parse_outbox_entry_name(name: &str) -> anyhow::Result<(String, u64, bool)> {
     Ok((job_id, generation, false))
 }
 
-fn outbox_owner_is_live(state_dir: &Path, job_id: &str, generation: u64) -> anyhow::Result<bool> {
-    let path = cleanup::owned_path(state_dir, job_id, generation);
-    match std::fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            return Err(anyhow::anyhow!(
-                "ownership marker must not be a symlink: {}",
-                path.display()
-            ));
-        }
-        Ok(metadata) if !metadata.is_file() => {
-            return Err(anyhow::anyhow!(
-                "ownership marker is not a regular file: {}",
-                path.display()
-            ));
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error.into()),
+fn outbox_owner_requires_retention(
+    state_dir: &Path,
+    job_id: &str,
+    generation: u64,
+    state: &velnor_control::journal::FleetState,
+    owned_children: &HashMap<String, Child>,
+) -> bool {
+    if owned_children.contains_key(job_id) {
+        return true;
     }
-    let pid = cleanup::read_owned_pid(state_dir, job_id, generation)
-        .ok_or_else(|| anyhow::anyhow!("ownership marker has no valid pid: {}", path.display()))?;
-    Ok(prove::pid_is_alive(pid))
+
+    let active_job = state.jobs.iter().find(|job| {
+        job.job_id.0 == job_id && job.generation.0 == generation && job.phase.occupies_slot()
+    });
+    let waiter_id = active_job.map(|job| format!("wait-{}", job.slot_id.0));
+    if waiter_id
+        .as_ref()
+        .is_some_and(|waiter_id| owned_children.contains_key(waiter_id))
+    {
+        return true;
+    }
+
+    let worker_liveness = match cleanup::owned_pid_liveness(state_dir, job_id, generation) {
+        Ok(owner_state) => owner_state,
+        Err(error) => {
+            eprintln!(
+                "Warning: orphan outbox for job {job_id} generation {generation} retained; ownership state for {job_id} is unknown: {error:#}"
+            );
+            return true;
+        }
+    };
+    let Some(waiter_id) = waiter_id else {
+        return worker_liveness != cleanup::OwnedPidLiveness::Dead;
+    };
+    let waiter_liveness = match cleanup::owned_pid_liveness(state_dir, &waiter_id, generation) {
+        Ok(owner_state) => owner_state,
+        Err(error) => {
+            eprintln!(
+                "Warning: orphan outbox for job {job_id} generation {generation} retained; ownership state for {waiter_id} is unknown: {error:#}"
+            );
+            return true;
+        }
+    };
+    if !waiter_owned_job_markers_prove_death(worker_liveness, waiter_liveness) {
+        eprintln!(
+            "Warning: orphan outbox for job {job_id} generation {generation} retained; worker or waiter ownership is unknown"
+        );
+        return true;
+    }
+    false
+}
+
+/// Controller-spawned slot workers keep their durable identity as
+/// `wait-{slot}` while `run_daemon_slot` executes broker jobs. Require that
+/// canonical marker to be dead; a job-keyed marker is optional but, if it
+/// exists, must also be dead. Absent or unreadable waiter evidence cannot
+/// authorize cleanup.
+fn waiter_owned_job_markers_prove_death(
+    worker: cleanup::OwnedPidLiveness,
+    waiter: cleanup::OwnedPidLiveness,
+) -> bool {
+    waiter == cleanup::OwnedPidLiveness::Dead
+        && matches!(
+            worker,
+            cleanup::OwnedPidLiveness::Absent | cleanup::OwnedPidLiveness::Dead
+        )
 }
 
 fn recovery_slot_config_dir(
@@ -2688,16 +3253,23 @@ fn slot_index_from_id(slot_id: &SlotId) -> usize {
 fn fenced_slot_recovery_generation(
     slot: Option<&SlotRecord>,
     state_dir: &Path,
+    slot_config_dir: &Path,
     state: &velnor_control::journal::FleetState,
     jobs: &HashMap<String, Child>,
-) -> Option<Generation> {
-    let slot = slot.filter(|slot| slot.phase == SlotPhase2::Fenced)?;
-    if slot_has_admission_block(state, &slot.slot_id, slot.generation)
-        || child_owns_slot(state_dir, state, jobs, &slot.slot_id, slot.generation)
+) -> anyhow::Result<Option<Generation>> {
+    let Some(slot) = slot.filter(|slot| slot.phase == SlotPhase2::Fenced) else {
+        return Ok(None);
+    };
+    // RemoteAcked removes the journal row immediately, while the physical
+    // in-flight marker remains until storage and permit cleanup complete. Keep
+    // the old generation so marker replay checks its exact ack and owner PIDs.
+    if crate::runner::recorded_in_flight_job_exists(slot_config_dir)?
+        || slot_has_admission_block(state, &slot.slot_id, slot.generation)
+        || child_owns_slot(state_dir, state, jobs, &slot.slot_id, slot.generation)?
     {
-        return None;
+        return Ok(None);
     }
-    Some(slot.generation.next())
+    Ok(Some(slot.generation.next()))
 }
 
 fn slot_has_admission_block(
@@ -2723,29 +3295,38 @@ fn child_owns_slot(
     jobs: &HashMap<String, Child>,
     slot_id: &SlotId,
     generation: Generation,
-) -> bool {
+) -> anyhow::Result<bool> {
     let waiter_id = format!("wait-{}", slot_id.0);
     if jobs.contains_key(&waiter_id) {
-        return true;
+        return Ok(true);
     }
     if state
         .jobs
         .iter()
         .any(|job| job.slot_id == *slot_id && jobs.contains_key(&job.job_id.0))
     {
-        return true;
+        return Ok(true);
     }
     // Persisted ownership survives controller restart while the process lives.
-    if cleanup::read_owned_pid(state_dir, &waiter_id, generation.0).is_some_and(prove::pid_is_alive)
-    {
-        return true;
+    if matches!(
+        cleanup::owned_pid_liveness(state_dir, &waiter_id, generation.0)?,
+        cleanup::OwnedPidLiveness::Live | cleanup::OwnedPidLiveness::UnpublishedIntentLive
+    ) {
+        return Ok(true);
     }
-    state.jobs.iter().any(|job| {
-        job.slot_id == *slot_id
-            && job.generation == generation
-            && cleanup::read_owned_pid(state_dir, &job.job_id.0, generation.0)
-                .is_some_and(prove::pid_is_alive)
-    })
+    for job in state
+        .jobs
+        .iter()
+        .filter(|job| job.slot_id == *slot_id && job.generation == generation)
+    {
+        if matches!(
+            cleanup::owned_pid_liveness(state_dir, &job.job_id.0, generation.0)?,
+            cleanup::OwnedPidLiveness::Live | cleanup::OwnedPidLiveness::UnpublishedIntentLive
+        ) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Journal work or a live waiter/worker means the slot is still acting.
@@ -2758,13 +3339,13 @@ fn slot_is_acting(
     jobs: &HashMap<String, Child>,
     slot_id: &SlotId,
     generation: Generation,
-) -> bool {
-    slot_has_admission_block(state, slot_id, generation)
-        || child_owns_slot(state_dir, state, jobs, slot_id, generation)
+) -> anyhow::Result<bool> {
+    Ok(slot_has_admission_block(state, slot_id, generation)
+        || child_owns_slot(state_dir, state, jobs, slot_id, generation)?)
 }
 
-async fn reap_supervised_child(
-    children: &mut HashMap<String, Child>,
+async fn reap_supervised_child<C: ProcessHandle>(
+    children: &mut HashMap<String, C>,
     key: &str,
     label: &str,
 ) -> anyhow::Result<()> {
@@ -2774,7 +3355,7 @@ async fn reap_supervised_child(
     // Proof: the `contains_key` guard above holds with no `await` between
     // it and this lookup (shutdown is synchronous), so the entry is `Some`.
     #[allow(clippy::expect_used, reason = "contains_key just proved presence")]
-    request_child_shutdown(children.get(key).expect("child still present"))?;
+    request_child_shutdown(children.get(key).expect("child still present").process())?;
     let mut deadline = Instant::now() + FENCED_SLOT_TERMINATION_TIMEOUT;
     let mut escalated = false;
     loop {
@@ -2785,6 +3366,7 @@ async fn reap_supervised_child(
         if children
             .get_mut(key)
             .expect("child retained until reap")
+            .process_mut()
             .try_wait()?
             .is_some()
         {
@@ -2801,6 +3383,7 @@ async fn reap_supervised_child(
             children
                 .get_mut(key)
                 .expect("child retained until escalation")
+                .process_mut()
                 .kill()
                 .map_err(|error| {
                     anyhow::anyhow!("{label} SIGKILL escalation failed; handle retained: {error}")
@@ -2815,7 +3398,7 @@ async fn reap_supervised_child(
 
 async fn terminate_fenced_slot_actor(
     args: &ControllerArgs,
-    slots: &mut HashMap<String, Child>,
+    slots: &mut SlotChildren,
     jobs: &mut HashMap<String, Child>,
     state: &velnor_control::journal::FleetState,
     slot_id: &SlotId,
@@ -2834,47 +3417,38 @@ async fn terminate_fenced_slot_actor(
     let Some(pid) = slot.pid else {
         return Ok(());
     };
-    if !prove::slot_process_is_alive(pid, &args.state_dir, slot_id, slot.generation) {
+    let Some(process) = cleanup::pin_slot_process(pid, &args.state_dir, slot_id, slot.generation)
+        .context("cannot prove fenced slot PID identity")?
+    else {
+        return Ok(());
+    };
+    if !process
+        .signal(libc::SIGTERM)
+        .context("cannot signal fenced slot process with SIGTERM")?
+    {
         return Ok(());
     }
-    send_pid_signal(pid, libc::SIGTERM)?;
     let deadline = Instant::now() + FENCED_SLOT_TERMINATION_TIMEOUT;
     while Instant::now() < deadline {
-        if !prove::slot_process_is_alive(pid, &args.state_dir, slot_id, slot.generation) {
+        if !process
+            .is_alive()
+            .context("cannot recheck pinned fenced slot process")?
+        {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    // Re-prove the command line immediately before escalation. If the PID was
-    // reused, leave the unrelated process untouched and still rotate the
-    // durable generation below.
-    if prove::slot_process_is_alive(pid, &args.state_dir, slot_id, slot.generation) {
-        send_pid_signal(pid, libc::SIGKILL)?;
+    // The same pidfd remains pinned from initial identity validation through
+    // escalation, so PID reuse can never redirect SIGKILL to another actor.
+    if process
+        .is_alive()
+        .context("cannot recheck pinned fenced slot process before escalation")?
+    {
+        process
+            .signal(libc::SIGKILL)
+            .context("cannot signal fenced slot process with SIGKILL")?;
     }
     Ok(())
-}
-
-#[cfg(unix)]
-fn send_pid_signal(pid: u32, signal: libc::c_int) -> anyhow::Result<()> {
-    if pid == 0 {
-        return Ok(());
-    }
-    // SAFETY: callers prove the PID belongs to the fenced Velnor slot actor
-    // immediately before signaling it; SIGTERM is followed by a re-proof
-    // before SIGKILL.
-    let result = unsafe { libc::kill(pid as libc::pid_t, signal) };
-    if result == -1 {
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::ESRCH) {
-            return Err(error.into());
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn send_pid_signal(_pid: u32, _signal: i32) -> anyhow::Result<()> {
-    anyhow::bail!("fenced slot recovery requires Unix process signaling")
 }
 
 fn stale_slot_deadline_reached(
@@ -2882,16 +3456,18 @@ fn stale_slot_deadline_reached(
     slot: Option<&SlotRecord>,
     id: &SlotId,
     deadlines: &mut HashMap<String, Instant>,
+    slots: &mut SlotChildren,
     now: Instant,
 ) -> bool {
     let Some(slot) = slot else {
         return false;
     };
-    if prove::slot_heartbeat_is_fresh(
+    if prove::slot_heartbeat_is_fresh_with_child(
         &_args.state_dir,
         id,
         slot.generation,
         SLOT_HEARTBEAT_MAX_AGE,
+        owned_slot_child(slots, id),
     ) {
         return false;
     }
@@ -2901,10 +3477,56 @@ fn stale_slot_deadline_reached(
     *deadline <= now
 }
 
+fn owned_slot_child<'a>(
+    slots: &'a mut SlotChildren,
+    slot_id: &SlotId,
+) -> Option<(&'a mut Child, Generation)> {
+    let slot = slots.get_mut(&slot_id.0)?;
+    let generation = slot.generation;
+    Some((&mut slot.child, generation))
+}
+
+fn slot_heartbeat_is_fresh_from_cache(
+    args: &ControllerArgs,
+    id: &SlotId,
+    generation: Generation,
+    slots: &mut SlotChildren,
+    verified: &mut HashMap<String, prove::VerifiedSlotHeartbeat>,
+) -> bool {
+    if let Some(evidence) = verified.get(&id.0).copied()
+        && prove::cached_slot_heartbeat_is_fresh_with_child(
+            &args.state_dir,
+            id,
+            &evidence,
+            generation,
+            Instant::now(),
+            owned_slot_child(slots, id),
+        )
+        .is_some()
+    {
+        return true;
+    }
+
+    let current = prove::read_verified_slot_heartbeat_with_child(
+        &args.state_dir,
+        id,
+        generation,
+        SLOT_HEARTBEAT_MAX_AGE,
+        owned_slot_child(slots, id),
+    );
+    if let Some(current) = current {
+        verified.insert(id.0.clone(), current);
+        true
+    } else {
+        verified.remove(&id.0);
+        false
+    }
+}
+
 async fn fence_stale_slot_actor(
     args: &ControllerArgs,
     journal: &mut Journal,
-    slots: &mut HashMap<String, Child>,
+    slots: &mut SlotChildren,
     jobs: &mut HashMap<String, Child>,
     id: &SlotId,
     generation: Generation,
@@ -2945,55 +3567,53 @@ fn ingest_slot_heartbeats(
     args: &ControllerArgs,
     journal: &mut Journal,
     total: usize,
+    slots: &mut SlotChildren,
     seen: &mut HashMap<String, (u32, u64)>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<HashMap<String, prove::VerifiedSlotHeartbeat>> {
     let state = journal.materialized_state()?;
     let mut pending = Vec::new();
+    let mut verified = HashMap::new();
     for index in 1..=total {
-        let path = heartbeat_path(&args.state_dir, index);
-        let Ok(bytes) = std::fs::read(path) else {
-            continue;
-        };
         let id = slot_id(&args.scope, index);
         let Some(slot) = state.slots.iter().find(|slot| slot.slot_id == id) else {
             continue;
         };
-        let Ok(heartbeat) = serde_json::from_slice::<SlotHeartbeat>(&bytes) else {
+        let Some(heartbeat) = prove::read_verified_slot_heartbeat_with_child(
+            &args.state_dir,
+            &id,
+            slot.generation,
+            SLOT_HEARTBEAT_MAX_AGE,
+            owned_slot_child(slots, &id),
+        ) else {
             continue;
         };
-        if slot.generation.0 != heartbeat.generation
-            || !prove::slot_heartbeat_is_fresh(
-                &args.state_dir,
-                &id,
-                slot.generation,
-                SLOT_HEARTBEAT_MAX_AGE,
-            )
-            || seen.get(&id.0).is_some_and(|(pid, sequence)| {
-                *pid == heartbeat.pid && *sequence >= heartbeat.sequence
-            })
-        {
+        verified.insert(id.0.clone(), heartbeat);
+        if seen.get(&id.0).is_some_and(|(pid, sequence)| {
+            *pid == heartbeat.pid() && *sequence >= heartbeat.sequence()
+        }) {
             continue;
         }
         pending.push((id, heartbeat));
     }
-    let outcomes =
-        journal.apply_many(pending.iter().map(|(id, heartbeat)| Event::SlotHeartbeat {
+    let outcomes = journal.apply_observation_batch(pending.iter().map(|(id, heartbeat)| {
+        Event::SlotHeartbeat {
             slot_id: id.clone(),
-            generation: Generation(heartbeat.generation),
-            pid: heartbeat.pid,
-        }))?;
+            generation: heartbeat.generation(),
+            pid: heartbeat.pid(),
+        }
+    }))?;
     for ((id, heartbeat), outcome) in pending.into_iter().zip(outcomes) {
         if !outcome.rejected {
-            seen.insert(id.0, (heartbeat.pid, heartbeat.sequence));
+            seen.insert(id.0, (heartbeat.pid(), heartbeat.sequence()));
         }
     }
-    Ok(())
+    Ok(verified)
 }
 
 fn maybe_spawn_slot(
     args: &ControllerArgs,
     journal: &Journal,
-    children: &mut HashMap<String, Child>,
+    children: &mut SlotChildren,
     startup_deadlines: &mut HashMap<String, Instant>,
     slot_id: &SlotId,
     generation: Generation,
@@ -3004,11 +3624,10 @@ fn maybe_spawn_slot(
     if children.contains_key(&slot_id.0) {
         return Ok(());
     }
-    if let Ok(state) = journal.materialized_state()
-        && let Some(slot) = state.slots.iter().find(|slot| slot.slot_id == *slot_id)
-        && slot.pid.is_some_and(|pid| {
-            prove::slot_process_is_alive(pid, &args.state_dir, slot_id, generation)
-        })
+    let state = journal.materialized_state()?;
+    if let Some(slot) = state.slots.iter().find(|slot| slot.slot_id == *slot_id)
+        && let Some(pid) = slot.pid
+        && prove::slot_process_liveness(pid, &args.state_dir, slot_id, generation)?
     {
         return Ok(());
     }
@@ -3025,7 +3644,7 @@ fn maybe_spawn_slot(
         .arg("--generation")
         .arg(generation.0.to_string())
         .spawn()?;
-    children.insert(slot_id.0.clone(), child);
+    children.insert(slot_id.0.clone(), SlotChild { generation, child });
     startup_deadlines.insert(slot_id.0.clone(), Instant::now() + SLOT_HEARTBEAT_MAX_AGE);
     Ok(())
 }
@@ -3037,6 +3656,30 @@ fn maybe_spawn_job(
     job_id: &str,
     generation: u64,
     slot_id: Option<&SlotId>,
+    recovery_only: bool,
+) -> anyhow::Result<()> {
+    let exe = crate::service::node_service_executable()?;
+    maybe_spawn_job_with_executable(
+        args,
+        journal,
+        jobs,
+        job_id,
+        generation,
+        slot_id,
+        recovery_only,
+        &exe,
+    )
+}
+
+fn maybe_spawn_job_with_executable(
+    args: &ControllerArgs,
+    journal: &Journal,
+    jobs: &mut HashMap<String, Child>,
+    job_id: &str,
+    generation: u64,
+    slot_id: Option<&SlotId>,
+    recovery_only: bool,
+    executable: &Path,
 ) -> anyhow::Result<()> {
     let generation = Generation(generation);
     let slot_id = slot_id
@@ -3057,46 +3700,61 @@ fn maybe_spawn_job(
     if jobs.contains_key(&key) {
         return Ok(());
     }
-    if cleanup::read_owned_pid(&args.state_dir, job_id, generation.0)
-        .is_some_and(prove::pid_is_alive)
-    {
-        return Ok(());
-    }
-    let exe = crate::service::node_service_executable()?;
     let slot_index = slot_index_from_id(&slot_id);
-    let child = Command::new(exe)
-        .arg("job")
-        .arg("--state-dir")
-        .arg(&args.state_dir)
-        .arg("--job-id")
-        .arg(job_id)
-        .arg("--generation")
-        .arg(generation.0.to_string())
-        .arg("--slot-index")
-        .arg(slot_index.to_string())
-        .arg("--slot-id")
-        .arg(&slot_id.0)
-        .arg("--scope")
-        .arg(&args.scope)
-        .spawn()?;
-    if let Err(error) = cleanup::write_owned_pid(&args.state_dir, job_id, generation.0, child.id())
-    {
-        let mut child = child;
-        let kill_result = child.kill();
-        let wait_result = child.wait();
-        let cleanup_result = cleanup::remove_owned(&args.state_dir, job_id, generation.0);
-        return Err(error.context(format!(
-            "failed to publish ownership marker for job {job_id}; child cleanup: kill={kill_result:?}, wait={wait_result:?}, marker={cleanup_result:?}"
-        )));
-    }
+    // Hold the marker lock through the OS spawn. Otherwise a second
+    // controller can see a still-unpublished token before the first child is
+    // visible in the process table, rotate it, and make both children unable
+    // to publish ownership. The child blocks on the same lock until spawn
+    // returns, then publishes its PID before opening journal or job state.
+    let publish = |launch_token: &str| {
+        let mut command = Command::new(executable);
+        command
+            .arg("job")
+            .arg("--state-dir")
+            .arg(&args.state_dir)
+            .arg("--job-id")
+            .arg(job_id)
+            .arg("--generation")
+            .arg(generation.0.to_string())
+            .arg("--slot-index")
+            .arg(slot_index.to_string())
+            .arg("--slot-id")
+            .arg(&slot_id.0)
+            .arg("--scope")
+            .arg(&args.scope)
+            .arg("--launch-token")
+            .arg(launch_token);
+        if recovery_only {
+            command.arg("--recovery-only");
+        }
+        // Leave the durable intent in place if spawn fails. A caller must
+        // not infer that an interrupted platform spawn created no child.
+        command.spawn().map_err(anyhow::Error::from)
+    };
+    // Recovery is a respawn path, so its marker must remain explicitly Dead
+    // until the same lock publishes the new intent and creates the child.
+    // Normal first-time waiter launch still permits an absent marker.
+    let child = if recovery_only {
+        cleanup::with_existing_dead_owned_pid_intent(
+            &args.state_dir,
+            job_id,
+            generation.0,
+            publish,
+        )?
+    } else {
+        cleanup::with_dead_owned_pid_intent(&args.state_dir, job_id, generation.0, publish)?
+    };
+    let Some(child) = child else {
+        return Ok(());
+    };
     jobs.insert(job_id.to_owned(), child);
     Ok(())
 }
 
-fn reap(children: &mut HashMap<String, Child>) {
+fn reap<C: ProcessHandle>(children: &mut HashMap<String, C>) {
     let mut dead = Vec::new();
     for (id, child) in children.iter_mut() {
-        match child.try_wait() {
+        match child.process_mut().try_wait() {
             Ok(Some(_)) => dead.push(id.clone()),
             Ok(None) => {}
             Err(error) => {
@@ -3109,10 +3767,14 @@ fn reap(children: &mut HashMap<String, Child>) {
     }
 }
 
-fn reap_draining(children: &mut HashMap<String, Child>, kind: &str) -> anyhow::Result<()> {
+fn reap_draining<C: ProcessHandle>(
+    children: &mut HashMap<String, C>,
+    kind: &str,
+) -> anyhow::Result<()> {
     let mut dead = Vec::new();
     for (id, child) in children.iter_mut() {
         if child
+            .process_mut()
             .try_wait()
             .map_err(|error| {
                 anyhow::anyhow!(
@@ -3130,9 +3792,12 @@ fn reap_draining(children: &mut HashMap<String, Child>, kind: &str) -> anyhow::R
     Ok(())
 }
 
-fn kill_draining(children: &mut HashMap<String, Child>, kind: &str) -> anyhow::Result<()> {
+fn kill_draining<C: ProcessHandle>(
+    children: &mut HashMap<String, C>,
+    kind: &str,
+) -> anyhow::Result<()> {
     for (id, child) in children.iter_mut() {
-        child.kill().map_err(|error| {
+        child.process_mut().kill().map_err(|error| {
             anyhow::anyhow!(
                 "process-reap escalation failed for {kind} child {id}; handle retained: {error}"
             )
@@ -3244,9 +3909,868 @@ mod tests {
         assert!(parse_outbox_entry_name("..malformed").is_err());
     }
 
+    const TEST_RUN_SERVICE_URL: &str = "https://run.example/run";
+
+    fn test_native_permit_lease(
+        runner_request_id: &str,
+    ) -> velnor_control::journal::NativePermitLease {
+        velnor_control::journal::NativePermitLease {
+            holder: crate::permit_guard::native_permit_holder("velnor", runner_request_id),
+            ledger_path: "/tmp/test-permit-ledger.db".to_owned(),
+            generation: 1,
+        }
+    }
+
+    fn owned_job_events(
+        job_id: &JobId,
+        slot_id: &SlotId,
+        generation: Generation,
+        runner_request_id: &str,
+        permit_lease: Option<velnor_control::journal::NativePermitLease>,
+    ) -> Vec<Event> {
+        let provisional_job_id = JobId(runner_request_id.to_owned());
+        let intent = match permit_lease.as_ref() {
+            Some(permit_lease) => Event::JobAcquisitionIntendedWithPermit {
+                slot_id: slot_id.clone(),
+                job_id: provisional_job_id.clone(),
+                generation,
+                message_id: format!("message-{runner_request_id}"),
+                runner_request_id: runner_request_id.to_owned(),
+                run_service_url: TEST_RUN_SERVICE_URL.to_owned(),
+                intended_unix: 1_000,
+                permit_lease: permit_lease.clone(),
+            },
+            None => Event::JobAcquisitionIntended {
+                slot_id: slot_id.clone(),
+                job_id: provisional_job_id.clone(),
+                generation,
+                message_id: format!("message-{runner_request_id}"),
+                runner_request_id: Some(runner_request_id.to_owned()),
+                run_service_url: TEST_RUN_SERVICE_URL.to_owned(),
+                intended_unix: 1_000,
+            },
+        };
+        vec![
+            intent,
+            Event::JobAcquisitionResolved {
+                provisional_job_id,
+                acquired_job_id: job_id.clone(),
+                plan_id: "plan-1".to_owned(),
+                generation,
+                runner_request_id: Some(runner_request_id.to_owned()),
+                permit_lease,
+            },
+            Event::JobOwned {
+                job_id: job_id.clone(),
+                slot_id: slot_id.clone(),
+                attempt: 1,
+                generation,
+                worker: format!("worker-{}", job_id.0),
+                accepted_unix: 1,
+            },
+        ]
+    }
+
+    fn with_journal_write_gate(
+        path: &Path,
+        mutation: impl FnOnce(&rusqlite::Transaction<'_>) -> rusqlite::Result<()>,
+    ) -> rusqlite::Result<()> {
+        let mut connection = rusqlite::Connection::open(path)?;
+        let transaction =
+            connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        transaction.execute("INSERT INTO journal_write_gate (id) VALUES (1)", [])?;
+        mutation(&transaction)?;
+        transaction.execute("DELETE FROM journal_write_gate WHERE id = 1", [])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    struct TokenProcess(Child);
+
+    #[cfg(unix)]
+    impl Drop for TokenProcess {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[cfg(unix)]
+    fn spawn_tokenized_owned_process(
+        state_dir: &Path,
+        isolation_id: &str,
+        generation: Generation,
+    ) -> TokenProcess {
+        TokenProcess(spawn_tokenized_owned_child(
+            state_dir,
+            isolation_id,
+            generation,
+        ))
+    }
+
+    #[cfg(unix)]
+    fn spawn_tokenized_owned_child(
+        state_dir: &Path,
+        isolation_id: &str,
+        generation: Generation,
+    ) -> Child {
+        let token = uuid::Uuid::new_v4().simple().to_string();
+        let ready_path = state_dir.join(format!(".owned-process-ready-{token}"));
+        let child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("trap 'exit 0' TERM INT; printf ready > \"$2\"; while :; do sleep 1; done")
+            .arg("velnor-controller-fixture")
+            .arg(format!("--launch-token={token}"))
+            .arg(&ready_path)
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !ready_path.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !ready_path.exists() {
+            panic!("token-bearing fixture process failed to start");
+        }
+        std::fs::remove_file(&ready_path).unwrap();
+        cleanup::write_owned_pid_with_launch_token(
+            state_dir,
+            isolation_id,
+            generation.0,
+            child.id(),
+            &token,
+        )
+        .unwrap();
+        child
+    }
+
+    #[cfg(unix)]
+    fn write_dead_published_owned_process(
+        state_dir: &Path,
+        isolation_id: &str,
+        generation: Generation,
+    ) {
+        use std::io::Write as _;
+        use std::os::unix::process::CommandExt;
+
+        let token = uuid::Uuid::new_v4().simple().to_string();
+        let ready_path = state_dir.join(format!(".dead-owned-ready-{token}"));
+        let mut child = TokenProcess(
+            Command::new("/bin/sh")
+                .arg0(format!("--launch-token={token}"))
+                .args([
+                    "-c",
+                    "set -eu; printf ready > \"$2\"; IFS= read -r release; [ \"$release\" = release ]",
+                    "velnor-controller-dead-fixture",
+                ])
+                .arg(format!("--launch-token={token}"))
+                .arg(&ready_path)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !ready_path.exists() {
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "published-owner fixture exited before readiness"
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "published-owner fixture did not reach readiness"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(child.0.try_wait().unwrap().is_none());
+
+        cleanup::write_owned_pid_with_launch_token(
+            state_dir,
+            isolation_id,
+            generation.0,
+            child.0.id(),
+            &token,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                &std::fs::read(cleanup::owned_path(state_dir, isolation_id, generation.0)).unwrap(),
+            )
+            .unwrap()["pid"]
+                .as_u64(),
+            Some(child.0.id().into()),
+            "the child PID must be published before it is released"
+        );
+        let mut stdin = child.0.stdin.take().expect("child release pipe exists");
+        stdin.write_all(b"release\n").unwrap();
+        drop(stdin);
+        assert!(child.0.wait().unwrap().success());
+        assert_eq!(
+            cleanup::owned_pid_liveness(state_dir, isolation_id, generation.0).unwrap(),
+            cleanup::OwnedPidLiveness::Dead,
+            "the fixture must retain a published marker for an exited process"
+        );
+    }
+
+    fn write_in_flight_job_marker(
+        slot_dir: &Path,
+        job_id: &str,
+        runner_request_id: &str,
+        generation: Generation,
+    ) -> PathBuf {
+        write_in_flight_job_marker_with_url(
+            slot_dir,
+            job_id,
+            runner_request_id,
+            generation,
+            TEST_RUN_SERVICE_URL,
+        )
+    }
+
+    fn write_in_flight_job_marker_with_url(
+        slot_dir: &Path,
+        job_id: &str,
+        runner_request_id: &str,
+        generation: Generation,
+        run_service_url: &str,
+    ) -> PathBuf {
+        write_in_flight_job_marker_with_url_and_permit(
+            slot_dir,
+            job_id,
+            runner_request_id,
+            generation,
+            run_service_url,
+            Some(test_native_permit_lease(runner_request_id)),
+        )
+    }
+
+    fn write_in_flight_job_marker_with_url_and_permit(
+        slot_dir: &Path,
+        job_id: &str,
+        runner_request_id: &str,
+        generation: Generation,
+        run_service_url: &str,
+        permit_lease: Option<velnor_control::journal::NativePermitLease>,
+    ) -> PathBuf {
+        std::fs::create_dir_all(slot_dir).unwrap();
+        let marker = crate::runner::test_in_flight_job_path(slot_dir);
+        std::fs::write(
+            &marker,
+            serde_json::to_vec(&json!({
+                "plan_id": "plan-1",
+                "job_id": job_id,
+                "run_service_url": run_service_url,
+                "billing_owner_id": null,
+                "runner_request_id": runner_request_id,
+                "generation": generation.0,
+                "permit_holder": permit_lease.as_ref().map_or("", |lease| &lease.holder),
+                "permit_ledger": permit_lease.as_ref().map_or("", |lease| &lease.ledger_path),
+                "permit_generation": permit_lease.as_ref().map(|lease| lease.generation)
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        marker
+    }
+
+    fn prime_owned_job(
+        journal: &mut Journal,
+        job_id: &JobId,
+        slot_id: &SlotId,
+        generation: Generation,
+        runner_request_id: &str,
+        permit_lease: Option<velnor_control::journal::NativePermitLease>,
+    ) {
+        for event in owned_job_events(job_id, slot_id, generation, runner_request_id, permit_lease)
+        {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        assert!(
+            !journal
+                .apply(Event::JobStarted {
+                    job_id: job_id.clone(),
+                    generation,
+                })
+                .unwrap()
+                .rejected
+        );
+    }
+
     fn prime_pending_completion(journal: &mut Journal) -> (JobId, Generation, String) {
         let slot_id = SlotId("velnor-1".to_owned());
         let job_id = JobId("job-1".to_owned());
+        let runner_request_id = "request-1";
+        let generation = Generation::INITIAL;
+        for event in [
+            Event::ControlLive,
+            Event::JournalWritable,
+            Event::Dependency {
+                github_reachable: true,
+            },
+            Event::Routing {
+                valid: true,
+                group_valid: true,
+            },
+            Event::DesiredCapacity { ready: 1 },
+            Event::PermitReserved {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::ExecutorProven {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::SessionLive {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::RegistrationIntended {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::Registered {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::ReadyAttempt {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        prime_owned_job(
+            journal,
+            &job_id,
+            &slot_id,
+            generation,
+            runner_request_id,
+            None,
+        );
+        for event in [Event::JobTerminalResult {
+            job_id: job_id.clone(),
+            generation,
+            conclusion: "success".to_owned(),
+        }] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        let payload_sha256 = velnor_control::journal::payload_checksum(b"payload");
+        assert!(
+            !journal
+                .apply(Event::CompletionIntended {
+                    job_id: job_id.clone(),
+                    generation,
+                    payload_sha256: payload_sha256.clone(),
+                })
+                .unwrap()
+                .rejected
+        );
+        (job_id, generation, payload_sha256)
+    }
+
+    fn prime_completion_publish_window(journal: &mut Journal) -> (JobId, Generation) {
+        let slot_id = SlotId("velnor-1".to_owned());
+        let job_id = JobId("job-1".to_owned());
+        let generation = Generation::INITIAL;
+        prime_owned_job(journal, &job_id, &slot_id, generation, "request-1", None);
+        assert!(
+            !journal
+                .apply(Event::JobTerminalResult {
+                    job_id: job_id.clone(),
+                    generation,
+                    conclusion: "success".to_owned(),
+                })
+                .unwrap()
+                .rejected
+        );
+        (job_id, generation)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphan_outbox_reconciliation_keeps_payload_for_live_slot_waiter() {
+        let dir = metrics_test_dir("outbox-live-slot-waiter");
+        let mut journal = ready_slot_journal(&dir);
+        let (job_id, generation) = prime_completion_publish_window(&mut journal);
+        cleanup::write_outbox(&dir, &job_id.0, generation.0, b"completion payload").unwrap();
+
+        // A ready waiter remains registered under `wait-{slot}` after the
+        // journal adopts the acquired job id. The completion writer publishes
+        // these bytes before CompletionIntended, so the journal has no outbox
+        // row yet while the waiter still owns the job.
+        cleanup::write_owned_pid(&dir, &job_id.0, generation.0, 99_999_999).unwrap();
+        assert_eq!(
+            cleanup::owned_pid_liveness(&dir, &job_id.0, generation.0).unwrap(),
+            cleanup::OwnedPidLiveness::Dead
+        );
+        let child = spawn_tokenized_owned_child(&dir, "wait-velnor-1", generation);
+        assert_eq!(
+            cleanup::owned_pid_liveness(&dir, "wait-velnor-1", generation.0).unwrap(),
+            cleanup::OwnedPidLiveness::Live
+        );
+        let mut jobs = HashMap::from([("wait-velnor-1".to_owned(), child)]);
+
+        reconcile_orphaned_outboxes(&controller_test_args(dir.clone()), &journal, &jobs).unwrap();
+
+        assert_eq!(
+            cleanup::read_outbox(&dir, &job_id.0, generation.0).unwrap(),
+            b"completion payload"
+        );
+        let mut child = jobs.remove("wait-velnor-1").unwrap();
+        let _ = child.kill();
+        let _ = child.wait();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn orphan_outbox_reconciliation_keeps_payload_when_active_owner_is_unknown() {
+        let dir = metrics_test_dir("outbox-unknown-active-owner");
+        let mut journal = ready_slot_journal(&dir);
+        let (job_id, generation) = prime_completion_publish_window(&mut journal);
+        cleanup::write_outbox(&dir, &job_id.0, generation.0, b"completion payload").unwrap();
+
+        // Both ownership markers are absent. Because this active journal row
+        // can still own the completion write, absence alone cannot authorize
+        // deleting a payload before CompletionIntended is recorded.
+        reconcile_orphaned_outboxes(
+            &controller_test_args(dir.clone()),
+            &journal,
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            cleanup::read_outbox(&dir, &job_id.0, generation.0).unwrap(),
+            b"completion payload"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphan_outbox_reconciliation_keeps_payload_when_one_owner_is_absent() {
+        let dir = metrics_test_dir("outbox-dead-worker-absent-waiter");
+        let mut journal = ready_slot_journal(&dir);
+        let (job_id, generation) = prime_completion_publish_window(&mut journal);
+        cleanup::write_outbox(&dir, &job_id.0, generation.0, b"completion payload").unwrap();
+        cleanup::write_owned_pid(&dir, &job_id.0, generation.0, 99_999_999).unwrap();
+        assert_eq!(
+            cleanup::owned_pid_liveness(&dir, &job_id.0, generation.0).unwrap(),
+            cleanup::OwnedPidLiveness::Dead
+        );
+        assert_eq!(
+            cleanup::owned_pid_liveness(&dir, "wait-velnor-1", generation.0).unwrap(),
+            cleanup::OwnedPidLiveness::Absent
+        );
+
+        reconcile_orphaned_outboxes(
+            &controller_test_args(dir.clone()),
+            &journal,
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            cleanup::read_outbox(&dir, &job_id.0, generation.0).unwrap(),
+            b"completion payload"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn orphan_outbox_reconciliation_removes_payload_after_waiter_death_without_job_marker() {
+        let dir = metrics_test_dir("outbox-dead-waiter-no-job-marker");
+        let mut journal = ready_slot_journal(&dir);
+        let (job_id, generation) = prime_completion_publish_window(&mut journal);
+        let payload_path = cleanup::outbox_path(&dir, &job_id.0, generation.0);
+        cleanup::write_outbox(&dir, &job_id.0, generation.0, b"completion payload").unwrap();
+        cleanup::write_owned_pid(&dir, "wait-velnor-1", generation.0, 99_999_999).unwrap();
+        assert_eq!(
+            cleanup::owned_pid_liveness(&dir, &job_id.0, generation.0).unwrap(),
+            cleanup::OwnedPidLiveness::Absent
+        );
+        assert_eq!(
+            cleanup::owned_pid_liveness(&dir, "wait-velnor-1", generation.0).unwrap(),
+            cleanup::OwnedPidLiveness::Dead
+        );
+
+        reconcile_orphaned_outboxes(
+            &controller_test_args(dir.clone()),
+            &journal,
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert!(std::fs::symlink_metadata(&payload_path).is_err());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn orphan_outbox_reconciliation_removes_payload_for_abandoned_row() {
+        let dir = metrics_test_dir("outbox-abandoned-row");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let (job_id, generation, payload_sha256) = prime_pending_completion(&mut journal);
+        let payload_path = cleanup::outbox_path(&dir, &job_id.0, generation.0);
+        cleanup::write_outbox(&dir, &job_id.0, generation.0, b"payload").unwrap();
+
+        let abandoned = journal
+            .apply(Event::CompletionPayloadLost {
+                job_id: job_id.clone(),
+                generation,
+                payload_sha256,
+                reason: "simulated crash before outbox deletion".to_owned(),
+            })
+            .unwrap();
+        assert!(!abandoned.rejected);
+        assert!(journal
+            .unresolvable_completions()
+            .unwrap()
+            .iter()
+            .any(|completion| completion.job_id == job_id && completion.generation == generation));
+
+        // The reducer committed abandonment, then the process crashed before
+        // its DeleteOutbox side effect. Reconciliation must finish that work.
+        reconcile_orphaned_outboxes(
+            &controller_test_args(dir.clone()),
+            &journal,
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert!(std::fs::symlink_metadata(&payload_path).is_err());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn waiter_owned_job_requires_dead_waiter_and_dead_existing_job_marker() {
+        use cleanup::OwnedPidLiveness::{Absent, Dead, Live, UnpublishedIntentLive};
+
+        assert!(waiter_owned_job_markers_prove_death(Absent, Dead));
+        assert!(waiter_owned_job_markers_prove_death(Dead, Dead));
+        assert!(!waiter_owned_job_markers_prove_death(Dead, Absent));
+        assert!(!waiter_owned_job_markers_prove_death(Absent, Absent));
+        assert!(!waiter_owned_job_markers_prove_death(Dead, Live));
+        assert!(!waiter_owned_job_markers_prove_death(Live, Dead));
+        assert!(!waiter_owned_job_markers_prove_death(
+            UnpublishedIntentLive,
+            Dead
+        ));
+    }
+
+    #[test]
+    fn ready_waiter_respawn_accepts_absent_or_dead_owner_marker_after_identity_proof() {
+        use cleanup::OwnedPidLiveness::{Absent, Dead, Live, UnpublishedIntentLive};
+
+        assert!(waiter_marker_allows_spawn(Dead));
+        assert!(waiter_marker_allows_spawn(Absent));
+        assert!(!waiter_marker_allows_spawn(Live));
+        assert!(!waiter_marker_allows_spawn(UnpublishedIntentLive));
+    }
+
+    fn prime_provisional_assignment(journal: &mut Journal) -> (JobId, SlotId, Generation) {
+        let slot_id = SlotId("velnor-1".to_owned());
+        let request_id = JobId("request-1".to_owned());
+        let acquired_id = JobId("job-1".to_owned());
+        let generation = Generation::INITIAL;
+        let permit_lease = test_native_permit_lease(&request_id.0);
+        for event in [
+            Event::ControlLive,
+            Event::JournalWritable,
+            Event::Dependency {
+                github_reachable: true,
+            },
+            Event::Routing {
+                valid: true,
+                group_valid: true,
+            },
+            Event::DesiredCapacity { ready: 1 },
+            Event::PermitReserved {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::ExecutorProven {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::SessionLive {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::RegistrationIntended {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::Registered {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::ReadyAttempt {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::JobAcquisitionIntendedWithPermit {
+                slot_id: slot_id.clone(),
+                job_id: request_id.clone(),
+                generation,
+                message_id: "broker-message-1".into(),
+                runner_request_id: request_id.0.clone(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: epoch_now(),
+                permit_lease: permit_lease.clone(),
+            },
+            Event::JobAcquisitionResolved {
+                provisional_job_id: request_id,
+                acquired_job_id: acquired_id.clone(),
+                plan_id: "plan-1".to_owned(),
+                generation,
+                runner_request_id: Some("request-1".to_owned()),
+                permit_lease: Some(permit_lease),
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        (acquired_id, slot_id, generation)
+    }
+
+    fn prime_second_provisional_assignment(journal: &mut Journal) {
+        let slot_id = SlotId("velnor-2".to_owned());
+        let request_id = JobId("request-2".to_owned());
+        let acquired_id = JobId("job-2".to_owned());
+        let generation = Generation::INITIAL;
+        let permit_lease = test_native_permit_lease(&request_id.0);
+        for event in [
+            Event::DesiredCapacity { ready: 2 },
+            Event::PermitReserved {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::ExecutorProven {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::SessionLive {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::RegistrationIntended {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::Registered {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::ReadyAttempt {
+                slot_id: slot_id.clone(),
+                generation,
+            },
+            Event::JobAcquisitionIntendedWithPermit {
+                slot_id: slot_id.clone(),
+                job_id: request_id.clone(),
+                generation,
+                message_id: "broker-message-2".into(),
+                runner_request_id: request_id.0.clone(),
+                run_service_url: "https://run.example/run".into(),
+                intended_unix: epoch_now(),
+                permit_lease: permit_lease.clone(),
+            },
+            Event::JobAcquisitionResolved {
+                provisional_job_id: request_id,
+                acquired_job_id: acquired_id,
+                plan_id: "plan-2".to_owned(),
+                generation,
+                runner_request_id: Some("request-2".to_owned()),
+                permit_lease: Some(permit_lease),
+            },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+    }
+
+    fn controller_test_args(state_dir: PathBuf) -> ControllerArgs {
+        ControllerArgs {
+            state_dir,
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: false,
+            lifecycle: None,
+        }
+    }
+
+    #[test]
+    fn malformed_provisional_waiter_pid_fails_closed_without_spawning() {
+        let dir = metrics_test_dir("provisional-malformed-pid");
+        std::fs::create_dir_all(&dir).unwrap();
+        cleanup::initialize_owned_directory(&dir).unwrap();
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let (_, slot_id, generation) = prime_provisional_assignment(&mut journal);
+        let waiter_id = format!("wait-{}", slot_id.0);
+        std::fs::write(
+            cleanup::owned_path(&dir, &waiter_id, generation.0),
+            b"not a process record",
+        )
+        .unwrap();
+        let args = controller_test_args(dir.clone());
+        let mut jobs = HashMap::new();
+
+        let result = spawn_provisional_recovery_waiters_with(
+            &args,
+            &journal,
+            &mut jobs,
+            |_, _, _, _, _, _, _| panic!("unreadable PID evidence must prevent spawn"),
+        );
+
+        assert!(result.is_err());
+        assert!(jobs.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provisional_recovery_does_not_spawn_when_waiter_marker_is_absent() {
+        let dir = metrics_test_dir("provisional-absent-waiter");
+        std::fs::create_dir_all(&dir).unwrap();
+        cleanup::initialize_owned_directory(&dir).unwrap();
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let (job_id, slot_id, generation) = prime_provisional_assignment(&mut journal);
+        let waiter_id = format!("wait-{}", slot_id.0);
+        let args = controller_test_args(dir.clone());
+        let mut jobs = HashMap::new();
+        let mut spawn_calls = 0;
+
+        spawn_provisional_recovery_waiters_with(
+            &args,
+            &journal,
+            &mut jobs,
+            |_, _, _, _, _, _, _| {
+                spawn_calls += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(spawn_calls, 0, "absence is not proof of owner death");
+        assert!(jobs.is_empty());
+        assert!(!cleanup::owned_path(&dir, &waiter_id, generation.0).exists());
+        assert!(!cleanup::owned_path(&dir, &job_id.0, generation.0).exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provisional_recovery_starts_one_fleet_pass_only_after_all_waiters_are_dead() {
+        let dir = metrics_test_dir("provisional-single-fleet-pass");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let (_, first_slot, generation) = prime_provisional_assignment(&mut journal);
+        prime_second_provisional_assignment(&mut journal);
+        let first_waiter = format!("wait-{}", first_slot.0);
+        let second_waiter = "wait-velnor-2";
+        cleanup::write_owned_pid(&dir, &first_waiter, generation.0, 99_999_999).unwrap();
+        let args = controller_test_args(dir.clone());
+        let mut jobs = HashMap::new();
+        let mut spawn_calls = 0;
+        let mut spawn = |_: &ControllerArgs,
+                         _: &Journal,
+                         _: &mut HashMap<String, Child>,
+                         job_id: &str,
+                         _: u64,
+                         slot_id: Option<&SlotId>,
+                         recovery_only: bool| {
+            spawn_calls += 1;
+            assert!(job_id == "wait-velnor-1" || job_id == "wait-velnor-2");
+            assert_eq!(slot_id.map(|slot| slot.0.as_str()), Some(&job_id[5..]));
+            assert!(recovery_only);
+            Ok(())
+        };
+
+        spawn_provisional_recovery_waiters_with(&args, &journal, &mut jobs, &mut spawn).unwrap();
+        assert_eq!(
+            spawn_calls, 0,
+            "an absent marker is unknown fleet ownership"
+        );
+
+        cleanup::write_owned_pid(&dir, second_waiter, generation.0, 99_999_999).unwrap();
+        spawn_provisional_recovery_waiters_with(&args, &journal, &mut jobs, &mut spawn).unwrap();
+        assert_eq!(spawn_calls, 1, "one child performs the fleet probe pass");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unknown_provisional_job_owner_marker_blocks_dead_waiter_respawn() {
+        let dir = metrics_test_dir("provisional-unknown-job-owner");
+        std::fs::create_dir_all(&dir).unwrap();
+        cleanup::initialize_owned_directory(&dir).unwrap();
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let (job_id, slot_id, generation) = prime_provisional_assignment(&mut journal);
+        let waiter_id = format!("wait-{}", slot_id.0);
+        cleanup::write_owned_pid(&dir, &waiter_id, generation.0, 99_999_999).unwrap();
+        std::fs::write(
+            cleanup::owned_path(&dir, &job_id.0, generation.0),
+            b"not a process record",
+        )
+        .unwrap();
+        let args = controller_test_args(dir.clone());
+        let mut jobs = HashMap::new();
+
+        let result = spawn_provisional_recovery_waiters_with(
+            &args,
+            &journal,
+            &mut jobs,
+            |_, _, _, _, _, _, _| panic!("unknown job-owner evidence must prevent spawn"),
+        );
+
+        assert!(result.is_err());
+        assert!(jobs.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pre_handshake_decimal_pid_marker_fails_closed_after_upgrade() {
+        let dir = metrics_test_dir("legacy-decimal-pid");
+        std::fs::create_dir_all(&dir).unwrap();
+        cleanup::initialize_owned_directory(&dir).unwrap();
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let (_, slot_id, generation) = prime_provisional_assignment(&mut journal);
+        let waiter_id = format!("wait-{}", slot_id.0);
+        std::fs::write(
+            cleanup::owned_path(&dir, &waiter_id, generation.0),
+            b"12345\n",
+        )
+        .unwrap();
+        let args = controller_test_args(dir.clone());
+        let mut jobs = HashMap::new();
+
+        let result = spawn_provisional_recovery_waiters_with(
+            &args,
+            &journal,
+            &mut jobs,
+            |_, _, _, _, _, _, _| panic!("legacy PID text cannot prove the old owner is dead"),
+        );
+
+        assert!(result.is_err());
+        assert!(jobs.is_empty());
+        assert_eq!(
+            std::fs::read(cleanup::owned_path(&dir, &waiter_id, generation.0)).unwrap(),
+            b"12345\n",
+            "the new reader must retain an unprovable pre-handshake marker"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn planless_pre_migration_provisional_row_stays_fenced_without_probe_child() {
+        let dir = metrics_test_dir("provisional-legacy-fenced");
+        std::fs::create_dir_all(&dir).unwrap();
+        cleanup::initialize_owned_directory(&dir).unwrap();
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let slot_id = SlotId("velnor-1".to_owned());
+        let request_id = JobId("legacy-request".to_owned());
         let generation = Generation::INITIAL;
         for event in [
             Event::ControlLive,
@@ -3284,56 +4808,339 @@ mod tests {
                 generation,
             },
             Event::JobAcquisitionIntended {
-                slot_id: slot_id.clone(),
-                job_id: job_id.clone(),
-                generation,
-                message_id: "msg-1".into(),
-                run_service_url: "https://run.example/run".into(),
-                intended_unix: 1_000,
-            },
-            Event::JobOwned {
-                job_id: job_id.clone(),
                 slot_id,
-                attempt: 1,
+                job_id: request_id.clone(),
                 generation,
-                worker: "worker-1".to_owned(),
-                accepted_unix: 1,
-            },
-            Event::JobStarted {
-                job_id: job_id.clone(),
-                generation,
-            },
-            Event::JobTerminalResult {
-                job_id: job_id.clone(),
-                generation,
-                conclusion: "success".to_owned(),
+                message_id: "legacy-message".to_owned(),
+                runner_request_id: Some(request_id.0.clone()),
+                run_service_url: "https://run.example/run".to_owned(),
+                intended_unix: epoch_now(),
             },
         ] {
             assert!(!journal.apply(event).unwrap().rejected);
         }
-        let payload_sha256 = velnor_control::journal::payload_checksum(b"payload");
-        assert!(
-            !journal
-                .apply(Event::CompletionIntended {
-                    job_id: job_id.clone(),
-                    generation,
-                    payload_sha256: payload_sha256.clone(),
-                })
-                .unwrap()
-                .rejected
-        );
-        (job_id, generation, payload_sha256)
+        let args = controller_test_args(dir.clone());
+        let mut jobs = HashMap::new();
+
+        spawn_provisional_recovery_waiters_with(
+            &args,
+            &journal,
+            &mut jobs,
+            |_, _, _, _, _, _, _| panic!("legacy planless row has no safe probe authority"),
+        )
+        .unwrap();
+
+        let state = journal.materialized_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        assert!(state.jobs[0].provisional);
+        assert!(state.jobs[0].plan_id.is_empty());
+        assert!(state.jobs[0].permit_lease.is_none());
+        assert!(jobs.is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
-    fn controller_test_args(state_dir: PathBuf) -> ControllerArgs {
-        ControllerArgs {
-            state_dir,
-            scope: "velnor".to_owned(),
-            desired_ready: 1,
-            once: true,
-            spawn_slots: false,
-            lifecycle: None,
+    #[cfg(unix)]
+    #[test]
+    fn failed_provisional_spawn_keeps_intent_and_retry_rotates_token() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = metrics_test_dir("provisional-spawn-retry");
+        std::fs::create_dir_all(&dir).unwrap();
+        cleanup::initialize_owned_directory(&dir).unwrap();
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let (_, slot_id, generation) = prime_provisional_assignment(&mut journal);
+        cleanup::write_owned_pid(
+            &dir,
+            &format!("wait-{}", slot_id.0),
+            generation.0,
+            99_999_999,
+        )
+        .unwrap();
+        let args = controller_test_args(dir.clone());
+        let mut jobs = HashMap::new();
+        let missing_executable = dir.join("missing-node-service");
+
+        let first = spawn_provisional_recovery_waiters_with(
+            &args,
+            &journal,
+            &mut jobs,
+            |args, journal, jobs, job_id, generation, slot_id, recovery_only| {
+                maybe_spawn_job_with_executable(
+                    args,
+                    journal,
+                    jobs,
+                    job_id,
+                    generation,
+                    slot_id,
+                    recovery_only,
+                    &missing_executable,
+                )
+            },
+        );
+
+        assert!(first.is_err());
+        assert!(jobs.is_empty());
+        let waiter_id = format!("wait-{}", slot_id.0);
+        let marker_path = cleanup::owned_path(&dir, &waiter_id, generation.0);
+        let first_marker: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&marker_path).unwrap()).unwrap();
+        let first_token = first_marker["launch_token"]
+            .as_str()
+            .expect("failed spawn preserves its exact launch intent")
+            .to_owned();
+        assert_eq!(first_marker["pid"].as_u64(), Some(0));
+
+        let executable = dir.join("retry-node-service.sh");
+        std::fs::write(
+            &executable,
+            r#"#!/bin/sh
+set -eu
+[ "$#" -eq 16 ]
+[ "$1" = job ]
+[ "$2" = --state-dir ]
+[ -d "$3" ]
+[ "$4" = --job-id ]
+[ "$5" = wait-velnor-1 ]
+[ "$6" = --generation ]
+[ "$7" = 1 ]
+[ "$8" = --slot-index ]
+[ "$9" = 1 ]
+[ "${10}" = --slot-id ]
+[ "${11}" = velnor-1 ]
+[ "${12}" = --scope ]
+[ "${13}" = velnor ]
+[ "${14}" = --launch-token ]
+[ -n "${15}" ]
+[ "${16}" = --recovery-only ]
+printf '%s\n' "${15}" > "$3/spawned-token.txt"
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        spawn_provisional_recovery_waiters_with(
+            &args,
+            &journal,
+            &mut jobs,
+            |args, journal, jobs, job_id, generation, slot_id, recovery_only| {
+                maybe_spawn_job_with_executable(
+                    args,
+                    journal,
+                    jobs,
+                    job_id,
+                    generation,
+                    slot_id,
+                    recovery_only,
+                    &executable,
+                )
+            },
+        )
+        .unwrap();
+
+        let child = jobs
+            .get_mut(&waiter_id)
+            .expect("retry starts after the old intent is proven orphaned");
+        assert!(child.wait().unwrap().success());
+        let second_token = std::fs::read_to_string(dir.join("spawned-token.txt")).unwrap();
+        let second_marker: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&marker_path).unwrap()).unwrap();
+        assert_ne!(first_token, second_token.trim());
+        assert_eq!(
+            second_marker["launch_token"].as_str(),
+            Some(second_token.trim())
+        );
+        assert_eq!(second_marker["pid"].as_u64(), Some(0));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restart_spawns_only_a_token_marked_recovery_waiter_for_provisional_assignment() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = metrics_test_dir("provisional-recovery-waiter");
+        std::fs::create_dir_all(&dir).unwrap();
+        cleanup::initialize_owned_directory(&dir).unwrap();
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let (job_id, slot_id, generation) = prime_provisional_assignment(&mut journal);
+        let waiter_id = format!("wait-{}", slot_id.0);
+        cleanup::write_owned_pid(&dir, &job_id.0, generation.0, 99_999_999).unwrap();
+        let args = controller_test_args(dir.clone());
+        let executable = dir.join("fake-node-service.sh");
+        std::fs::write(
+            &executable,
+            r#"#!/bin/sh
+set -eu
+[ "$#" -eq 16 ]
+[ "$1" = job ]
+[ "$2" = --state-dir ]
+[ -d "$3" ]
+[ "$4" = --job-id ]
+[ "$5" = wait-velnor-1 ]
+[ "$6" = --generation ]
+[ "$7" = 1 ]
+[ "$8" = --slot-index ]
+[ "$9" = 1 ]
+[ "${10}" = --slot-id ]
+[ "${11}" = velnor-1 ]
+[ "${12}" = --scope ]
+[ "${13}" = velnor ]
+[ "${14}" = --launch-token ]
+[ -n "${15}" ]
+[ "${16}" = --recovery-only ]
+grep -F "\"launch_token\":\"${15}\"" "$3/owned/${5}.${7}" >/dev/null
+printf '%s\n' "${15}" > "$3/recovery-child.txt"
+printf 'ready\n' > "$3/recovery-child-ready.txt"
+while [ ! -f "$3/recovery-child-release.txt" ]; do sleep 1; done
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        let mut jobs = HashMap::new();
+        let waiter_marker = cleanup::owned_path(&dir, &waiter_id, generation.0);
+        let mut spawn_fake = |args: &ControllerArgs,
+                              journal: &Journal,
+                              jobs: &mut HashMap<String, Child>,
+                              job_id: &str,
+                              generation: u64,
+                              slot_id: Option<&SlotId>,
+                              recovery_only: bool| {
+            maybe_spawn_job_with_executable(
+                args,
+                journal,
+                jobs,
+                job_id,
+                generation,
+                slot_id,
+                recovery_only,
+                &executable,
+            )
+        };
+
+        // Absence after restart is unknown ownership, so even a usable fake
+        // node service must not be launched.
+        spawn_provisional_recovery_waiters_with(&args, &journal, &mut jobs, &mut spawn_fake)
+            .unwrap();
+        assert!(
+            jobs.is_empty(),
+            "an absent waiter marker cannot authorize respawn"
+        );
+        assert!(!waiter_marker.exists());
+
+        // A malformed waiter marker is unknown evidence and fails closed.
+        std::fs::write(&waiter_marker, b"not a process record").unwrap();
+        assert!(spawn_provisional_recovery_waiters_with(
+            &args,
+            &journal,
+            &mut jobs,
+            &mut spawn_fake,
+        )
+        .is_err());
+        assert!(jobs.is_empty());
+        std::fs::remove_file(&waiter_marker).unwrap();
+
+        // Simulate marker loss after the preflight proves Dead but before the
+        // OS spawn. The strict spawn path rechecks under the ownership lock.
+        cleanup::write_owned_pid(&dir, &waiter_id, generation.0, 99_999_999).unwrap();
+        let mut remove_marker_then_spawn =
+            |args: &ControllerArgs,
+             journal: &Journal,
+             jobs: &mut HashMap<String, Child>,
+             job_id: &str,
+             generation: u64,
+             slot_id: Option<&SlotId>,
+             recovery_only: bool| {
+                std::fs::remove_file(&waiter_marker)?;
+                maybe_spawn_job_with_executable(
+                    args,
+                    journal,
+                    jobs,
+                    job_id,
+                    generation,
+                    slot_id,
+                    recovery_only,
+                    &executable,
+                )
+            };
+        spawn_provisional_recovery_waiters_with(
+            &args,
+            &journal,
+            &mut jobs,
+            &mut remove_marker_then_spawn,
+        )
+        .unwrap();
+        assert!(
+            jobs.is_empty(),
+            "marker loss after preflight must still block spawn"
+        );
+        assert!(!waiter_marker.exists());
+
+        // A present, live job-owner marker also blocks waiter recovery even
+        // when the waiter marker itself is explicitly dead.
+        cleanup::write_owned_pid(&dir, &waiter_id, generation.0, 99_999_999).unwrap();
+        std::fs::remove_file(cleanup::owned_path(&dir, &job_id.0, generation.0)).unwrap();
+        let mut live_job_owner = spawn_tokenized_owned_process(&dir, &job_id.0, generation);
+        spawn_provisional_recovery_waiters_with(&args, &journal, &mut jobs, &mut spawn_fake)
+            .unwrap();
+        assert!(jobs.is_empty(), "a live job owner must prevent respawn");
+        live_job_owner.0.kill().unwrap();
+        let _ = live_job_owner.0.wait().unwrap();
+        assert_eq!(
+            cleanup::owned_pid_liveness(&dir, &job_id.0, generation.0).unwrap(),
+            cleanup::OwnedPidLiveness::Dead
+        );
+
+        spawn_provisional_recovery_waiters_with(&args, &journal, &mut jobs, &mut spawn_fake)
+            .unwrap();
+
+        let child = jobs.get_mut(&waiter_id).expect("recovery waiter spawned");
+        let ready_path = dir.join("recovery-child-ready.txt");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !ready_path.exists() {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "recovery child exited before the readiness handshake"
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "recovery child did not complete the readiness handshake"
+            );
+            std::thread::sleep(Duration::from_millis(10));
         }
+        assert!(child.try_wait().unwrap().is_none());
+        assert_eq!(
+            cleanup::replace_dead_owned_pid_with_intent(&dir, &waiter_id, generation.0).unwrap(),
+            None,
+            "an unresolved intent with a live token-bearing child blocks duplicate spawn"
+        );
+        std::fs::write(dir.join("recovery-child-release.txt"), "release").unwrap();
+        let status = child.wait().unwrap();
+        assert!(status.success());
+        let args_token = std::fs::read_to_string(dir.join("recovery-child.txt")).unwrap();
+        let marker: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(cleanup::owned_path(&dir, &waiter_id, generation.0)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(marker["launch_token"].as_str(), Some(args_token.trim()));
+        assert_eq!(marker["pid"].as_u64(), Some(0));
+        assert_eq!(
+            cleanup::replace_dead_owned_pid_with_intent(&dir, &waiter_id, generation.0)
+                .unwrap()
+                .is_some(),
+            true,
+            "a restarted controller can replace a token intent after its child exits"
+        );
+        assert_eq!(job_id.0, "job-1");
+        assert_eq!(
+            journal.materialized_state().unwrap().jobs[0].job_id,
+            job_id,
+            "the recovery child must not rewrite the provisional row before its probe"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -3427,6 +5234,47 @@ mod tests {
         .unwrap()
     }
 
+    fn ready_runner_config(exec: &DaemonArgs, slot_index: usize) -> config::StoredRunnerConfig {
+        config::StoredRunnerConfig {
+            settings: config::RunnerSettings {
+                github_url: exec.url.clone().unwrap_or_default(),
+                server_url: None,
+                server_url_v2: Some("https://run.example/v2".to_owned()),
+                pool_id: Some(exec.pool_id.unwrap_or(1)),
+                pool_name: exec.pool_name.clone(),
+                agent_id: Some(71),
+                agent_name: crate::runner::compose_github_runner_name(
+                    &crate::runner::github_runner_host_slug(),
+                    exec.name.as_deref().unwrap_or("local"),
+                    slot_index - 1,
+                ),
+                labels: crate::runner::normalize_labels(
+                    exec.labels.clone(),
+                    exec.target_mvp_labels,
+                    exec.target_mvp_arm_label,
+                ),
+                use_v2_flow: true,
+                ephemeral: true,
+                disable_update: true,
+            },
+            credentials: Some(config::StoredCredentials {
+                scheme: config::CredentialScheme::OAuthAccessToken,
+                data: json!({"token": "test-token"}),
+            }),
+        }
+    }
+
+    fn write_ready_runner_config(
+        state_dir: &Path,
+        exec: &DaemonArgs,
+        slot_index: usize,
+        slot_count: usize,
+    ) -> PathBuf {
+        let slot_dir = crate::runner::daemon_slot_config_dir(state_dir, slot_index, slot_count);
+        config::save(&slot_dir, &ready_runner_config(exec, slot_index)).unwrap();
+        slot_dir
+    }
+
     fn metrics_test_dir(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "velnor-controller-metrics-{label}-{}-{}",
@@ -3437,6 +5285,7 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        cleanup::initialize_owned_directory(&dir).unwrap();
         dir
     }
 
@@ -3451,7 +5300,16 @@ mod tests {
         assert_eq!((job_processes, waiter_processes), (2, 1));
 
         let dir = metrics_test_dir("active-jobs");
-        publish_controller_metrics(&dir, 1, 2, job_processes, waiter_processes, 7).unwrap();
+        publish_controller_metrics(
+            &dir,
+            1,
+            2,
+            job_processes,
+            waiter_processes,
+            7,
+            ReconcileTelemetry::default(),
+        )
+        .unwrap();
 
         let metrics: serde_json::Value =
             serde_json::from_slice(&std::fs::read(dir.join("controller-metrics.json")).unwrap())
@@ -3491,7 +5349,7 @@ mod tests {
             checksum = checksum.wrapping_add(value.rotate_left(7));
         }
         std::hint::black_box(checksum);
-        publish_controller_metrics(&dir, 1, 0, 0, 0, 1).unwrap();
+        publish_controller_metrics(&dir, 1, 0, 0, 0, 1, ReconcileTelemetry::default()).unwrap();
         let metrics: serde_json::Value =
             serde_json::from_slice(&std::fs::read(dir.join("controller-metrics.json")).unwrap())
                 .unwrap();
@@ -3565,32 +5423,26 @@ mod tests {
                 slot_id: SlotId("velnor-1".to_owned()),
                 generation: Generation::INITIAL,
             },
-            Event::JobAcquisitionIntended {
-                slot_id: SlotId("velnor-1".to_owned()),
-                job_id: JobId("job-1".to_owned()),
-                generation: Generation::INITIAL,
-                message_id: "msg-1".into(),
-                run_service_url: "https://run.example/run".into(),
-                intended_unix: 1_000,
-            },
-            Event::JobOwned {
-                job_id: JobId("job-1".to_owned()),
-                slot_id: SlotId("velnor-1".to_owned()),
-                attempt: 1,
-                generation: Generation::INITIAL,
-                worker: "worker-1".to_owned(),
-                accepted_unix: 1_234,
-            },
-            Event::JobStarted {
-                job_id: JobId("job-1".to_owned()),
-                generation: Generation::INITIAL,
-            },
         ] {
             assert!(!journal.apply(event).unwrap().rejected);
         }
+        prime_owned_job(
+            &mut journal,
+            &JobId("job-1".to_owned()),
+            &SlotId("velnor-1".to_owned()),
+            Generation::INITIAL,
+            "request-1",
+            None,
+        );
 
         let child = || Command::new("sleep").arg("5").spawn().unwrap();
-        let mut slots = HashMap::from([(String::from("velnor-1"), child())]);
+        let mut slots = HashMap::from([(
+            String::from("velnor-1"),
+            SlotChild {
+                generation: Generation::INITIAL,
+                child: child(),
+            },
+        )]);
         let mut jobs = HashMap::from([
             (String::from("job-1"), child()),
             (String::from("wait-velnor-1"), child()),
@@ -3603,7 +5455,8 @@ mod tests {
             &jobs,
             &SlotId("velnor-1".to_owned()),
             Generation::INITIAL,
-        ));
+        )
+        .unwrap());
         assert_eq!(
             job_child_keys_for_slot(&jobs, &state, &SlotId("velnor-1".to_owned())),
             vec!["job-1".to_owned(), "wait-velnor-1".to_owned()]
@@ -3779,13 +5632,14 @@ mod tests {
         let mut journal = Journal::open(dir.join("journal.db")).unwrap();
         journal.set_admission_blocked(4).unwrap();
         let lifecycle = drain_test_lifecycle(&dir, "primary", MutationKind::Uncordon);
-        rusqlite::Connection::open(dir.join("journal.db"))
-            .unwrap()
-            .execute(
+        with_journal_write_gate(&dir.join("journal.db"), |transaction| {
+            transaction.execute(
                 "UPDATE meta SET value = 'corrupt' WHERE key = 'admission'",
                 [],
-            )
-            .unwrap();
+            )?;
+            Ok(())
+        })
+        .unwrap();
 
         let error = reconcile_lifecycle_admission(&mut journal, Some(&lifecycle))
             .expect_err("corrupt admission marker must fail closed");
@@ -3887,7 +5741,13 @@ mod tests {
         assert!(!journal.materialized_state().unwrap().drain_active);
 
         let child = || Command::new("sleep").arg("30").spawn().unwrap();
-        let mut slots = HashMap::from([(String::from("velnor-1"), child())]);
+        let mut slots = HashMap::from([(
+            String::from("velnor-1"),
+            SlotChild {
+                generation: Generation::INITIAL,
+                child: child(),
+            },
+        )]);
         let mut jobs = HashMap::new();
         drain_children(&journal, &mut slots, &mut jobs)
             .await
@@ -3993,14 +5853,17 @@ mod tests {
     async fn metrics_publisher_synchronously_writes_the_final_snapshot() {
         let dir = metrics_test_dir("final-snapshot");
         let mut publisher = MetricsPublisher::start(&dir);
-        publisher.update(&HashMap::new(), &HashMap::new(), 42);
+        publisher.reconcile_completed(&HashMap::new(), &HashMap::new(), 42);
 
         publisher.stop_and_publish().await.unwrap();
 
         let metrics: serde_json::Value =
             serde_json::from_slice(&std::fs::read(dir.join("controller-metrics.json")).unwrap())
                 .unwrap();
-        assert_eq!(metrics["reconcile_duration_ms"]["p95"], json!(42));
+        assert_eq!(metrics["reconcile"]["last_wall_duration_ms"], json!(42));
+        assert_eq!(metrics["reconcile"]["completed_cycles"], json!(1));
+        assert_eq!(metrics["reconcile"]["wall_duration_ms_total"], json!(42));
+        assert!(metrics["cpu"]["controller_at_reconcile_boundary"]["user_us"].is_number());
         assert_eq!(
             metrics["sequence"].as_u64().unwrap(),
             publisher.state.lock().unwrap().sequence
@@ -4096,17 +5959,65 @@ mod tests {
         let state = FleetState::default();
         let children = HashMap::new();
         assert_eq!(
-            fenced_slot_recovery_generation(Some(&slot), &dir, &state, &children),
+            fenced_slot_recovery_generation(Some(&slot), &dir, &dir, &state, &children).unwrap(),
             None
         );
 
         slot.phase = SlotPhase2::Fenced;
         assert_eq!(
-            fenced_slot_recovery_generation(Some(&slot), &dir, &state, &children),
+            fenced_slot_recovery_generation(Some(&slot), &dir, &dir, &state, &children).unwrap(),
+            Some(Generation(slot.generation.0 + 1))
+        );
+        std::fs::write(
+            crate::runner::test_in_flight_job_path(&dir),
+            serde_json::to_vec(&json!({
+                "plan_id": "plan-1",
+                "job_id": "job-1",
+                "run_service_url": "https://run.example/run",
+                "billing_owner_id": null,
+                "runner_request_id": "request-1",
+                "generation": slot.generation.0,
+                "permit_holder": "native/request-1",
+                "permit_ledger": "/unused/permit-ledger.db",
+                "permit_generation": 1
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            fenced_slot_recovery_generation(Some(&slot), &dir, &dir, &state, &children).unwrap(),
+            None,
+            "the old marker fences generation rotation until terminal cleanup removes it"
+        );
+        std::fs::remove_file(crate::runner::test_in_flight_job_path(&dir)).unwrap();
+        let mut legacy_marker = serde_json::json!({
+            "plan_id": "plan-legacy",
+            "job_id": "job-legacy",
+            "run_service_url": "https://run.example/run",
+            "billing_owner_id": null,
+            "runner_request_id": "request-legacy",
+            "permit_holder": "native/request-legacy",
+            "permit_ledger": "/unused/permit-ledger.db",
+            "permit_generation": 1
+        });
+        legacy_marker.as_object_mut().unwrap().remove("generation");
+        std::fs::write(
+            crate::runner::test_in_flight_job_path(&dir),
+            serde_json::to_vec(&legacy_marker).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            fenced_slot_recovery_generation(Some(&slot), &dir, &dir, &state, &children).unwrap(),
+            None,
+            "even a legacy marker with unknown generation must fence advancement"
+        );
+        std::fs::remove_file(crate::runner::test_in_flight_job_path(&dir)).unwrap();
+        assert_eq!(
+            fenced_slot_recovery_generation(Some(&slot), &dir, &dir, &state, &children).unwrap(),
             Some(Generation(slot.generation.0 + 1))
         );
         assert_eq!(
-            fenced_slot_recovery_generation(None, &dir, &state, &children),
+            fenced_slot_recovery_generation(None, &dir, &dir, &state, &children).unwrap(),
             None
         );
         std::fs::remove_dir_all(dir).ok();
@@ -4121,16 +6032,10 @@ mod tests {
         let waiter = Command::new("sleep").arg("5").spawn().unwrap();
         let mut jobs = HashMap::from([(String::from("wait-velnor-1"), waiter)]);
 
-        assert!(slot_is_acting(
-            &dir,
-            &state,
-            &jobs,
-            &slot.slot_id,
-            slot.generation
-        ));
+        assert!(slot_is_acting(&dir, &state, &jobs, &slot.slot_id, slot.generation).unwrap());
         slot.phase = SlotPhase2::Fenced;
         assert_eq!(
-            fenced_slot_recovery_generation(Some(&slot), &dir, &state, &jobs),
+            fenced_slot_recovery_generation(Some(&slot), &dir, &dir, &state, &jobs).unwrap(),
             None,
             "a live waiter must not be skipped: it is why generation recovery deadlocks"
         );
@@ -4138,44 +6043,38 @@ mod tests {
         let _ = jobs.get_mut("wait-velnor-1").unwrap().kill();
         let _ = jobs.get_mut("wait-velnor-1").unwrap().wait();
         jobs.remove("wait-velnor-1");
-        assert!(!slot_is_acting(
-            &dir,
-            &state,
-            &jobs,
-            &slot.slot_id,
-            slot.generation
-        ));
+        assert!(!slot_is_acting(&dir, &state, &jobs, &slot.slot_id, slot.generation).unwrap());
         assert_eq!(
-            fenced_slot_recovery_generation(Some(&slot), &dir, &state, &jobs),
+            fenced_slot_recovery_generation(Some(&slot), &dir, &dir, &state, &jobs).unwrap(),
             Some(Generation(slot.generation.0 + 1))
         );
         std::fs::remove_dir_all(dir).ok();
     }
 
+    #[cfg(unix)]
     #[test]
     fn persisted_live_waiter_pid_blocks_acting_slot_after_controller_restart() {
         let dir = metrics_test_dir("persisted-waiter-restart");
         let mut slot = reserved_slot();
         let state = FleetState::default();
         let jobs = HashMap::<String, Child>::new();
-        let mut waiter = Command::new("sleep").arg("30").spawn().unwrap();
-        cleanup::write_owned_pid(&dir, "wait-velnor-1", slot.generation.0, waiter.id()).unwrap();
+        let mut waiter = spawn_tokenized_owned_process(&dir, "wait-velnor-1", slot.generation);
 
         assert!(
-            slot_is_acting(&dir, &state, &jobs, &slot.slot_id, slot.generation),
+            slot_is_acting(&dir, &state, &jobs, &slot.slot_id, slot.generation).unwrap(),
             "persisted waiter pid must count as acting with an empty jobs map"
         );
         slot.phase = SlotPhase2::Fenced;
         assert_eq!(
-            fenced_slot_recovery_generation(Some(&slot), &dir, &state, &jobs),
+            fenced_slot_recovery_generation(Some(&slot), &dir, &dir, &state, &jobs).unwrap(),
             None,
             "fencing must stay blocked while the persisted waiter pid is live"
         );
 
-        let _ = waiter.kill();
-        let _ = waiter.wait();
+        waiter.0.kill().unwrap();
+        let _ = waiter.0.wait();
         assert!(
-            !slot_is_acting(&dir, &state, &jobs, &slot.slot_id, slot.generation),
+            !slot_is_acting(&dir, &state, &jobs, &slot.slot_id, slot.generation).unwrap(),
             "dead persisted waiter must no longer block acting"
         );
         std::fs::remove_dir_all(dir).ok();
@@ -4216,9 +6115,42 @@ mod tests {
             "the waiter process itself must be gone, not just dropped from the map"
         );
         assert_eq!(
-            fenced_slot_recovery_generation(Some(&slot), &dir, &state, &jobs),
+            fenced_slot_recovery_generation(Some(&slot), &dir, &dir, &state, &jobs).unwrap(),
             Some(Generation(slot.generation.0 + 1))
         );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fencing_leaves_unrelated_pid_untouched() {
+        let dir = metrics_test_dir("fence-unrelated-pid");
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: true,
+            lifecycle: None,
+        };
+        let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let mut slot = reserved_slot();
+        slot.phase = SlotPhase2::Fenced;
+        slot.pid = Some(child.id());
+        let state = FleetState::default();
+        let mut slots = HashMap::new();
+        let mut jobs = HashMap::new();
+
+        terminate_fenced_slot_actor(&args, &mut slots, &mut jobs, &state, &slot.slot_id, &slot)
+            .await
+            .unwrap();
+
+        assert!(
+            prove::pid_is_alive(child.id()),
+            "a process without the exact slot argv must not receive the fence signal"
+        );
+        child.kill().unwrap();
+        child.wait().unwrap();
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -4257,6 +6189,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn live_waiter_marker_is_not_hidden_by_stale_job_marker() {
         let dir = std::env::temp_dir().join(format!(
@@ -4268,16 +6201,7 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-
-        let mut stale_worker = std::process::Command::new(std::env::current_exe().unwrap())
-            .arg("--list")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
-        let stale_pid = stale_worker.id();
-        assert!(stale_worker.wait().unwrap().success());
-        assert!(!prove::pid_is_alive(stale_pid));
+        cleanup::initialize_owned_directory(&dir).unwrap();
 
         let mut journal = Journal::open(dir.join("journal.db")).unwrap();
         for event in [
@@ -4315,37 +6239,20 @@ mod tests {
                 slot_id: SlotId("velnor-1".to_owned()),
                 generation: Generation::INITIAL,
             },
-            Event::JobAcquisitionIntended {
-                slot_id: SlotId("velnor-1".to_owned()),
-                job_id: JobId("job-1".to_owned()),
-                generation: Generation::INITIAL,
-                message_id: "msg-1".into(),
-                run_service_url: "https://run.example/run".into(),
-                intended_unix: 1_000,
-            },
-            Event::JobOwned {
-                job_id: JobId("job-1".to_owned()),
-                slot_id: SlotId("velnor-1".to_owned()),
-                attempt: 1,
-                generation: Generation::INITIAL,
-                worker: "worker-1".to_owned(),
-                accepted_unix: 1_234,
-            },
-            Event::JobStarted {
-                job_id: JobId("job-1".to_owned()),
-                generation: Generation::INITIAL,
-            },
         ] {
             assert!(!journal.apply(event).unwrap().rejected);
         }
-        cleanup::write_owned_pid(&dir, "job-1", Generation::INITIAL.0, stale_pid).unwrap();
-        cleanup::write_owned_pid(
-            &dir,
-            "wait-velnor-1",
-            Generation::INITIAL.0,
-            std::process::id(),
-        )
-        .unwrap();
+        prime_owned_job(
+            &mut journal,
+            &JobId("job-1".to_owned()),
+            &SlotId("velnor-1".to_owned()),
+            Generation::INITIAL,
+            "request-1",
+            None,
+        );
+        write_dead_published_owned_process(&dir, "job-1", Generation::INITIAL);
+        let mut live_waiter =
+            spawn_tokenized_owned_process(&dir, "wait-velnor-1", Generation::INITIAL);
 
         let args = ControllerArgs {
             state_dir: dir.clone(),
@@ -4373,6 +6280,8 @@ mod tests {
             .unwrap();
         assert_eq!(job.phase, JobPhase2::Running);
 
+        let _ = live_waiter.0.kill();
+        let _ = live_waiter.0.wait();
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -4380,6 +6289,7 @@ mod tests {
     /// dead, plus an exec config whose two-slot layout maps `velnor-1` to
     /// `slots/slot-1`. With `backend`, the state dir also selects that
     /// execution backend; without it no `execution.toml` exists.
+    #[cfg(unix)]
     fn stale_running_job_fixture(label: &str, backend: Option<&str>) -> (PathBuf, Journal) {
         let dir = std::env::temp_dir().join(format!(
             "velnor-orphan-{label}-{}-{}",
@@ -4390,6 +6300,7 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        cleanup::initialize_owned_directory(&dir).unwrap();
         if let Some(backend) = backend {
             std::fs::write(
                 dir.join("execution.toml"),
@@ -4399,6 +6310,11 @@ mod tests {
         }
         write_exec_config(&dir, &dummy_exec("https://github.com/tailrocks/fixture"), 2).unwrap();
         let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let slot_id = SlotId("velnor-1".to_owned());
+        let job_id = JobId("job-1".to_owned());
+        let generation = Generation::INITIAL;
+        let runner_request_id = "request-1";
+        let permit_lease = test_native_permit_lease(runner_request_id);
         for event in [
             Event::ControlLive,
             Event::JournalWritable,
@@ -4434,35 +6350,385 @@ mod tests {
                 slot_id: SlotId("velnor-1".to_owned()),
                 generation: Generation::INITIAL,
             },
-            Event::JobAcquisitionIntended {
-                slot_id: SlotId("velnor-1".to_owned()),
-                job_id: JobId("job-1".to_owned()),
-                generation: Generation::INITIAL,
-                message_id: "msg-1".into(),
-                run_service_url: "https://run.example/run".into(),
-                intended_unix: 1_000,
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+        prime_owned_job(
+            &mut journal,
+            &job_id,
+            &slot_id,
+            generation,
+            runner_request_id,
+            Some(permit_lease),
+        );
+        write_dead_published_owned_process(&dir, "job-1", generation);
+        write_dead_published_owned_process(&dir, "wait-velnor-1", generation);
+        (dir, journal)
+    }
+
+    fn remote_ack_stale_running_job(journal: &mut Journal) {
+        let job_id = JobId("job-1".to_owned());
+        let generation = Generation::INITIAL;
+        for event in [
+            Event::JobTerminalResult {
+                job_id: job_id.clone(),
+                generation,
+                conclusion: "success".to_owned(),
             },
-            Event::JobOwned {
-                job_id: JobId("job-1".to_owned()),
-                slot_id: SlotId("velnor-1".to_owned()),
-                attempt: 1,
-                generation: Generation::INITIAL,
-                worker: "worker-1".to_owned(),
-                accepted_unix: 1_234,
+            Event::CompletionIntended {
+                job_id: job_id.clone(),
+                generation,
+                payload_sha256: velnor_control::journal::payload_checksum(b"payload"),
             },
-            Event::JobStarted {
-                job_id: JobId("job-1".to_owned()),
-                generation: Generation::INITIAL,
+            Event::CompletionSendStarted {
+                job_id: job_id.clone(),
+                generation,
+            },
+            Event::RemoteAcked { job_id, generation },
+        ] {
+            assert!(!journal.apply(event).unwrap().rejected);
+        }
+    }
+
+    fn write_remote_acked_in_flight_marker(slot_dir: &Path) -> PathBuf {
+        write_in_flight_job_marker(slot_dir, "job-1", "request-1", Generation::INITIAL)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remote_acked_marker_still_defers_to_live_worker_or_waiter() {
+        for live_owner in ["job-1", "wait-velnor-1"] {
+            let (dir, mut journal) = stale_running_job_fixture("acked-live-owner", Some("docker"));
+            remote_ack_stale_running_job(&mut journal);
+            let slot_dir = dir.join("slots").join("slot-1");
+            let marker = write_remote_acked_in_flight_marker(&slot_dir);
+            std::fs::remove_file(cleanup::owned_path(&dir, live_owner, Generation::INITIAL.0))
+                .unwrap();
+            let mut live_process =
+                spawn_tokenized_owned_process(&dir, live_owner, Generation::INITIAL);
+
+            reclaim_orphaned_jobs(
+                &controller_test_args(dir.clone()),
+                &mut journal,
+                tokio::time::Instant::now() + Duration::from_secs(15),
+                true,
+                |docker_args| panic!("live owner must defer teardown: {docker_args:?}"),
+            )
+            .await
+            .unwrap();
+
+            assert!(marker.exists(), "live {live_owner} must keep the marker");
+            let _ = live_process.0.kill();
+            let _ = live_process.0.wait();
+            std::fs::remove_dir_all(dir).ok();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remote_acked_marker_requires_worker_death_evidence() {
+        let (dir, mut journal) = stale_running_job_fixture("acked-no-worker-pid", Some("docker"));
+        remote_ack_stale_running_job(&mut journal);
+        let slot_dir = dir.join("slots").join("slot-1");
+        let marker = write_remote_acked_in_flight_marker(&slot_dir);
+        std::fs::remove_file(cleanup::owned_path(&dir, "job-1", Generation::INITIAL.0)).unwrap();
+        std::fs::remove_file(cleanup::owned_path(
+            &dir,
+            "wait-velnor-1",
+            Generation::INITIAL.0,
+        ))
+        .unwrap();
+
+        let error = reclaim_orphaned_jobs(
+            &controller_test_args(dir.clone()),
+            &mut journal,
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            true,
+            |docker_args| panic!("missing worker proof must defer teardown: {docker_args:?}"),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("has unknown worker or waiter ownership"),
+            "{error:#}"
+        );
+        assert!(marker.exists(), "missing owner evidence retains the marker");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_remote_acked_marker_without_generation_fails_closed() {
+        let (dir, mut journal) =
+            stale_running_job_fixture("acked-legacy-generation", Some("docker"));
+        remote_ack_stale_running_job(&mut journal);
+        let slot_dir = dir.join("slots").join("slot-1");
+        let marker = write_remote_acked_in_flight_marker(&slot_dir);
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+        record.as_object_mut().unwrap().remove("generation");
+        std::fs::write(&marker, serde_json::to_vec(&record).unwrap()).unwrap();
+
+        let error = reclaim_orphaned_jobs(
+            &controller_test_args(dir.clone()),
+            &mut journal,
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            true,
+            |docker_args| panic!("unknown marker generation must defer teardown: {docker_args:?}"),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("has no recorded generation"));
+        assert!(marker.exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remote_acked_marker_uses_its_recorded_generation_after_slot_rotation() {
+        let (dir, mut journal) = stale_running_job_fixture("acked-old-generation", Some("docker"));
+        remote_ack_stale_running_job(&mut journal);
+        let slot_id = SlotId("velnor-1".to_owned());
+        assert!(
+            !journal
+                .apply(Event::PermitReserved {
+                    slot_id,
+                    generation: Generation::INITIAL.next(),
+                })
+                .unwrap()
+                .rejected
+        );
+        let slot_dir = dir.join("slots").join("slot-1");
+        let marker = write_remote_acked_in_flight_marker(&slot_dir);
+        cleanup::write_outbox(&dir, "job-1", Generation::INITIAL.0, b"old-generation").unwrap();
+        cleanup::write_outbox(
+            &dir,
+            "job-1",
+            Generation::INITIAL.next().0,
+            b"new-generation",
+        )
+        .unwrap();
+        let teardown_marker = marker.clone();
+        let cleanup_marker_path = marker.clone();
+        let cleanup_state_dir = dir.clone();
+
+        reclaim_orphaned_jobs_with_marker_cleanup(
+            &controller_test_args(dir.clone()),
+            &mut journal,
+            &HashMap::new(),
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            true,
+            move |_docker_args| {
+                assert!(
+                    teardown_marker.exists(),
+                    "teardown must precede marker cleanup"
+                );
+                Ok(String::new())
+            },
+            move |slot_dir, record| {
+                assert_eq!(record.job_id(), "job-1");
+                assert_eq!(record.generation(), Some(Generation::INITIAL.0));
+                assert!(cleanup_marker_path.exists());
+                cleanup::remove_outbox(
+                    &cleanup_state_dir,
+                    record.job_id(),
+                    record.generation().unwrap(),
+                )?;
+                std::fs::remove_file(crate::runner::test_in_flight_job_path(slot_dir))?;
+                Ok(true)
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(!marker.exists());
+        assert!(
+            !cleanup::outbox_path(&dir, "job-1", Generation::INITIAL.0).exists(),
+            "marker cleanup removes only the outbox for its recorded generation"
+        );
+        assert_eq!(
+            std::fs::read(cleanup::outbox_path(
+                &dir,
+                "job-1",
+                Generation::INITIAL.next().0
+            ))
+            .unwrap(),
+            b"new-generation",
+            "a newer generation's outbox must be untouched"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn marker_only_cleanup_rejects_same_job_generation_with_replaced_permit_identity() {
+        let (dir, mut journal) = stale_running_job_fixture("acked-replaced-marker", Some("docker"));
+        remote_ack_stale_running_job(&mut journal);
+        let slot_dir = dir.join("slots").join("slot-1");
+        let marker = write_remote_acked_in_flight_marker(&slot_dir);
+        let marker_for_teardown = marker.clone();
+        let marker_for_assertion = marker.clone();
+
+        let error = reclaim_orphaned_jobs_with_marker_cleanup(
+            &controller_test_args(dir.clone()),
+            &mut journal,
+            &HashMap::new(),
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            true,
+            move |_docker_args| {
+                let mut record: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&marker_for_teardown)?)?;
+                let object = record.as_object_mut().unwrap();
+                object.insert("runner_request_id".into(), json!("replacement-request"));
+                object.insert("permit_holder".into(), json!("native/replacement-request"));
+                object.insert("permit_generation".into(), json!(2));
+                std::fs::write(&marker_for_teardown, serde_json::to_vec(&record)?)?;
+                Ok(String::new())
+            },
+            |slot_dir, record| {
+                assert_eq!(record.job_id(), "job-1");
+                assert_eq!(record.generation(), Some(Generation::INITIAL.0));
+                crate::runner::cleanup_recorded_in_flight_job_for_record(slot_dir, record)
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("marker changed before terminal cleanup"));
+        let replacement: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&marker_for_assertion).unwrap()).unwrap();
+        assert_eq!(replacement["runner_request_id"], "replacement-request");
+        assert_eq!(replacement["permit_generation"], 2);
+        assert!(
+            marker_for_assertion.exists(),
+            "replacement marker must remain for its owner"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn remote_acked_dead_owner_teardown_precedes_marker_cleanup() {
+        let (dir, mut journal) = stale_running_job_fixture("acked-dead-owner", Some("docker"));
+        remote_ack_stale_running_job(&mut journal);
+        let slot_dir = dir.join("slots").join("slot-1");
+        let marker = write_remote_acked_in_flight_marker(&slot_dir);
+        let teardown_marker = marker.clone();
+        let cleanup_marker_path = marker.clone();
+        let docker_calls = Arc::new(Mutex::new(0usize));
+        let recorded_docker_calls = docker_calls.clone();
+
+        reclaim_orphaned_jobs_with_marker_cleanup(
+            &controller_test_args(dir.clone()),
+            &mut journal,
+            &HashMap::new(),
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            true,
+            move |_docker_args| {
+                *recorded_docker_calls.lock().unwrap() += 1;
+                assert!(teardown_marker.exists(), "marker cleared before teardown");
+                Ok(String::new())
+            },
+            move |slot_dir, record| {
+                assert_eq!(record.job_id(), "job-1");
+                assert_eq!(record.generation(), Some(Generation::INITIAL.0));
+                assert!(
+                    cleanup_marker_path.exists(),
+                    "marker absent before local cleanup"
+                );
+                std::fs::remove_file(crate::runner::test_in_flight_job_path(slot_dir))?;
+                Ok(true)
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            *docker_calls.lock().unwrap() > 0,
+            "dead owner containers must be inspected"
+        );
+        assert!(!marker.exists(), "successful cleanup removes the marker");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn locally_abandoned_completion_cleans_marker_without_remote_replay() {
+        let (dir, mut journal) = stale_running_job_fixture("payload-lost-marker", Some("docker"));
+        let job_id = JobId("job-1".to_owned());
+        let generation = Generation::INITIAL;
+        let checksum = velnor_control::journal::payload_checksum(b"payload");
+        for event in [
+            Event::JobTerminalResult {
+                job_id: job_id.clone(),
+                generation,
+                conclusion: "success".to_owned(),
+            },
+            Event::CompletionIntended {
+                job_id: job_id.clone(),
+                generation,
+                payload_sha256: checksum.clone(),
             },
         ] {
             assert!(!journal.apply(event).unwrap().rejected);
         }
-        cleanup::write_owned_pid(&dir, "job-1", Generation::INITIAL.0, stale_pid()).unwrap();
-        cleanup::write_owned_pid(&dir, "wait-velnor-1", Generation::INITIAL.0, stale_pid())
-            .unwrap();
-        (dir, journal)
+        preserve_outbox(
+            &controller_test_args(dir.clone()),
+            &mut journal,
+            &job_id,
+            generation,
+            &checksum,
+        )
+        .unwrap();
+        assert!(journal.materialized_state().unwrap().jobs.is_empty());
+        assert!(!journal
+            .has_remote_terminal_ack(&job_id, generation)
+            .unwrap());
+        assert_eq!(
+            journal.unresolvable_completions().unwrap()[0].job_id,
+            job_id,
+            "payload-loss evidence must be the exact durable terminal proof"
+        );
+
+        let slot_dir = dir.join("slots").join("slot-1");
+        let marker = write_remote_acked_in_flight_marker(&slot_dir);
+        let marker_for_teardown = marker.clone();
+        let marker_for_cleanup = marker.clone();
+        let cleanup_called = Arc::new(AtomicBool::new(false));
+        let cleanup_called_by_callback = cleanup_called.clone();
+        reclaim_orphaned_jobs_with_marker_cleanup(
+            &controller_test_args(dir.clone()),
+            &mut journal,
+            &HashMap::new(),
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            true,
+            move |_docker_args| {
+                assert!(marker_for_teardown.exists());
+                Ok(String::new())
+            },
+            move |slot_dir, record| {
+                assert_eq!(record.job_id(), "job-1");
+                assert_eq!(record.generation(), Some(generation.0));
+                assert!(marker_for_cleanup.exists(), "teardown must precede cleanup");
+                cleanup_called_by_callback.store(true, Ordering::Relaxed);
+                std::fs::remove_file(crate::runner::test_in_flight_job_path(slot_dir))?;
+                Ok(true)
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(cleanup_called.load(Ordering::Relaxed));
+        assert!(!marker.exists());
+        std::fs::remove_dir_all(dir).ok();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn stale_recovery_force_removes_containers_before_restoring_slot() {
         let (dir, mut journal) = stale_running_job_fixture("teardown", Some("docker"));
@@ -4529,6 +6795,44 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stale_running_job_recovers_with_dead_waiter_and_absent_job_marker() {
+        let (dir, journal) = stale_running_job_fixture("waiter-owner-no-job-marker", None);
+        let job_id = JobId("job-1".to_owned());
+        let generation = Generation::INITIAL;
+        std::fs::remove_file(cleanup::owned_path(&dir, &job_id.0, generation.0)).unwrap();
+        assert_eq!(
+            cleanup::owned_pid_liveness(&dir, &job_id.0, generation.0).unwrap(),
+            cleanup::OwnedPidLiveness::Absent
+        );
+        assert_eq!(
+            cleanup::owned_pid_liveness(&dir, "wait-velnor-1", generation.0).unwrap(),
+            cleanup::OwnedPidLiveness::Dead
+        );
+        // Reopen the durable journal as a fresh controller process would.
+        drop(journal);
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+
+        reclaim_orphaned_jobs(
+            &controller_test_args(dir.clone()),
+            &mut journal,
+            tokio::time::Instant::now() + Duration::from_secs(15),
+            false,
+            |docker_args| {
+                panic!("docker must not be invoked without docker backend: {docker_args:?}")
+            },
+        )
+        .await
+        .unwrap();
+
+        let state = journal.materialized_state().unwrap();
+        assert!(state.jobs.iter().all(|job| job.job_id != job_id));
+        assert_eq!(state.slots[0].phase, SlotPhase2::Ready);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn stale_recovery_without_docker_backend_restores_slot_without_docker() {
         let (dir, mut journal) = stale_running_job_fixture("no-backend", None);
@@ -4570,6 +6874,7 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn stale_recovery_on_microvm_backend_restores_slot_without_docker() {
         let (dir, mut journal) = stale_running_job_fixture("microvm", Some("microvm"));
@@ -4615,6 +6920,7 @@ mod tests {
     /// the job row, so the slot returns to Ready through the row-gone branch.
     /// The dead worker's containers must still be torn down on that path.
     #[cfg(feature = "test-support")]
+    #[cfg(unix)]
     #[tokio::test]
     async fn stale_recovery_marker_success_tears_down_containers_before_ready() {
         let transport_guard = crate::test_support::github_http_transport_env().await;
@@ -4633,18 +6939,13 @@ mod tests {
         // the process-wide sink, which the daemon installs at startup.
         crate::ops::init_at("test-instance".to_owned(), Some(&dir.join("state.db"))).unwrap();
         let slot_dir = dir.join("slots").join("slot-1");
-        std::fs::create_dir_all(&slot_dir).unwrap();
-        std::fs::write(
-            slot_dir.join("in-flight-job.json"),
-            serde_json::to_vec(&json!({
-                "plan_id": "plan-1",
-                "job_id": "job-1",
-                "run_service_url": run_service_url,
-                "billing_owner_id": null
-            }))
-            .unwrap(),
-        )
-        .unwrap();
+        write_in_flight_job_marker_with_url(
+            &slot_dir,
+            "job-1",
+            "request-1",
+            Generation::INITIAL,
+            &run_service_url,
+        );
         config::save(
             &slot_dir,
             &config::StoredRunnerConfig {
@@ -4739,6 +7040,7 @@ mod tests {
     /// restores the slot to Ready. The dead worker's containers must be torn
     /// down on that abandon path, not stranded behind Ready. Replay fails on
     /// the missing outbox payload before any network, so no mock is needed.
+    #[cfg(unix)]
     #[tokio::test]
     async fn stale_recovery_budget_spent_abandon_tears_down_containers() {
         let (dir, mut journal) = stale_running_job_fixture("budget-spent", Some("docker"));
@@ -4787,18 +7089,13 @@ mod tests {
             );
         }
         let slot_dir = dir.join("slots").join("slot-1");
-        std::fs::create_dir_all(&slot_dir).unwrap();
-        std::fs::write(
-            slot_dir.join("in-flight-job.json"),
-            serde_json::to_vec(&json!({
-                "plan_id": "plan-1",
-                "job_id": "job-1",
-                "run_service_url": "https://example.invalid/run-service",
-                "billing_owner_id": null
-            }))
-            .unwrap(),
-        )
-        .unwrap();
+        write_in_flight_job_marker_with_url(
+            &slot_dir,
+            "job-1",
+            "request-1",
+            generation,
+            "https://example.invalid/run-service",
+        );
         config::save(
             &slot_dir,
             &config::StoredRunnerConfig {
@@ -4942,21 +7239,11 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        cleanup::initialize_owned_directory(&dir).unwrap();
         let journal = ready_slot_journal(&dir);
         write_exec_config(&dir, &dummy_exec("https://github.com/tailrocks/fixture"), 2).unwrap();
         let slot_dir = dir.join("slots").join("slot-1");
-        std::fs::create_dir_all(&slot_dir).unwrap();
-        std::fs::write(
-            slot_dir.join("in-flight-job.json"),
-            serde_json::to_vec(&json!({
-                "plan_id": "plan-1",
-                "job_id": "job-9",
-                "run_service_url": "https://example.invalid/run-service",
-                "billing_owner_id": null
-            }))
-            .unwrap(),
-        )
-        .unwrap();
+        write_in_flight_job_marker(&slot_dir, "job-9", "request-9", Generation::INITIAL);
         (dir, journal, slot_dir)
     }
 
@@ -4980,15 +7267,86 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    #[test]
+    fn persisted_ready_slot_with_absent_waiter_marker_respawns_from_exact_config() {
+        let dir = metrics_test_dir("ready-waiter-absent-marker");
+        let journal = ready_slot_journal(&dir);
+        let exec = dummy_exec("https://github.com/tailrocks/fixture");
+        write_exec_config(&dir, &exec, 2).unwrap();
+        write_ready_runner_config(&dir, &exec, 1, 2);
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: true,
+            lifecycle: None,
+        };
+        let mut jobs = HashMap::new();
+        let mut spawn_calls = 0;
+
+        spawn_ready_waiters_with(
+            &args,
+            &journal,
+            &mut jobs,
+            |_, _, _, job_id, generation, slot_id, recovery_only| {
+                spawn_calls += 1;
+                assert_eq!(job_id, "wait-velnor-1");
+                assert_eq!(generation, Generation::INITIAL.0);
+                assert_eq!(slot_id, Some(&SlotId("velnor-1".to_owned())));
+                assert!(!recovery_only);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(spawn_calls, 1, "a proven Ready registration needs a waiter");
+        assert!(jobs.is_empty(), "the injected spawn callback owns no child");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn persisted_ready_slot_with_drifted_config_does_not_respawn() {
+        let dir = metrics_test_dir("ready-waiter-drifted-config");
+        let journal = ready_slot_journal(&dir);
+        let exec = dummy_exec("https://github.com/tailrocks/fixture");
+        write_exec_config(&dir, &exec, 2).unwrap();
+        let slot_dir = crate::runner::daemon_slot_config_dir(&dir, 1, 2);
+        let mut stored = ready_runner_config(&exec, 1);
+        stored.settings.agent_name.push_str("-stale");
+        config::save(&slot_dir, &stored).unwrap();
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: true,
+            lifecycle: None,
+        };
+        let mut jobs = HashMap::new();
+
+        spawn_ready_waiters_with(&args, &journal, &mut jobs, |_, _, _, _, _, _, _| {
+            panic!("drifted JIT identity must prevent waiter respawn")
+        })
+        .unwrap();
+
+        assert!(jobs.is_empty());
+        assert!(
+            !cleanup::owned_path(&dir, "wait-velnor-1", Generation::INITIAL.0).exists(),
+            "failed identity proof must not publish a new waiter owner"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[cfg(unix)]
     #[test]
     fn ready_waiters_are_not_spawned_while_a_persisted_waiter_pid_lives() {
         let dir = metrics_test_dir("ready-waiter-live-pid");
         let journal = ready_slot_journal(&dir);
-        write_exec_config(&dir, &dummy_exec("https://github.com/tailrocks/fixture"), 1).unwrap();
-        let mut waiter = Command::new("sleep").arg("30").spawn().unwrap();
-        cleanup::write_owned_pid(&dir, "wait-velnor-1", Generation::INITIAL.0, waiter.id())
-            .unwrap();
+        let exec = dummy_exec("https://github.com/tailrocks/fixture");
+        write_exec_config(&dir, &exec, 1).unwrap();
+        write_ready_runner_config(&dir, &exec, 1, 1);
+        let _waiter = spawn_tokenized_owned_process(&dir, "wait-velnor-1", Generation::INITIAL);
         let args = ControllerArgs {
             state_dir: dir.clone(),
             scope: "velnor".to_owned(),
@@ -5003,24 +7361,62 @@ mod tests {
             jobs.is_empty(),
             "a live waiter pid after controller restart must keep the slot unspawnable"
         );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ready_waiters_are_not_spawned_while_a_persisted_waiter_intent_lives() {
+        let dir = metrics_test_dir("ready-waiter-live-intent");
+        let journal = ready_slot_journal(&dir);
+        let exec = dummy_exec("https://github.com/tailrocks/fixture");
+        write_exec_config(&dir, &exec, 1).unwrap();
+        write_ready_runner_config(&dir, &exec, 1, 1);
+        cleanup::initialize_owned_directory(&dir).unwrap();
+        let mut waiter = cleanup::with_dead_owned_pid_intent(
+            &dir,
+            "wait-velnor-1",
+            Generation::INITIAL.0,
+            |launch_token| {
+                let launch_argument = format!("--launch-token={launch_token}");
+                Command::new("/bin/sh")
+                    .args([
+                        "-c",
+                        "trap 'exit 0' TERM INT; while :; do sleep 1; done",
+                        "velnor-controller-waiter-fixture",
+                        &launch_argument,
+                    ])
+                    .spawn()
+                    .map_err(anyhow::Error::from)
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            cleanup::owned_pid_liveness(&dir, "wait-velnor-1", Generation::INITIAL.0).unwrap(),
+            cleanup::OwnedPidLiveness::UnpublishedIntentLive
+        );
+
+        let args = ControllerArgs {
+            state_dir: dir.clone(),
+            scope: "velnor".to_owned(),
+            desired_ready: 1,
+            once: true,
+            spawn_slots: true,
+            lifecycle: None,
+        };
+        let mut jobs = HashMap::new();
+        spawn_ready_waiters(&args, &journal, &mut jobs).unwrap();
+        assert!(
+            jobs.is_empty(),
+            "a live process carrying the durable launch token must block duplicate waiter spawn"
+        );
         let _ = waiter.kill();
         let _ = waiter.wait();
         std::fs::remove_dir_all(dir).ok();
     }
 
-    fn stale_pid() -> u32 {
-        let mut stale_worker = std::process::Command::new(std::env::current_exe().unwrap())
-            .arg("--list")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
-        let pid = stale_worker.id();
-        assert!(stale_worker.wait().unwrap().success());
-        assert!(!prove::pid_is_alive(pid));
-        pid
-    }
-
+    #[cfg(unix)]
     #[tokio::test]
     async fn marker_only_in_flight_job_defers_to_live_waiter_pid() {
         let (dir, mut journal, slot_dir) = marker_only_recovery_fixture("live-waiter");
@@ -5028,13 +7424,7 @@ mod tests {
         // journal admission, so ownership is still keyed `wait-{slot}` and no
         // `job-9` worker marker exists yet. Recovery must defer to the live
         // waiter instead of hard-erroring on the missing worker marker.
-        cleanup::write_owned_pid(
-            &dir,
-            "wait-velnor-1",
-            Generation::INITIAL.0,
-            std::process::id(),
-        )
-        .unwrap();
+        let _waiter = spawn_tokenized_owned_process(&dir, "wait-velnor-1", Generation::INITIAL);
 
         let args = ControllerArgs {
             state_dir: dir.clone(),
@@ -5055,17 +7445,25 @@ mod tests {
         .unwrap();
 
         assert!(
-            slot_dir.join("in-flight-job.json").exists(),
+            crate::runner::test_in_flight_job_path(&slot_dir).exists(),
             "live waiter must keep its in-flight marker for the next tick"
         );
         std::fs::remove_dir_all(dir).ok();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
-    async fn marker_only_in_flight_job_reclaims_once_worker_and_waiter_are_dead() {
+    async fn marker_only_in_flight_job_reclaims_with_dead_waiter_and_absent_job_marker() {
         let (dir, mut journal, _slot_dir) = marker_only_recovery_fixture("dead-waiter");
-        cleanup::write_owned_pid(&dir, "wait-velnor-1", Generation::INITIAL.0, stale_pid())
-            .unwrap();
+        write_dead_published_owned_process(&dir, "wait-velnor-1", Generation::INITIAL);
+        assert_eq!(
+            cleanup::owned_pid_liveness(&dir, "job-9", Generation::INITIAL.0).unwrap(),
+            cleanup::OwnedPidLiveness::Absent
+        );
+        assert_eq!(
+            cleanup::owned_pid_liveness(&dir, "wait-velnor-1", Generation::INITIAL.0).unwrap(),
+            cleanup::OwnedPidLiveness::Dead
+        );
 
         let args = ControllerArgs {
             state_dir: dir.clone(),
@@ -5084,8 +7482,9 @@ mod tests {
         )
         .await
         .unwrap_err();
-        // Both ownership markers are dead, so recovery advances past the
-        // ownership gate and stops only at the missing runner credentials.
+        // The production worker remains keyed by its waiter id, so the dead
+        // waiter marker alone proves owner death when no job-id marker exists.
+        // Recovery advances past the ownership gate and stops at credentials.
         assert!(
             error.to_string().contains(
                 "runner credentials missing while recovering marker-only in-flight job job-9"
@@ -5119,12 +7518,13 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("has no valid worker or waiter ownership pid"),
+                .contains("has unknown worker or waiter ownership"),
             "{error:#}"
         );
         std::fs::remove_dir_all(dir).ok();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn completing_job_without_payload_does_not_abort_orphan_reclaim() {
         let dir = metrics_test_dir("completing-no-payload-reclaim");
@@ -5178,39 +7578,25 @@ mod tests {
                 assert!(!journal.apply(event).unwrap().rejected);
             }
         }
-        for (slot_id, job_id, message_id) in [
+        for (slot_id, job_id, runner_request_id) in [
             (
                 completing_slot.clone(),
                 completing_job.clone(),
-                "msg-completing",
+                "request-completing",
             ),
-            (running_slot.clone(), running_job.clone(), "msg-running"),
+            (running_slot.clone(), running_job.clone(), "request-running"),
         ] {
-            for event in [
-                Event::JobAcquisitionIntended {
-                    slot_id: slot_id.clone(),
+            for event in owned_job_events(&job_id, &slot_id, generation, runner_request_id, None)
+                .into_iter()
+                .chain([Event::JobStarted {
                     job_id: job_id.clone(),
                     generation,
-                    message_id: message_id.into(),
-                    run_service_url: "https://run.example/run".into(),
-                    intended_unix: 1_000,
-                },
-                Event::JobOwned {
-                    job_id: job_id.clone(),
-                    slot_id: slot_id.clone(),
-                    attempt: 1,
-                    generation,
-                    worker: format!("worker-{}", job_id.0),
-                    accepted_unix: 1,
-                },
-                Event::JobStarted {
-                    job_id: job_id.clone(),
-                    generation,
-                },
-            ] {
+                }])
+            {
                 assert!(!journal.apply(event).unwrap().rejected);
             }
         }
+        cleanup::write_outbox(&dir, &completing_job.0, generation.0, b"payload").unwrap();
         assert!(
             !journal
                 .apply(Event::CompletionIntended {
@@ -5222,33 +7608,28 @@ mod tests {
                 .rejected
         );
         drop(journal);
-        rusqlite::Connection::open(dir.join("journal.db"))
-            .unwrap()
-            .execute("DELETE FROM outbox", [])
-            .unwrap();
+        // Exercise payload loss after the durable intent. Preserve the
+        // event-sourced outbox row; deleting that row would corrupt the
+        // journal projection instead of modeling a missing payload file.
+        std::fs::remove_file(cleanup::outbox_path(&dir, &completing_job.0, generation.0)).unwrap();
         let mut journal = Journal::open(dir.join("journal.db")).unwrap();
         write_exec_config(&dir, &dummy_exec("https://github.com/tailrocks/fixture"), 2).unwrap();
         let slot_dir = dir.join("slots").join("slot-1");
-        std::fs::create_dir_all(&slot_dir).unwrap();
-        std::fs::write(
-            slot_dir.join("in-flight-job.json"),
-            serde_json::to_vec(&json!({
-                "plan_id": "plan-1",
-                "job_id": completing_job.0,
-                "run_service_url": "https://example.invalid/run-service",
-                "billing_owner_id": null
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        let stale = stale_pid();
+        write_in_flight_job_marker_with_url_and_permit(
+            &slot_dir,
+            &completing_job.0,
+            "request-completing",
+            generation,
+            "https://example.invalid/run-service",
+            None,
+        );
         for isolation in [
             completing_job.0.as_str(),
             running_job.0.as_str(),
             "wait-velnor-1",
             "wait-velnor-2",
         ] {
-            cleanup::write_owned_pid(&dir, isolation, generation.0, stale).unwrap();
+            write_dead_published_owned_process(&dir, isolation, generation);
         }
 
         let args = ControllerArgs {
@@ -5293,6 +7674,7 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn completing_job_with_pending_outbox_does_not_reconstruct_after_replay_failure() {
         let dir = metrics_test_dir("completing-pending-outbox-no-reconstruct");
@@ -5346,36 +7728,21 @@ mod tests {
                 assert!(!journal.apply(event).unwrap().rejected);
             }
         }
-        for (slot_id, job_id, message_id) in [
+        for (slot_id, job_id, runner_request_id) in [
             (
                 completing_slot.clone(),
                 completing_job.clone(),
-                "msg-completing",
+                "request-completing",
             ),
-            (running_slot.clone(), running_job.clone(), "msg-running"),
+            (running_slot.clone(), running_job.clone(), "request-running"),
         ] {
-            for event in [
-                Event::JobAcquisitionIntended {
-                    slot_id: slot_id.clone(),
+            for event in owned_job_events(&job_id, &slot_id, generation, runner_request_id, None)
+                .into_iter()
+                .chain([Event::JobStarted {
                     job_id: job_id.clone(),
                     generation,
-                    message_id: message_id.into(),
-                    run_service_url: "https://run.example/run".into(),
-                    intended_unix: 1_000,
-                },
-                Event::JobOwned {
-                    job_id: job_id.clone(),
-                    slot_id: slot_id.clone(),
-                    attempt: 1,
-                    generation,
-                    worker: format!("worker-{}", job_id.0),
-                    accepted_unix: 1,
-                },
-                Event::JobStarted {
-                    job_id: job_id.clone(),
-                    generation,
-                },
-            ] {
+                }])
+            {
                 assert!(!journal.apply(event).unwrap().rejected);
             }
         }
@@ -5425,25 +7792,21 @@ mod tests {
             },
         )
         .unwrap();
-        std::fs::write(
-            slot_dir.join("in-flight-job.json"),
-            serde_json::to_vec(&json!({
-                "plan_id": "plan-1",
-                "job_id": completing_job.0,
-                "run_service_url": "https://example.invalid/run-service",
-                "billing_owner_id": null
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        let stale = stale_pid();
+        write_in_flight_job_marker_with_url_and_permit(
+            &slot_dir,
+            &completing_job.0,
+            "request-completing",
+            generation,
+            "https://example.invalid/run-service",
+            None,
+        );
         for isolation in [
             completing_job.0.as_str(),
             running_job.0.as_str(),
             "wait-velnor-1",
             "wait-velnor-2",
         ] {
-            cleanup::write_owned_pid(&dir, isolation, generation.0, stale).unwrap();
+            write_dead_published_owned_process(&dir, isolation, generation);
         }
 
         let args = ControllerArgs {
@@ -5484,7 +7847,7 @@ mod tests {
             payload
         );
         assert!(
-            slot_dir.join("in-flight-job.json").exists(),
+            crate::runner::test_in_flight_job_path(&slot_dir).exists(),
             "replay failure must not reconstruct or clear the in-flight marker"
         );
         assert!(
@@ -5594,29 +7957,17 @@ mod tests {
                 slot_id: SlotId("velnor-1".to_owned()),
                 generation: Generation::INITIAL,
             },
-            Event::JobAcquisitionIntended {
-                slot_id: SlotId("velnor-1".to_owned()),
-                job_id: JobId("job-1".to_owned()),
-                generation: Generation::INITIAL,
-                message_id: "msg-1".into(),
-                run_service_url: "https://run.example/run".into(),
-                intended_unix: 1_000,
-            },
-            Event::JobOwned {
-                job_id: JobId("job-1".to_owned()),
-                slot_id: SlotId("velnor-1".to_owned()),
-                attempt: 1,
-                generation: Generation::INITIAL,
-                worker: "worker-1".to_owned(),
-                accepted_unix: 1_234,
-            },
-            Event::JobStarted {
-                job_id: JobId("job-1".to_owned()),
-                generation: Generation::INITIAL,
-            },
         ] {
             assert!(!journal.apply(event).unwrap().rejected);
         }
+        prime_owned_job(
+            &mut journal,
+            &JobId("job-1".to_owned()),
+            &SlotId("velnor-1".to_owned()),
+            Generation::INITIAL,
+            "request-1",
+            Some(test_native_permit_lease("request-1")),
+        );
 
         let args = ControllerArgs {
             state_dir: dir.clone(),

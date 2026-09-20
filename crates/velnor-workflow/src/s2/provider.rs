@@ -136,6 +136,15 @@ pub(crate) struct ProviderSelector {
 /// Per-provider selectors keyed by provider ID.
 pub(crate) type SelectorMap = BTreeMap<ProviderId, ProviderSelector>;
 
+/// A GitHub-hosted image prefix cannot be used as a selector for
+/// caller-managed capacity: S2 policy treats these namespaces as hosted.
+pub(crate) fn is_github_hosted_image_label(label: &str) -> bool {
+    let normalized = label.trim().to_ascii_lowercase();
+    ["ubuntu-", "macos-", "windows-"]
+        .iter()
+        .any(|prefix| normalized.starts_with(prefix))
+}
+
 /// Parse `[workflow.selectors.<id>]` tables keyed by strict provider ID.
 pub(crate) fn parse_selectors(
     tables: &BTreeMap<String, ProviderSelector>,
@@ -156,6 +165,11 @@ pub(crate) fn parse_selectors(
             if label.is_empty() || label.chars().any(char::is_control) {
                 return Err(GeneratorError::usage(format!(
                     "[workflow.selectors.{key}] runs_on labels must be non-empty and contain no control characters"
+                )));
+            }
+            if provider.is_local() && is_github_hosted_image_label(label) {
+                return Err(GeneratorError::usage(format!(
+                    "[workflow.selectors.{provider}] runs_on label `{label}` uses a GitHub-hosted image prefix; local providers need Velnor-owned labels"
                 )));
             }
         }

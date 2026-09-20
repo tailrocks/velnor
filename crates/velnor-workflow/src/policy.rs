@@ -2294,16 +2294,28 @@ fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, Generat
         .and_then(|value| value.get("workflow"))
         .and_then(toml::Value::as_table);
     let generation_workflow = generation.as_ref().and_then(toml::Value::as_table);
-    let mut labels = toml_string_array(
+    let runtime_labels = toml_string_array(
         runtime_workflow.and_then(|workflow| workflow.get("velnor_labels")),
         "[workflow] velnor_labels",
     )?;
-    if labels.is_empty() {
-        labels = toml_string_array(
-            generation_workflow.and_then(|workflow| workflow.get("velnor_labels")),
-            "[workflow] velnor_labels",
-        )?;
+    let generation_labels = toml_string_array(
+        generation_workflow.and_then(|workflow| workflow.get("velnor_labels")),
+        "[workflow] velnor_labels",
+    )?;
+    if let Some(label) = runtime_labels
+        .iter()
+        .chain(&generation_labels)
+        .find(|label| crate::s2::provider::is_github_hosted_image_label(label))
+    {
+        return Err(GeneratorError::usage(format!(
+            "workflow policy rejected local Velnor label `{label}` because it uses a GitHub-hosted image prefix"
+        )));
     }
+    let labels = if runtime_labels.is_empty() {
+        generation_labels
+    } else {
+        runtime_labels
+    };
     let group = toml_string(
         generation_workflow.and_then(|workflow| workflow.get("velnor_runner_group")),
         "[workflow] velnor_runner_group",
@@ -2317,6 +2329,13 @@ fn configured_velnor_policy(root: &Path) -> Result<VelnorPolicyContract, Generat
         generation_workflow.and_then(|workflow| workflow.get("velnor_trusted_label")),
         "[workflow] velnor_trusted_label",
     )?;
+    if let Some(label) = velnor_trusted_label.as_deref()
+        && crate::s2::provider::is_github_hosted_image_label(label)
+    {
+        return Err(GeneratorError::usage(format!(
+            "workflow policy rejected trusted Velnor label `{label}` because it uses a GitHub-hosted image prefix"
+        )));
+    }
     let runners = runtime
         .as_ref()
         .and_then(|value| value.get("runners"))

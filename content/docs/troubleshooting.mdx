@@ -202,7 +202,9 @@ GitHub already considers the job terminal.
 If GitHub timed the job out while Velnor believed it finished, the entry was
 abandoned rather than acknowledged: its budget was spent, and the reason is in
 the journal's unresolvable completions. Outbox age will not show it, because
-that metric counts only pending entries.
+that metric counts only pending entries. Abandonment after transport retries
+does not prove GitHub never received the completion; check the GitHub job state
+and journal reason to distinguish a known refusal from an unconfirmed delivery.
 
 Do not delete completion/outbox evidence while diagnosing. It is the recovery
 proof that separates “posted,” “acknowledged,” and “cleaned up.”

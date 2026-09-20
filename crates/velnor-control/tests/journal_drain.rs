@@ -70,6 +70,7 @@ fn drain_marker_is_visible_across_handles_and_gates_the_second_writer() {
                 job_id: velnor_model::JobId("job-1".to_owned()),
                 generation,
                 message_id: "msg-1".to_owned(),
+                runner_request_id: None,
                 run_service_url: "https://run.example/run".to_owned(),
                 intended_unix: 1_000,
             })

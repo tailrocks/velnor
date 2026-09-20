@@ -30,6 +30,32 @@ fn must_fail<T, E>(result: Result<T, E>, context: &str) -> E {
     }
 }
 
+#[test]
+fn hosted_image_classification_is_case_insensitive_and_local_selectors_reject_it() {
+    for label in [
+        "ubuntu-24.04",
+        " UBUNTU-LATEST ",
+        "MacOs-26",
+        "WINDOWS-2025",
+    ] {
+        assert!(is_github_owned_label(label), "{label}");
+    }
+
+    let root = temporary_directory("hosted-label-selector");
+    write(
+        &root.join(".github-gen/velnor-workflow.toml"),
+        "[workflow]\nproviders = [\"github-hosted\", \"velnor\"]\n\
+         [workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n\
+         [workflow.selectors.velnor]\nruns_on = [\"self-hosted\", \"UbUnTu-26.04\"]\n",
+    );
+
+    let error = configured_velnor_policy(&root).unwrap_err().to_string();
+
+    assert!(error.contains("local provider `velnor`"), "{error}");
+    assert!(error.contains("UbUnTu-26.04"), "{error}");
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn temporary_directory(name: &str) -> PathBuf {
     let root = env::temp_dir().join(format!(
         "velnor-workflow-policy-{name}-{}",

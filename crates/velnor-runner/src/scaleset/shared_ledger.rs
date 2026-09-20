@@ -21,12 +21,13 @@ use std::path::Path;
 
 use velnor_control::permit_ledger::{
     AcquireOutcome as ControlAcquire, LedgerError as ControlError, PermitDemand,
-    PermitLane as ControlLane, PermitLedger, PermitState as ControlState,
-    ReconcileReport as ControlReport,
+    PermitDemandObservation as ControlDemandObservation, PermitLane as ControlLane, PermitLedger,
+    PermitState as ControlState, ReconcileReport as ControlReport,
 };
 
 use crate::scaleset::capacity::{
-    AcquireOutcome, CapacityLedger, LedgerHolder, LedgerLane, LedgerPermitState, ReconcileReport,
+    AcquireOutcome, CapacityLedger, LedgerDemandObservation, LedgerHolder, LedgerLane,
+    LedgerPermitState, ReconcileReport,
 };
 
 fn to_control_lane(lane: LedgerLane) -> ControlLane {
@@ -71,9 +72,10 @@ fn from_control_outcome(outcome: ControlAcquire) -> AcquireOutcome {
     match outcome {
         ControlAcquire::Acquired => AcquireOutcome::Acquired,
         ControlAcquire::AlreadyHeld => AcquireOutcome::AlreadyHeld,
-        ControlAcquire::Full | ControlAcquire::Deferred | ControlAcquire::Closed => {
-            AcquireOutcome::Full
-        }
+        ControlAcquire::Full
+        | ControlAcquire::Deferred
+        | ControlAcquire::NotReady
+        | ControlAcquire::Closed => AcquireOutcome::Full,
         ControlAcquire::StaleGeneration => AcquireOutcome::StaleGeneration,
         ControlAcquire::NotConfigured => AcquireOutcome::NotConfigured,
     }
@@ -141,19 +143,34 @@ impl SharedLedger {
 
     /// Release after confirmed retry/handoff cleanup while preserving the
     /// demand's original position in the global queue.
-    pub fn release_to_eligible(&mut self, holder: &str) -> Result<bool, ControlError> {
-        self.inner.release_to_eligible(holder)
+    pub fn release_to_eligible_if_generation(
+        &mut self,
+        holder: &str,
+        lease_generation: u64,
+    ) -> Result<bool, ControlError> {
+        self.inner
+            .release_to_eligible_if_generation(holder, lease_generation)
     }
 
     /// Release after confirmed upstream cancellation.
-    pub fn release_cancelled(&mut self, holder: &str) -> Result<bool, ControlError> {
-        self.inner.release_cancelled(holder)
+    pub fn release_cancelled_if_generation(
+        &mut self,
+        holder: &str,
+        lease_generation: u64,
+    ) -> Result<bool, ControlError> {
+        self.inner
+            .release_cancelled_if_generation(holder, lease_generation)
     }
 
     /// Keep occupancy after cleanup uncertainty and close the served demand
     /// in the same transaction.
-    pub fn retain_uncertain(&mut self, holder: &str, generation: u64) -> Result<(), ControlError> {
-        self.inner.retain_uncertain(holder, generation)
+    pub fn retain_uncertain_if_generation(
+        &mut self,
+        holder: &str,
+        lease_generation: u64,
+    ) -> Result<bool, ControlError> {
+        self.inner
+            .retain_uncertain_if_generation(holder, lease_generation)
     }
 }
 
@@ -182,6 +199,7 @@ impl CapacityLedger for SharedLedger {
                 lane: from_control_lane(holder.lane),
                 state: from_control_state(holder.state),
                 generation: holder.generation,
+                lease_generation: holder.lease_generation,
             })
             .collect())
     }
@@ -208,50 +226,169 @@ impl CapacityLedger for SharedLedger {
         Ok(())
     }
 
+    fn observe_demand_with_subsecond(
+        &mut self,
+        holder: &str,
+        lane: LedgerLane,
+        scope: &str,
+        first_seen_unix: u64,
+        first_seen_subsec_nanos: u32,
+        observed_unix: u64,
+    ) -> Result<(), Self::Error> {
+        self.inner.observe_demand_with_subsecond(
+            holder,
+            to_control_lane(lane),
+            scope,
+            first_seen_unix,
+            first_seen_subsec_nanos,
+            observed_unix,
+        )?;
+        Ok(())
+    }
+
+    fn observe_demands(
+        &mut self,
+        demands: &[LedgerDemandObservation],
+        observed_unix: u64,
+    ) -> Result<(), Self::Error> {
+        self.inner
+            .observe_demands(demands.iter().map(|demand| ControlDemandObservation {
+                holder: &demand.holder,
+                lane: to_control_lane(demand.lane),
+                scope: &demand.scope,
+                first_seen_unix: demand.first_seen_unix,
+                first_seen_subsec_nanos: demand.first_seen_subsec_nanos,
+                observed_unix,
+            }))?;
+        Ok(())
+    }
+
+    fn begin_scale_set_offer(
+        &mut self,
+        holder: &str,
+        scope: &str,
+        source_db: &Path,
+        generation: u64,
+        first_seen: Option<(u64, u32)>,
+        publication: &velnor_control::permit_ledger::ScaleSetDemandPublication,
+    ) -> Result<(u64, u32), Self::Error> {
+        // A previous attempt may have committed the global pending marker
+        // and then failed its local source write. Replay that marker before
+        // trying another publication so one transient SQLite failure cannot
+        // wedge shared admission until process restart.
+        let roster = velnor_control::permit_ledger::read_demand_source_roster(self.inner.path())?;
+        crate::runner::recover_pending_scale_set_publications(&mut self.inner, &roster)
+            .map_err(|error| ControlError::DemandSourcesUnready(format!("{error:#}")))?;
+        let demand = self.inner.begin_scale_set_offer(
+            holder,
+            scope,
+            source_db,
+            generation,
+            first_seen,
+            publication,
+        )?;
+        Ok((demand.first_seen_unix, demand.first_seen_subsec_nanos))
+    }
+
+    fn complete_scale_set_offer(
+        &mut self,
+        holder: &str,
+        source_db: &Path,
+        generation: u64,
+    ) -> Result<(), Self::Error> {
+        self.inner
+            .complete_scale_set_offer(holder, source_db, generation)
+    }
+
     fn cancel_demand(&mut self, holder: &str) -> Result<bool, Self::Error> {
         self.inner.cancel_demand(holder)
     }
 
-    fn acquire(
+    fn acquire_with_lease_generation(
         &mut self,
         holder: &str,
         lane: LedgerLane,
         state: LedgerPermitState,
         generation: u64,
-    ) -> Result<AcquireOutcome, Self::Error> {
-        Ok(from_control_outcome(self.inner.acquire(
+    ) -> Result<(AcquireOutcome, Option<u64>), Self::Error> {
+        let (outcome, lease_generation) = self.inner.acquire_with_lease_generation(
             holder,
             to_control_lane(lane),
             to_control_state(state),
             generation,
             None,
-        )?))
+            None,
+        )?;
+        Ok((from_control_outcome(outcome), lease_generation))
     }
 
-    fn transition(
+    fn transition_if_lease_generation(
         &mut self,
         holder: &str,
         state: LedgerPermitState,
-        generation: u64,
-    ) -> Result<(), Self::Error> {
+        expected_lease_generation: u64,
+    ) -> Result<bool, Self::Error> {
+        self.inner.transition_if_generation(
+            holder,
+            to_control_state(state),
+            expected_lease_generation,
+        )
+    }
+
+    fn permit_lease_generation(&self, holder: &str) -> Result<Option<u64>, Self::Error> {
+        self.inner.permit_lease_generation(holder)
+    }
+
+    fn release_if_generation(
+        &mut self,
+        holder: &str,
+        expected_lease_generation: u64,
+    ) -> Result<bool, Self::Error> {
         self.inner
-            .transition(holder, to_control_state(state), generation)
+            .release_if_generation(holder, expected_lease_generation)
     }
 
-    fn release(&mut self, holder: &str) -> Result<bool, Self::Error> {
-        self.inner.release(holder)
+    fn release_to_eligible_if_generation(
+        &mut self,
+        holder: &str,
+        expected_lease_generation: u64,
+    ) -> Result<bool, Self::Error> {
+        self.inner
+            .release_to_eligible_if_generation(holder, expected_lease_generation)
     }
 
-    fn release_to_eligible(&mut self, holder: &str) -> Result<bool, Self::Error> {
-        self.inner.release_to_eligible(holder)
+    fn release_cancelled_if_generation(
+        &mut self,
+        holder: &str,
+        expected_lease_generation: u64,
+    ) -> Result<bool, Self::Error> {
+        self.inner
+            .release_cancelled_if_generation(holder, expected_lease_generation)
     }
 
-    fn release_cancelled(&mut self, holder: &str) -> Result<bool, Self::Error> {
-        self.inner.release_cancelled(holder)
+    fn close_demand_if_unheld(
+        &mut self,
+        holder: &str,
+        state: crate::scaleset::capacity::LedgerDemandTerminalState,
+    ) -> Result<bool, Self::Error> {
+        let final_state = match state {
+            crate::scaleset::capacity::LedgerDemandTerminalState::Terminal => {
+                velnor_control::permit_ledger::DemandState::Terminal
+            }
+            crate::scaleset::capacity::LedgerDemandTerminalState::Cancelled => {
+                velnor_control::permit_ledger::DemandState::Cancelled
+            }
+        };
+        self.inner.close_demand_if_unheld(holder, final_state)
     }
 
-    fn retain_uncertain(&mut self, holder: &str, generation: u64) -> Result<(), Self::Error> {
-        self.inner.retain_uncertain(holder, generation)
+    fn retain_uncertain_if_generation(
+        &mut self,
+        holder: &str,
+        expected_lease_generation: u64,
+    ) -> Result<bool, Self::Error> {
+        self.inner
+            .retain_uncertain_if_generation(holder, expected_lease_generation)
     }
 
     fn reconcile(
@@ -267,8 +404,21 @@ impl CapacityLedger for SharedLedger {
         Ok(from_control_report(self.inner.reconcile(&attested)?))
     }
 
-    fn is_stale_generation(error: &Self::Error) -> bool {
-        matches!(error, ControlError::StaleGeneration { .. })
+    fn reconcile_host_sources(
+        &mut self,
+        expected_generation: u64,
+        required_demand_db: &Path,
+        _alive: &[(&str, LedgerLane, LedgerPermitState)],
+    ) -> Result<ReconcileReport, Self::Error> {
+        let roster = velnor_control::permit_ledger::read_demand_source_roster(self.inner.path())?;
+        let report = crate::runner::reconcile_host_permit_roster(
+            &mut self.inner,
+            &roster,
+            expected_generation,
+            Some(required_demand_db),
+        )
+        .map_err(|error| ControlError::DemandSourcesUnready(format!("{error:#}")))?;
+        Ok(from_control_report(report))
     }
 }
 
@@ -327,10 +477,12 @@ mod tests {
         let mut ledger = configured(&path, 1);
         assert_eq!(advertise_free(&ledger), 1);
         let generation = ledger.generation().unwrap();
-        let (outcome, _) = reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
+        let (outcome, _, lease) =
+            reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
         assert_eq!(outcome, ReserveOutcome::Reserved);
+        assert!(lease.is_some());
         assert_eq!(advertise_free(&ledger), 0);
-        let (full, _) = reserve_for_offer(&mut ledger, "scaleset/7/2", generation).unwrap();
+        let (full, _, _) = reserve_for_offer(&mut ledger, "scaleset/7/2", generation).unwrap();
         assert_eq!(full, ReserveOutcome::CapacityExhausted);
     }
 
@@ -339,10 +491,13 @@ mod tests {
         let path = temp_ledger_path("dup");
         let mut ledger = configured(&path, 1);
         let generation = ledger.generation().unwrap();
-        let (first, _) = reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
-        let (again, _) = reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
+        let (first, _, first_lease) =
+            reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
+        let (again, _, again_lease) =
+            reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
         assert_eq!(first, ReserveOutcome::Reserved);
         assert_eq!(again, ReserveOutcome::Reserved);
+        assert_eq!(first_lease, again_lease);
         assert_eq!(ledger.occupied().unwrap(), 1);
     }
 
@@ -352,15 +507,15 @@ mod tests {
         let mut ledger = configured(&path, 1);
         let generation = ledger.generation().unwrap();
         let native = ledger
-            .acquire(
+            .acquire_with_lease_generation(
                 "native/broker-9",
                 LedgerLane::Native,
                 LedgerPermitState::Running,
                 generation,
             )
             .unwrap();
-        assert_eq!(native, AcquireOutcome::Acquired);
-        let (outcome, _) = reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
+        assert_eq!(native.0, AcquireOutcome::Acquired);
+        let (outcome, _, _) = reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
         assert_eq!(outcome, ReserveOutcome::CapacityExhausted);
         let holders = ledger.holders().unwrap();
         assert_eq!(holders.len(), 1);
@@ -391,14 +546,14 @@ mod tests {
 
         assert_eq!(
             ledger
-                .acquire(
+                .acquire_with_lease_generation(
                     "scaleset/7/younger",
                     LedgerLane::ScaleSet,
                     LedgerPermitState::Reserved,
                     generation,
                 )
                 .unwrap(),
-            AcquireOutcome::Full
+            (AcquireOutcome::Full, None)
         );
         let raw = PermitLedger::open(&path).unwrap();
         assert_eq!(
@@ -407,28 +562,26 @@ mod tests {
         );
         drop(raw);
 
-        assert_eq!(
-            ledger
-                .acquire(
-                    "native/older",
-                    LedgerLane::Native,
-                    LedgerPermitState::Running,
-                    generation,
-                )
-                .unwrap(),
-            AcquireOutcome::Acquired
-        );
-        assert_eq!(
-            ledger
-                .acquire(
-                    "scaleset/7/younger",
-                    LedgerLane::ScaleSet,
-                    LedgerPermitState::Reserved,
-                    generation,
-                )
-                .unwrap(),
-            AcquireOutcome::Acquired
-        );
+        let (native_outcome, native_lease) = ledger
+            .acquire_with_lease_generation(
+                "native/older",
+                LedgerLane::Native,
+                LedgerPermitState::Running,
+                generation,
+            )
+            .unwrap();
+        assert_eq!(native_outcome, AcquireOutcome::Acquired);
+        assert!(native_lease.is_some());
+        let (scale_outcome, scale_lease) = ledger
+            .acquire_with_lease_generation(
+                "scaleset/7/younger",
+                LedgerLane::ScaleSet,
+                LedgerPermitState::Reserved,
+                generation,
+            )
+            .unwrap();
+        assert_eq!(scale_outcome, AcquireOutcome::Acquired);
+        assert!(scale_lease.is_some());
     }
 
     #[test]
@@ -438,15 +591,21 @@ mod tests {
         let stale = ledger.generation().unwrap();
         PermitLedger::open(&path).unwrap().begin_epoch().unwrap();
         // `reserve_for_offer` re-reads once and lands on the fresh epoch.
-        let (outcome, landed) = reserve_for_offer(&mut ledger, "scaleset/7/1", stale).unwrap();
+        let (outcome, landed, lease) =
+            reserve_for_offer(&mut ledger, "scaleset/7/1", stale).unwrap();
         assert_eq!(outcome, ReserveOutcome::Reserved);
         assert_eq!(landed, stale + 1);
-        // A raw fenced transition on the old epoch reports stale.
-        let mut raw = PermitLedger::open(&path).unwrap();
-        let error = raw
-            .transition("scaleset/7/1", ControlState::Running, stale)
-            .unwrap_err();
-        assert!(SharedLedger::is_stale_generation(&error));
+        let lease = lease.unwrap();
+        assert!(!ledger
+            .transition_if_lease_generation(
+                "scaleset/7/1",
+                LedgerPermitState::Running,
+                lease.saturating_sub(1),
+            )
+            .unwrap());
+        assert!(ledger
+            .transition_if_lease_generation("scaleset/7/1", LedgerPermitState::Running, lease,)
+            .unwrap());
     }
 
     #[test]
@@ -455,7 +614,7 @@ mod tests {
         let mut ledger = configured(&path, 4);
         let generation = ledger.generation().unwrap();
         ledger
-            .acquire(
+            .acquire_with_lease_generation(
                 "scaleset/7/1",
                 LedgerLane::ScaleSet,
                 LedgerPermitState::Running,
@@ -484,9 +643,10 @@ mod tests {
         let path = temp_ledger_path("release");
         let mut ledger = configured(&path, 1);
         let generation = ledger.generation().unwrap();
-        reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
-        assert!(ledger.release("scaleset/7/1").unwrap());
-        assert!(!ledger.release("scaleset/7/1").unwrap());
+        let (_, _, lease) = reserve_for_offer(&mut ledger, "scaleset/7/1", generation).unwrap();
+        let lease = lease.unwrap();
+        assert!(ledger.release_if_generation("scaleset/7/1", lease).unwrap());
+        assert!(ledger.release_if_generation("scaleset/7/1", lease).unwrap());
         assert_eq!(advertise_free(&ledger), 1);
     }
 

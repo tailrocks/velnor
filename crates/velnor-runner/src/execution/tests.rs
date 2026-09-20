@@ -257,6 +257,7 @@ fn superseded_docker_script_executor_paths_are_gone() {
     );
     let leftover = include_str!("../leftover_disk.rs");
     let cache = include_str!("../cache.rs");
+    let capacity = include_str!("../capacity.rs");
     assert!(
         leftover.contains("permits_host_docker_maintenance"),
         "disk-pressure reclaim must gate host Docker on selected backend"
@@ -278,8 +279,82 @@ fn superseded_docker_script_executor_paths_are_gone() {
         "doctor reclaim must skip host Docker unless docker is selected"
     );
     assert!(
-        runner.contains("reclaim_production_if_hard_pressure_for"),
-        "disk-pressure path must use the gated leftover reclaim"
+        runner.contains("cache::reclaim_for_disk_pressure"),
+        "disk pressure must enter cache reclaim under the GC leader and filesystem coordinator"
+    );
+    let disk_pressure_adapter = cache
+        .split_once("fn reclaim_for_disk_pressure_with_context(")
+        .and_then(|(_, rest)| rest.split_once("fn reclaim_for_disk_pressure_with_context_and("))
+        .map(|(adapter, _)| adapter)
+        .expect("disk-pressure adapter remains an explicit cache API seam");
+    assert!(
+        disk_pressure_adapter.contains("reclaim_production_leftovers_under_coordinator"),
+        "disk-pressure leftover reclaim must receive the held filesystem coordinator"
+    );
+    let disk_pressure_api = cache
+        .split_once("pub(crate) fn reclaim_for_disk_pressure(")
+        .and_then(|(_, rest)| rest.split_once(") -> ReclaimReport"))
+        .map(|(signature, _)| signature)
+        .expect("disk-pressure reclaim has one controlled entry point");
+    assert!(
+        disk_pressure_api.contains("DiskReclaimCapability"),
+        "disk-pressure reclaim requires the unforgeable admission capability"
+    );
+    let direct_reclaim_api = cache
+        .split_once("pub(crate) fn reclaim(")
+        .and_then(|(_, rest)| rest.split_once(") -> Result<ReclaimReport>"))
+        .map(|(signature, _)| signature)
+        .expect("direct cache reclaim has one controlled entry point");
+    assert!(
+        direct_reclaim_api.contains("DiskReclaimCapability"),
+        "direct cache reclaim requires the unforgeable admission capability"
+    );
+    let capability = runner
+        .split_once("pub(crate) struct DiskReclaimCapability {")
+        .and_then(|(_, rest)| rest.split_once('}'))
+        .map(|(fields, _)| fields)
+        .expect("disk reclaim capability is declared once");
+    assert!(
+        !capability.contains("pub ") && capability.contains("_owner_fence"),
+        "raw callers cannot construct the capability without the private owner fence"
+    );
+    assert!(
+        runner
+            .contains("fn block_for_reclaim(&self, reason: &str) -> Option<DiskReclaimCapability>"),
+        "only a durable admission block can mint the reclaim capability"
+    );
+    assert!(
+        !leftover.contains("pub fn reclaim_leftover_after_velnor")
+            && !leftover.contains("pub fn reclaim_if_hard_pressure")
+            && !leftover.contains("pub fn reclaim_production_leftovers_for")
+            && !leftover.contains("pub fn reclaim_production_if_hard_pressure"),
+        "no raw leftover reclaimer may bypass the lifecycle coordinator"
+    );
+    let low_level_reclaim = leftover
+        .split_once("fn reclaim_with_liveness(")
+        .and_then(|(_, rest)| rest.split_once(") -> Result<LeftoverReclaimReport>"))
+        .map(|(signature, _)| signature)
+        .expect("leftover deletion is centralized in the liveness reclaimer");
+    assert!(
+        low_level_reclaim.contains("FilesystemCoordinator"),
+        "the deletion primitive requires proof of the held lifecycle coordinator"
+    );
+    assert!(
+        leftover.contains("_coordinator.require_exclusive_for(run_root)?"),
+        "leftover deletion must validate that its held lifecycle lock is exclusive for this run root"
+    );
+    assert!(
+        capacity
+            .contains("pub(crate) fn require_exclusive_for(&self, run_root: &Path) -> Result<()>"),
+        "the lifecycle lock proof must expose only the checked crate-local capability"
+    );
+    assert!(
+        !runner.contains("reclaim_production_if_hard_pressure_for"),
+        "admission must not call the unlocked hard-pressure leftover wrapper"
+    );
+    assert!(
+        !runner.contains("reclaim_production_leftovers_for"),
+        "admission must not call the production leftover wrapper outside cache coordination"
     );
 }
 

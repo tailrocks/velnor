@@ -1080,7 +1080,11 @@ async fn daemon_serves_one_job_end_to_end() {
     let pat_env = test_pat_env("e2e");
     unsafe { std::env::set_var(&pat_env, "test-pat") };
     let config = write_config(&dir, &server, &pat_env, "");
-    let (defaults, ledger_path) = daemon_defaults(&dir);
+    let (mut defaults, _) = daemon_defaults(&dir);
+    // DaemonDefaults is the only ledger path source; use a distinctive path
+    // and verify the Scale Set's terminal demand lands in that database.
+    let ledger_path = dir.join("host-capacity.sqlite");
+    defaults.ledger_path = ledger_path.clone();
     configure_ledger(&ledger_path, 4);
     let docker = FakeDocker::new();
 
@@ -1123,6 +1127,16 @@ async fn daemon_serves_one_job_end_to_end() {
     assert_eq!(report.scale_set_id, SCALE_SET_ID);
     assert_eq!(report.metrics.acks, 4);
     assert_eq!(report.shutdown_report.recorded_total, 0);
+    assert_eq!(
+        PermitLedger::open(&ledger_path)
+            .unwrap()
+            .demand(&format!("scaleset/{SCALE_SET_ID}/{REQUEST_ID}"))
+            .unwrap()
+            .unwrap()
+            .state,
+        velnor_control::permit_ledger::DemandState::Terminal,
+        "the daemon uses the exact host-wide ledger path injected through defaults"
+    );
 
     // Cursor advanced across all four messages; capacity advertised free
     // headroom from the shared ledger (4 with one held, then free again).
@@ -1172,18 +1186,39 @@ async fn daemon_serves_one_job_end_to_end() {
         "no TCP surface in worker argv"
     );
 
-    // Diagnostics were exported before deletion; objects are gone.
+    // Diagnostics were captured before container teardown; worker state is
+    // scrubbed before its permit is released.
     let slug = slug_for(REQUEST_ID);
+    let worker_state_dir = dir.join("scaleset-workers").join(&slug);
     let runner_log = dir
         .join("scaleset-workers")
-        .join(&slug)
-        .join("diagnostics")
+        .join(format!(".velnor-diagnostics-{slug}"))
         .join("runner.log");
+    let runner_calls = docker.seen_matching(&runner_container_for(REQUEST_ID));
+    let logs_captured_at = runner_calls
+        .iter()
+        .position(|argv| argv.first().is_some_and(|head| head == "logs"))
+        .expect("runner diagnostics log capture ran");
+    let runner_removed_at = runner_calls
+        .iter()
+        .position(|argv| argv.first().is_some_and(|head| head == "rm"))
+        .expect("runner container teardown ran");
+    assert!(logs_captured_at < runner_removed_at);
     assert!(
-        runner_log.is_file(),
-        "diagnostics exported before deletion: {}",
-        runner_log.display()
+        !worker_state_dir.exists() && !runner_log.exists(),
+        "raw diagnostics state is removed after cleanup"
     );
+    let worker = WorkerRegistry::open(&defaults.state_db)
+        .unwrap()
+        .get(&ownership_key_for(REQUEST_ID))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        worker.worker_state,
+        velnor_model::ScaleSetWorkerState::PermitReleased
+    );
+    assert!(worker.diagnostics_complete);
+    assert!(!worker.state_dir_cleanup_pending);
     assert!(
         !docker.has_container(&runner_container_for(REQUEST_ID))
             && !docker.has_container(&dind_container_for(REQUEST_ID)),
@@ -1196,6 +1231,37 @@ async fn daemon_serves_one_job_end_to_end() {
     assert_eq!(set_delete_calls(&server).await, 0);
 
     unsafe { std::env::remove_var(&pat_env) };
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scale_set_config_rejects_removed_ledger_path() {
+    let server = MockServer::start().await;
+    let dir = temp_root("removed-ledger-path");
+    let config = write_config(
+        &dir,
+        &server,
+        "unused-test-pat-env",
+        "ledger_path = \"second-ledger.db\"",
+    );
+    let (defaults, _) = daemon_defaults(&dir);
+
+    let error = ScaleSetDaemon::open(
+        &config,
+        &defaults,
+        Box::new(FakeDocker::new()),
+        Box::new(ScriptHook),
+    )
+    .err()
+    .expect("per-lane ledger paths are not valid Scale Set config");
+    let rendered = format!("{error:#}");
+    assert!(
+        rendered.contains("ledger_path"),
+        "stale ledger override is named: {rendered}"
+    );
+    assert!(
+        !dir.join("second-ledger.db").exists(),
+        "rejected override never opens a second ledger"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1540,15 +1606,34 @@ async fn crash_with_dead_workers_fails_explicitly() {
             "demand {request} must not complete without a GitHub observation"
         );
     }
-    // A's diagnostics survived its death.
+    // Recovery captures A's diagnostics before deleting its containers, then
+    // scrubs the worker state before releasing its permit.
+    let a_state_dir = dir.join("scaleset-workers").join(slug_for(REQUEST_ID));
+    let a_runner_calls = docker.seen_matching(&runner_container_for(REQUEST_ID));
+    let a_logs_captured_at = a_runner_calls
+        .iter()
+        .position(|argv| argv.first().is_some_and(|head| head == "logs"))
+        .expect("recovery captures A's runner logs");
+    let a_runner_removed_at = a_runner_calls
+        .iter()
+        .position(|argv| argv.first().is_some_and(|head| head == "rm"))
+        .expect("recovery removes A's runner");
+    assert!(a_logs_captured_at < a_runner_removed_at);
     assert!(
-        dir.join("scaleset-workers")
-            .join(slug_for(REQUEST_ID))
-            .join("diagnostics")
-            .join("runner.log")
-            .is_file(),
-        "A's logs were exported before deletion"
+        !a_state_dir.exists(),
+        "A's raw diagnostics state was scrubbed"
     );
+    let a_worker = WorkerRegistry::open(&defaults.state_db)
+        .unwrap()
+        .get(&ownership_key_for(REQUEST_ID))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        a_worker.worker_state,
+        velnor_model::ScaleSetWorkerState::PermitReleased
+    );
+    assert!(a_worker.diagnostics_complete);
+    assert!(!a_worker.state_dir_cleanup_pending);
 
     // Phase 2 run: completions arrive. B's terminal path retains its
     // permit uncertain on the first try (its evidence vanished with its
@@ -1785,17 +1870,21 @@ async fn capacity_shares_one_ledger_across_lanes() {
     // A native acquisition occupies the only permit.
     let mut raw = PermitLedger::open(&ledger_path).unwrap();
     let generation = raw.generation().unwrap();
-    assert_eq!(
-        raw.acquire(
+    let (native_outcome, native_lease) = raw
+        .acquire_with_lease_generation(
             "native/broker-9",
             PermitLane::Native,
             PermitState::Running,
             generation,
             Some(std::process::id()),
+            None,
         )
-        .unwrap(),
+        .unwrap();
+    assert_eq!(
+        native_outcome,
         velnor_control::permit_ledger::AcquireOutcome::Acquired
     );
+    let native_lease = native_lease.expect("acquired native lease identity");
     drop(raw);
 
     let session = MessageSessionClient::create(&client, SCALE_SET_ID, OWNER)
@@ -1878,10 +1967,10 @@ async fn capacity_shares_one_ledger_across_lanes() {
 
     // The native holder releases; the redelivered offer acquires under the
     // unified holder and provisions exactly one pair.
-    PermitLedger::open(&ledger_path)
+    assert!(PermitLedger::open(&ledger_path)
         .unwrap()
-        .release("native/broker-9")
-        .unwrap();
+        .release_if_generation("native/broker-9", native_lease)
+        .unwrap());
     let outcome = listener.run_once().await.unwrap();
     assert_eq!(outcome.acquired, vec![REQUEST_ID]);
     assert_eq!(outcome.provisioned, vec![REQUEST_ID]);

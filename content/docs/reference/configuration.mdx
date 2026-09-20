@@ -117,7 +117,8 @@ The TOML selects a GitHub scope, owner, runner group, and Scale Set. It can
 adopt a set by ID or get-or-create it by name; exactly one of `set_id` and
 `set_name` is required. Choose either `group_id` or `group_name`; if both are
 present, the ID wins. Configure labels and optional state, worker-directory,
-readiness, retry, and polling overrides as needed.
+readiness, retry, and polling overrides as needed. When `labels` is empty,
+Velnor uses the set name as the Scale Set `System` label.
 
 ```toml
 scope_url = "https://github.com/OWNER"
@@ -174,9 +175,12 @@ permit headroom, while GitHub assigned-demand statistics drive its worker
 target. Either lane's capacity may be lower than the host-wide `N` ceiling.
 Labels for native runners are sorted and deduplicated. Empty native labels
 become `self-hosted,velnor`.
-Native target-MVP labels add `hetzner-sentry-ci`, `ubuntu-24.04`,
-`ubuntu-latest`, and `velnor-target-mvp`; the ARM option adds
-`ubuntu-24.04-arm`. macOS labels are rejected; local execution is Linux-only.
+Native target-MVP labels add `hetzner-sentry-ci`, `velnor-target-mvp`, and
+`velnor-target-mvp-x64`; the ARM option adds `velnor-target-mvp-arm64`. Native
+and Scale Set labels, including a derived Scale Set `System` label, cannot
+start with `ubuntu-`, `macos-`, or `windows-` (case-insensitive). Local
+workflow selectors enforce the same boundary; GitHub-hosted selectors may
+use image labels. Local execution is Linux-only.
 
 ## Native scope and registration
 

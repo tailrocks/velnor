@@ -16,7 +16,7 @@ pub enum GitHubScope {
 }
 
 /// Parsed config URL (`gitHubConfig`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct GitHubConfig {
     /// `config/configURL` — echoed into the admin-connection request body.
     pub config_url: Url,
@@ -25,6 +25,25 @@ pub struct GitHubConfig {
     pub organization: String,
     pub repository: String,
     pub is_hosted: bool,
+}
+
+impl std::fmt::Debug for GitHubConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut config_url = self.config_url.clone();
+        let _ = config_url.set_username("");
+        let _ = config_url.set_password(None);
+        config_url.set_query(None);
+        config_url.set_fragment(None);
+
+        f.debug_struct("GitHubConfig")
+            .field("config_url", &config_url.as_str())
+            .field("scope", &self.scope)
+            .field("enterprise", &self.enterprise)
+            .field("organization", &self.organization)
+            .field("repository", &self.repository)
+            .field("is_hosted", &self.is_hosted)
+            .finish()
+    }
 }
 
 impl GitHubConfig {
@@ -162,6 +181,26 @@ mod tests {
         assert!(GitHubConfig::parse("https://github.com/").is_err());
         assert!(GitHubConfig::parse("https://github.com/a/b/c").is_err());
         assert!(GitHubConfig::parse("not-a-url").is_err());
+    }
+
+    #[test]
+    fn debug_redacts_config_url_userinfo_query_and_fragment() {
+        let config = GitHubConfig::parse(
+            "https://url-user:url-password@github.example.com/octo-org?sig=config-url-secret#url-fragment-secret",
+        )
+        .unwrap();
+        let rendered = format!("{config:?}");
+
+        assert!(rendered.contains("github.example.com"), "{rendered}");
+        assert!(rendered.contains("/octo-org"), "{rendered}");
+        for secret in [
+            "url-user",
+            "url-password",
+            "config-url-secret",
+            "url-fragment-secret",
+        ] {
+            assert!(!rendered.contains(secret), "{rendered}");
+        }
     }
 
     #[test]

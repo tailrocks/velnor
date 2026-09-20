@@ -895,7 +895,8 @@ pub struct ReclaimReport {
     pub failures: Vec<String>,
 }
 
-pub fn reclaim(
+pub(crate) fn reclaim(
+    _capability: crate::runner::DiskReclaimCapability,
     layout: &crate::storage::StorageLayout,
     target_bytes: u64,
     in_use_scopes: &BTreeSet<String>,
@@ -917,10 +918,39 @@ pub fn reclaim(
 /// remaining roots from being reclaimed or make the caller fail open. Each
 /// root retains the lease and filesystem coordination enforced by
 /// [`reclaim_work_root`].
-pub fn reclaim_for_disk_pressure(target_bytes: u64) -> ReclaimReport {
-    let roots = crate::leftover_disk::discover_daemon_work_roots();
-    let layout = crate::storage::StorageLayout::resolve();
-    reclaim_for_disk_pressure_with_context(target_bytes, &roots, layout.as_ref())
+pub(crate) fn reclaim_for_disk_pressure(
+    _capability: crate::runner::DiskReclaimCapability,
+    minimum_available_bytes: u64,
+    target_filesystem_id: u64,
+    measured_root: &Path,
+    reclaim_work_root: Option<&Path>,
+    backend: Option<velnor_model::ExecutionBackendKind>,
+    layout: &crate::storage::StorageLayout,
+) -> ReclaimReport {
+    let roots = disk_pressure_work_roots(
+        crate::leftover_disk::discover_daemon_work_roots_for_layout(layout),
+        reclaim_work_root,
+    );
+    reclaim_for_disk_pressure_with_context(
+        minimum_available_bytes,
+        target_filesystem_id,
+        measured_root,
+        &roots,
+        Some(layout),
+        backend,
+    )
+}
+
+fn disk_pressure_work_roots(
+    mut roots: Vec<PathBuf>,
+    reclaim_work_root: Option<&Path>,
+) -> Vec<PathBuf> {
+    if let Some(reclaim_work_root) = reclaim_work_root
+        && !roots.iter().any(|root| root == reclaim_work_root)
+    {
+        roots.push(reclaim_work_root.to_path_buf());
+    }
+    roots
 }
 
 /// Reclaim one work root using the current process storage layout.
@@ -930,7 +960,7 @@ pub fn reclaim_for_disk_pressure(target_bytes: u64) -> ReclaimReport {
 /// the existing crate-local test and operator entry point for callers that
 /// provide only filesystem roots.
 #[allow(dead_code, reason = "crate-local tests exercise the wrapper")]
-pub(crate) fn reclaim_work_root(
+fn reclaim_work_root(
     work_root: &Path,
     run_root: &Path,
     log_root: &Path,
@@ -951,13 +981,106 @@ pub(crate) fn reclaim_work_root(
 }
 
 fn reclaim_for_disk_pressure_with_context(
-    target_bytes: u64,
+    minimum_available_bytes: u64,
+    target_filesystem_id: u64,
+    measured_root: &Path,
     roots: &[PathBuf],
     layout: Option<&crate::storage::StorageLayout>,
+    backend: Option<velnor_model::ExecutionBackendKind>,
+) -> ReclaimReport {
+    let mut filesystem_id_for = |path: &Path| {
+        crate::host_capacity::HostCapacity::probe(path)
+            .ok()
+            .and_then(|capacity| capacity.filesystem_id)
+    };
+    let mut available_bytes_for = |path: &Path| {
+        crate::host_capacity::HostCapacity::probe(path)
+            .ok()
+            .map(|capacity| capacity.available_bytes)
+    };
+    reclaim_for_disk_pressure_with_context_and(
+        minimum_available_bytes,
+        target_filesystem_id,
+        measured_root,
+        roots,
+        layout,
+        backend,
+        &mut filesystem_id_for,
+        &mut available_bytes_for,
+        |coordinator, run_root, work_roots, backend| {
+            let Some(backend) = backend else {
+                return Ok(crate::leftover_disk::LeftoverReclaimReport::default());
+            };
+            crate::leftover_disk::reclaim_production_leftovers_under_coordinator(
+                coordinator,
+                run_root,
+                work_roots,
+                backend,
+                false,
+            )
+        },
+    )
+}
+
+fn reclaim_for_disk_pressure_with_context_and(
+    minimum_available_bytes: u64,
+    target_filesystem_id: u64,
+    measured_root: &Path,
+    roots: &[PathBuf],
+    layout: Option<&crate::storage::StorageLayout>,
+    backend: Option<velnor_model::ExecutionBackendKind>,
+    filesystem_id_for: &mut impl FnMut(&Path) -> Option<u64>,
+    available_bytes_for: &mut impl FnMut(&Path) -> Option<u64>,
+    mut reclaim_leftovers: impl FnMut(
+        &crate::capacity::FilesystemCoordinator,
+        &Path,
+        &[PathBuf],
+        Option<velnor_model::ExecutionBackendKind>,
+    ) -> Result<crate::leftover_disk::LeftoverReclaimReport>,
 ) -> ReclaimReport {
     let mut report = ReclaimReport::default();
+    let mut leftover_reclaim_done = false;
+    let target_work_roots: Vec<_> = roots
+        .iter()
+        .filter(|work_root| filesystem_id_for(work_root) == Some(target_filesystem_id))
+        .cloned()
+        .collect();
+    let cache_root_on_target = layout
+        .is_some_and(|layout| filesystem_id_for(&layout.cache_root) == Some(target_filesystem_id));
+    let scan_roots = if !target_work_roots.is_empty() {
+        target_work_roots.clone()
+    } else if cache_root_on_target {
+        roots
+            .first()
+            .cloned()
+            .or_else(|| layout.map(|layout| layout.cache_root.clone()))
+            .into_iter()
+            .collect()
+    } else {
+        report.failures.push(format!(
+            "no daemon cache or work root shares limiting filesystem {target_filesystem_id}"
+        ));
+        return report;
+    };
+    if filesystem_id_for(measured_root) != Some(target_filesystem_id) {
+        report.failures.push(format!(
+            "measured disk-pressure root {} no longer identifies limiting filesystem {target_filesystem_id}",
+            measured_root.display()
+        ));
+        return report;
+    }
+    let Some(initial_available_bytes) = available_bytes_for(measured_root) else {
+        report.failures.push(format!(
+            "cannot measure available bytes on limiting filesystem {target_filesystem_id} at {}",
+            measured_root.display()
+        ));
+        return report;
+    };
+    if initial_available_bytes >= minimum_available_bytes {
+        return report;
+    }
 
-    for work_root in roots {
+    for work_root in &scan_roots {
         let (run_root, log_root) = layout
             .as_ref()
             .map(|layout| (layout.run_root.clone(), layout.log_root.clone()))
@@ -967,11 +1090,19 @@ fn reclaim_for_disk_pressure_with_context(
                     work_root.join("_velnor_logs"),
                 )
             });
-        let remaining = target_bytes.saturating_sub(report.freed_bytes);
+        let Some(current_available_bytes) = available_bytes_for(measured_root) else {
+            report.failures.push(format!(
+                "cannot remeasure available bytes on limiting filesystem {target_filesystem_id} at {}",
+                measured_root.display()
+            ));
+            break;
+        };
+        report.freed_bytes = current_available_bytes.saturating_sub(initial_available_bytes);
+        let remaining = minimum_available_bytes.saturating_sub(current_available_bytes);
         if remaining == 0 {
             break;
         }
-        match reclaim_work_root_with_layout(
+        match reclaim_work_root_with_layout_and(
             work_root,
             &run_root,
             &log_root,
@@ -979,9 +1110,20 @@ fn reclaim_for_disk_pressure_with_context(
             &BTreeSet::new(),
             true,
             layout,
+            !leftover_reclaim_done && !target_work_roots.is_empty(),
+            Some(target_filesystem_id),
+            false,
+            filesystem_id_for,
+            available_bytes_for,
+            Some((measured_root, minimum_available_bytes)),
+            &target_work_roots,
+            backend,
+            &mut reclaim_leftovers,
         ) {
-            Ok(root_report) => {
-                report.freed_bytes = report.freed_bytes.saturating_add(root_report.freed_bytes);
+            Ok((root_report, acquired_locks)) => {
+                if acquired_locks {
+                    leftover_reclaim_done = true;
+                }
                 report.deleted.extend(root_report.deleted);
                 report.failures.extend(root_report.failures);
             }
@@ -989,6 +1131,16 @@ fn reclaim_for_disk_pressure_with_context(
                 .failures
                 .push(format!("{}: {error:#}", work_root.display())),
         }
+    }
+
+    match available_bytes_for(measured_root) {
+        Some(current_available_bytes) => {
+            report.freed_bytes = current_available_bytes.saturating_sub(initial_available_bytes);
+        }
+        None => report.failures.push(format!(
+            "cannot measure available bytes after disk reclaim on limiting filesystem {target_filesystem_id} at {}",
+            measured_root.display()
+        )),
     }
 
     report
@@ -1003,17 +1155,76 @@ fn reclaim_work_root_with_layout(
     emergency: bool,
     layout: Option<&crate::storage::StorageLayout>,
 ) -> Result<ReclaimReport> {
+    let mut no_leftover_reclaim =
+        |_: &crate::capacity::FilesystemCoordinator,
+         _: &Path,
+         _: &[PathBuf],
+         _: Option<velnor_model::ExecutionBackendKind>| {
+            Ok(crate::leftover_disk::LeftoverReclaimReport::default())
+        };
+    reclaim_work_root_with_layout_and(
+        work_root,
+        run_root,
+        log_root,
+        target_bytes,
+        in_use_scopes,
+        emergency,
+        layout,
+        false,
+        None,
+        true,
+        &mut |path| {
+            crate::host_capacity::HostCapacity::probe(path)
+                .ok()
+                .and_then(|capacity| capacity.filesystem_id)
+        },
+        &mut |path| {
+            crate::host_capacity::HostCapacity::probe(path)
+                .ok()
+                .map(|capacity| capacity.available_bytes)
+        },
+        None,
+        &[],
+        None,
+        &mut no_leftover_reclaim,
+    )
+    .map(|(report, _)| report)
+}
+
+fn reclaim_work_root_with_layout_and(
+    work_root: &Path,
+    run_root: &Path,
+    log_root: &Path,
+    target_bytes: u64,
+    in_use_scopes: &BTreeSet<String>,
+    emergency: bool,
+    layout: Option<&crate::storage::StorageLayout>,
+    reclaim_leftovers: bool,
+    target_filesystem_id: Option<u64>,
+    prune_buildkit_builders: bool,
+    filesystem_id_for: &mut impl FnMut(&Path) -> Option<u64>,
+    available_bytes_for: &mut impl FnMut(&Path) -> Option<u64>,
+    disk_pressure_target: Option<(&Path, u64)>,
+    leftover_work_roots: &[PathBuf],
+    backend: Option<velnor_model::ExecutionBackendKind>,
+    reclaim_leftovers_with: &mut impl FnMut(
+        &crate::capacity::FilesystemCoordinator,
+        &Path,
+        &[PathBuf],
+        Option<velnor_model::ExecutionBackendKind>,
+    ) -> Result<crate::leftover_disk::LeftoverReclaimReport>,
+) -> Result<(ReclaimReport, bool)> {
     let _lock = match GcLeaderLock::acquire(run_root) {
         Ok(lock) => lock,
         Err(error) if error.downcast_ref::<GcLeaderLockHeld>().is_some() => {
             eprintln!("capacity reclaim already running in another daemon; rechecking later");
-            return Ok(ReclaimReport::default());
+            return Ok((ReclaimReport::default(), false));
         }
         Err(error) => return Err(error),
     };
     // Publish/snapshot leases under one filesystem-wide coordinator. A daemon
     // starting a job cannot race between this snapshot and candidate deletion.
-    let _coordinator = crate::capacity::FilesystemCoordinator::lock_exclusive(run_root)?;
+    let coordinator = crate::capacity::FilesystemCoordinator::lock_exclusive(run_root)?;
     let mut active_scopes = in_use_scopes.clone();
     active_scopes.extend(crate::capacity::active_scopes(
         run_root,
@@ -1021,6 +1232,9 @@ fn reclaim_work_root_with_layout(
     )?);
     let scope = StoreScope::with_layout(layout);
     let mut entries = cache_listing(work_root, emergency, &scope)?;
+    if let Some(target_filesystem_id) = target_filesystem_id {
+        entries.retain(|entry| filesystem_id_for(&entry.path) == Some(target_filesystem_id));
+    }
     let policy = EvictionPolicy {
         now: SystemTime::now(),
         keep_newest_per_target_scope: 0,
@@ -1056,8 +1270,33 @@ fn reclaim_work_root_with_layout(
             .then_with(|| left.path.cmp(&right.path))
     });
     let mut report = ReclaimReport::default();
+    let target_initial_available_bytes = match disk_pressure_target {
+        Some((path, _)) => match available_bytes_for(path) {
+            Some(bytes) => Some(bytes),
+            None => {
+                report.failures.push(format!(
+                    "cannot measure available bytes on disk-pressure target {}",
+                    path.display()
+                ));
+                return Ok((report, true));
+            }
+        },
+        None => None,
+    };
     for entry in entries {
-        if report.freed_bytes >= target_bytes {
+        if let Some((path, minimum_available_bytes)) = disk_pressure_target {
+            match available_bytes_for(path) {
+                Some(bytes) if bytes >= minimum_available_bytes => break,
+                Some(_) => {}
+                None => {
+                    report.failures.push(format!(
+                        "cannot remeasure available bytes on disk-pressure target {}",
+                        path.display()
+                    ));
+                    break;
+                }
+            }
+        } else if report.freed_bytes >= target_bytes {
             break;
         }
         let candidate = EvictionCandidate {
@@ -1069,7 +1308,26 @@ fn reclaim_work_root_with_layout(
         };
         match remove_candidate(&candidate) {
             Ok(()) => {
-                report.freed_bytes = report.freed_bytes.saturating_add(candidate.bytes);
+                if let Some((path, _)) = disk_pressure_target {
+                    match available_bytes_for(path) {
+                        Some(bytes) => {
+                            report.freed_bytes = bytes
+                                .saturating_sub(target_initial_available_bytes.unwrap_or(bytes));
+                        }
+                        None => {
+                            report.failures.push(format!(
+                                "cannot measure available bytes after deleting {} at {}",
+                                candidate.path.display(),
+                                path.display()
+                            ));
+                            report.deleted.push(candidate.path.clone());
+                            append_gc_history(log_root, &candidate, None, "deleted")?;
+                            break;
+                        }
+                    }
+                } else {
+                    report.freed_bytes = report.freed_bytes.saturating_add(candidate.bytes);
+                }
                 report.deleted.push(candidate.path.clone());
                 append_gc_history(log_root, &candidate, None, "deleted")?;
             }
@@ -1087,7 +1345,13 @@ fn reclaim_work_root_with_layout(
     // the target does emergency reclaim stop and prune unclaimed builders,
     // largest first — bounded, measured, and cold-only. This is what makes
     // the old dead reclaim (enumerate, then deliberately do nothing) live.
-    if emergency && report.freed_bytes < target_bytes {
+    let still_needs_reclaim = match disk_pressure_target {
+        Some((path, minimum_available_bytes)) => {
+            available_bytes_for(path).is_none_or(|bytes| bytes < minimum_available_bytes)
+        }
+        None => report.freed_bytes < target_bytes,
+    };
+    if emergency && prune_buildkit_builders && still_needs_reclaim {
         let remaining = target_bytes.saturating_sub(report.freed_bytes);
         let pruned = crate::buildkit::pressure_prune_builders(run_root, remaining);
         report.freed_bytes = report.freed_bytes.saturating_add(pruned.freed_bytes);
@@ -1096,7 +1360,35 @@ fn reclaim_work_root_with_layout(
         }
         report.failures.extend(pruned.failures);
     }
-    Ok(report)
+    let still_needs_reclaim = match disk_pressure_target {
+        Some((path, minimum_available_bytes)) => {
+            available_bytes_for(path).is_none_or(|bytes| bytes < minimum_available_bytes)
+        }
+        None => report.freed_bytes < target_bytes,
+    };
+    if reclaim_leftovers && still_needs_reclaim {
+        match reclaim_leftovers_with(&coordinator, run_root, leftover_work_roots, backend) {
+            Ok(leftover_report) => {
+                report.deleted.extend(leftover_report.deleted_workspaces);
+            }
+            Err(error) => report.failures.push(format!(
+                "leftover workspace reclaim under {}: {error:#}",
+                run_root.display()
+            )),
+        }
+    }
+    if let Some((path, _)) = disk_pressure_target {
+        if let Some(bytes) = available_bytes_for(path) {
+            report.freed_bytes =
+                bytes.saturating_sub(target_initial_available_bytes.unwrap_or(bytes));
+        } else {
+            report.failures.push(format!(
+                "cannot measure available bytes after disk reclaim at {}",
+                path.display()
+            ));
+        }
+    }
+    Ok((report, true))
 }
 
 /// Bring the compiler stores (mbx + sccache, every scope, repository and
@@ -2605,13 +2897,293 @@ mod tests {
         let layout = crate::storage::StorageLayout::from_prefix(&root);
         let work_roots = crate::leftover_disk::discover_daemon_work_roots_in(&root.join("lib"));
         assert_eq!(work_roots, vec![work.clone()]);
-        let report = reclaim_for_disk_pressure_with_context(32, &work_roots, Some(&layout));
+        let report = reclaim_for_disk_pressure_with_context_and(
+            132,
+            1,
+            &work,
+            &work_roots,
+            Some(&layout),
+            None,
+            &mut |_| Some(1),
+            &mut |path| {
+                assert_eq!(path, work);
+                let deleted = u64::from(!cache.exists())
+                    + u64::from(!compiler_cache.parent().unwrap().exists());
+                Some(100 + deleted * 16)
+            },
+            |_, _, _, _| Ok(Default::default()),
+        );
 
         assert_eq!(report.freed_bytes, 32);
         assert_eq!(
             report.deleted,
             vec![cache, compiler_cache.parent().unwrap().to_path_buf()]
         );
+        assert!(report.failures.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn disk_pressure_reclaimer_keeps_cache_on_a_healthy_filesystem() {
+        use std::cell::Cell;
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-disk-pressure-split-fs-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let work = root.join("lib/velnor-test/work");
+        let layout = crate::storage::StorageLayout::from_prefix(&root);
+        let healthy_cache =
+            crate::store_catalog::gha_cache_root(&layout).join("tenants/tenant/scope/key");
+        fs::create_dir_all(&work).unwrap();
+        fs::create_dir_all(&healthy_cache).unwrap();
+        fs::write(healthy_cache.join("payload"), vec![0; 16]).unwrap();
+        backdate(&healthy_cache, EMERGENCY_MIN_IDLE * 2);
+
+        let work_roots = vec![work.clone()];
+        let leftover_called = Cell::new(false);
+        let report = reclaim_for_disk_pressure_with_context_and(
+            101,
+            11,
+            &work,
+            &work_roots,
+            Some(&layout),
+            Some(velnor_model::ExecutionBackendKind::MicroVm),
+            &mut |path| {
+                if path.starts_with(&layout.cache_root) {
+                    Some(22)
+                } else {
+                    Some(11)
+                }
+            },
+            &mut |_| Some(100),
+            |_, _, roots, _| {
+                assert_eq!(roots, work_roots);
+                leftover_called.set(true);
+                Ok(Default::default())
+            },
+        );
+
+        assert!(leftover_called.get());
+        assert_eq!(report.freed_bytes, 0);
+        assert!(healthy_cache.join("payload").exists());
+        assert!(report.deleted.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn disk_pressure_reclaimer_can_target_separate_global_cache_filesystem() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-disk-pressure-cache-fs-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let work = root.join("lib/velnor-test/work");
+        let local_cache = work.join("_velnor_sccache/untrusted/idle/key");
+        let layout = crate::storage::StorageLayout::from_prefix(&root);
+        let global_cache =
+            crate::store_catalog::gha_cache_root(&layout).join("tenants/tenant/scope/key");
+        fs::create_dir_all(&local_cache).unwrap();
+        fs::create_dir_all(&global_cache).unwrap();
+        fs::write(local_cache.join("payload"), vec![0; 16]).unwrap();
+        fs::write(global_cache.join("payload"), vec![0; 16]).unwrap();
+        backdate(&local_cache, EMERGENCY_MIN_IDLE * 2);
+        let global_tenant = global_cache.parent().unwrap().parent().unwrap();
+        backdate(global_tenant, EMERGENCY_MIN_IDLE * 2);
+
+        let work_roots = vec![work.clone()];
+        let report = reclaim_for_disk_pressure_with_context_and(
+            16,
+            22,
+            &layout.cache_root,
+            &work_roots,
+            Some(&layout),
+            None,
+            &mut |path| {
+                if path.starts_with(&layout.cache_root) {
+                    Some(22)
+                } else {
+                    Some(11)
+                }
+            },
+            &mut |path| {
+                Some(if path.starts_with(&layout.cache_root) {
+                    if global_tenant.exists() {
+                        0
+                    } else {
+                        16
+                    }
+                } else {
+                    0
+                })
+            },
+            |_, _, _, _| Ok(Default::default()),
+        );
+
+        assert_eq!(report.freed_bytes, 16, "{report:?}");
+        assert_eq!(report.deleted, vec![global_tenant.to_path_buf()]);
+        assert!(local_cache.join("payload").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn disk_pressure_reclaims_the_exact_custom_work_root_on_another_filesystem() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-disk-pressure-custom-work-fs-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let discovered_work = root.join("lib/velnor-test/default-work");
+        let custom_work = root.join("separate-volume/custom-runner-work");
+        let custom_cache = custom_work.join("_velnor_sccache/untrusted/cold/key");
+        let layout = crate::storage::StorageLayout::from_prefix(&root);
+        fs::create_dir_all(&discovered_work).unwrap();
+        fs::create_dir_all(&custom_cache).unwrap();
+        fs::write(custom_cache.join("payload"), vec![0; 16]).unwrap();
+        backdate(&custom_cache, EMERGENCY_MIN_IDLE * 2);
+
+        let work_roots =
+            disk_pressure_work_roots(vec![discovered_work.clone()], Some(&custom_work));
+        assert_eq!(work_roots, vec![discovered_work, custom_work.clone()]);
+        let report = reclaim_for_disk_pressure_with_context_and(
+            16,
+            33,
+            &custom_work,
+            &work_roots,
+            Some(&layout),
+            None,
+            &mut |path| {
+                if path.starts_with(&custom_work) {
+                    Some(33)
+                } else if path.starts_with(&layout.cache_root) {
+                    Some(22)
+                } else {
+                    Some(11)
+                }
+            },
+            &mut |path| {
+                assert_eq!(path, custom_work);
+                Some(if custom_cache.exists() { 0 } else { 16 })
+            },
+            |_, _, _, _| Ok(Default::default()),
+        );
+
+        assert_eq!(report.freed_bytes, 16, "{report:?}");
+        assert!(report
+            .deleted
+            .contains(&custom_cache.parent().unwrap().to_path_buf()));
+        assert!(!custom_cache.exists());
+        assert!(report.failures.is_empty(), "{report:?}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn disk_pressure_leftover_reclaim_runs_inside_both_global_locks() {
+        use std::cell::Cell;
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-disk-pressure-leftovers-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let work = root.join("lib/velnor-test/work");
+        let cache = root.join("cache/velnor/v1/untrusted/caches/idle/key");
+        fs::create_dir_all(&work).unwrap();
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("payload"), vec![0; 16]).unwrap();
+        backdate(&cache, EMERGENCY_MIN_IDLE * 2);
+
+        let layout = crate::storage::StorageLayout::from_prefix(&root);
+        let work_roots = vec![work.clone()];
+        let leftover = work.join("slot-1/00000000-0000-0000-0000-000000000001");
+        let called = Cell::new(false);
+        let report = reclaim_for_disk_pressure_with_context_and(
+            1,
+            11,
+            &work,
+            &work_roots,
+            Some(&layout),
+            Some(velnor_model::ExecutionBackendKind::MicroVm),
+            &mut |path| {
+                if path.starts_with(&layout.cache_root) {
+                    Some(22)
+                } else {
+                    Some(11)
+                }
+            },
+            &mut |_| Some(0),
+            |_, run_root, roots, backend| {
+                assert_eq!(run_root, layout.run_root);
+                assert_eq!(roots, work_roots);
+                assert_eq!(backend, Some(velnor_model::ExecutionBackendKind::MicroVm));
+                let leader = GcLeaderLock::acquire(run_root).unwrap_err();
+                assert!(leader.downcast_ref::<GcLeaderLockHeld>().is_some());
+                let coordinator =
+                    crate::capacity::FilesystemCoordinator::lock_exclusive(run_root).unwrap_err();
+                assert!(coordinator
+                    .to_string()
+                    .contains("already held exclusively by this thread"));
+                called.set(true);
+                Ok(crate::leftover_disk::LeftoverReclaimReport {
+                    deleted_workspaces: vec![leftover.clone()],
+                    ..Default::default()
+                })
+            },
+        );
+
+        assert!(
+            called.get(),
+            "leftover reclaim must run under disk pressure"
+        );
+        assert!(report.deleted.contains(&leftover));
+        assert!(report.failures.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn disk_pressure_reclaimer_measures_free_space_after_each_delete() {
+        use std::cell::Cell;
+
+        let root = std::env::temp_dir().join(format!(
+            "velnor-disk-pressure-measured-reclaim-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let work = root.join("lib/velnor-test/work");
+        let cache = root.join("cache/velnor/v1/untrusted/caches/idle/key");
+        let compiler_cache = work.join("_velnor_sccache/untrusted/idle/key");
+        fs::create_dir_all(&work).unwrap();
+        fs::create_dir_all(&cache).unwrap();
+        fs::create_dir_all(&compiler_cache).unwrap();
+        fs::write(cache.join("payload"), vec![0; 16]).unwrap();
+        fs::write(compiler_cache.join("payload"), vec![0; 16]).unwrap();
+        backdate(&cache, EMERGENCY_MIN_IDLE * 2);
+        backdate(compiler_cache.parent().unwrap(), EMERGENCY_MIN_IDLE * 2);
+
+        let layout = crate::storage::StorageLayout::from_prefix(&root);
+        let work_roots = vec![work.clone()];
+        let measured_probe_count = Cell::new(0_u64);
+        let report = reclaim_for_disk_pressure_with_context_and(
+            108,
+            1,
+            &work,
+            &work_roots,
+            Some(&layout),
+            None,
+            &mut |_| Some(1),
+            &mut |path| {
+                assert_eq!(path, work);
+                let deleted = u64::from(!cache.exists())
+                    + u64::from(!compiler_cache.parent().unwrap().exists());
+                measured_probe_count.set(measured_probe_count.get() + 1);
+                Some(100 + deleted * 4)
+            },
+            |_, _, _, _| Ok(Default::default()),
+        );
+
+        assert_eq!(report.freed_bytes, 8);
+        assert_eq!(
+            report.deleted,
+            vec![cache, compiler_cache.parent().unwrap().to_path_buf()],
+            "logical file lengths exceed injected physical bytes; reclaim must continue until statvfs reaches the floor"
+        );
+        assert!(measured_probe_count.get() >= 4);
         assert!(report.failures.is_empty());
         fs::remove_dir_all(root).unwrap();
     }

@@ -289,12 +289,33 @@ pub(crate) fn is_buildkit_builder_not_found(error: &anyhow::Error) -> bool {
 }
 
 /// The daemon's missing-object vocabulary, both generations: modern Engines
-/// answer `No such container|object|image|volume`, older ones `no such ...`.
+/// answer `No such container|object|image|network|volume`, older ones
+/// `no such ...`.
 /// Deliberately narrow: the cancellation ladder treats any other failure as
 /// "still alive", so a loose match here would stop the ladder early. Shared
 /// by every maintenance tolerant path so the vocabulary stays single-sourced.
 pub(crate) fn daemon_reports_missing(stderr: &str) -> bool {
-    stderr.contains("No such") || stderr.contains("no such")
+    stderr.lines().any(|line| {
+        let line = line.trim().to_ascii_lowercase();
+        let detail = line
+            .strip_prefix("error response from daemon: ")
+            .or_else(|| line.strip_prefix("error: "))
+            .unwrap_or(&line);
+        [
+            "no such object",
+            "no such container",
+            "no such image",
+            "no such network",
+            "no such volume",
+        ]
+        .iter()
+        .any(|prefix| {
+            detail == *prefix
+                || detail
+                    .strip_prefix(prefix)
+                    .is_some_and(|suffix| suffix.starts_with(':'))
+        })
+    })
 }
 
 /// Retry category of a failed `docker` invocation, decided once at the
@@ -2375,6 +2396,7 @@ mod tests {
         // Modern Engine: `Error: No such object: <name>` on stdout `[]`.
         assert!(daemon_reports_missing("Error: No such object: velnor-x"));
         assert!(daemon_reports_missing("Error: No such container: velnor-x"));
+        assert!(daemon_reports_missing("Error: No such network: velnor-net"));
         // Older generation.
         assert!(daemon_reports_missing("error: no such object: velnor-x"));
         assert!(daemon_reports_missing("no such container"));
@@ -2386,6 +2408,11 @@ mod tests {
         assert!(!daemon_reports_missing(
             "Cannot connect to the Docker daemon"
         ));
+        assert!(!daemon_reports_missing(
+            "dial unix /run/docker.sock: connect: no such file or directory"
+        ));
+        assert!(!daemon_reports_missing("unrelated failure: no such file"));
+        assert!(!daemon_reports_missing("no such"));
     }
 
     #[test]

@@ -633,14 +633,6 @@ active_velnor_units() {
   done <<< "$rows"
 }
 
-active_velnor_job_units() {
-  local units unit
-  units="$(active_velnor_units)" || return 2
-  while IFS= read -r unit; do
-    [[ "$unit" == velnor-job@*.service ]] && printf '%s\n' "$unit"
-  done <<< "$units"
-}
-
 is_admission_unit() {
   case "$1" in
     velnor-daemon.service|velnor-daemon@*.service|velnor-controller@*.service|velnor-slot@*.service|velnor-guardian.service|velnor*.socket|velnor*.timer|velnor*.path)
@@ -680,39 +672,15 @@ close_velnor_admission() {
 }
 
 wait_for_work_drain() {
-  local deadline containers jobs unit
-  deadline="$(maintenance_deadline_value)"
-  while :; do
-    containers="$(container_count_for_maintenance)" \
-      || die "Docker container inventory is unknown; refusing maintenance" 2
-    jobs="$(active_velnor_job_units)" \
-      || die "cannot inventory active Velnor jobs; refusing maintenance" 2
-    if [[ "$PACKAGE_LOCK_HELD" == 1 && -n "$jobs" ]]; then
-      # Once the exclusive lock is held, any active job unit is waiting for
-      # its packaged shared flock in ExecStart. Stop it before waiting, or the
-      # job cannot exit until this maintenance transaction releases the lock.
-      local -a blocked_jobs=()
-      while IFS= read -r unit; do
-        [[ -n "$unit" ]] && blocked_jobs+=("$unit")
-      done <<< "$jobs"
-      log "canceling Velnor job units waiting on the exclusive package lock: ${blocked_jobs[*]}"
-      mut systemctl --no-block stop "${blocked_jobs[@]}"
-      wait_for_units_stopped "canceling Velnor jobs queued on the package lock" "${blocked_jobs[@]}"
-      continue
-    fi
-    if [[ -z "$jobs" ]]; then
-      if [[ "$containers" -eq 0 ]]; then return 0; fi
-      if [[ "$ALLOW_RESTART" == "1" ]]; then
-        warn "proceeding with $containers Docker container(s) under explicit VELNOR_C1_ALLOW_RESTART=1"
-        return 0
-      fi
-      die "refusing maintenance with $containers Docker container(s); drain them first" 2
-    fi
-    (( SECONDS < deadline )) \
-      || die "timed out waiting for Velnor job units to drain: ${jobs//$'\n'/, }" 2
-    log "waiting for Velnor jobs to drain: ${jobs//$'\n'/, }"
-    sleep 5
-  done
+  local containers
+  containers="$(container_count_for_maintenance)" \
+    || die "Docker container inventory is unknown; refusing maintenance" 2
+  if [[ "$containers" -eq 0 ]]; then return 0; fi
+  if [[ "$ALLOW_RESTART" == "1" ]]; then
+    warn "proceeding with $containers Docker container(s) under explicit VELNOR_C1_ALLOW_RESTART=1"
+    return 0
+  fi
+  die "refusing maintenance with $containers Docker container(s); drain them first" 2
 }
 
 ensure_package_lock_file() {
@@ -1474,13 +1442,9 @@ preflight_env() {
 # VELNOR_C1_ALLOW_RESTART permits explicitly accepted non-Velnor containers.
 require_drained() {
   local reason="$1"
-  local n jobs
+  local n
   n="$(container_count_for_maintenance)" \
     || die "refusing to $reason because Docker work inventory cannot be proven" 2
-  jobs="$(active_velnor_job_units)" \
-    || die "refusing to $reason because Velnor job inventory cannot be proven" 2
-  [[ -z "$jobs" ]] \
-    || die "refusing to $reason while Velnor job units remain active: ${jobs//$'\n'/, }" 2
   if [[ "$n" -gt 0 && "$ALLOW_RESTART" != "1" ]]; then
     die "refusing to $reason with $n running container(s); drain jobs first, then re-run with VELNOR_C1_ALLOW_RESTART=1" 2
   fi

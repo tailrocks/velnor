@@ -7,9 +7,9 @@ title: "Storage and resource budgets"
 Velnor derives what a job may use from what the machine actually has, rather
 than letting each tool assume it owns the host. Jobs run unbounded — no
 CPU/RAM ceiling is imposed on any container, daemon, or compiler — and host
-capacity is governed by a single `max_jobs=N` permit ledger. This page
-describes the store catalog, the unbounded execution policy, and how disk
-pressure is handled.
+capacity has a shared host-wide `max_jobs=N` permit ceiling. This page describes
+the store catalog, the unbounded execution policy, and how disk pressure is
+handled.
 
 > Navigation: [← Observability](/operations/observability) · [Index](/) · [Security and data →](/operations/security-and-data)
 
@@ -34,31 +34,45 @@ store cannot be written at one path and reclaimed at another.
 Each reclaimable class declares a lease class a running job publishes to mark
 the store live, so a reclaimer cannot delete a class it does not own, and
 cannot delete a store a job is using. `docker` declares none: Velnor never
-reclaims Docker's storage by scope, but host disk accounting must include it,
-because it consumes the same filesystem.
+reclaims Docker's storage by scope. `cache du` reports Docker usage separately
+as unmanaged, outside Velnor's store-budget totals. Filesystem free-space
+measurements still reflect Docker's use of that filesystem.
 
-Stores resolve under `VELNOR_STORAGE_ROOT` when set, otherwise through the
-systemd state directory and XDG defaults documented in
-[Configuration](/reference/configuration). The daemon-shared work root holds
-cross-slot warm data; slot-scoped paths (mbx object/target trees, mise
-installs, stable workspaces) lift to that root by construction so affinity
-matters but the catalog stays singular.
+When set, `VELNOR_STORAGE_ROOT` selects the daemon's canonical cache, library,
+runtime, and log roots. Without it, daemon cache stores use their legacy
+work-root layout. Packaged services set `VELNOR_STORAGE_ROOT=/var`; interactive
+`velnorctl storage` uses XDG cache/state/runtime paths when neither a storage
+root nor an explicit config directory is supplied. Artifacts stay under the
+daemon-shared work root in `_velnor_artifacts` in both layouts. See
+[Configuration](/reference/configuration) for daemon config and work paths.
+The daemon-shared work root holds cross-slot warm data; slot-scoped paths lift
+to that root where the store contract allows sharing, so affinity still matters.
 
 | Store | Shared across slots | Scoped by |
 | --- | --- | --- |
-| Cargo registry cache/index + git db | yes (trust scope) | repository id |
-| mise download cache | yes (trust scope) | repository id |
-| mise installs + per-version binaries | per slot | trust + repository |
+| Cargo registry cache/index + git db | yes | trust scope |
+| mise download cache | yes | trust scope |
+| Cargo executable store | yes | trust scope + repository id |
+| mise installs | per slot | trust scope + repository id |
+| mise per-version binaries | yes | trust scope + repository id |
 | mbx cache + managed targets | per slot | trust + repository |
-| actions-cache / gha-cache emulator | per host | repository + key |
+| `actions-cache` | yes, within its trust scope | trust scope + repository + key |
+| `gha-cache` emulator | yes, host-wide | repository/ref + key/version |
 | artifacts | per run | workflow run id |
 
 Operator GC for reclaimable Velnor-owned classes is
 `velnorctl cache --work-dir DIR gc --yes`, typically on a systemd timer after
-baseline measurement with
-`velnorctl cache du`. That reclaims UUID workspaces and orphaned images under
-the 2 GiB admission floor; it does not delete live leases. BuildKit and Docker
-image storage remain operator-managed on trusted docker hosts.
+baseline measurement with `velnorctl cache du`. It evicts eligible Velnor
+store entries and preserves active leases. With the host-Docker backend it
+also attempts to reclaim orphaned UUID workspaces after checking Docker job
+liveness; with MicroVM it leaves shared UUID workspaces alone because it
+cannot prove pool ownership. It does not prune Docker images or volumes.
+Disk-pressure reclaim also targets Velnor-owned entries on the limiting
+measured filesystem and protects live leases and entries touched in the last
+15 minutes. Orphan-workspace cleanup remains backend-specific: MicroVM skips
+shared roots, and Docker cleanup requires its liveness check. Disk pressure
+does not prune Docker images, volumes, or BuildKit builders. BuildKit and
+Docker image storage remain operator-managed on trusted Docker hosts.
 
 ## Unbounded execution and the host permit ledger
 
@@ -73,22 +87,77 @@ cleanup ancestry only.
 
 Host capacity is governed instead by a single host-wide `max_jobs=N`
 permit ledger, shared by the native and Scale Set lanes. One top-level
-job holds one permit from acquisition-commit until terminal work and
-owned cleanup are confirmed; a full ledger skips the acquisition and
-the broker redelivers. The only number to tune for completed-work
-throughput is `N` (`--max-jobs` / `VELNOR_MAX_JOBS`, defaulting to the
-daemon's slot count on single-daemon hosts). The first daemon start
-configures `N`; later starts adopt the configured value, so a second
-scope daemon's slot count never rewrites host capacity — an explicit
-`--max-jobs` always wins as deliberate intent.
+job holds one permit from acquisition commit until terminal work and owned
+cleanup are confirmed. When the ledger is full, the native lane leaves the
+broker offer unacquired for broker redelivery. The Scale Set lane persists
+offers before acknowledging their message; when permits are unavailable,
+those offers stay queued and acquisition resumes on later messages or idle
+polls. Broker redelivery is not the Scale Set lane's normal full-ledger path.
 
-Native offers queue oldest-observed-first across every scope: each broker
-offer is recorded with an immutable first-seen age, redelivery retains
-the original age, and a younger offer defers while older eligible demand
-exists that free permits cannot also cover. Ordering is advisory and
-bounded by freshness; `occupied <= N` is enforced atomically by the
-ledger behind it. No global FIFO is promised: GitHub controls delivery
-order.
+`N` (`--max-jobs` / `VELNOR_MAX_JOBS`) is the shared host-wide ceiling, not a
+per-lane target. If no explicit positive value is set, the first daemon to
+configure an unset ledger sets `N` from its own slot count; later daemons adopt
+that value, so slot counts are never summed. An explicit positive
+`--max-jobs` / `VELNOR_MAX_JOBS` value sets or resizes `N`. Native slot count
+can limit that lane below `N`. The Scale Set adapter has no per-set capacity
+field in its TOML. Velnor currently sends its shared free-permit estimate
+through `X-ScaleSetMaxCapacity`: `N.saturating_sub(occupied)`, capped at
+`2,147,483,647` for the signed 32-bit header, or `0` when the ledger is not
+ready to advertise. This is Velnor-local behavior and an unverified deviation
+from the upstream listener's configured total-capacity meaning; GitHub's
+handling of the free-permit estimate is not established here. Velnor also uses
+GitHub's assigned-job statistics to reconcile local runner population. Every
+daemon on the host must resolve the same permit-ledger file.
+
+Both lanes record eligible demand in the shared ledger. Permit admission takes
+the oldest fresh eligible demand across all local lanes and scopes, ordered by
+durable first-seen age plus a sequence tie-breaker. Redelivery refreshes
+freshness but keeps the original age. Demand not refreshed for 300 seconds no
+longer blocks another lane; when seen again, it retains its original place.
+A younger acquisition is deferred while any older fresh eligible demand
+remains, even when multiple permits are free. The atomic grant check refuses a
+new permit when `occupied >= N`. Lowering `N` does not revoke permits already
+held, so occupancy can temporarily exceed the new limit until those permits
+are released.
+
+This order governs local permit admission. It does not guarantee GitHub
+submission order, completion order, or actual start order: GitHub controls
+when work is delivered and which eligible runner receives it. Velnor can order
+only demand it has observed.
+
+### Disk peak and compiler-store budgets
+
+`max_jobs` limits concurrent jobs; it does not reserve disk space. After strict
+Native action admission, each admitted Native job makes a separate disk-peak
+reservation against free space on the filesystem holding the daemon-shared
+work root. The default reservation is 30 GiB per active job
+(`--job-peak-bytes` / `VELNOR_JOB_PEAK_BYTES`). Velnor keeps a default 10 GiB
+emergency reserve unavailable to new jobs
+(`--emergency-reserve-bytes` / `VELNOR_EMERGENCY_RESERVE_BYTES`). The disk
+reservation is held only while the job is active and releases when its job
+scope ends.
+
+If the reservation is unavailable, Velnor tries bounded reclaim and retries
+every 15 seconds while renewing the acquired job's Run Service lease. The
+default wait is 120 seconds; `VELNOR_CAPACITY_WAIT_SECS` changes it, with a
+15-second minimum. If the wait expires, Velnor completes the acquired job as
+failed before workflow steps begin. This disk guard is separate from the
+shared job-count permit.
+
+The compiler-store budget bounds Mr Boxington and sccache together across
+trust scopes, repositories, and slots. Per daemon, Velnor calculates it from
+the work-root filesystem capacity and that daemon's slot count:
+
+```text
+persistent_allowance = max(0, filesystem_total - emergency_reserve - slots * job_peak)
+compiler_store_budget = persistent_allowance / 2
+```
+
+Velnor prints the budget during preflight and daemon startup, and enforces it
+at startup, each job admission, and `cache gc`. Co-located daemon instances
+derive budgets from their own slot counts. The budget pass is best-effort: a
+failed measurement or eviction warns and the job proceeds; the disk-peak
+reservation remains the fail-closed free-space guard.
 
 ## Mr Boxington store limits
 
@@ -123,45 +192,86 @@ lanes are independent.
 
 ## Disk pressure
 
-Free space is measured with `statvfs` on the filesystem that actually holds the
-work root, using the unprivileged figure (`f_bavail`), not the root-reserved
-one. Docker's own usage is measured and subtracted from the headroom Velnor is
-willing to promise; when it cannot be measured it is treated as unknown, never
-as zero.
+Velnor measures required writable roots independently with `statvfs` and uses
+unprivileged available bytes (`f_bavail`), not root-reserved space. It never
+adds free space across paths or filesystems. Job-data roots need at least 2 GiB
+free; control roots need at least 16 MiB:
 
-The free-space floor is 2 GiB. Below it, a slot must not admit a job. Pressure
-is handled as a total state machine — every state has a defined successor and
-none of them means "sleep and try again forever":
+| Floor | Required writable roots |
+| --- | --- |
+| 2 GiB job data | Daemon `config_base` and per-slot `config_dir`; `<config_dir>/logs/pages`; the resolved slot work and cache roots; an explicitly configured Docker host work bind; for MicroVM, `<resolved-lib-root>/microvm/jailer` and `<resolved-lib-root>/microvm/disks`; and, when the Scale Set lane is configured, its `worker_state_dir` (default `<config_dir>/scaleset-workers`). If `VELNOR_STORAGE_ROOT` is unset, the MicroVM root falls back to `/var/lib/velnor/microvm`. Docker Engine `RootDir` is also required when Docker is selected, but is currently unmeasurable; see below. |
+| 16 MiB control data | Resolved runtime/run root and its `disk-admission` child; resolved log root, resolved `lib_root/buildkit-owners`, and `<config_base>/logs`; for MicroVM, `<resolved-lib-root>/microvm/vsock` (under the same fallback above) and `/var/run/netns`; parents of explicit or default native state DBs, supervisor journal and state DBs, and the Scale Set state DB; the canonical permit-ledger file's parent; and the optional job-message dump's parent. |
+
+The slot compares each root's free-space margin (`available bytes - that
+root's floor`). The root with the smallest margin drives the shared pressure
+state, even when another root has fewer raw free bytes. Every required root
+must be measurable and at or above its own floor before admission.
+
+For a Docker execution backend, Docker Engine `RootDir` is another 2 GiB
+job-data root. An accepted local Unix socket does not prove that this path is
+in the host's mount namespace, so Velnor always records Engine `RootDir` as
+unmeasurable. It does not use `statvfs` on a same-spelled host path as proof.
+With the current proof model, native Docker slots therefore refuse admission
+and follow the unknown-root drain lifecycle. Docker's files affect a measured
+filesystem only when Engine `RootDir` actually shares it; the socket alone
+cannot establish that.
+
+If any root is unmeasurable, or no roots are available, the slot refuses new
+admission and rechecks within 60 seconds. Continuous unknown capacity for 15
+minutes starts draining, followed by a 5-minute drain grace. After that, the
+slot preserves any durable in-flight marker or provisional acquisition intent
+and hands it to controller recovery. It deletes the runner registration only
+when no durable work record blocks cleanup. The unknown interval does not
+count toward a measured low-space episode; if a probe recovers before the
+unknown deadline, the pressure loop resumes using only measured time.
+
+For measurable low-space roots, every state has a defined successor:
 
 | State | Meaning | Action |
 | --- | --- | --- |
-| `Healthy` | at or above the floor | admit jobs |
-| `Reclaiming` | below the floor, reclaim not yet attempted this episode | run the bounded reclaimer, re-evaluate |
-| `Degraded` | reclaim ran, still below the floor | refuse admission, with the time left before escalation |
-| `Draining` | the degraded deadline expired | stop accepting work, shed the slot |
-| `Deregistered` | terminal | delete the registration and exit |
+| `Healthy` | every measured root is at or above its own floor | admit jobs |
+| `Reclaiming` | one or more measured roots are below their floor; reclaim has not run this episode | refuse admission, run the bounded reclaimer, then measure again |
+| `Degraded` | reclamation ran but a root remains below its floor | refuse admission until the 10-minute low-space deadline |
+| `Draining` | the 10-minute continuous low-space deadline expired | stop accepting work; if all roots recover during the 5-minute grace, return to `Healthy`/`Admit`; new jobs resume only after local fence recovery succeeds and no other live block remains; otherwise, at grace expiry preserve durable work for controller recovery and delete registration only when no durable work record blocks cleanup |
+| `Deregistered` | terminal | slot has exited; an operator or fleet controller must recreate it |
 
-The degraded deadline is 10 minutes and the drain deadline a further 5. Any
-non-terminal state returns to `Healthy` the moment space appears; recovery is
-checked before escalation. `Deregistered` is terminal and requires an operator
-or the fleet controller to act.
+Recovery is checked before escalation in every nonterminal state, including
+`Draining`. When every root measures at or above its floor, the slot returns to
+`Healthy` and returns the disk gate to `Admit`. New jobs resume only after local
+fence recovery succeeds and no other live block remains. The 10-minute
+low-space deadline applies only while measurements show capacity below a
+required floor; an unknown interval pauses that clock, and a fully measured
+observation with every root at or above its floor resets it. If capacity stays
+unhealthy through that deadline, Velnor begins the separate 5-minute drain
+grace. The 10-minute low-space deadline and 15-minute unknown-capacity deadline
+are separate clocks.
 
 Admission is evaluated *before* a job is acquired. Acquiring first and
 discovering afterwards that the host cannot hold the job is what produced
 doomed jobs and the indefinite park.
 
-What a node does today when it is below the floor is measure, run the bounded
-reclaimer, re-measure, and — if it is still below the floor — refuse readiness
-with a `low disk space` reason naming the free and required bytes. That is
-bounded and fail-closed. The escalation past `Degraded` into `Draining` and
-`Deregistered` is defined but is not yet driven from the slot loop, so a host
-that stays full holds a refusing slot instead of shedding it.
+The slot loop drives these transitions. Unknown measurements block admission
+immediately while the bounded unknown-capacity clock runs; measured low space
+blocks admission, triggers the bounded reclaimer, then proceeds to drain and
+deregistration if recovery does not occur.
 
 The reclaimer is bounded: it takes a leader lock so two daemons do not reclaim
-concurrently, targets a byte goal rather than running to completion, skips any
-class a live lease covers, and reports what it freed. It reclaims UUID job
-workspaces and dangling untagged images; warm caches, volumes, builders, and
-shared microVM work roots are protected or skipped. It does not scrub bytes.
+concurrently, targets a byte goal rather than running to completion, and
+reports what it freed. Disk pressure filters candidate stores and eligible
+orphan-workspace roots to the limiting measured filesystem. It can evict idle,
+unleased Velnor-owned store entries there; entries touched in the last 15
+minutes and live leases are protected. MicroVM orphan-workspace cleanup skips
+shared roots because pool ownership is unproven. Docker orphan-workspace
+cleanup requires its liveness check. Disk pressure does not prune Docker
+images or volumes, and skips BuildKit-engine prune because that engine's
+storage root cannot be tied to the measured filesystem. It does not scrub
+arbitrary bytes.
+
+Disk reclaim requires a known filesystem identity from `statvfs`. When
+`f_fsid == 0`, Velnor treats the identity as unknown and fails reclaim closed:
+it skips reclaim instead of guessing which paths share the filesystem.
+Admission stays blocked while the limiting root remains below its floor, so the
+low-space drain policy still applies.
 
 `velnorctl storage paths` and `velnorctl storage status` report the resolved
 roots and the per-class byte totals. `velnorctl storage explain-pressure` is

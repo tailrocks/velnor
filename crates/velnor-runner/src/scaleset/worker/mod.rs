@@ -27,14 +27,24 @@
 //! ```
 //!
 //! Every edge is validated by [`legal_edge`] and recorded through an
-//! [`EdgeSink`] (the journal `ScaleSetWorkerEdge` event once the journal
-//! extension lands; the sink keeps the machine independent of the store).
+//! [`EdgeSink`]. The scale-set lane persists production edges in its worker
+//! registry; the sink keeps transition policy independent from persistence.
 //! Supervision ([`supervise`]) reconciles observed Docker state against
-//! the recorded state at every boundary before advancing.
+//! recorded state at every boundary before advancing.
+//!
+//! Provisioning is scoped to the scale-set lifecycle coordinator:
+//!
+//! ```compile_fail
+//! use velnor_runner::scaleset::worker::provision_worker;
+//! ```
+
+use std::time::Instant;
 
 pub mod dind;
 pub mod ownership;
 pub mod runner;
+#[cfg(unix)]
+mod secure_fs;
 pub mod supervise;
 
 pub use dind::{
@@ -49,7 +59,9 @@ pub use runner::{
     RUNNER_DIGEST_AMD64, RUNNER_DIGEST_ARM64, RUNNER_INDEX_DIGEST, RUNNER_REPOSITORY,
     RUNNER_VERSION,
 };
-pub use supervise::{CleanupReport, DiagnosticExport, Supervision, SupervisionOutcome};
+pub use supervise::{DiagnosticExport, Supervision, SupervisionOutcome};
+
+use std::path::{Path, PathBuf};
 
 use velnor_model::ScaleSetWorkerState;
 
@@ -70,6 +82,19 @@ pub struct WorkerOutput {
 pub trait WorkerRunner {
     /// Run `program` to completion, capturing both streams.
     fn run(&mut self, program: &str, args: &[String]) -> anyhow::Result<WorkerOutput>;
+
+    /// Run one operation with an operation-scoped timeout. Scripted worker
+    /// runners inherit the unbounded behavior; production runners override
+    /// this through the command runner's bounded API.
+    fn run_timeout(
+        &mut self,
+        program: &str,
+        args: &[String],
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<WorkerOutput> {
+        let _ = timeout;
+        self.run(program, args)
+    }
 }
 
 impl<T> WorkerRunner for T
@@ -84,6 +109,116 @@ where
             stderr: output.stderr,
         })
     }
+
+    fn run_timeout(
+        &mut self,
+        program: &str,
+        args: &[String],
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<WorkerOutput> {
+        let output = crate::executor::CommandRunner::run_timeout(self, program, args, timeout)?;
+        Ok(WorkerOutput {
+            code: output.code,
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
+    }
+}
+
+/// Resolve and prepare the host-owned root for scale-set worker state.
+///
+/// The returned absolute path must be persisted in lane configuration so
+/// later worker creation and cleanup do not depend on process cwd changes.
+pub(crate) fn prepare_state_root(path: &Path) -> std::io::Result<PathBuf> {
+    #[cfg(unix)]
+    {
+        secure_fs::prepare_state_root(path)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "secure worker-state roots require Unix dirfd support",
+        ))
+    }
+}
+
+/// Create or replace the worker's stable owner-only JIT env file.
+///
+/// The worker state directory is a writable bind mount inside both DinD
+/// and the runner, so host-only secrets must never be staged inside it.
+/// The private sibling name lets crash recovery find and remove an env
+/// file left behind before Docker returned.
+pub(crate) fn create_owner_only_file_next_to(
+    state_dir: &Path,
+    contents: &[u8],
+) -> std::io::Result<PathBuf> {
+    #[cfg(unix)]
+    {
+        let parent_path = state_dir.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "worker state directory has no parent",
+            )
+        })?;
+        let parent = secure_fs::open_absolute_directory(parent_path)?;
+        secure_fs::verify_host_parent(&parent)?;
+        let directory_name = secure_fs::private_jit_directory_name(state_dir)?;
+        let directory = secure_fs::open_or_create_private_directory_at(&parent, &directory_name)?;
+        let file_name = std::ffi::OsStr::new("jit.env");
+        if let Err(write_error) = secure_fs::write_file_at(&directory, file_name, contents, 0o600) {
+            drop(directory);
+            return match secure_fs::remove_tree_at(&parent, &directory_name) {
+                Ok(()) => Err(write_error),
+                Err(cleanup_error) => Err(std::io::Error::other(format!(
+                    "host-only JIT write failed: {write_error}; cleanup failed: {cleanup_error}"
+                ))),
+            };
+        }
+        Ok(parent_path.join(directory_name).join(file_name))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (state_dir, contents);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "secure host-owned worker files require descriptor-relative filesystem support",
+        ))
+    }
+}
+
+/// Remove the deterministic private JIT directory, including `jit.env` and
+/// any temporary file left by a process crash during atomic creation.
+pub(crate) fn remove_owner_only_file_next_to(state_dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let parent_path = state_dir.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "worker state directory has no parent",
+            )
+        })?;
+        let parent = secure_fs::open_absolute_directory(parent_path)?;
+        secure_fs::verify_host_parent(&parent)?;
+        let directory_name = secure_fs::private_jit_directory_name(state_dir)?;
+        match secure_fs::open_private_directory_at(&parent, &directory_name) {
+            Ok(directory) => drop(directory),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return secure_fs::sync_directory(&parent);
+            }
+            Err(error) => return Err(error),
+        }
+        secure_fs::remove_tree_at(&parent, &directory_name)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = state_dir;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "secure host-owned worker files require descriptor-relative filesystem support",
+        ))
+    }
 }
 
 /// A recorded lifecycle edge: `from → to` for one ownership id.
@@ -96,9 +231,8 @@ pub struct WorkerEdge {
 
 /// Where lifecycle edges are recorded.
 ///
-/// The journal implements this once the `ScaleSetWorkerEdge` event lands
-/// (design §2); until then the provision path records edges through the
-/// test/in-memory sinks. The machine never skips an edge: an unrecorded
+/// The scale-set lane uses its worker registry; isolated transition tests
+/// use in-memory sinks. The machine never skips an edge: an unrecorded
 /// transition is a bug, not an optimization.
 pub trait EdgeSink {
     /// Record one validated edge. Fails the transition on error: the
@@ -106,7 +240,7 @@ pub trait EdgeSink {
     fn record_edge(&mut self, edge: &WorkerEdge) -> anyhow::Result<()>;
 }
 
-/// In-memory edge sink (tests + the pre-journal provision path).
+/// In-memory edge sink for isolated transition tests.
 #[derive(Debug, Default)]
 pub struct VecEdgeSink {
     edges: Vec<WorkerEdge>,
@@ -179,8 +313,8 @@ pub fn legal_edge(from: ScaleSetWorkerState, to: ScaleSetWorkerState) -> bool {
 
 /// One worker's durable record: identity + lifecycle + bindings.
 ///
-/// The journal `scaleset_workers` row persists this shape; the struct is
-/// the in-memory owner of the transition policy.
+/// The worker registry persists this shape; the struct is the in-memory
+/// owner of the transition policy.
 #[derive(Debug, Clone)]
 pub struct ScaleSetWorker {
     identity: WorkerIdentity,
@@ -322,7 +456,8 @@ pub struct ProvisionOutcome {
     pub runner_attestation: ToolContentAttestation,
 }
 
-/// Provision one worker pair end to end (the listener's provision call).
+/// Provision one worker pair end to end while the scale-set lane holds the
+/// worker lifecycle lock and records each Docker boundary durably.
 ///
 /// Order: verify both images (tool-content hook) → ensure network →
 /// ensure DinD → readiness loop → ensure runner → observe connection.
@@ -334,12 +469,25 @@ pub struct ProvisionOutcome {
 ///
 /// `sleep` is injected (production: `std::thread::sleep`) so tests run
 /// the readiness loop without waiting.
-pub fn provision_worker(
+pub(in crate::scaleset) fn provision_worker(
+    lifecycle: &mut crate::scaleset::lane::WorkerLifecycleCapability<'_>,
     runner: &mut dyn WorkerRunner,
     hook: &dyn ToolContentHook,
     plan: &ProvisionPlan,
     sleep: &dyn Fn(std::time::Duration),
-    before_runner_start: &mut dyn FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<ProvisionOutcome> {
+    let ownership_id = plan.identity.ownership().as_str();
+    lifecycle.validate_provision_owner(&ownership_id)?;
+    let mut lifecycle_event = |event| lifecycle.record_docker_lifecycle_event(&ownership_id, event);
+    provision_worker_inner(runner, hook, plan, sleep, &mut lifecycle_event)
+}
+
+fn provision_worker_inner(
+    runner: &mut dyn WorkerRunner,
+    hook: &dyn ToolContentHook,
+    plan: &ProvisionPlan,
+    sleep: &dyn Fn(std::time::Duration),
+    lifecycle_event: &mut dyn FnMut(runner::DockerLifecycleEvent) -> anyhow::Result<()>,
 ) -> anyhow::Result<ProvisionOutcome> {
     use anyhow::Context;
     if plan.ready_attempts == 0 {
@@ -356,28 +504,38 @@ pub fn provision_worker(
         )
         .context("verify runner tool content")?;
 
-    let network = dind::ensure_network(runner, &plan.identity)?;
+    let network = dind::ensure_network(runner, &plan.identity, lifecycle_event)?;
     let dind_spec = DindSpec::new(
         plan.identity.clone(),
         plan.profile.dind().clone(),
         &plan.state_dir,
     );
-    let dind = dind::ensure_dind(runner, &dind_spec)?;
-    let mut ready = false;
-    for attempt in 0..plan.ready_attempts {
-        if dind::dind_ready(runner, &dind_spec)? {
-            ready = true;
-            break;
-        }
-        if attempt + 1 < plan.ready_attempts {
-            sleep(DIND_READY_POLL_INTERVAL);
-        }
-    }
+    let dind = dind::ensure_dind(runner, &dind_spec, lifecycle_event)?;
+    let dind_id = dind::inspect_owned_container(runner, &plan.identity, ownership::ROLE_DIND)?
+        .context("DinD disappeared or lost ownership after provisioning")?;
+    let readiness_deadline = Instant::now() + DIND_READY_TIMEOUT;
+    let ready = probe_dind_until_ready(
+        runner,
+        &dind_spec,
+        &dind_id,
+        plan.ready_attempts,
+        sleep,
+        || readiness_deadline.saturating_duration_since(Instant::now()),
+    );
     if !ready {
         anyhow::bail!(
             "DinD container {} never became ready ({} probes)",
             plan.identity.dind_container(),
             plan.ready_attempts
+        );
+    }
+    let network_id = dind::inspect_owned_network(runner, &plan.identity)?
+        .context("worker network disappeared after DinD became ready")?;
+    dind::validate_network_spec(runner, &plan.identity, &network_id)?;
+    if !dind::validate_dind_runtime(runner, &dind_spec, &dind_id, &network_id)? {
+        anyhow::bail!(
+            "DinD container {} disappeared after readiness",
+            plan.identity.dind_container()
         );
     }
     let runner_spec = RunnerSpec::new(
@@ -386,8 +544,10 @@ pub fn provision_worker(
         &plan.state_dir,
         &plan.jit_config,
     );
-    let provisioned = runner::ensure_runner(runner, &runner_spec, before_runner_start)?;
-    let connection = runner::runner_connection(runner, &plan.identity)?;
+    let provisioned = runner::ensure_runner(runner, &runner_spec, &dind_id, lifecycle_event)?;
+    let runner_id = dind::inspect_owned_container(runner, &plan.identity, ownership::ROLE_RUNNER)?
+        .context("runner disappeared or lost ownership after provisioning")?;
+    let connection = runner::runner_connection_by_id(runner, &runner_id)?;
     Ok(ProvisionOutcome {
         network,
         dind,
@@ -396,6 +556,33 @@ pub fn provision_worker(
         dind_attestation,
         runner_attestation,
     })
+}
+
+fn probe_dind_until_ready(
+    runner: &mut dyn WorkerRunner,
+    spec: &DindSpec,
+    dind_id: &str,
+    ready_attempts: u32,
+    sleep: &dyn Fn(std::time::Duration),
+    mut remaining: impl FnMut() -> std::time::Duration,
+) -> bool {
+    for attempt in 0..ready_attempts {
+        let Some(operation_timeout) = dind::readiness_probe_timeout(remaining()) else {
+            break;
+        };
+        if dind::dind_ready_with_timeout(runner, spec, dind_id, operation_timeout).unwrap_or(false)
+        {
+            return true;
+        }
+        if attempt + 1 < ready_attempts {
+            let remaining = remaining();
+            if remaining.is_zero() {
+                break;
+            }
+            sleep(DIND_READY_POLL_INTERVAL.min(remaining));
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -527,7 +714,7 @@ mod tests {
         struct FailingSink;
         impl EdgeSink for FailingSink {
             fn record_edge(&mut self, _edge: &WorkerEdge) -> anyhow::Result<()> {
-                anyhow::bail!("journal unavailable")
+                anyhow::bail!("worker registry unavailable")
             }
         }
         let mut worker = worker();
@@ -550,6 +737,7 @@ mod tests {
     struct ScriptRunner {
         results: std::collections::VecDeque<WorkerOutput>,
         seen: Vec<Vec<String>>,
+        timeouts: Vec<std::time::Duration>,
     }
 
     impl ScriptRunner {
@@ -557,6 +745,7 @@ mod tests {
             Self {
                 results: results.into(),
                 seen: Vec::new(),
+                timeouts: Vec::new(),
             }
         }
 
@@ -577,6 +766,257 @@ mod tests {
         }
     }
 
+    fn owned_container_output(identity: &WorkerIdentity, id: &str, role: &str) -> String {
+        let mut labels = identity.labels();
+        labels.insert(ownership::WORKER_ROLE_LABEL.to_string(), role.to_string());
+        format!("{id}\n{}", serde_json::to_string(&labels).unwrap())
+    }
+
+    fn owned_network_output(identity: &WorkerIdentity, id: &str) -> String {
+        format!(
+            "{id}\n{}",
+            serde_json::to_string(&identity.labels()).unwrap()
+        )
+    }
+
+    fn owned_network_snapshot(identity: &WorkerIdentity, id: &str) -> String {
+        serde_json::json!({
+            "Id": id,
+            "Name": identity.network(),
+            "Labels": identity.labels(),
+            "Driver": "bridge",
+            "Scope": "local",
+            "Internal": false,
+            "Attachable": false,
+            "Ingress": false,
+            "ConfigOnly": false,
+            "EnableIPv6": false,
+            "Options": null,
+            "IPAM": {
+                "Driver": "default",
+                "Options": null,
+                "Config": [{
+                    "Subnet": "172.30.0.0/16",
+                    "IPRange": "",
+                    "Gateway": "172.30.0.1"
+                }]
+            }
+        })
+        .to_string()
+    }
+
+    fn owned_volume_output(identity: &WorkerIdentity, kind: &str, name: &str) -> String {
+        let mut labels = identity.labels();
+        labels.insert("velnor.scaleset.volume".to_string(), kind.to_string());
+        labels.insert("velnor.scaleset.volume-name".to_string(), name.to_string());
+        format!("{name}\n{}", serde_json::to_string(&labels).unwrap())
+    }
+
+    fn owned_volume_snapshot(identity: &WorkerIdentity, kind: &str, name: &str) -> String {
+        let mut labels = identity.labels();
+        labels.insert("velnor.scaleset.volume".to_string(), kind.to_string());
+        labels.insert("velnor.scaleset.volume-name".to_string(), name.to_string());
+        serde_json::json!({
+            "Name": name,
+            "Driver": "local",
+            "Options": null,
+            "Labels": labels
+        })
+        .to_string()
+    }
+
+    fn dind_runtime_outputs(plan: &ProvisionPlan, id: &str, network_id: &str) -> Vec<WorkerOutput> {
+        std::fs::create_dir_all(plan.state_dir.join("buildkit-cache")).unwrap();
+        let state_dir = std::fs::canonicalize(&plan.state_dir).unwrap();
+        let mut labels = plan.identity.labels();
+        labels.insert(
+            ownership::WORKER_ROLE_LABEL.to_string(),
+            ownership::ROLE_DIND.to_string(),
+        );
+        let container = serde_json::json!({
+            "Id": id,
+            "Image": "sha256:beef",
+            "Name": format!("/{}", plan.identity.dind_container()),
+            "Config": {
+                "Image": plan.profile.dind().reference(),
+                "Labels": labels,
+                "Env": ["DOCKER_TLS_CERTDIR="],
+                "Cmd": [format!("-H unix://{}", dind::DIND_SOCKET)],
+                "Entrypoint": null,
+                "User": "",
+                "WorkingDir": "",
+                "ExposedPorts": null,
+                "Volumes": null,
+                "StopSignal": null,
+                "Healthcheck": null,
+                "Shell": null
+            },
+            "HostConfig": {
+                "NetworkMode": network_id,
+                "Privileged": true,
+                "PortBindings": null,
+                "CapAdd": null,
+                "CapDrop": null,
+                "Devices": null,
+                "SecurityOpt": null,
+                "AutoRemove": false,
+                "RestartPolicy": {"Name": "no", "MaximumRetryCount": 0},
+                "PublishAllPorts": false,
+                "ReadonlyRootfs": false
+            },
+            "Mounts": [
+                {
+                    "Type": "volume",
+                    "Source": "/var/lib/docker/volumes/dind-data/_data",
+                    "Destination": dind::DIND_DATA_ROOT,
+                    "Name": plan.identity.dind_data_volume(),
+                    "RW": true
+                },
+                {
+                    "Type": "bind",
+                    "Source": state_dir,
+                    "Destination": dind::STATE_MOUNT,
+                    "RW": true
+                }
+            ],
+            "State": {"Running": false},
+            "NetworkSettings": {
+                "Networks": {
+                    (plan.identity.network()): {"NetworkID": network_id}
+                }
+            }
+        });
+        let image = serde_json::json!({
+            "Id": "sha256:beef",
+            "Config": {
+                "Labels": null,
+                "Env": [],
+                "Entrypoint": null,
+                "User": "",
+                "WorkingDir": "",
+                "ExposedPorts": null,
+                "Volumes": null,
+                "StopSignal": null,
+                "Healthcheck": null,
+                "Shell": null,
+                "Cmd": null
+            }
+        });
+        vec![
+            ScriptRunner::ok(&format!("{id}\n")),
+            ScriptRunner::ok(&container.to_string()),
+            ScriptRunner::ok(&image.to_string()),
+        ]
+    }
+
+    fn runner_runtime_outputs(
+        plan: &ProvisionPlan,
+        runner_id: &str,
+        dind_id: &str,
+    ) -> Vec<WorkerOutput> {
+        std::fs::create_dir_all(plan.state_dir.join("buildkit-cache")).unwrap();
+        let state_dir = std::fs::canonicalize(&plan.state_dir).unwrap();
+        let cache_dir = std::fs::canonicalize(plan.state_dir.join("buildkit-cache")).unwrap();
+        let mut labels = plan.identity.labels();
+        labels.insert(
+            ownership::WORKER_ROLE_LABEL.to_string(),
+            ownership::ROLE_RUNNER.to_string(),
+        );
+        labels.insert(
+            runner::RUNNER_SOURCE_LABEL.to_string(),
+            runner::RUNNER_SOURCE.to_string(),
+        );
+        let workspace = plan.identity.workspace_volume();
+        let container = serde_json::json!({
+            "Id": runner_id,
+            "Image": "sha256:feed",
+            "Name": format!("/{}", plan.identity.runner_container()),
+            "Config": {
+                "Image": plan.profile.runner().reference(),
+                "Labels": labels,
+                "Env": [
+                    format!("{}={}", runner::RUNNER_NAME_ENV, plan.identity.ownership().runner_name()),
+                    format!("DOCKER_HOST=unix://{}", dind::DIND_SOCKET),
+                    format!("RUNNER_WORK_FOLDER={}", runner::RUNNER_WORK_DIR),
+                    format!("{}={}", runner::JIT_CONFIG_ENV, plan.jit_config)
+                ],
+                "Cmd": null,
+                "Entrypoint": null,
+                "User": "",
+                "WorkingDir": "",
+                "ExposedPorts": null,
+                "Volumes": null,
+                "StopSignal": null,
+                "Healthcheck": null,
+                "Shell": null
+            },
+            "HostConfig": {
+                "NetworkMode": format!("container:{dind_id}"),
+                "Privileged": false,
+                "PortBindings": null,
+                "CapAdd": null,
+                "CapDrop": null,
+                "Devices": null,
+                "SecurityOpt": null,
+                "AutoRemove": false,
+                "RestartPolicy": {"Name": "no", "MaximumRetryCount": 0},
+                "PublishAllPorts": false,
+                "ReadonlyRootfs": false
+            },
+            "Mounts": [
+                {
+                    "Type": "bind",
+                    "Source": state_dir,
+                    "Destination": dind::STATE_MOUNT,
+                    "RW": true
+                },
+                {
+                    "Type": "volume",
+                    "Source": "/var/lib/docker/volumes/workspace/_data",
+                    "Destination": runner::RUNNER_WORK_DIR,
+                    "Name": workspace,
+                    "RW": true
+                },
+                {
+                    "Type": "volume",
+                    "Source": "/var/lib/docker/volumes/workspace/_data",
+                    "Destination": runner::TOOL_CACHE_DIR,
+                    "Name": plan.identity.workspace_volume(),
+                    "RW": true
+                },
+                {
+                    "Type": "bind",
+                    "Source": cache_dir,
+                    "Destination": dind::BUILDKIT_CACHE_DIR,
+                    "RW": true
+                }
+            ],
+            "State": {"Running": false},
+            "NetworkSettings": {"Networks": {}}
+        });
+        let image = serde_json::json!({
+            "Id": "sha256:feed",
+            "Config": {
+                "Labels": {runner::RUNNER_SOURCE_LABEL: runner::RUNNER_SOURCE},
+                "Env": [],
+                "Entrypoint": null,
+                "User": "",
+                "WorkingDir": "",
+                "ExposedPorts": null,
+                "Volumes": null,
+                "StopSignal": null,
+                "Healthcheck": null,
+                "Shell": null,
+                "Cmd": null
+            }
+        });
+        vec![
+            ScriptRunner::ok(&format!("{runner_id}\n")),
+            ScriptRunner::ok(&container.to_string()),
+            ScriptRunner::ok(&image.to_string()),
+        ]
+    }
+
     impl WorkerRunner for ScriptRunner {
         fn run(&mut self, program: &str, args: &[String]) -> anyhow::Result<WorkerOutput> {
             assert_eq!(program, "docker");
@@ -585,13 +1025,27 @@ mod tests {
                 .pop_front()
                 .ok_or_else(|| anyhow::anyhow!("script exhausted at docker {}", args.join(" ")))
         }
+
+        fn run_timeout(
+            &mut self,
+            program: &str,
+            args: &[String],
+            timeout: std::time::Duration,
+        ) -> anyhow::Result<WorkerOutput> {
+            self.timeouts.push(timeout);
+            self.run(program, args)
+        }
     }
 
+    #[cfg(unix)]
     #[test]
     fn provision_runs_verify_network_dind_ready_runner_in_order() {
         let dind_ref = format!("{DIND_REPOSITORY}@{DIND_INDEX_DIGEST}");
         let runner_ref = format!("{RUNNER_REPOSITORY}@{RUNNER_INDEX_DIGEST}");
-        let state = std::env::temp_dir().join(format!("velnor-provision-{}", std::process::id()));
+        let temp = std::env::temp_dir().canonicalize().unwrap();
+        let root = temp.join(format!("velnor-provision-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let state = root.join("worker");
         let plan = ProvisionPlan {
             identity: WorkerIdentity::new(OwnershipId::bind(7, "velnor-set-0007")),
             profile: HomogeneousProfile::for_arch("x86_64").unwrap(),
@@ -599,6 +1053,8 @@ mod tests {
             jit_config: "jit-blob".to_string(),
             ready_attempts: 3,
         };
+        let dind_runtime = dind_runtime_outputs(&plan, "dindid", "networkid");
+        let runner_runtime = runner_runtime_outputs(&plan, "runnerid", "dindid");
         let mut script = ScriptRunner::scripted(vec![
             // DinD tool-content hook (4 calls).
             ScriptRunner::ok("pulled\n"),
@@ -612,36 +1068,103 @@ mod tests {
                 r#"{"org.opencontainers.image.source":"https://github.com/actions/runner"}"#,
             ),
             ScriptRunner::ok("sha256:feed\n"),
-            // Network: missing → create.
-            ScriptRunner::ok(""),
-            ScriptRunner::ok("netid\n"),
-            // DinD: missing → create → start.
-            ScriptRunner::ok(""),
+            // Network: one inspect returns ID plus every identity label.
+            ScriptRunner::ok(&owned_network_output(&plan.identity, "networkid")),
+            ScriptRunner::ok("networkid\n"),
+            ScriptRunner::ok(&owned_network_snapshot(&plan.identity, "networkid")),
+            // DinD data volume is already owned.
+            ScriptRunner::ok(&owned_volume_output(
+                &plan.identity,
+                "dind-data",
+                &plan.identity.dind_data_volume(),
+            )),
+            ScriptRunner::ok(&format!("{}\n", plan.identity.dind_data_volume())),
+            ScriptRunner::ok(&owned_volume_snapshot(
+                &plan.identity,
+                "dind-data",
+                &plan.identity.dind_data_volume(),
+            )),
+            ScriptRunner::ok(&owned_network_output(&plan.identity, "networkid")),
+            ScriptRunner::ok("networkid\n"),
+            ScriptRunner::ok(&owned_network_snapshot(&plan.identity, "networkid")),
+            // DinD: missing → exact network-ID create → inspect by ID → start.
+            ScriptRunner::fail(
+                1,
+                "Error: No such container: velnor-scaleset-dind-s7-velnor-set-0007-2ad92676",
+            ),
             ScriptRunner::ok("dindid\n"),
-            ScriptRunner::ok("velnor-scaleset-dind-s7-velnor-set-0007-2ad92676\n"),
-            // Readiness: one miss, then ready.
+            ScriptRunner::ok(&owned_container_output(
+                &plan.identity,
+                "dindid",
+                ownership::ROLE_DIND,
+            )),
+            ScriptRunner::ok(&dind_runtime[0].stdout),
+            ScriptRunner::ok(&dind_runtime[1].stdout),
+            ScriptRunner::ok(&dind_runtime[2].stdout),
+            ScriptRunner::ok("dind started\n"),
+            // Provision result is resolved again by exact name before the first probe.
+            ScriptRunner::ok(&owned_container_output(
+                &plan.identity,
+                "dindid",
+                ownership::ROLE_DIND,
+            )),
+            // Readiness: probe the immutable ID; one miss, then ready.
             ScriptRunner::fail(1, "Cannot connect"),
             ScriptRunner::ok("28.5.2\n"),
-            // Runner: missing → create → start.
-            ScriptRunner::ok(""),
+            ScriptRunner::ok(&owned_network_output(&plan.identity, "networkid")),
+            ScriptRunner::ok("networkid\n"),
+            ScriptRunner::ok(&owned_network_snapshot(&plan.identity, "networkid")),
+            ScriptRunner::ok(&dind_runtime[0].stdout),
+            ScriptRunner::ok(&dind_runtime[1].stdout),
+            ScriptRunner::ok(&dind_runtime[2].stdout),
+            // Runner workspace is owned; runner is missing → create by DinD ID → start.
+            ScriptRunner::ok(&owned_volume_output(
+                &plan.identity,
+                "workspace",
+                &plan.identity.workspace_volume(),
+            )),
+            ScriptRunner::ok(&format!("{}\n", plan.identity.workspace_volume())),
+            ScriptRunner::ok(&owned_volume_snapshot(
+                &plan.identity,
+                "workspace",
+                &plan.identity.workspace_volume(),
+            )),
+            ScriptRunner::fail(
+                1,
+                "Error: No such container: velnor-scaleset-runner-s7-velnor-set-0007-2ad92676",
+            ),
             ScriptRunner::ok("runnerid\n"),
-            ScriptRunner::ok("velnor-scaleset-runner-s7-velnor-set-0007-2ad92676\n"),
+            ScriptRunner::ok(&owned_container_output(
+                &plan.identity,
+                "runnerid",
+                ownership::ROLE_RUNNER,
+            )),
+            ScriptRunner::ok(&runner_runtime[0].stdout),
+            ScriptRunner::ok(&runner_runtime[1].stdout),
+            ScriptRunner::ok(&runner_runtime[2].stdout),
+            ScriptRunner::ok("runner started\n"),
+            // Resolve runner ownership before its ID-bound state/log observation.
             // Connection: running + marker.
+            ScriptRunner::ok(&owned_container_output(
+                &plan.identity,
+                "runnerid",
+                ownership::ROLE_RUNNER,
+            )),
             ScriptRunner::ok("true\n"),
-            ScriptRunner::ok("Connected to GitHub\n"),
+            ScriptRunner::ok("Connected to GitHub\nListening for Jobs\n"),
         ]);
         let sleeps = std::cell::Cell::new(0u32);
-        let outcome = provision_worker(
+        let outcome = provision_worker_inner(
             &mut script,
             &DockerToolContentHook,
             &plan,
             &|_| {
                 sleeps.set(sleeps.get() + 1);
             },
-            &mut || Ok(()),
+            &mut |_| Ok(()),
         )
         .unwrap();
-        assert_eq!(outcome.network, NetworkProvision::Created);
+        assert_eq!(outcome.network, NetworkProvision::Adopted);
         assert_eq!(outcome.dind, DindProvision::Created);
         assert_eq!(outcome.runner, RunnerProvision::Created);
         assert_eq!(outcome.connection, RunnerConnection::Connected);
@@ -649,22 +1172,29 @@ mod tests {
         assert_eq!(outcome.runner_attestation.content_version, RUNNER_VERSION);
         // One sleep between the two readiness probes.
         assert_eq!(sleeps.get(), 1);
-        // Order proof: first pull precedes network create precedes dind
-        // create precedes runner create.
+        // Order proof: first pull precedes network ownership verification,
+        // which precedes dind creation and runner creation.
         let verbs: Vec<String> = script.seen.iter().map(|argv| argv.join(" ")).collect();
-        let position = |needle: &str| verbs.iter().position(|v| v.contains(needle)).unwrap();
-        assert!(position("pull") < position("network create"));
-        assert!(position("network create") < position("create --privileged"));
-        assert!(position("create --privileged") < position("container:velnor-scaleset-dind"));
-        std::fs::remove_dir_all(&state).unwrap();
+        let position = |needle: &str| {
+            verbs
+                .iter()
+                .position(|v| v.contains(needle))
+                .unwrap_or_else(|| panic!("missing {needle:?} in {verbs:?}"))
+        };
+        assert!(position("pull") < position("network inspect"));
+        assert!(position("{{json .Labels}}") < position("create --privileged"));
+        assert!(position("create --privileged") < position("container:dindid"));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
     fn provision_fails_closed_when_dind_never_ready() {
         let dind_ref = format!("{DIND_REPOSITORY}@{DIND_INDEX_DIGEST}");
         let runner_ref = format!("{RUNNER_REPOSITORY}@{RUNNER_INDEX_DIGEST}");
-        let state =
-            std::env::temp_dir().join(format!("velnor-provision-noready-{}", std::process::id()));
+        let temp = std::env::temp_dir().canonicalize().unwrap();
+        let root = temp.join(format!("velnor-provision-noready-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let state = root.join("worker");
         let plan = ProvisionPlan {
             identity: WorkerIdentity::new(OwnershipId::bind(7, "velnor-set-0007")),
             profile: HomogeneousProfile::for_arch("x86_64").unwrap(),
@@ -672,6 +1202,7 @@ mod tests {
             jit_config: "jit-blob".to_string(),
             ready_attempts: 2,
         };
+        let dind_runtime = dind_runtime_outputs(&plan, "dindid", "networkid");
         let mut script = ScriptRunner::scripted(vec![
             ScriptRunner::ok("pulled\n"),
             ScriptRunner::ok(&format!("[\"{dind_ref}\"]\n")),
@@ -683,20 +1214,51 @@ mod tests {
                 r#"{"org.opencontainers.image.source":"https://github.com/actions/runner"}"#,
             ),
             ScriptRunner::ok("sha256:feed\n"),
-            ScriptRunner::ok(""),
-            ScriptRunner::ok("netid\n"),
-            ScriptRunner::ok(""),
+            ScriptRunner::ok(&owned_network_output(&plan.identity, "networkid")),
+            ScriptRunner::ok("networkid\n"),
+            ScriptRunner::ok(&owned_network_snapshot(&plan.identity, "networkid")),
+            ScriptRunner::ok(&owned_volume_output(
+                &plan.identity,
+                "dind-data",
+                &plan.identity.dind_data_volume(),
+            )),
+            ScriptRunner::ok(&format!("{}\n", plan.identity.dind_data_volume())),
+            ScriptRunner::ok(&owned_volume_snapshot(
+                &plan.identity,
+                "dind-data",
+                &plan.identity.dind_data_volume(),
+            )),
+            ScriptRunner::ok(&owned_network_output(&plan.identity, "networkid")),
+            ScriptRunner::ok("networkid\n"),
+            ScriptRunner::ok(&owned_network_snapshot(&plan.identity, "networkid")),
+            ScriptRunner::fail(
+                1,
+                "Error: No such container: velnor-scaleset-dind-s7-velnor-set-0007-2ad92676",
+            ),
             ScriptRunner::ok("dindid\n"),
-            ScriptRunner::ok("velnor-scaleset-dind-s7-velnor-set-0007-2ad92676\n"),
+            ScriptRunner::ok(&owned_container_output(
+                &plan.identity,
+                "dindid",
+                ownership::ROLE_DIND,
+            )),
+            ScriptRunner::ok(&dind_runtime[0].stdout),
+            ScriptRunner::ok(&dind_runtime[1].stdout),
+            ScriptRunner::ok(&dind_runtime[2].stdout),
+            ScriptRunner::ok("dind started\n"),
+            ScriptRunner::ok(&owned_container_output(
+                &plan.identity,
+                "dindid",
+                ownership::ROLE_DIND,
+            )),
             ScriptRunner::fail(1, "Cannot connect"),
             ScriptRunner::fail(1, "Cannot connect"),
         ]);
-        let error = provision_worker(
+        let error = provision_worker_inner(
             &mut script,
             &DockerToolContentHook,
             &plan,
             &|_| {},
-            &mut || Ok(()),
+            &mut |_| Ok(()),
         )
         .unwrap_err();
         assert!(error.to_string().contains("never became ready"), "{error}");
@@ -708,7 +1270,7 @@ mod tests {
             "{:?}",
             script.seen
         );
-        std::fs::remove_dir_all(&state).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -727,6 +1289,51 @@ mod tests {
             "ProvisionPlan Debug leaked JIT: {rendered}"
         );
         assert!(rendered.contains("velnor-7-4244"));
+    }
+
+    #[test]
+    fn readiness_probes_stop_at_monotonic_deadline_and_use_remaining_timeout() {
+        let profile = runner::HomogeneousProfile::for_arch("x86_64").unwrap();
+        let spec = DindSpec::new(
+            WorkerIdentity::new(OwnershipId::bind(7, "velnor-set-0007")),
+            profile.dind().clone(),
+            Path::new("/tmp/worker-readiness-deadline"),
+        );
+        let mut runner = ScriptRunner::scripted(vec![
+            ScriptRunner::fail(1, "dockerd is still starting"),
+            ScriptRunner::fail(1, "dockerd is still starting"),
+        ]);
+        let mut remaining = [
+            std::time::Duration::from_secs(8),
+            std::time::Duration::from_secs(4),
+            std::time::Duration::from_secs(2),
+            std::time::Duration::ZERO,
+        ]
+        .into_iter();
+        let sleeps = std::cell::RefCell::new(Vec::new());
+        let ready = probe_dind_until_ready(
+            &mut runner,
+            &spec,
+            "immutable-dind-id",
+            4,
+            &|duration| sleeps.borrow_mut().push(duration),
+            || remaining.next().unwrap_or_default(),
+        );
+
+        assert!(!ready);
+        assert_eq!(
+            runner.timeouts,
+            [
+                dind::DIND_READY_OPERATION_TIMEOUT,
+                std::time::Duration::from_secs(2),
+            ]
+        );
+        assert_eq!(
+            runner.seen.len(),
+            2,
+            "expired total deadline must stop probes"
+        );
+        assert_eq!(*sleeps.borrow(), [std::time::Duration::from_secs(4)]);
     }
 
     #[test]

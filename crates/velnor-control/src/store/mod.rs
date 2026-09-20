@@ -1661,6 +1661,39 @@ mod tests {
     }
 
     #[test]
+    fn explicit_storage_reservation_release_is_idempotent() {
+        let temp = TempDb::new("reservation-explicit-release-replay");
+        let store = Store::open(&temp.path).unwrap();
+        store.upsert_instance(&instance("release-replay")).unwrap();
+        store
+            .record_job(&job("release-replay", "job-1", "org/release-replay"))
+            .unwrap();
+
+        assert!(store
+            .release_job_storage_reservation("release-replay", "job-1")
+            .unwrap());
+        assert!(!store
+            .release_job_storage_reservation("release-replay", "job-1")
+            .unwrap());
+        assert_eq!(
+            test_connection(&store)
+                .query_row(
+                    "SELECT reserved_bytes FROM storage_reservation_state WHERE singleton = 0",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+
+        drop(store);
+        let reopened = Store::open(&temp.path).unwrap();
+        assert!(!reopened
+            .release_job_storage_reservation("release-replay", "job-1")
+            .unwrap());
+    }
+
+    #[test]
     fn budgeted_admission_replays_one_reservation_and_rejects_corrupt_aggregate() {
         use velnor_model::{JobPhase, JobSummary as ModelJobSummary, NormalizedJob, RepositoryRef};
 

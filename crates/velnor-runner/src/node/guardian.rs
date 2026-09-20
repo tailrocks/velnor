@@ -7,6 +7,7 @@ use clap::Args;
 use velnor_control::journal::{Event, Journal};
 use velnor_model::{Generation, SlotId, SlotPhase2};
 
+use super::cleanup;
 use super::health::HealthServer;
 use super::prove;
 use super::watchdog::{feed_after_cycle, LocalCycle};
@@ -27,7 +28,7 @@ pub struct GuardianArgs {
 
 /// Run the guardian. Never reads a GitHub credential or opens the Docker socket.
 pub async fn run(args: GuardianArgs) -> anyhow::Result<()> {
-    std::fs::create_dir_all(&args.state_dir)?;
+    cleanup::initialize_owned_directory(&args.state_dir)?;
     let journal_path = args.state_dir.join("journal.db");
     let mut journal = Journal::open(&journal_path)?;
     journal.apply(Event::ControlLive)?;
@@ -83,4 +84,42 @@ fn supervise_once(
     let health = journal.materialized_state()?.health();
     server.publish(&health)?;
     Ok(LocalCycle::finished())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{run, GuardianArgs};
+
+    #[tokio::test]
+    async fn first_start_initializes_owned_directory_before_journal() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let state_dir = std::env::temp_dir().join(format!(
+            "velnor-guardian-first-start-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&state_dir).unwrap();
+        let journal_path = state_dir.join("journal.db");
+        let owned_path = state_dir.join("owned");
+        let marker_path = state_dir.join(".owned-initialized");
+
+        assert!(!journal_path.exists());
+        assert!(!owned_path.exists());
+        assert!(!marker_path.exists());
+
+        run(GuardianArgs {
+            state_dir: state_dir.clone(),
+            once: true,
+            stale_seconds: 10,
+        })
+        .await
+        .unwrap();
+
+        assert!(owned_path.is_dir());
+        assert_eq!(std::fs::read(&marker_path).unwrap().len(), 16);
+        assert!(journal_path.is_file());
+        std::fs::remove_dir_all(state_dir).unwrap();
+    }
 }

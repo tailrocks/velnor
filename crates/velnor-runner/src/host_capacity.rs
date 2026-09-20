@@ -16,8 +16,8 @@
 //! carries a deadline, and the terminal state is `Deregistered`. There is no
 //! transition back into an unbounded park.
 
-use std::path::Path;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
@@ -31,6 +31,15 @@ pub const DEFAULT_DEGRADED_DEADLINE: Duration = Duration::from_secs(10 * 60);
 /// How long a drain may take before the slot deregisters unconditionally.
 pub const DEFAULT_DRAIN_DEADLINE: Duration = Duration::from_secs(5 * 60);
 
+/// How long continuously unmeasurable writable roots may refuse new work
+/// before the slot starts its drain grace. This is separate from the measured
+/// low-space clock, so a recovered probe never inherits unknown elapsed time.
+pub const DEFAULT_UNMEASURABLE_DEADLINE: Duration = Duration::from_secs(15 * 60);
+
+/// Minimum remaining room for small durable control files such as journals,
+/// ledgers, and runtime locks. These roots do not need the job-data reserve.
+pub const DEFAULT_CONTROL_ROOT_FREE_BYTES: u64 = 16 * 1024 * 1024;
+
 /// Measured capacity of the filesystem holding a Velnor root.
 ///
 /// `available_bytes` is the unprivileged figure (`f_bavail`) — the number that
@@ -40,6 +49,10 @@ pub const DEFAULT_DRAIN_DEADLINE: Duration = Duration::from_secs(5 * 60);
 pub struct HostCapacity {
     pub total_bytes: u64,
     pub available_bytes: u64,
+    /// Filesystem identity reported by statvfs. Zero is unspecified by some
+    /// filesystems and becomes `None`, so reclaim can fail closed when it
+    /// cannot tie disposable bytes to the limiting filesystem.
+    pub filesystem_id: Option<u64>,
     /// Bytes Docker's own storage occupies on this filesystem, when it could be
     /// measured. `None` means unmeasured, which must be treated as unknown
     /// rather than zero.
@@ -65,6 +78,7 @@ impl HostCapacity {
         Ok(Self {
             total_bytes: stat.f_blocks.saturating_mul(block),
             available_bytes: stat.f_bavail.saturating_mul(block),
+            filesystem_id: (stat.f_fsid != 0).then_some(stat.f_fsid),
             docker_bytes,
         })
     }
@@ -202,11 +216,66 @@ pub enum DiskAction {
     Deregister,
 }
 
+/// One writable root participating in slot disk admission.
+///
+/// Each path has an independent filesystem budget. A root failure stays tied
+/// to that path; it is never collapsed into another root's free-space value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiskRootMeasurement {
+    Measured {
+        root: PathBuf,
+        available_bytes: u64,
+        min_free_bytes: u64,
+        filesystem_id: Option<u64>,
+    },
+    Unmeasurable {
+        root: PathBuf,
+        error: String,
+    },
+}
+
+/// Result of folding every required writable-root measurement into the disk
+/// pressure machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiskObservation {
+    Measured {
+        action: DiskAction,
+        root: PathBuf,
+        available_bytes: u64,
+        min_free_bytes: u64,
+        filesystem_id: Option<u64>,
+    },
+    Unmeasurable {
+        root: PathBuf,
+        error: String,
+        action: DiskAction,
+    },
+    NoRoots {
+        action: DiskAction,
+    },
+}
+
+impl DiskObservation {
+    /// Unknown capacity cannot admit work or advance a degradation deadline.
+    /// Refuse for one interval, then let the caller measure again.
+    pub fn action(&self) -> DiskAction {
+        match self {
+            Self::Measured { action, .. } => *action,
+            Self::Unmeasurable { action, .. } | Self::NoRoots { action } => *action,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DiskPolicy {
+    /// Default free-space floor for job-data roots.
     pub min_free_bytes: u64,
+    /// Maximum continuous low-space time before the slot begins draining.
     pub degraded_deadline: Duration,
+    /// Time allowed to finish active work after admission stops.
     pub drain_deadline: Duration,
+    /// Maximum continuous time that required capacity remains unmeasurable.
+    pub unmeasurable_deadline: Duration,
 }
 
 impl Default for DiskPolicy {
@@ -215,6 +284,7 @@ impl Default for DiskPolicy {
             min_free_bytes: DEFAULT_MIN_FREE_BYTES,
             degraded_deadline: DEFAULT_DEGRADED_DEADLINE,
             drain_deadline: DEFAULT_DRAIN_DEADLINE,
+            unmeasurable_deadline: DEFAULT_UNMEASURABLE_DEADLINE,
         }
     }
 }
@@ -280,8 +350,16 @@ impl DiskPolicy {
 pub struct DiskPressure {
     policy: DiskPolicy,
     state: DiskState,
-    /// Seconds since the current below-floor episode began; `None` when healthy.
-    episode_started_unix: Option<u64>,
+    clock_origin: Instant,
+    /// Elapsed monotonic duration since the current below-floor episode began.
+    episode_started: Option<Duration>,
+    /// Start of a gap where at least one required root could not be measured.
+    /// Such a gap refuses admission but must not consume the pressure deadline.
+    measurement_unknown_since: Option<Duration>,
+    /// Start of the current drain grace. Unlike the measured-low episode, this
+    /// clock keeps running during an unknown measurement so Drain cannot be
+    /// hidden by a failing probe.
+    drain_started: Option<Duration>,
 }
 
 impl DiskPressure {
@@ -289,7 +367,10 @@ impl DiskPressure {
         Self {
             policy,
             state: DiskState::Healthy,
-            episode_started_unix: None,
+            clock_origin: Instant::now(),
+            episode_started: None,
+            measurement_unknown_since: None,
+            drain_started: None,
         }
     }
 
@@ -302,18 +383,167 @@ impl DiskPressure {
     }
 
     /// Fold one measurement into the machine and return the bounded action.
-    pub fn observe(&mut self, available_bytes: u64, now_unix: u64) -> DiskAction {
-        if available_bytes >= self.policy.min_free_bytes {
-            self.episode_started_unix = None;
-        } else if self.episode_started_unix.is_none() {
-            self.episode_started_unix = Some(now_unix);
+    pub fn observe(&mut self, available_bytes: u64) -> DiskAction {
+        self.observe_at(
+            available_bytes,
+            self.policy.min_free_bytes,
+            self.clock_origin.elapsed(),
+        )
+    }
+
+    fn observe_at(
+        &mut self,
+        available_bytes: u64,
+        min_free_bytes: u64,
+        now: Duration,
+    ) -> DiskAction {
+        if self.state == DiskState::Deregistered {
+            return DiskAction::Deregister;
+        }
+        self.resume_measurement_clock(now);
+        if available_bytes >= min_free_bytes {
+            self.episode_started = None;
+            self.drain_started = None;
+            self.measurement_unknown_since = None;
+            self.state = DiskState::Healthy;
+            return DiskAction::Admit;
+        } else if self.episode_started.is_none() {
+            self.episode_started = Some(now);
         }
         let episode = self
-            .episode_started_unix
-            .map(|start| Duration::from_secs(now_unix.saturating_sub(start)))
-            .unwrap_or_default();
-        self.state = self.policy.next(self.state, available_bytes, episode);
+            .episode_started
+            .map_or(Duration::ZERO, |start| now.saturating_sub(start));
+        self.state = match self.state {
+            DiskState::Healthy => DiskState::Reclaiming,
+            DiskState::Reclaiming => DiskState::Degraded { elapsed: episode },
+            DiskState::Degraded { .. } if episode >= self.policy.degraded_deadline => {
+                self.drain_started = Some(now);
+                DiskState::Draining { elapsed: episode }
+            }
+            DiskState::Degraded { .. } => DiskState::Degraded { elapsed: episode },
+            DiskState::Draining { .. } => self.advance_drain(now, episode),
+            DiskState::Deregistered => DiskState::Deregistered,
+        };
         self.policy.action(self.state)
+    }
+
+    /// Observe all writable roots without combining their capacities.
+    ///
+    /// The least-free measured root drives the shared state machine because
+    /// every root must meet the same floor. Any unmeasurable root refuses
+    /// admission without changing the episode clock. The selected root stays
+    /// attached to the result for accurate operator diagnostics.
+    pub fn observe_roots(&mut self, roots: &[DiskRootMeasurement]) -> DiskObservation {
+        self.observe_roots_at(roots, self.clock_origin.elapsed())
+    }
+
+    fn observe_roots_at(
+        &mut self,
+        roots: &[DiskRootMeasurement],
+        now: Duration,
+    ) -> DiskObservation {
+        if roots.is_empty() {
+            let action = self.observe_unknown(now);
+            return DiskObservation::NoRoots { action };
+        }
+        if let Some((root, error)) = roots.iter().find_map(|measurement| match measurement {
+            DiskRootMeasurement::Unmeasurable { root, error } => {
+                Some((root.clone(), error.clone()))
+            }
+            DiskRootMeasurement::Measured { .. } => None,
+        }) {
+            let action = self.observe_unknown(now);
+            return DiskObservation::Unmeasurable {
+                root,
+                error,
+                action,
+            };
+        }
+
+        let limiting = roots
+            .iter()
+            .filter_map(|measurement| match measurement {
+                DiskRootMeasurement::Measured {
+                    root,
+                    available_bytes,
+                    min_free_bytes,
+                    filesystem_id,
+                } => Some((
+                    root,
+                    *available_bytes,
+                    *min_free_bytes,
+                    *filesystem_id,
+                    i128::from(*available_bytes) - i128::from(*min_free_bytes),
+                )),
+                DiskRootMeasurement::Unmeasurable { .. } => None,
+            })
+            .min_by_key(|(_, _, _, _, margin)| *margin);
+        let Some((root, available_bytes, min_free_bytes, filesystem_id, _)) = limiting else {
+            let action = self.observe_unknown(now);
+            return DiskObservation::NoRoots { action };
+        };
+
+        DiskObservation::Measured {
+            action: self.observe_at(available_bytes, min_free_bytes, now),
+            root: root.clone(),
+            available_bytes,
+            min_free_bytes,
+            filesystem_id,
+        }
+    }
+
+    fn observe_unknown(&mut self, now: Duration) -> DiskAction {
+        self.pause_measurement_clock(now);
+        if self.state == DiskState::Deregistered {
+            return DiskAction::Deregister;
+        }
+        if matches!(self.state, DiskState::Draining { .. }) {
+            let episode = self
+                .episode_started
+                .map_or(Duration::ZERO, |start| now.saturating_sub(start));
+            self.state = self.advance_drain(now, episode);
+            return self.policy.action(self.state);
+        }
+
+        let unknown_since = self.measurement_unknown_since.unwrap_or(now);
+        let unknown_elapsed = now.saturating_sub(unknown_since);
+        if unknown_elapsed >= self.policy.unmeasurable_deadline {
+            self.drain_started = Some(now);
+            self.state = DiskState::Draining {
+                elapsed: unknown_elapsed,
+            };
+            DiskAction::Drain
+        } else {
+            DiskAction::RefuseUntil {
+                remaining: self
+                    .policy
+                    .unmeasurable_deadline
+                    .saturating_sub(unknown_elapsed),
+            }
+        }
+    }
+
+    fn advance_drain(&self, now: Duration, episode: Duration) -> DiskState {
+        let drain_started = self.drain_started.unwrap_or(now);
+        let drain_elapsed = now.saturating_sub(drain_started);
+        if drain_elapsed >= self.policy.drain_deadline {
+            DiskState::Deregistered
+        } else {
+            DiskState::Draining { elapsed: episode }
+        }
+    }
+
+    fn pause_measurement_clock(&mut self, now: Duration) {
+        self.measurement_unknown_since.get_or_insert(now);
+    }
+
+    fn resume_measurement_clock(&mut self, now: Duration) {
+        let Some(unknown_since) = self.measurement_unknown_since.take() else {
+            return;
+        };
+        if let Some(episode_started) = self.episode_started.as_mut() {
+            *episode_started += now.saturating_sub(unknown_since);
+        }
     }
 }
 
@@ -329,6 +559,57 @@ impl DiskPressure {
 )]
 mod tests {
     use super::*;
+
+    fn observe_roots_at(
+        pressure: &mut DiskPressure,
+        roots: &[DiskRootMeasurement],
+        seconds: u64,
+    ) -> DiskObservation {
+        pressure.observe_roots_at(roots, Duration::from_secs(seconds))
+    }
+
+    fn observe_at(pressure: &mut DiskPressure, available_bytes: u64, seconds: u64) -> DiskAction {
+        pressure.observe_at(
+            available_bytes,
+            pressure.policy.min_free_bytes,
+            Duration::from_secs(seconds),
+        )
+    }
+
+    fn measured_root(root: &str, available_bytes: u64) -> DiskRootMeasurement {
+        measured_root_with_floor(root, available_bytes, 100)
+    }
+
+    fn measured_root_with_floor(
+        root: &str,
+        available_bytes: u64,
+        min_free_bytes: u64,
+    ) -> DiskRootMeasurement {
+        measured_root_on_filesystem(root, available_bytes, min_free_bytes, Some(1))
+    }
+
+    fn measured_root_on_filesystem(
+        root: &str,
+        available_bytes: u64,
+        min_free_bytes: u64,
+        filesystem_id: Option<u64>,
+    ) -> DiskRootMeasurement {
+        DiskRootMeasurement::Measured {
+            root: PathBuf::from(root),
+            available_bytes,
+            min_free_bytes,
+            filesystem_id,
+        }
+    }
+
+    fn small_disk_policy() -> DiskPolicy {
+        DiskPolicy {
+            min_free_bytes: 100,
+            degraded_deadline: Duration::from_secs(60),
+            drain_deadline: Duration::from_secs(30),
+            unmeasurable_deadline: Duration::from_secs(90),
+        }
+    }
 
     #[test]
     fn admission_probe_uses_statvfs_without_a_docker_subprocess() {
@@ -361,11 +642,286 @@ mod tests {
         let capacity = HostCapacity {
             total_bytes: 100 * gib,
             available_bytes: 20 * gib,
+            filesystem_id: Some(1),
             docker_bytes: Some(bytes),
         };
         assert_eq!(capacity.used_percent(), 80);
         assert_eq!(capacity.promisable_bytes(5 * gib), 15 * gib);
         assert!(docker_usage_bytes_from_df("").is_none());
+    }
+
+    #[test]
+    fn low_config_root_blocks_admission_when_work_root_is_healthy() {
+        let mut pressure = DiskPressure::new(small_disk_policy());
+        let observation = observe_roots_at(
+            &mut pressure,
+            &[
+                measured_root_on_filesystem("/config", 40, 100, Some(21)),
+                measured_root_on_filesystem("/work", 1_000, 100, Some(22)),
+            ],
+            10,
+        );
+
+        assert_eq!(observation.action(), DiskAction::Reclaim);
+        assert!(matches!(
+            observation,
+            DiskObservation::Measured {
+                root,
+                available_bytes: 40,
+                filesystem_id: Some(21),
+                ..
+            } if root == PathBuf::from("/config")
+        ));
+    }
+
+    #[test]
+    fn low_work_root_blocks_admission_when_config_root_is_healthy() {
+        let mut pressure = DiskPressure::new(small_disk_policy());
+        let observation = observe_roots_at(
+            &mut pressure,
+            &[measured_root("/config", 1_000), measured_root("/work", 40)],
+            10,
+        );
+
+        assert_eq!(observation.action(), DiskAction::Reclaim);
+        assert!(matches!(
+            observation,
+            DiskObservation::Measured {
+                root,
+                available_bytes: 40,
+                ..
+            } if root == PathBuf::from("/work")
+        ));
+    }
+
+    #[test]
+    fn unmeasurable_root_refuses_without_advancing_pressure_state() {
+        let mut pressure = DiskPressure::new(small_disk_policy());
+        let observation = observe_roots_at(
+            &mut pressure,
+            &[
+                measured_root("/work", 1_000),
+                DiskRootMeasurement::Unmeasurable {
+                    root: PathBuf::from("/config"),
+                    error: "statvfs failed".to_string(),
+                },
+            ],
+            10,
+        );
+
+        assert_eq!(
+            observation.action(),
+            DiskAction::RefuseUntil {
+                remaining: Duration::from_secs(90)
+            }
+        );
+        assert_eq!(pressure.state(), DiskState::Healthy);
+        assert!(matches!(
+            observation,
+            DiskObservation::Unmeasurable { root, .. }
+                if root == PathBuf::from("/config")
+        ));
+    }
+
+    #[test]
+    fn unknown_measurement_gap_pauses_degradation_and_drain_deadlines() {
+        let policy = DiskPolicy::default();
+        let mut pressure = DiskPressure::new(policy);
+        let low_roots = [
+            measured_root_with_floor("/config", 40, 100),
+            measured_root_with_floor("/work", 1_000, 100),
+        ];
+        let unknown_config = [
+            measured_root_with_floor("/work", 1_000, 100),
+            DiskRootMeasurement::Unmeasurable {
+                root: PathBuf::from("/config"),
+                error: "statvfs failed".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            observe_roots_at(&mut pressure, &low_roots, 0).action(),
+            DiskAction::Reclaim
+        );
+        assert!(matches!(
+            observe_roots_at(&mut pressure, &low_roots, 1).action(),
+            DiskAction::RefuseUntil { .. }
+        ));
+        assert_eq!(
+            observe_roots_at(&mut pressure, &unknown_config, 2).action(),
+            DiskAction::RefuseUntil {
+                remaining: policy.unmeasurable_deadline
+            }
+        );
+        // The 11-minute unknown gap exceeds the measured-low deadline but is
+        // shorter than the independent 15-minute probe-outage bound.
+        assert_eq!(
+            observe_roots_at(&mut pressure, &unknown_config, 661).action(),
+            DiskAction::RefuseUntil {
+                remaining: policy.unmeasurable_deadline - Duration::from_secs(659)
+            }
+        );
+
+        assert_eq!(
+            observe_roots_at(&mut pressure, &low_roots, 662).action(),
+            DiskAction::RefuseUntil {
+                remaining: policy.degraded_deadline - Duration::from_secs(2)
+            },
+            "unmeasurable time must not consume the degradation or drain deadlines"
+        );
+        assert_eq!(
+            pressure.state(),
+            DiskState::Degraded {
+                elapsed: Duration::from_secs(2)
+            }
+        );
+        let drain_at = 662 + policy.degraded_deadline.as_secs() - 2;
+        assert_eq!(
+            observe_roots_at(&mut pressure, &low_roots, drain_at).action(),
+            DiskAction::Drain
+        );
+        assert_eq!(
+            observe_roots_at(
+                &mut pressure,
+                &low_roots,
+                drain_at + policy.drain_deadline.as_secs() - 1,
+            )
+            .action(),
+            DiskAction::Drain
+        );
+        assert_eq!(
+            observe_roots_at(
+                &mut pressure,
+                &low_roots,
+                drain_at + policy.drain_deadline.as_secs(),
+            )
+            .action(),
+            DiskAction::Deregister
+        );
+    }
+
+    #[test]
+    fn persistent_unknown_capacity_has_its_own_bounded_drain() {
+        let policy = DiskPolicy {
+            min_free_bytes: 100,
+            degraded_deadline: Duration::from_secs(60),
+            drain_deadline: Duration::from_secs(30),
+            unmeasurable_deadline: Duration::from_secs(90),
+        };
+        let mut pressure = DiskPressure::new(policy);
+        let unknown = [DiskRootMeasurement::Unmeasurable {
+            root: PathBuf::from("/config"),
+            error: "statvfs failed".to_string(),
+        }];
+
+        assert_eq!(
+            observe_roots_at(&mut pressure, &unknown, 0).action(),
+            DiskAction::RefuseUntil {
+                remaining: Duration::from_secs(90)
+            }
+        );
+        assert_eq!(pressure.state(), DiskState::Healthy);
+        assert_eq!(
+            observe_roots_at(&mut pressure, &unknown, 90).action(),
+            DiskAction::Drain
+        );
+        assert_eq!(
+            observe_roots_at(&mut pressure, &unknown, 119).action(),
+            DiskAction::Drain
+        );
+        assert_eq!(
+            observe_roots_at(&mut pressure, &unknown, 120).action(),
+            DiskAction::Deregister
+        );
+    }
+
+    #[test]
+    fn unknown_measurement_does_not_mask_an_existing_drain_grace() {
+        let policy = small_disk_policy();
+        let mut pressure = DiskPressure::new(policy);
+        let low = [measured_root("/work", 40)];
+        let unknown = [DiskRootMeasurement::Unmeasurable {
+            root: PathBuf::from("/work"),
+            error: "statvfs failed".to_string(),
+        }];
+
+        assert_eq!(
+            observe_roots_at(&mut pressure, &low, 0).action(),
+            DiskAction::Reclaim
+        );
+        assert_eq!(
+            observe_roots_at(&mut pressure, &low, 1).action(),
+            DiskAction::RefuseUntil {
+                remaining: Duration::from_secs(59)
+            }
+        );
+        assert_eq!(
+            observe_roots_at(&mut pressure, &low, 61).action(),
+            DiskAction::Drain
+        );
+        assert_eq!(
+            observe_roots_at(&mut pressure, &unknown, 62).action(),
+            DiskAction::Drain
+        );
+        assert_eq!(
+            pressure.state(),
+            DiskState::Draining {
+                elapsed: Duration::from_secs(62)
+            }
+        );
+        assert_eq!(
+            observe_roots_at(&mut pressure, &unknown, 90).action(),
+            DiskAction::Drain
+        );
+        assert_eq!(
+            observe_roots_at(&mut pressure, &unknown, 91).action(),
+            DiskAction::Deregister
+        );
+    }
+
+    #[test]
+    fn roots_keep_individual_capacity_floors() {
+        let mut pressure = DiskPressure::new(small_disk_policy());
+        let observation = observe_roots_at(
+            &mut pressure,
+            &[
+                measured_root_with_floor("/work", 1_000, 100),
+                measured_root_with_floor("/run", 20, 16),
+            ],
+            10,
+        );
+
+        assert_eq!(observation.action(), DiskAction::Admit);
+        assert!(matches!(
+            observation,
+            DiskObservation::Measured {
+                root,
+                available_bytes: 20,
+                min_free_bytes: 16,
+                ..
+            } if root == PathBuf::from("/run")
+        ));
+    }
+
+    #[test]
+    fn every_root_at_the_floor_is_admissible() {
+        let mut pressure = DiskPressure::new(small_disk_policy());
+        let observation = observe_roots_at(
+            &mut pressure,
+            &[measured_root("/config", 100), measured_root("/work", 101)],
+            10,
+        );
+
+        assert_eq!(observation.action(), DiskAction::Admit);
+        assert_eq!(pressure.state(), DiskState::Healthy);
+        assert!(matches!(
+            observation,
+            DiskObservation::Measured {
+                root,
+                available_bytes: 100,
+                ..
+            } if root == PathBuf::from("/config")
+        ));
     }
 
     /// The defect: below the floor the slot slept and looped forever. Drive the
@@ -377,12 +933,13 @@ mod tests {
             min_free_bytes: 2 * 1024 * 1024 * 1024,
             degraded_deadline: Duration::from_secs(60),
             drain_deadline: Duration::from_secs(30),
+            unmeasurable_deadline: Duration::from_secs(90),
         };
         let mut pressure = DiskPressure::new(policy);
         let mut observed = Vec::new();
         let mut terminal_at = None;
         for tick in 0..200u64 {
-            let action = pressure.observe(0, tick * 5);
+            let action = observe_at(&mut pressure, 0, tick * 5);
             observed.push(action);
             if action == DiskAction::Deregister {
                 terminal_at = Some(tick);
@@ -413,12 +970,12 @@ mod tests {
         }
         // Terminal is absorbing: no path back into a park.
         assert_eq!(
-            pressure.observe(0, 10_000),
+            observe_at(&mut pressure, 0, 10_000),
             DiskAction::Deregister,
             "deregistered must be terminal"
         );
         assert_eq!(
-            pressure.observe(u64::MAX, 10_001),
+            observe_at(&mut pressure, u64::MAX, 10_001),
             DiskAction::Deregister,
             "a deregistered slot must not silently resurrect"
         );
@@ -430,16 +987,20 @@ mod tests {
             min_free_bytes: 2 * 1024 * 1024 * 1024,
             degraded_deadline: Duration::from_secs(60),
             drain_deadline: Duration::from_secs(30),
+            unmeasurable_deadline: Duration::from_secs(90),
         };
         let mut pressure = DiskPressure::new(policy);
-        assert_eq!(pressure.observe(1024 * 1024 * 1024, 0), DiskAction::Reclaim);
+        assert_eq!(
+            observe_at(&mut pressure, 1024 * 1024 * 1024, 0),
+            DiskAction::Reclaim
+        );
         assert!(matches!(
-            pressure.observe(1024 * 1024 * 1024, 5),
+            observe_at(&mut pressure, 1024 * 1024 * 1024, 5),
             DiskAction::RefuseUntil { .. }
         ));
         assert!(!policy.admits(pressure.state()));
         assert_eq!(
-            pressure.observe(8 * 1024 * 1024 * 1024, 10),
+            observe_at(&mut pressure, 8 * 1024 * 1024 * 1024, 10),
             DiskAction::Admit
         );
         assert_eq!(pressure.state(), DiskState::Healthy);

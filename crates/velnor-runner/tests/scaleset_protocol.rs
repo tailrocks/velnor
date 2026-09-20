@@ -35,6 +35,7 @@ use wiremock::{
 
 const SCALE_SET_ID: i32 = 7;
 const OWNER: &str = "octo-org";
+const INSTALLATION_ID: i64 = 42;
 /// `exp` of the unsigned test admin JWT served by the token-chain mocks.
 const ADMIN_JWT_EXP: u64 = 2_000_000_000;
 
@@ -181,6 +182,44 @@ async fn test_client(server: &MockServer, fixtures: &Fixtures) -> ScaleSetClient
         test_retry(),
     )
     .unwrap()
+}
+
+async fn mount_app_session_chain(server: &MockServer, fixtures: &Fixtures) {
+    // App JWT → installation token → runner registration token.
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/api/v3/app/installations/{INSTALLATION_ID}/access_tokens"
+        )))
+        .and(header("Authorization", "Bearer test-app-jwt"))
+        .and(header("Content-Type", "application/vnd.github+json"))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .set_body_string(fixtures.read("installation_token.json").unwrap()),
+        )
+        .mount(server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/api/v3/orgs/octo-org/actions/runners/registration-token",
+        ))
+        .and(header("Authorization", "Bearer REDACTED"))
+        .and(header("Content-Type", "application/vnd.github.v3+json"))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .set_body_string(fixtures.read("registration_token.json").unwrap()),
+        )
+        .mount(server)
+        .await;
+    mount_admin_handshake(server, fixtures).await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/tenant/_apis/runtime/runnerscalesets/{SCALE_SET_ID}/sessions"
+        )))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(session_json(server, "queue-token-1")),
+        )
+        .mount(server)
+        .await;
 }
 
 #[tokio::test]
@@ -513,7 +552,8 @@ async fn scale_set_and_runner_reads_match_upstream_shapes() {
         .is_none());
 
     let error = client.get_runner(11).await.unwrap_err();
-    assert_eq!(error.fault(), Some(ScaleSetFault::NotFound));
+    assert_eq!(error.fault(), Some(ScaleSetFault::RunnerNotFound));
+    assert_eq!(error.status_fault(), Some(ScaleSetFault::NotFound));
     assert!(error.to_string().contains("runner not found"), "{error}");
 }
 
@@ -559,51 +599,41 @@ async fn runner_reference_shapes_pin_get_and_lookup() {
 async fn github_app_chain_fetches_installation_token_first() {
     let server = MockServer::start().await;
     let fixtures = Fixtures::load(&fixture_dir()).unwrap();
-    const INSTALLATION_ID: i64 = 42;
-
-    // Upstream `fetchAccessToken`: App JWT Bearer → 201 `accessToken`
-    // (recorded `installation_token.json` bytes verbatim).
-    Mock::given(method("POST"))
-        .and(path(format!(
-            "/api/v3/app/installations/{INSTALLATION_ID}/access_tokens"
-        )))
-        .and(header("Authorization", "Bearer test-app-jwt"))
-        .and(header("Content-Type", "application/vnd.github+json"))
-        .respond_with(
-            ResponseTemplate::new(201)
-                .set_body_string(fixtures.read("installation_token.json").unwrap()),
-        )
-        .mount(&server)
-        .await;
-    // The installation token authorizes the registration-token call.
-    Mock::given(method("POST"))
-        .and(path(
-            "/api/v3/orgs/octo-org/actions/runners/registration-token",
-        ))
-        .and(header("Authorization", "Bearer REDACTED"))
-        .and(header("Content-Type", "application/vnd.github.v3+json"))
-        .respond_with(
-            ResponseTemplate::new(201)
-                .set_body_string(fixtures.read("registration_token.json").unwrap()),
-        )
-        .mount(&server)
-        .await;
-    mount_admin_handshake(&server, &fixtures).await;
-    Mock::given(method("POST"))
-        .and(path(format!(
-            "/tenant/_apis/runtime/runnerscalesets/{SCALE_SET_ID}/sessions"
-        )))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(session_json(&server, "queue-token-1")),
-        )
-        .mount(&server)
-        .await;
 
     let provider: Arc<dyn JwtProvider> = Arc::new(FnJwtProvider(|| Ok("test-app-jwt".to_string())));
+    mount_app_session_chain(&server, &fixtures).await;
     let client = ScaleSetClient::new_with_jwt_provider(
         &format!("{}/octo-org", server.uri()),
         INSTALLATION_ID,
         provider,
+        system_info(),
+        test_retry(),
+    )
+    .unwrap();
+    let session = MessageSessionClient::create(&client, SCALE_SET_ID, OWNER)
+        .await
+        .unwrap();
+    assert_eq!(session.scale_set_id(), SCALE_SET_ID);
+    assert_eq!(session.owner(), OWNER);
+}
+
+#[tokio::test]
+async fn github_app_chain_treats_empty_pat_as_absent_on_wire() {
+    let server = MockServer::start().await;
+    let fixtures = Fixtures::load(&fixture_dir()).unwrap();
+    let provider: Arc<dyn JwtProvider> = Arc::new(FnJwtProvider(|| Ok("test-app-jwt".to_string())));
+    let auth = ActionsAuth {
+        token: Some(String::new()),
+        jwt_provider: Some(provider),
+        installation_id: INSTALLATION_ID,
+    };
+
+    // The registration-token mock only accepts the installation token
+    // obtained via the app-token endpoint; `Bearer ` therefore fails here.
+    mount_app_session_chain(&server, &fixtures).await;
+    let client = ScaleSetClient::new(
+        &format!("{}/octo-org", server.uri()),
+        auth,
         system_info(),
         test_retry(),
     )

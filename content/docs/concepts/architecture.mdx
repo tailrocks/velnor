@@ -75,12 +75,13 @@ flowchart LR
 ```
 
 In the native lane, the daemon manages desired slot capacity and lifecycle.
-Each ready slot is an independent runner process with its own GitHub session.
-An acquired job runs in a transient job boundary beneath that slot. Controller
-restart does not by itself terminate surviving slot or active-job processes;
-generation and heartbeat checks prevent stale children from proving current
-readiness. The Scale Set adapter uses the same host-wide permit ledger and
-persists deferred offers so they can resume on later or idle polls.
+Each ready slot has a waiter process with its own GitHub session. That waiter
+can acquire and run successive jobs; Velnor does not launch a separate
+per-job systemd worker. Controller restart does not by itself terminate
+surviving slot or waiter processes; generation and heartbeat checks prevent
+stale children from proving current readiness. The Scale Set adapter uses the
+same host-wide permit ledger and persists deferred offers so they can resume
+on later or idle polls.
 
 Native readiness is a proof, not merely a live process: local state must be
 writable, the selected backend must pass preflight, GitHub registration must
@@ -97,20 +98,27 @@ sequenceDiagram
     participant G as GitHub broker
     participant V as Velnor slot
     participant R as GitHub Run Service
+    participant C as Shared permit ledger
+    participant F as Work filesystem
     participant A as Admission
     participant E as Executor
     participant P as Results/Timeline services
     participant L as Local journal/outbox
+    participant S as Runtime-store leases
 
     W->>G: Create and queue job
     G-->>V: Long-poll job reference
     V->>G: Acknowledge Busy (when requested)
+    V->>C: Commit shared max_jobs permit
+    V->>L: Persist acquisition intent
     V->>R: Acquire full job payload
     V->>L: Claim identity and persist in-flight state
     V->>A: Validate policy, capabilities, actions, limits
     A-->>V: Validated execution plan or rejection
     V->>R: Renew job lease while active
-    V->>E: Reserve, prepare, start, execute
+    V->>F: Reserve disk peak after admission
+    V->>S: Publish runtime-store leases
+    V->>E: Prepare, start, execute
     E-->>V: Step output, status, logs, artifacts
     V->>P: Publish step status, timeline, and log data
     V->>L: Persist completion payload before sending
@@ -125,13 +133,17 @@ This flow describes the native lane. Its important ordering is:
 1. GitHub creates the job and decides which labels and runner scope match.
 2. A Velnor slot learns of work through an authenticated broker session. REST
    queue listings are diagnostic; they do not assign work to Velnor.
-3. The broker message identifies the run-service request. Velnor acquires the
-   complete job payload through the Run Service.
-4. Velnor claims the job locally, then resolves the complete action closure,
-   policy, capability requirements, references, inputs, and resource limits.
-5. Only an admitted job receives leases, capacity, checkout, downloads,
-   credentials, cache mutation, services, or executor resources.
-6. The plan selects exactly one configured backend. Its lifecycle is
+3. Before fetching the full payload, Velnor commits a shared `max_jobs` permit
+   and records the acquisition intent. If no permit is free, the broker offer
+   remains unacquired for redelivery.
+4. Velnor acquires the complete payload through the Run Service and claims the
+   job locally.
+5. Strict Native admission resolves the action closure, policy, capability
+   requirements, references, inputs, and job shape. This follows the shared
+   permit and payload fetch.
+6. After admission, Velnor starts job-lease renewal, reserves a separate disk
+   peak, then publishes runtime-store leases before workflow steps begin. The
+   plan selects exactly one configured backend; its lifecycle is
    `preflight → reserve → prepare → start → execute or cancel → collect → teardown`.
 7. Velnor publishes progress while steps run, renews the GitHub lease, and
    handles broker cancellation messages.
@@ -193,10 +205,12 @@ or a resource-bound failure is rejected closed. See
 
 Scale Set offer classification is separate. It uses the event name and
 owner/repository fields from the offer: unparseable events or missing
-owner/repository values, plus `pull_request` and `workflow_run` events, remain
-`unknown`; other parseable events with both nonempty owner and repository
-fields are `trusted`. Offers do not include the head-repository data needed to
-classify those fork-sensitive events.
+owner/repository values, and every parseable event whose name begins with
+`pull_request` (including `pull_request_target`) or equals `workflow_run`
+under ASCII case-insensitive comparison, remain `unknown`; other parseable
+events with both nonempty owner and repository fields are `trusted`. Offers
+do not include the head-repository data needed to classify those
+fork-sensitive events.
 
 In the native lane, Docker uses the host Docker socket within the configured
 host and cgroup boundary. Firecracker uses KVM, verified artifacts, a jailer,
@@ -247,8 +261,14 @@ GitHub; Velnor tracks the worker lifecycle and cleanup.
 The outbox is bounded rather than infinite. An entry ends in one of three ways:
 GitHub acknowledges it; the run service reports the job already terminal; or
 its budget — a permanent refusal, eight attempts, or six hours — is spent, in
-which case the entry is abandoned, GitHub is never told, and the reason is
-preserved in the journal. Orphaned, malformed, symlinked, oversized, or
+which case Velnor abandons further local delivery attempts and preserves the
+reason in the journal. A permanent refusal is an explicit response; when
+transport retries exhaust without an acknowledgement, the Run Service may
+already have accepted the payload before the response was lost, so GitHub's
+outcome is unknown until checked. Local abandonment alone does not prove the
+remote outcome. The journal records Velnor's local budget decision; check the
+GitHub job state. If the Run Service did not receive the payload, it may time
+the job out. Orphaned, malformed, symlinked, oversized, or
 ambiguous outbox entries fail closed and are quarantined for diagnosis.
 
 Progress logs and telemetry are bounded operational evidence, not an archival

@@ -2018,60 +2018,21 @@ admission_stop_must_verify_test() (
 assert_status 'maintenance aborts if an admission unit remains active after stop' 2 \
   admission_stop_must_verify_test
 
-drain_waits_for_velnor_jobs_test() (
-  CHECK=0
-  MAINTENANCE_TIMEOUT=30
-  export FAKE_JOB_POLL_FILE="$FAKE_TMP/job-polls"
-  printf '0\n' > "$FAKE_JOB_POLL_FILE"
-  : > "$FAKE_TRACE"
-  # shellcheck disable=SC2329 # wait_for_work_drain resolves fake inventory calls.
-  running_containers() { printf '0\n'; }
-  active_velnor_job_units() {
-    local polls
-    polls="$(<"$FAKE_JOB_POLL_FILE")"
-    printf '%s\n' "$((polls + 1))" > "$FAKE_JOB_POLL_FILE"
-    if [[ "$polls" == 0 ]]; then printf 'velnor-job@one.service\n'; fi
-    return 0
-  }
-  # shellcheck disable=SC2329 # wait_for_work_drain resolves fake sleep.
-  sleep() { printf 'sleep %s\n' "$1" >> "$FAKE_TRACE"; }
+wait_drain_rejects_active_containers_test() (
+  ALLOW_RESTART=0
+  container_count_for_maintenance() { printf '1\n'; }
   wait_for_work_drain
-  grep -Fq 'sleep 5' "$FAKE_TRACE"
-  [[ "$(<"$FAKE_JOB_POLL_FILE")" == 2 ]]
 )
-assert_status 'drain waits for active Velnor job units to stop' 0 \
-  drain_waits_for_velnor_jobs_test
+assert_status 'drain gate rejects active Docker containers without restart allowance' 2 \
+  wait_drain_rejects_active_containers_test
 
-locked_job_activation_is_canceled_before_drain_test() (
-  CHECK=0
-  PACKAGE_LOCK_HELD=1
-  MAINTENANCE_TIMEOUT=30
-  export FAKE_LOCKED_JOB_FILE="$FAKE_TMP/locked-job-unit"
-  printf 'velnor-job@queued.service\n' > "$FAKE_LOCKED_JOB_FILE"
-  : > "$FAKE_TRACE"
-  running_containers() { printf '0\n'; }
-  active_velnor_job_units() { cat "$FAKE_LOCKED_JOB_FILE"; }
-  systemctl() {
-    if [[ "$1" == --no-block && "$2" == stop \
-      && "$3" == velnor-job@queued.service ]]; then
-      printf 'cancel waiting job %s\n' "$3" >> "$FAKE_TRACE"
-      : > "$FAKE_LOCKED_JOB_FILE"
-      return 0
-    fi
-    if [[ "$1" == show && "$2" == --property=ActiveState \
-      && "$3" == --value && "$4" == velnor-job@queued.service ]]; then
-      if [[ -s "$FAKE_LOCKED_JOB_FILE" ]]; then printf 'active\n'; else printf 'inactive\n'; fi
-      return 0
-    fi
-    return 2
-  }
-  sleep() { printf 'sleep %s\n' "$1" >> "$FAKE_TRACE"; }
+wait_drain_allows_explicit_restart_test() (
+  ALLOW_RESTART=1
+  container_count_for_maintenance() { printf '1\n'; }
   wait_for_work_drain
-  grep -Fq 'cancel waiting job velnor-job@queued.service' "$FAKE_TRACE"
-  [[ ! -s "$FAKE_LOCKED_JOB_FILE" ]]
 )
-assert_status 'job units queued on shared flock are stopped before locked drain waits' 0 \
-  locked_job_activation_is_canceled_before_drain_test
+assert_status 'drain gate allows active containers only with explicit restart allowance' 0 \
+  wait_drain_allows_explicit_restart_test
 
 barrier_race_refuses_new_container_test() (
   CHECK=0
@@ -2119,7 +2080,6 @@ barrier_race_refuses_new_container_test() (
     printf 'containers %s\n' "$count" >> "$FAKE_TRACE"
     printf '%s\n' "$count"
   }
-  active_velnor_job_units() { :; }
   package_transaction apt-get install -y race-test=1
 )
 : > "$FAKE_TRACE"
@@ -2467,7 +2427,6 @@ docker_bootstrap_from_absent_test() (
     esac
   }
   active_velnor_units() { :; }
-  active_velnor_job_units() { :; }
   ensure_maintenance_barrier() {
     [[ "$MAINTENANCE_READY" == 1 ]] && return 0
     printf 'maintenance barrier\n' >> "$FAKE_TRACE"
@@ -2526,7 +2485,6 @@ missing_runner_lock_repair_test() (
   active_velnor_units() { :; }
   export FAKE_DPKG_STATUS='install ok installed'
   running_containers() { printf '0\n'; }
-  active_velnor_job_units() { :; }
   close_velnor_admission() { printf 'admission closed\n' >> "$FAKE_TRACE"; }
   wait_for_work_drain() { printf 'work drained\n' >> "$FAKE_TRACE"; }
   require_drained() {

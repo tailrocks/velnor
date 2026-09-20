@@ -49,7 +49,7 @@ fn daemon_dry_run_jit_config_cli_writes_slot_configs_and_exits() {
                 "--name",
                 "velnor-ci",
                 "--labels",
-                "velnor,ubuntu-24.04",
+                "velnor,velnor-target-mvp-x64",
                 "--slots",
                 &configured.to_string(),
                 "--once",
@@ -115,6 +115,39 @@ fn daemon_dry_run_jit_config_cli_writes_slot_configs_and_exits() {
         }
         fs::remove_dir_all(config_dir).unwrap();
     }
+}
+
+#[test]
+fn daemon_dry_run_rejects_github_hosted_image_labels() {
+    let config_dir = unique_temp_dir("daemon-cli-hosted-image-label");
+    let output = Command::new(env!("CARGO_BIN_EXE_velnor-runner"))
+        .env(
+            "VELNOR_STATE_DB",
+            config_dir.join("state.db").to_str().unwrap(),
+        )
+        .args([
+            "daemon",
+            "--url",
+            "https://github.com/owner/repo",
+            "--labels",
+            "velnor,UbUnTu-24.04",
+            "--slots",
+            "1",
+            "--once",
+            "--config-dir",
+            config_dir.to_str().unwrap(),
+            "--dry-run-jit-config",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("GitHub-hosted image label"));
+    assert!(
+        !config_dir.join("runner.json").exists(),
+        "hosted image label created runner configuration"
+    );
+    fs::remove_dir_all(config_dir).ok();
 }
 
 #[test]

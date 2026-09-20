@@ -132,13 +132,6 @@ fn timed<T>(body: impl FnOnce() -> T) -> (T, u64) {
     (value, elapsed)
 }
 
-fn unix_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or(0)
-}
-
 fn require_success(invocation: &Invocation, operation: &str) -> Result<()> {
     if invocation.ok() {
         return Ok(());
@@ -455,10 +448,7 @@ impl VelnorJobWorkload {
 
         let (admission, admission_ms) = timed(|| -> Result<()> {
             let capacity = HostCapacity::probe(&scratch)?;
-            match self
-                .admission
-                .observe(capacity.available_bytes, unix_secs())
-            {
+            match self.admission.observe(capacity.available_bytes) {
                 DiskAction::Admit => Ok(()),
                 action => bail!(
                     "local admission refused ({action:?}): {} bytes available",

@@ -192,7 +192,7 @@ impl ActionsAuth {
 
     /// Mirror of `actionsAuth.validate`.
     pub fn validate(&self) -> Result<()> {
-        let has_pat = self.token.as_deref().is_some_and(|token| !token.is_empty());
+        let has_pat = self.pat_token().is_some();
         match (has_pat, self.jwt_provider.is_some()) {
             (false, false) => {
                 anyhow::bail!("either GitHub App credentials or personal access token is required");
@@ -210,8 +210,13 @@ impl ActionsAuth {
     }
 
     #[must_use]
+    pub(crate) fn pat_token(&self) -> Option<&str> {
+        self.token.as_deref().filter(|token| !token.is_empty())
+    }
+
+    #[must_use]
     pub fn is_pat(&self) -> bool {
-        self.token.as_deref().is_some_and(|token| !token.is_empty())
+        self.pat_token().is_some()
     }
 }
 

@@ -1885,7 +1885,6 @@ fn target_smoke_daemon_args(
         target_url.to_string(),
         "--name".to_string(),
         runner_name.to_string(),
-        "--target-mvp-labels".to_string(),
         "--replace".to_string(),
         "--slots".to_string(),
         job_count.to_string(),
@@ -1896,7 +1895,11 @@ fn target_smoke_daemon_args(
         work_dir.display().to_string(),
     ];
     if target_mvp_arm_label {
+        args.push("--labels".to_string());
+        args.push("velnor-target-mvp".to_string());
         args.push("--target-mvp-arm-label".to_string());
+    } else {
+        args.push("--target-mvp-labels".to_string());
     }
     if !dump_job_messages.is_empty() {
         args.push("--dump-job-message".to_string());
@@ -1913,11 +1916,15 @@ fn target_smoke_daemon_args(
 }
 
 fn target_smoke_scheduling_labels(target_mvp_arm_label: bool) -> Vec<&'static str> {
-    let mut labels = vec!["hetzner-sentry-ci", "ubuntu-latest", "ubuntu-24.04"];
     if target_mvp_arm_label {
-        labels.push("ubuntu-24.04-arm");
+        vec!["velnor-target-mvp", "velnor-target-mvp-arm64"]
+    } else {
+        vec![
+            "hetzner-sentry-ci",
+            "velnor-target-mvp",
+            "velnor-target-mvp-x64",
+        ]
     }
-    labels
 }
 
 fn live_host_doctor_plan(root: &Path, args: LiveHostDoctorPlanArgs) -> Result<()> {
@@ -5133,16 +5140,15 @@ offline-runner\toffline\tself-hosted,velnor-target-mvp
     fn smoke_plan_target_labels_match_shell_contract() {
         assert_eq!(
             target_smoke_scheduling_labels(false),
-            vec!["hetzner-sentry-ci", "ubuntu-latest", "ubuntu-24.04"]
+            vec![
+                "hetzner-sentry-ci",
+                "velnor-target-mvp",
+                "velnor-target-mvp-x64"
+            ]
         );
         assert_eq!(
             target_smoke_scheduling_labels(true),
-            vec![
-                "hetzner-sentry-ci",
-                "ubuntu-latest",
-                "ubuntu-24.04",
-                "ubuntu-24.04-arm"
-            ]
+            vec!["velnor-target-mvp", "velnor-target-mvp-arm64"]
         );
     }
 
@@ -5166,7 +5172,10 @@ offline-runner\toffline\tself-hosted,velnor-target-mvp
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--name", "velnor-target-mvp"]));
-        assert!(args.contains(&"--target-mvp-labels".to_string()));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--labels", "velnor-target-mvp"]));
+        assert!(!args.contains(&"--target-mvp-labels".to_string()));
         assert!(args.contains(&"--target-mvp-arm-label".to_string()));
         assert!(args.windows(2).any(|pair| pair == ["--slots", "3"]));
         assert!(args
@@ -5199,7 +5208,9 @@ offline-runner\toffline\tself-hosted,velnor-target-mvp
             "",
         );
 
+        assert!(args.contains(&"--target-mvp-labels".to_string()));
         assert!(!args.contains(&"--target-mvp-arm-label".to_string()));
+        assert!(!args.contains(&"--labels".to_string()));
         assert!(!args.contains(&"--docker-host-work-dir".to_string()));
         assert!(!args.contains(&"--dump-job-message".to_string()));
         assert!(!args.contains(&"--require-docker-socket".to_string()));

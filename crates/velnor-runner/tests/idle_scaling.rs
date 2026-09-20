@@ -22,13 +22,17 @@ use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use serde::Deserialize;
 use serde_json::Value;
+use velnor_control::journal::Journal;
 
-// The controller's bounded remote budget is 15s and its watchdog reserves an
-// equal local margin. Keep the observation deadline within that same 30s
-// liveness contract; normal runs still finish after four 2s cycles.
+// Allow slot startup, two warm-up cycles, and four measured 2s cycles within
+// the controller's 30s liveness contract.
 const METRICS_WAIT: Duration = Duration::from_secs(30);
 const METRICS_POLL: Duration = Duration::from_millis(20);
+const SLOT_HEARTBEAT_MAX_AGE: Duration = Duration::from_secs(10);
+const WARMUP_RECONCILE_CYCLES: u64 = 2;
+const SAMPLE_RECONCILE_CYCLES: u64 = 4;
 const OUTPUT_TAIL_CAP_BYTES: usize = 64 * 1024;
 const OUTPUT_READ_CHUNK_BYTES: usize = 8 * 1024;
 const CLEANUP_WAIT: Duration = Duration::from_millis(500);
@@ -438,38 +442,138 @@ fn wait_for_steady_cycles(
     slots: u32,
 ) -> (Value, Value) {
     let deadline = Instant::now() + METRICS_WAIT;
-    let mut previous = wait_for_metrics(controller, state_dir, path, deadline);
-    let mut steady_cycles = 0;
+    let mut current = wait_for_metrics(controller, state_dir, path, deadline);
+    let journal = Journal::open(state_dir.join("journal.db"))
+        .expect("open controller journal for slot readiness proof");
+    while !controller_metrics_are_steady(&current, slots)
+        || !all_slots_have_fresh_heartbeats(state_dir, &journal, slots)
+    {
+        current = wait_for_metrics_after(
+            controller,
+            state_dir,
+            path,
+            number(&current, &["sequence"]),
+            deadline,
+        );
+    }
+
+    let warmup_target = number(&current, &["reconcile", "completed_cycles"])
+        .saturating_add(WARMUP_RECONCILE_CYCLES);
+    let warmed = wait_for_completed_cycles_at_least(
+        controller,
+        state_dir,
+        path,
+        slots,
+        &journal,
+        current,
+        warmup_target,
+        deadline,
+    );
+    wait_for_reconcile_cycle_window(
+        controller,
+        state_dir,
+        path,
+        slots,
+        &journal,
+        warmed,
+        SAMPLE_RECONCILE_CYCLES,
+        deadline,
+    )
+}
+
+fn wait_for_metrics_after(
+    controller: &mut Controller,
+    state_dir: &Path,
+    path: &Path,
+    sequence: u64,
+    deadline: Instant,
+) -> Value {
     while Instant::now() < deadline {
         fail_if_controller_exited(controller, state_dir);
         controller.pump_output();
         if let Ok(bytes) = std::fs::read(path)
             && let Ok(value) = serde_json::from_slice::<Value>(&bytes)
+            && number(&value, &["sequence"]) > sequence
         {
-            let populated = number(&value, &["slot_processes"]) == u64::from(slots);
-            let previous_sequence = number(&previous, &["sequence"]);
-            // The producer publishes by atomic rename. A polling reader
-            // may legitimately miss one or more snapshots under load; a
-            // missed sequence is still controller progress, not a stall.
-            let advanced = number(&value, &["sequence"]) > previous_sequence;
-            if advanced {
-                if populated {
-                    steady_cycles += 1;
-                } else {
-                    steady_cycles = 0;
-                }
-                if steady_cycles >= 4 {
-                    return (previous, value);
-                }
-                previous = value;
-            }
+            return value;
         }
         sleep_until(deadline);
     }
     panic!(
-        "controller did not publish a second metrics cycle: {}",
+        "controller did not publish metrics after sequence {sequence}: {}",
         path.display()
     );
+}
+
+fn controller_metrics_are_steady(metrics: &Value, slots: u32) -> bool {
+    number(metrics, &["slot_processes"]) == u64::from(slots)
+        && number(metrics, &["job_processes"]) == 0
+        && number(metrics, &["waiter_processes"]) == 0
+}
+
+fn assert_steady_controller(metrics: &Value, state_dir: &Path, journal: &Journal, slots: u32) {
+    assert!(
+        controller_metrics_are_steady(metrics, slots),
+        "controller process counts changed during the measurement: {metrics}"
+    );
+    assert!(
+        all_slots_have_fresh_heartbeats(state_dir, journal, slots),
+        "slot heartbeat or live PID was lost during the measurement: {metrics}"
+    );
+}
+
+fn wait_for_completed_cycles_at_least(
+    controller: &mut Controller,
+    state_dir: &Path,
+    path: &Path,
+    slots: u32,
+    journal: &Journal,
+    mut previous: Value,
+    target_cycles: u64,
+    deadline: Instant,
+) -> Value {
+    while number(&previous, &["reconcile", "completed_cycles"]) < target_cycles {
+        let current = wait_for_metrics_after(
+            controller,
+            state_dir,
+            path,
+            number(&previous, &["sequence"]),
+            deadline,
+        );
+        assert_steady_controller(&current, state_dir, journal, slots);
+        previous = current;
+    }
+    previous
+}
+
+fn wait_for_reconcile_cycle_window(
+    controller: &mut Controller,
+    state_dir: &Path,
+    path: &Path,
+    slots: u32,
+    journal: &Journal,
+    mut baseline: Value,
+    cycles: u64,
+    deadline: Instant,
+) -> (Value, Value) {
+    let mut target_cycles =
+        number(&baseline, &["reconcile", "completed_cycles"]).saturating_add(cycles);
+    let mut sequence = number(&baseline, &["sequence"]);
+    loop {
+        let current = wait_for_metrics_after(controller, state_dir, path, sequence, deadline);
+        sequence = number(&current, &["sequence"]);
+        assert_steady_controller(&current, state_dir, journal, slots);
+        let completed_cycles = number(&current, &["reconcile", "completed_cycles"]);
+        if completed_cycles == target_cycles {
+            return (baseline, current);
+        }
+        if completed_cycles > target_cycles {
+            // If periodic publication skipped the exact target, start a new
+            // same-sized window at this completed-cycle boundary.
+            baseline = current;
+            target_cycles = completed_cycles.saturating_add(cycles);
+        }
+    }
 }
 
 fn sleep_until(deadline: Instant) {
@@ -654,9 +758,70 @@ fn number(metrics: &Value, path: &[&str]) -> u64 {
         .unwrap_or_else(|| panic!("missing numeric metric {path:?}: {metrics}"))
 }
 
-fn cpu_us(metrics: &Value) -> u64 {
-    number(metrics, &["cpu", "controller", "user_us"])
-        .saturating_add(number(metrics, &["cpu", "controller", "system_us"]))
+#[derive(Debug, Deserialize)]
+struct SlotHeartbeat {
+    generation: u64,
+    pid: u32,
+    sequence: u64,
+}
+
+fn all_slots_have_fresh_heartbeats(state_dir: &Path, journal: &Journal, slots: u32) -> bool {
+    let Ok(state) = journal.materialized_state() else {
+        return false;
+    };
+    (1..=slots).all(|slot_index| {
+        let slot_id = format!("idle-scale-{slot_index}");
+        let Some(slot) = state.slots.iter().find(|slot| slot.slot_id.0 == slot_id) else {
+            return false;
+        };
+        let Some(pid) = slot.pid else {
+            return false;
+        };
+        let path = state_dir.join(format!(".slot-{slot_index}.heartbeat"));
+        let Ok(metadata) = std::fs::metadata(path) else {
+            return false;
+        };
+        let Ok(modified) = metadata.modified() else {
+            return false;
+        };
+        let Ok(age) = modified.elapsed() else {
+            return false;
+        };
+        if age > SLOT_HEARTBEAT_MAX_AGE {
+            return false;
+        }
+        let Ok(bytes) = std::fs::read(state_dir.join(format!(".slot-{slot_index}.heartbeat")))
+        else {
+            return false;
+        };
+        let Ok(heartbeat) = serde_json::from_slice::<SlotHeartbeat>(&bytes) else {
+            return false;
+        };
+        heartbeat.generation == slot.generation.0
+            && heartbeat.pid == pid
+            && heartbeat.sequence > 0
+            && process_is_alive(pid)
+    })
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    // SAFETY: signal 0 checks whether the PID exists without delivering a signal.
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+fn reconcile_boundary_cpu_us(metrics: &Value) -> u64 {
+    number(
+        metrics,
+        &["cpu", "controller_at_reconcile_boundary", "user_us"],
+    )
+    .saturating_add(number(
+        metrics,
+        &["cpu", "controller_at_reconcile_boundary", "system_us"],
+    ))
 }
 
 fn stop_process_group(controller: &mut Controller) {
@@ -669,9 +834,11 @@ struct Measurement {
     slot_processes: u64,
     job_processes: u64,
     waiter_processes: u64,
-    reconcile_p95_ms: u64,
-    controller_cpu_us: u64,
-    journal_transactions: u64,
+    reconcile_cycles: u64,
+    reconcile_wall_ms_total: u64,
+    reconcile_wall_ms_per_cycle: u64,
+    controller_cpu_us_total: u64,
+    controller_cpu_us_per_cycle: u64,
     wal_bytes: u64,
 }
 
@@ -684,15 +851,29 @@ fn idle_resource_scaling_from_one_to_sixteen_slots_is_bounded() {
         let mut controller = spawn_controller(state_dir.path(), slots);
         let (first_metrics, metrics) =
             wait_for_steady_cycles(&mut controller, state_dir.path(), &metrics_path, slots);
+        let reconcile_cycles = number(&metrics, &["reconcile", "completed_cycles"])
+            .saturating_sub(number(&first_metrics, &["reconcile", "completed_cycles"]));
+        assert_eq!(
+            reconcile_cycles, SAMPLE_RECONCILE_CYCLES,
+            "measurement must span the same number of completed reconcile cycles"
+        );
+        let controller_cpu_us_total = reconcile_boundary_cpu_us(&metrics)
+            .saturating_sub(reconcile_boundary_cpu_us(&first_metrics));
+        let reconcile_wall_ms_total = number(&metrics, &["reconcile", "wall_duration_ms_total"])
+            .saturating_sub(number(
+                &first_metrics,
+                &["reconcile", "wall_duration_ms_total"],
+            ));
         let measurement = Measurement {
             slots,
             slot_processes: number(&metrics, &["slot_processes"]),
             job_processes: number(&metrics, &["job_processes"]),
             waiter_processes: number(&metrics, &["waiter_processes"]),
-            reconcile_p95_ms: number(&metrics, &["reconcile_duration_ms", "p95"]),
-            controller_cpu_us: cpu_us(&metrics).saturating_sub(cpu_us(&first_metrics)),
-            journal_transactions: number(&metrics, &["journal", "transactions"])
-                .saturating_sub(number(&first_metrics, &["journal", "transactions"])),
+            reconcile_cycles,
+            reconcile_wall_ms_total,
+            reconcile_wall_ms_per_cycle: reconcile_wall_ms_total / reconcile_cycles,
+            controller_cpu_us_total,
+            controller_cpu_us_per_cycle: controller_cpu_us_total / reconcile_cycles,
             wal_bytes: number(&metrics, &["journal", "wal_bytes"]),
         };
         stop_process_group(&mut controller);
@@ -705,26 +886,24 @@ fn idle_resource_scaling_from_one_to_sixteen_slots_is_bounded() {
             "idle waiters: {measurement:?}"
         );
         assert!(
-            measurement.reconcile_p95_ms > 0,
-            "controller must publish a non-zero reconcile duration: {measurement:?}"
-        );
-        assert!(
-            measurement.journal_transactions > 0,
-            "controller must publish journal telemetry: {measurement:?}"
+            measurement.reconcile_wall_ms_per_cycle > 0,
+            "controller must publish non-zero completed-cycle wall time: {measurement:?}"
         );
         assert!(
             measurement.wal_bytes <= 4 * 1024 * 1024,
             "startup WAL must remain bounded: {measurement:?}"
         );
         println!(
-            "idle_scaling slots={} slot_processes={} job_processes={} waiter_processes={} reconcile_p95_ms={} controller_cpu_us={} journal_transactions={} wal_bytes={}",
+            "idle_scaling slots={} slot_processes={} job_processes={} waiter_processes={} reconcile_cycles={} reconcile_wall_ms_total={} reconcile_wall_ms_per_cycle={} controller_cpu_us_total={} controller_cpu_us_per_cycle={} wal_bytes={}",
             measurement.slots,
             measurement.slot_processes,
             measurement.job_processes,
             measurement.waiter_processes,
-            measurement.reconcile_p95_ms,
-            measurement.controller_cpu_us,
-            measurement.journal_transactions,
+            measurement.reconcile_cycles,
+            measurement.reconcile_wall_ms_total,
+            measurement.reconcile_wall_ms_per_cycle,
+            measurement.controller_cpu_us_total,
+            measurement.controller_cpu_us_per_cycle,
             measurement.wal_bytes,
         );
         measurements.push(measurement);
@@ -732,11 +911,11 @@ fn idle_resource_scaling_from_one_to_sixteen_slots_is_bounded() {
 
     let baseline = measurements.first().expect("one-slot measurement");
     let largest = measurements.last().expect("sixteen-slot measurement");
-    // The first cycle includes deterministic slot-process creation. CPU
-    // attribution is the steady control-resource gate; duration remains in
-    // the exact report for diagnosing startup work separately.
+    // Compare CPU at completed-cycle boundaries after fresh slot heartbeats
+    // and warm-up. Wall time remains in the sample for diagnosing slow cycles.
     assert!(
-        largest.controller_cpu_us <= baseline.controller_cpu_us.saturating_mul(2) + 1_000,
+        largest.controller_cpu_us_per_cycle
+            <= baseline.controller_cpu_us_per_cycle.saturating_mul(2) + 1_000,
         "controller CPU exceeded 2x: {measurements:#?}"
     );
 

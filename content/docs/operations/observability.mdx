@@ -64,18 +64,23 @@ events by run identity.
 
 ## Health
 
-The guardian writes an atomic `health.json` snapshot. An optional
-`health.sock` provides a one-request fast path; if it is absent or unusable,
-read the file. A missing or invalid file means health is unavailable, not
-healthy.
+The guardian publishes an atomic host-level `health.json` snapshot at
+`/var/lib/velnor/health.json` and an optional `health.sock` fast path at
+`/var/lib/velnor/health.sock`. If the socket is absent or unusable, read the
+file. A missing or invalid file means health is unavailable, not healthy.
 
-For the packaged single-instance service, the exact paths are
-`/var/lib/velnor/health.json` and `/var/lib/velnor/health.sock`. For a templated
-instance named `NAME`, they are `/var/lib/velnor-NAME/health.json` and
-`/var/lib/velnor-NAME/health.sock`. These paths come from systemd's
-`StateDirectory`; custom `--config-dir` or storage settings can change the
-runtime directory, so use the instance's configured state directory when those
-settings are in use.
+Each daemon also publishes its own `health.json` and optional `health.sock` in
+its daemon-scoped directory. `velnorctl status --json` reads this daemon-level
+health. The packaged bare daemon defaults to
+`/var/lib/velnor/runner/daemons/velnor/health.json` and
+`/var/lib/velnor/runner/daemons/velnor/health.sock`. A template instance uses
+`/var/lib/velnor-NAME/runner/daemons/<VELNOR_NAME>/health.json` and
+`/var/lib/velnor-NAME/runner/daemons/<VELNOR_NAME>/health.sock`; for example,
+if `VELNOR_NAME=velnor-NAME`, both files are under
+`/var/lib/velnor-NAME/runner/daemons/velnor-NAME/`. `STATE_DIRECTORY` takes
+precedence over `VELNOR_STORAGE_ROOT`, so changing only the storage root does
+not move packaged daemon health. Explicit `--config-dir` or
+`VELNOR_CONFIG_DIR` changes the daemon-scoped directory.
 
 Health includes control and journal state, GitHub connectivity, routing and
 runner-group proof, desired/actual/ready capacity, executor/backend readiness,
@@ -90,10 +95,15 @@ Interpret states carefully:
 - `not_ready`: Velnor must not accept work, for example when control/journal is
   unavailable or no slot/permit is ready.
 
-`controller-metrics.json` is a current local snapshot: process counts,
-reconcile timing, journal/WAL bytes, and CPU totals. Phase CPU buckets are
-currently zero; do not treat them as measured per-phase metrics. There is no
-Prometheus endpoint, dashboard, SSE endpoint, or HTTP health endpoint.
+`controller-metrics.json` is a current local snapshot with process counts,
+reconcile timing, the byte size of the SQLite `journal.db-wal` file, and
+controller user/system CPU totals, including values captured at the last
+reconcile boundary. It does not report the main `journal.db` file size.
+Phase CPU buckets are currently zero; do not treat them as measured per-phase
+metrics. Health is available through the per-daemon `health.sock` and its
+`health.json` fallback. These are separate from `control.sock`; the control
+socket serves local status/read and control operations, not health. There is
+no Prometheus endpoint, dashboard, SSE endpoint, or HTTP health endpoint.
 
 ## Jobs, events, logs, and telemetry
 
@@ -152,9 +162,13 @@ outbox entry is retained until it reaches a terminal state, which is one of
 three: GitHub acknowledged the completion; the run service reported the job
 already terminal; or the entry's durable budget — a permanent refusal, eight
 attempts, or six hours — was spent, and the entry was abandoned. An abandoned
-entry means **GitHub was never told the job finished** and the run service will
-time the job out; the reason is preserved permanently in the journal. Outbox
-age counts only pending entries, so an abandoned entry drops out of it.
+entry means Velnor stopped retrying without recording successful delivery. A
+permanent refusal is an explicit response; after ambiguous transport failures,
+the Run Service may have accepted the payload before the response was lost, so
+GitHub's outcome may be unknown. If it did not receive the payload, the Run
+Service may time out the job. The journal records Velnor's local budget
+decision; check GitHub's job state for the remote outcome. Outbox age counts
+only pending entries, so an abandoned entry drops out of it.
 
 Inspect outbox age and completion-related events when execution succeeded
 locally but GitHub remains pending, and inspect the journal's unresolvable

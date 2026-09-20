@@ -28,17 +28,24 @@ sudo /usr/bin/flock --exclusive --nonblock --no-fork \
 Replace `VERSION` and `ARCH` with the downloaded asset names. Direct `dpkg -i`
 and unlocked package transactions are rejected. Installation verifies package
 identity, creates required paths, reloads systemd, enables the weekly
-`velnor-cache-gc.timer`, and leaves every fleet service disabled and stopped.
-It does not activate a release or restart the fleet.
+`velnor-cache-gc.timer`, and does not activate a release or restart the fleet.
+Fresh installs leave fleet services disabled and stopped; upgrades preserve
+their existing enablement state.
 
 Install host prerequisites before the package and backend prerequisites before
 starting the daemon:
 
 - systemd, outbound HTTPS, Git, curl, CA certificates, util-linux, and enough
   CPU, memory, and disk for the selected jobs;
-- Docker backend: a running Docker daemon and the required host Docker socket;
-- MicroVM backend: `/dev/kvm`, packaged verified Firecracker artifacts, and a
-  working jailer. MicroVM never falls back to Docker.
+- Native Docker backend: a running Docker daemon and the required host Docker
+  socket;
+- Native microVM backend: `/dev/kvm`, packaged verified Firecracker artifacts,
+  and a working jailer. MicroVM never falls back to Docker;
+- Optional Scale Set lane: a running host Docker daemon to manage the official
+  runner and its private DinD containers; its per-worker daemon does not use the
+  host Docker socket. Velnor creates each DinD container with
+  `docker create --privileged`, so the host must permit privileged container
+  creation. Use this lane only where the host's trust boundary allows it.
 
 ## Configure and start
 
@@ -55,7 +62,7 @@ fi
 sudoedit /etc/velnor/secrets.env
 ```
 
-Set one backend, with no fallback:
+Set the native lane's backend, with no fallback:
 
 ```toml
 [execution]
@@ -77,13 +84,68 @@ slot count, trust scope, capability validation, and work directory. Capability
 validation must be `strict`. Organization and enterprise scopes require an
 explicit runner group and a matching desired routing policy.
 
-`VELNOR_TRUST_SCOPE` defaults to `untrusted` and fails closed. A node upgraded
-from a build that defaulted to `trusted` loses the host Docker socket,
-privileged container and service options, host port publishing, and the right
-to run a job carrying user secrets, and its persistent stores move to the
-`untrusted` namespace so the first job rebuilds its caches once. Set
-`VELNOR_TRUST_SCOPE=trusted` explicitly if that is what the pool is for. See
-[Trust scope](/reference/trust-scope).
+The daemon runs native slots only by default. To configure the official Scale
+Set lane, set `VELNOR_SCALE_SET_CONFIG` in
+`/etc/velnor/velnor.env` to its TOML configuration; for a named
+`velnor-daemon@NAME.service`, set it in `/etc/velnor/NAME.env`. Its App key or
+PAT must be referenced from the service's mode-`0600` secrets file or a private
+credential file. The Scale Set adapter shares the host-wide permit ledger with
+native slots. See the
+[Scale Set configuration reference](/reference/configuration#optional-scale-set-lane).
+
+Before enabling any daemon, create the host demand-source roster. Each daemon
+reads this root-owned file and fails closed unless its own state database,
+configured Scale Set database, and native slot marker roots appear in it. The
+roster is host-wide, so list every daemon's paths, not only the first daemon's.
+Include the shared permit ledger, every daemon state database, each Scale Set
+database, and every native slot marker root. List each Scale Set database
+under both `state-db` and `demand-db`; if it shares a daemon state database,
+list that path once under `state-db` and once under `demand-db`. Set
+`VELNOR_PERMIT_LEDGER` identically for every daemon unit so each resolves the
+single ledger path in this roster:
+
+```sh
+# New-host bootstrap only, before starting any daemon:
+sudo install -o root -g root -m 0644 /dev/null /etc/velnor/permit-ledger.sources
+sudo install -o root -g root -m 0644 /dev/null /etc/velnor/permit-ledger.sources.lock
+
+# Every roster edit, including the initial population, holds this lock:
+sudo /usr/bin/flock --exclusive --wait 30 \
+  /etc/velnor/permit-ledger.sources.lock \
+  /usr/bin/sudoedit /etc/velnor/permit-ledger.sources
+```
+
+Use the actual absolute paths resolved by the configured units:
+
+```text
+permit-ledger /absolute/path/to/shared/permit-ledger.db
+state-db /absolute/path/to/daemon/state.db
+demand-db /absolute/path/to/scale-set/demand.db
+native-slot /absolute/path/to/native/slot/marker-root
+```
+
+Add one entry for each distinct path within each kind; a Scale Set database
+appears once under both `state-db` and `demand-db`. The roster must remain
+root-owned, readable, and not group/world-writable. Keep its sibling lock file
+root-owned with mode `0644`; the daemon opens it read-only. Create the lock once
+before the first daemon starts, keep its inode stable, and never replace or
+remove it while any daemon is active. Before enabling any daemon, create every
+database file and native marker directory named in the roster, with access for
+the configured daemon account. Hold an exclusive `flock` on the sibling lock
+for the full duration of every roster edit; daemons use a shared lock while
+reading it.
+Update the roster before starting any added or changed daemon, database, or
+native slot root; restart all daemons after changing the roster.
+
+`VELNOR_TRUST_SCOPE` applies to native slots only. It defaults to `untrusted`
+and fails closed: an untrusted native job loses the host Docker socket,
+privileged container and service options, host port publishing, and permission
+to run with user secrets; its persistent stores move to the `untrusted`
+namespace so the first job rebuilds its caches once. Set
+`VELNOR_TRUST_SCOPE=trusted` explicitly if that is what the native pool is
+for. Scale Set config has no `trust_scope` field, and its private DinD is
+created with `docker create --privileged`; allow it only on a host whose trust
+boundary permits privileged containers. See [Trust scope](/reference/trust-scope).
 
 Start the services explicitly:
 
@@ -96,8 +158,8 @@ sudo systemctl enable --now velnor-doctor.timer
 The guardian provides local supervision only. The daemon opens durable state,
 selects storage, preflights the backend, admits capacity, and supervises slots.
 Each slot performs its own JIT registration before polling GitHub. Registration
-and network failures retry with backoff; a retrying daemon is not a healthy or
-schedulable fleet.
+and network failures retry in-process with backoff; a retrying daemon is not a
+healthy or schedulable fleet.
 
 For another scope, create matching files and use the template units:
 
@@ -147,17 +209,29 @@ mbx doctor
 
 Its container store is `/var/cache/mbx` (managed targets are below
 `/var/cache/mbx/targets`). With packaged storage, host stores are below
-`/var/cache/velnor/v1/{untrusted,trusted,release}/compiler/mbx/REPOSITORY_ID`;
-an invalid repository ID uses job-ephemeral storage instead. Do not merge trust
-class or repository directories while diagnosing disk use. Mr Boxington's
-internal 20 GiB cache, 30 GiB target, and 50 GiB combined GC limits remain
-subject to Velnor's host disk accounting. Cargo registry and Git source caches
-are independent and must be inspected separately.
+`/var/cache/velnor/v1/TRUST_SCOPE/compiler/mbx/REPOSITORY_ID`. Common trust
+scopes include `untrusted`, `trusted`, and `release`; same-repository pull
+requests on a trusted pool use `pr`, and custom pools keep their configured
+scope. An invalid repository ID uses job-ephemeral storage instead. Do not
+merge trust-scope or repository directories while diagnosing disk use. Mr
+Boxington's internal 20 GiB cache, 30 GiB target, and 50 GiB combined GC
+limits remain subject to Velnor's host disk accounting. Cargo registry and
+Git source caches are independent and must be inspected separately.
 
-Jobs run unbounded: no per-job CPU/RAM ceiling is imposed anywhere, and
-host capacity is governed only by the `max_jobs=N` permit ledger. A build
-that looks under-parallelized is not being throttled by the daemon —
-check the tool's own parallelism settings and the host's actual load:
+Jobs run unbounded: no per-job CPU/RAM ceiling is imposed anywhere. The
+`max_jobs=N` permit ledger sets the shared host-wide concurrency ceiling, while
+native slot count can limit that lane below `N`. If no explicit positive value
+is set, the first daemon configures an unset ledger from its own slot count;
+later daemons adopt that value rather than adding their slots. The Scale Set
+adapter's TOML has no per-set capacity field. Velnor currently sends
+`N.saturating_sub(occupied)` through `X-ScaleSetMaxCapacity`, capped at
+`2,147,483,647` for its signed 32-bit header, or `0` before the ledger is ready
+to advertise. This is Velnor-local behavior and an unverified deviation from
+the upstream listener's configured total-capacity meaning; GitHub's handling
+of the free-permit estimate is not established. Velnor uses GitHub's
+assigned-job statistics to reconcile its local runner population. For an
+under-parallelized build, check ready lane capacity, the tool's own parallelism
+settings, and the host's actual load:
 [Storage and resource budgets](/operations/storage-and-resources).
 
 ## Daily inspection
@@ -240,9 +314,11 @@ journalctl -u velnor-daemon.service -b --no-pager
 systemctl list-timers 'velnor-doctor*'
 ```
 
-The daemon restarts automatically after failure. The doctor is a periodic
-oneshot; `loaded inactive dead` after it completes is normal. Inspect its timer
-and failed-unit state instead of treating the completed probe as a dead daemon.
+systemd restarts the daemon after its process exits. Errors the daemon handles
+retry in-process and do not trigger a systemd restart while it remains alive.
+The doctor is a periodic oneshot; `loaded inactive dead` after it completes is
+normal. Inspect its timer and failed-unit state instead of treating the
+completed probe as a dead daemon.
 
 After configuration changes, restart the exact affected daemon:
 
@@ -258,16 +334,31 @@ the remaining cgroup.
 
 ## Upgrade and release control
 
-Before an upgrade, stop the exact fleet units (daemon, guardian, controller,
-slot, and job units), then keep the exclusive transaction lock for the whole
-package operation:
+Before an upgrade, enumerate all `velnor*.service` units and stop every active
+fleet service. Controller and slot instances are separate systemd units, and an
+older install may leave legacy `velnor-job@…` instances active. Stopping only
+the daemon and guardian does not stop these units. Stop every active service
+reported by the listing, including legacy job instances. The package check
+requires fleet services to be inactive or failed. It exempts lock-serialized
+maintenance `Type=oneshot` services and their timers, which may remain enabled.
+Then hold the exclusive transaction lock for the whole package operation:
 
 ```sh
-sudo systemctl stop velnor-daemon.service velnor-guardian.service
+sudo systemctl list-units --type=service --all --no-legend --plain 'velnor*.service'
+sudo systemctl stop \
+  velnor-daemon.service velnor-daemon@NAME.service velnor-guardian.service \
+  velnor-controller@NAME.service velnor-slot@SLOT.service \
+  velnor-job@NAME.service
+sudo systemctl list-units --type=service --all --no-legend --plain 'velnor*.service'
 sudo /usr/bin/flock --exclusive --nonblock --no-fork \
   /run/velnor/package-transaction.lock \
   apt-get install ./velnor-runner-VERSION-ARCH.deb
 ```
+
+Repeat the stop command for every listed active daemon, controller, slot, and
+legacy job instance. Verify that no fleet service is active; the package check also
+rejects other active Velnor units unless they are lock-serialized maintenance
+oneshots or their timers.
 
 Every shipped Velnor service takes the shared lock. Scheduled maintenance
 timers (`velnor-doctor*.timer`, `velnor-cache-gc.timer`,
@@ -277,6 +368,59 @@ for the transaction and then executes the new binary. Package hooks reject
 direct or unlocked configuration and do not restart or re-enable fleet
 services; the only unit the package enables itself is `velnor-cache-gc.timer`
 (mask it to opt out).
+
+### Owned-worker marker format change
+
+The runner now writes structured process-identity and launch-token records in
+`owned/{isolation_id}.{generation}`. Earlier releases wrote only a decimal PID.
+The new reader rejects decimal markers, and old readers cannot safely interpret
+the new records. Do not run old and new controllers or workers together.
+
+Before crossing this format change:
+
+1. Stop new work in every Native and Scale Set scope. Let active jobs reach
+   terminal completion and owned cleanup while the old release still runs.
+2. Enumerate all Velnor service units and stop every active fleet service,
+   including the default and named daemons, guardian, and each independently
+   managed `velnor-controller@` and `velnor-slot@` instance. If present, also
+   stop legacy `velnor-job@…` instances from older installs. These worker units
+   can remain active after daemon and guardian stop. The
+   package pre-install check requires fleet services to be inactive or failed;
+   it exempts lock-serialized maintenance oneshots and their timers. Never
+   signal a process using only the PID in an old marker; PIDs can be reused.
+
+   ```sh
+   sudo systemctl list-units --type=service --all --no-legend --plain 'velnor*.service'
+   sudo systemctl stop \
+     velnor-daemon.service velnor-guardian.service velnor-daemon@NAME.service \
+     velnor-controller@SCOPE.service velnor-slot@SLOT.service
+   sudo systemctl list-units --type=service --all --no-legend --plain 'velnor*.service'
+   ```
+
+   Repeat the stop command for every listed fleet service instance. Verify
+   each fleet service's `ACTIVE` state is `inactive` or `failed`.
+3. With all fleet writers stopped, take a consistent backup of the permit ledger,
+   every configured demand/state database, and the slot state directories,
+   including their journals and marker files.
+4. Inventory remaining decimal files under each state root's `owned/`
+   directory. Match each exact isolation ID and generation to its slot journal,
+   in-flight record, worker registry, and GitHub Run Service state. If an
+   attempt is active or uncertain, stop the upgrade, start only the old cohort,
+   let it resolve the attempt, then repeat the drain and stop steps. Remove an
+   exact stale marker only after durable terminal/cleanup evidence and absence
+   of its owning service cgroup are both established; archive the original
+   bytes first. Never convert a PID-only marker into a structured marker or
+   infer ownership/death from that PID alone. If evidence is incomplete, leave
+   the marker and keep the new release stopped.
+5. Install the new release and start the complete daemon cohort together.
+   Check service logs for marker or permit-readiness errors before restoring
+   traffic.
+
+Rollback is also a drained operation. A new release can write marker and
+journal data that an old binary cannot read. Stop every new controller and
+worker, then restore the full pre-upgrade state backup and matching old package
+as one set. Do not downgrade only the executable while retaining new-format
+state; any state written after the backup must be reconciled separately.
 
 Release commands are provided by `velnor-runner`:
 

@@ -44,7 +44,7 @@ fn native_and_scaleset_start_in_shared_observation_order() {
     let path = temp_ledger("cross-lane-order");
     let generation = configure(&path, 2);
     let observed = unix_now();
-    let native_holder = native_permit_holder("older");
+    let native_holder = native_permit_holder(SCOPE_NATIVE, "older");
     let scaleset_holder = "scaleset/7/younger";
 
     // Match native broker ingress: persist its observation before the
@@ -74,13 +74,14 @@ fn native_and_scaleset_start_in_shared_observation_order() {
         .unwrap();
     assert_eq!(
         scaleset
-            .acquire(
+            .acquire_with_lease_generation(
                 scaleset_holder,
                 LedgerLane::ScaleSet,
                 LedgerPermitState::Reserved,
                 generation,
             )
-            .unwrap(),
+            .unwrap()
+            .0,
         AcquireOutcome::Full
     );
     assert_eq!(PermitLedger::open(&path).unwrap().occupied().unwrap(), 0);
@@ -92,13 +93,14 @@ fn native_and_scaleset_start_in_shared_observation_order() {
         .expect("oldest native demand should acquire");
     assert_eq!(
         scaleset
-            .acquire(
+            .acquire_with_lease_generation(
                 scaleset_holder,
                 LedgerLane::ScaleSet,
                 LedgerPermitState::Reserved,
                 generation,
             )
-            .unwrap(),
+            .unwrap()
+            .0,
         AcquireOutcome::Acquired
     );
     assert_eq!(PermitLedger::open(&path).unwrap().occupied().unwrap(), 2);
@@ -115,8 +117,14 @@ fn native_and_scaleset_start_in_shared_observation_order() {
         velnor_control::permit_ledger::DemandState::Granted
     );
 
-    native.release();
-    scaleset.release(scaleset_holder).unwrap();
+    native.release().unwrap();
+    let lease = scaleset
+        .permit_lease_generation(scaleset_holder)
+        .unwrap()
+        .unwrap();
+    assert!(scaleset
+        .release_if_generation(scaleset_holder, lease)
+        .unwrap());
     assert_eq!(PermitLedger::open(&path).unwrap().occupied().unwrap(), 0);
     std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
@@ -126,7 +134,7 @@ fn older_native_demand_blocks_younger_scaleset_with_one_slot() {
     let path = temp_ledger("single-slot-order");
     let generation = configure(&path, 1);
     let observed = unix_now();
-    let native_holder = native_permit_holder("older");
+    let native_holder = native_permit_holder(SCOPE_NATIVE, "older");
     let scaleset_holder = "scaleset/7/younger";
 
     let mut native_ledger = PermitLedger::open(&path).unwrap();
@@ -152,13 +160,14 @@ fn older_native_demand_blocks_younger_scaleset_with_one_slot() {
 
     assert_eq!(
         scaleset
-            .acquire(
+            .acquire_with_lease_generation(
                 scaleset_holder,
                 LedgerLane::ScaleSet,
                 LedgerPermitState::Reserved,
                 generation,
             )
-            .unwrap(),
+            .unwrap()
+            .0,
         AcquireOutcome::Full
     );
     let native = NativePermitGuard::acquire(&path, native_holder, SCOPE_NATIVE)
@@ -166,30 +175,38 @@ fn older_native_demand_blocks_younger_scaleset_with_one_slot() {
         .expect("older native demand should get the only slot");
     assert_eq!(
         scaleset
-            .acquire(
+            .acquire_with_lease_generation(
                 scaleset_holder,
                 LedgerLane::ScaleSet,
                 LedgerPermitState::Reserved,
                 generation,
             )
-            .unwrap(),
+            .unwrap()
+            .0,
         AcquireOutcome::Full
     );
     assert_eq!(PermitLedger::open(&path).unwrap().occupied().unwrap(), 1);
 
-    native.release();
+    native.release().unwrap();
     assert_eq!(
         scaleset
-            .acquire(
+            .acquire_with_lease_generation(
                 scaleset_holder,
                 LedgerLane::ScaleSet,
                 LedgerPermitState::Reserved,
                 generation,
             )
-            .unwrap(),
+            .unwrap()
+            .0,
         AcquireOutcome::Acquired
     );
-    scaleset.release(scaleset_holder).unwrap();
+    let lease = scaleset
+        .permit_lease_generation(scaleset_holder)
+        .unwrap()
+        .unwrap();
+    assert!(scaleset
+        .release_if_generation(scaleset_holder, lease)
+        .unwrap());
     assert_eq!(PermitLedger::open(&path).unwrap().occupied().unwrap(), 0);
     std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }

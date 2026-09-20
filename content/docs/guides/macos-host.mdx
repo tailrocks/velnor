@@ -7,8 +7,8 @@ title: "macOS on-demand host"
 `velnorctl host` runs a foreground, repository-scoped Velnor host on a Mac
 whose Docker daemon is a Linux VM (OrbStack or Docker Desktop). Jobs stay
 Linux container jobs: the host contributes capacity and a Docker endpoint, not
-a macOS runner. `macos-*` labels are still rejected (see
-[Execution](/guides/execution#what-velnor-does-not-support)).
+a macOS runner. `ubuntu-*`, `macos-*`, and `windows-*` labels are rejected on
+local runners (see [Execution](/guides/execution#what-velnor-does-not-support)).
 
 This is a recovery and development surface. It registers repository-scoped
 runners only and refuses organization URLs, so a laptop can never join the
@@ -118,8 +118,9 @@ workflow uses for jobs that need the host Docker socket. An untrusted host
 never claims it. The scope is a ceiling, not a grant: fork and unknown jobs
 still run under the untrusted floor, and same-repository PR jobs on a trusted
 host write to the `pr` store scope (see [Stores](#stores-and-the-pr-seed)).
-Every host also carries `self-hosted` and `velnor-target-mvp`, plus the ARM
-label on Apple silicon.
+Every host carries `self-hosted` and `velnor-target-mvp`. Apple silicon also
+claims `velnor-target-mvp-arm64`; x64 hosts claim `hetzner-sentry-ci` and
+`velnor-target-mvp-x64`.
 
 ## Identity
 

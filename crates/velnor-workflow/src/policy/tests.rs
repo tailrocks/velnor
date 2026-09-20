@@ -873,6 +873,42 @@ fn velnor_tree(name: &str, pr_workflow: &str) -> PathBuf {
     root
 }
 
+#[test]
+fn configured_velnor_policy_rejects_hosted_image_prefixes() {
+    let cases = [
+        (
+            "runners = \"velnor\"\n\n[workflow]\nvelnor_labels = [\"self-hosted\", \"UbUnTu-24.04\"]\n",
+            None,
+            "UbUnTu-24.04",
+        ),
+        (
+            "runners = \"velnor\"\n\n[workflow]\nvelnor_labels = [\"self-hosted\"]\n",
+            Some("schema = 1\n\n[workflow]\nvelnor_trusted_label = \"WINDOWS-2025\"\n"),
+            "WINDOWS-2025",
+        ),
+        (
+            "runners = \"velnor\"\n\n[workflow]\nvelnor_labels = [\"self-hosted\"]\n",
+            Some("schema = 1\n\n[workflow]\nvelnor_labels = [\"self-hosted\", \"UbUnTu-24.04\"]\n"),
+            "UbUnTu-24.04",
+        ),
+    ];
+
+    for (index, (runtime, generation, expected)) in cases.into_iter().enumerate() {
+        let root = temporary_directory(&format!("hosted-label-policy-{index}"));
+        write(&root.join(RUNTIME_CONFIG), runtime);
+        if let Some(generation) = generation {
+            write(&root.join(GENERATION_CONFIG), generation);
+        }
+        let error = must_fail(
+            configured_velnor_policy(&root),
+            "configured Velnor policy must reject hosted image prefixes",
+        )
+        .to_string();
+        assert!(error.contains(expected), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
 /// A trust label of the tree's own choosing; the estate vocabulary is not
 /// the point of these tests, the gate is.
 const TRUSTED_LABEL: &str = "example-trusted-hosts";

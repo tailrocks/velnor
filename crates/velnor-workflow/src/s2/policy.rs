@@ -2116,7 +2116,7 @@ fn static_local_provider(job: &Mapping, velnor_policy: &VelnorPolicyContract) ->
 /// Selectors for local capacity are caller-managed and never carry these
 /// prefixes.
 fn is_github_owned_label(label: &str) -> bool {
-    label.starts_with("ubuntu-") || label.starts_with("macos-") || label.starts_with("windows-")
+    super::provider::is_github_hosted_image_label(label)
 }
 
 fn has_safe_runner_gate(
@@ -2322,6 +2322,15 @@ impl VelnorPolicyContract {
             if selector.is_empty() {
                 return Err(GeneratorError::usage(format!(
                     "workflow policy found provider `{provider}` with an empty selector"
+                )));
+            }
+            if Self::is_local_provider(provider)
+                && let Some(label) = selector
+                    .iter()
+                    .find(|label| super::provider::is_github_hosted_image_label(label))
+            {
+                return Err(GeneratorError::usage(format!(
+                    "workflow policy rejected local provider `{provider}` selector label `{label}` because it uses a GitHub-hosted image prefix"
                 )));
             }
         }

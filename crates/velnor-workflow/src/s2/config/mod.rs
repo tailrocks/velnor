@@ -3970,6 +3970,37 @@ mod tests {
     }
 
     #[test]
+    fn local_workflow_selectors_reject_github_hosted_image_prefixes() {
+        for (provider, label) in [
+            ("velnor", "UbUnTu-24.04"),
+            ("github-self-hosted", "MacOs-26"),
+            ("velnor", "WINDOWS-2025"),
+        ] {
+            let config = config_for(&format!(
+                "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow.selectors.{provider}]\nruns_on = [\"self-hosted\", \"{label}\"]\n"
+            ));
+            let error = must_fail(
+                config.validate(&[], &[], &BTreeSet::new()),
+                "local selector with GitHub-hosted image prefix must fail",
+            );
+            assert!(error.to_string().contains(provider), "{error}");
+            assert!(error.to_string().contains(label), "{error}");
+            assert!(
+                error.to_string().contains("GitHub-hosted image prefix"),
+                "{error}"
+            );
+        }
+
+        let hosted = config_for(
+            "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow.selectors.github-hosted]\nruns_on = [\"ubuntu-24.04\"]\n",
+        );
+        must(
+            hosted.validate(&[], &[], &BTreeSet::new()),
+            "GitHub-hosted selector keeps its hosted image label",
+        );
+    }
+
+    #[test]
     fn workflow_selectors_reject_shared_local_labels() {
         let shared = config_for(
             "schema = 2\n\n[generator]\nrepository = \"example/fixture\"\n\n[workflow.selectors.github-self-hosted]\nruns_on = [\"shared-label\"]\n\n[workflow.selectors.velnor]\nruns_on = [\"shared-label\"]\n",

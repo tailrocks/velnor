@@ -50,6 +50,7 @@ const ADAPTER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// no field that takes an inline secret, so a config file can never carry
 /// key material by construction.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScaleSetFileConfig {
     /// Enterprise, org, or repository URL, e.g. `https://github.com/octo-org`.
     pub scope_url: String,
@@ -70,8 +71,6 @@ pub struct ScaleSetFileConfig {
     pub auth: AuthFileConfig,
     /// State database (defaults to the daemon's operational state db).
     pub state_db: Option<PathBuf>,
-    /// Host-wide permit ledger (defaults to the daemon's ledger path).
-    pub ledger_path: Option<PathBuf>,
     /// Worker state root (defaults to `<config-dir>/scaleset-workers`).
     pub worker_state_dir: Option<PathBuf>,
     /// DinD readiness probes before giving up.
@@ -88,6 +87,7 @@ pub struct ScaleSetFileConfig {
 
 /// Credential references: exactly one of `app` / `pat`.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuthFileConfig {
     pub app: Option<AppAuthFile>,
     pub pat: Option<PatAuthFile>,
@@ -95,6 +95,7 @@ pub struct AuthFileConfig {
 
 /// GitHub App credentials by reference.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AppAuthFile {
     pub client_id: String,
     pub installation_id: i64,
@@ -104,6 +105,7 @@ pub struct AppAuthFile {
 
 /// PAT credential by reference.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PatAuthFile {
     pub token_file: Option<PathBuf>,
     pub token_env: Option<String>,
@@ -142,6 +144,15 @@ impl ScaleSetFileConfig {
             }
             _ => {}
         }
+        let mut effective_labels = self.labels.clone();
+        if effective_labels.is_empty() {
+            if let Some(name) = self.set_name.as_ref() {
+                // The runner service derives a `System` label from the set
+                // name when a new set is created without explicit labels.
+                effective_labels.push(name.clone());
+            }
+        }
+        crate::platform::validate_no_hosted_image_labels(&effective_labels)?;
         self.auth.resolve()?;
         if self.ready_attempts == Some(0) {
             anyhow::bail!("scale-set config: ready_attempts must be positive");
@@ -321,10 +332,7 @@ impl ScaleSetDaemon {
             }
         };
         let state_db = file.state_db.clone().unwrap_or(defaults.state_db.clone());
-        let ledger_path = file
-            .ledger_path
-            .clone()
-            .unwrap_or(defaults.ledger_path.clone());
+        let ledger_path = defaults.ledger_path.clone();
         let worker_state_dir = file
             .worker_state_dir
             .clone()
@@ -611,6 +619,42 @@ mod tests {
             config.auth.resolve().unwrap(),
             ResolvedAuth::App(_)
         ));
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn config_rejects_github_hosted_image_labels_case_insensitively() {
+        for label in [
+            "ubuntu-24.04",
+            " UBUNTU-LATEST ",
+            "MacOs-26",
+            "WINDOWS-2025",
+        ] {
+            let body = app_body("private_key_env = \"NEVER_SET_VELNOR_TEST\"").replace(
+                "labels = [\"velnor\", \"linux\"]",
+                &format!("labels = [\"{label}\"]"),
+            );
+            let path = write_config("hosted-image-label", &body);
+            let error = load_file_config(&path).unwrap_err().to_string();
+            assert!(error.contains(label), "{error}");
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+
+    #[test]
+    fn empty_scale_set_labels_validate_the_name_derived_system_label() {
+        let body = "scope_url = \"https://github.com/octo-org\"\n\
+             owner = \"octo-org\"\n\
+             group_name = \"velnor\"\n\
+             set_name = \"Ubuntu-Latest\"\n\
+             labels = []\n\
+             [auth.app]\n\
+             client_id = \"Iv1.abc\"\n\
+             installation_id = 42\n\
+             private_key_env = \"NEVER_SET_VELNOR_TEST\"\n";
+        let path = write_config("derived-hosted-image-label", body);
+        let error = load_file_config(&path).unwrap_err().to_string();
+        assert!(error.contains("Ubuntu-Latest"), "{error}");
         std::fs::remove_file(&path).unwrap();
     }
 

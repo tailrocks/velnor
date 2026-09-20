@@ -177,7 +177,12 @@ conclusion, writes and journals the payload, takes one send claim, submits it,
 records remote acknowledgement, and then removes the outbox entry. Recovery
 retries the same payload under the same claim. The retry budget is bounded — a
 permanent refusal, eight attempts, or six hours — and an exhausted entry is
-abandoned without telling GitHub. See
+abandoned when Velnor cannot continue local delivery attempts. If transport
+retries ended without acknowledgement, the Run Service may already have
+accepted the payload before its response was lost, so GitHub's outcome is
+unknown until checked. If the Run Service did not receive it, it may time out
+the job. The journal records Velnor's local budget decision; check GitHub's job
+state for the remote outcome. See
 [Native completion durability](/guides/execution#completion-durability).
 
 For Scale Set jobs, the official runner handles cancellation, progress, logs,

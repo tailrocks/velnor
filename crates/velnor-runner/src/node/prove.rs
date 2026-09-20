@@ -6,11 +6,14 @@
 //! field is invalid (August 24 class: registration without repo access).
 
 use anyhow::{bail, Context, Result};
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::process::Child;
 use std::{
     collections::BTreeSet,
+    io::Read,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant, SystemTime},
 };
 
 use serde::{Deserialize, Serialize};
@@ -53,6 +56,37 @@ pub struct RoutingDocument {
 pub struct RoutingObservation {
     pub valid: bool,
     pub group_valid: bool,
+}
+
+/// Heartbeat data verified once during controller ingestion. The expiry is
+/// tied to the file's modification time, so a later controller phase can
+/// reuse the record only while it still satisfies the original freshness
+/// bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifiedSlotHeartbeat {
+    generation: Generation,
+    pid: u32,
+    sequence: u64,
+    expires_at: Instant,
+    wall_checked_at: SystemTime,
+    remaining_freshness: Duration,
+}
+
+impl VerifiedSlotHeartbeat {
+    #[must_use]
+    pub const fn generation(self) -> Generation {
+        self.generation
+    }
+
+    #[must_use]
+    pub const fn pid(self) -> u32 {
+        self.pid
+    }
+
+    #[must_use]
+    pub const fn sequence(self) -> u64 {
+        self.sequence
+    }
 }
 
 impl RoutingObservation {
@@ -130,67 +164,81 @@ pub fn observe_slot_session(
     slot_heartbeat_is_fresh(state_dir, slot_id, generation, Duration::from_secs(10))
 }
 
-/// SIGNAL 0 existence check. Does not deliver a signal.
+/// SIGNAL 0 existence check. Does not deliver a signal. Only `ESRCH` proves
+/// death; invalid PIDs and other probe errors remain live/unknown so recovery
+/// cannot mistake lack of permission or malformed evidence for teardown.
 #[must_use]
 pub fn pid_is_alive(pid: u32) -> bool {
-    // SAFETY: kill(pid, 0) only tests whether `pid` exists.
-    let result = unsafe { libc::kill(pid as i32, 0) };
-    result == 0
+    if pid == 0 || pid > i32::MAX as u32 {
+        return true;
+    }
+    pid_is_alive_with(|| {
+        // SAFETY: kill(pid, 0) only tests whether `pid` exists.
+        if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    })
 }
 
-/// Verify that a persisted PID is the slot actor Velnor launched, not merely
-/// an unrelated process that reused the number after a controller restart.
-/// Linux exposes the child argv through procfs. Other Unix targets use the
-/// standard `ps` command and reject any missing, malformed, or mismatched
-/// command-line evidence.
-#[must_use]
-pub fn slot_process_is_alive(
+fn pid_is_alive_with(mut probe: impl FnMut() -> std::io::Result<()>) -> bool {
+    loop {
+        match probe() {
+            Ok(()) => return true,
+            Err(error) => match error.raw_os_error() {
+                Some(code) if code == libc::ESRCH => return false,
+                Some(code) if code == libc::EINTR => continue,
+                _ => return true,
+            },
+        }
+    }
+}
+
+/// Verify a persisted PID against the launched slot identity. Linux pins the
+/// process with pidfd while checking argv, preventing PID reuse between the
+/// process check and command-line read. Other Unix targets recheck the full
+/// process snapshot after matching it. Errors mean ownership is unknown.
+pub fn slot_process_liveness(
     pid: u32,
     state_dir: &std::path::Path,
     slot_id: &SlotId,
     generation: Generation,
-) -> bool {
-    if !pid_is_alive(pid) {
-        return false;
+) -> std::io::Result<bool> {
+    if pid == 0 || pid > i32::MAX as u32 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "slot PID cannot be represented as pid_t",
+        ));
     }
 
     #[cfg(target_os = "linux")]
     {
+        let raw_fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0u32) };
+        if raw_fd < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(false);
+            }
+            return Err(error);
+        }
+        // SAFETY: successful pidfd_open returns an owned descriptor.
+        let pidfd = unsafe { std::fs::File::from_raw_fd(raw_fd as i32) };
         let Some((scope, index)) = slot_id.0.rsplit_once('-') else {
-            return false;
+            return Ok(false);
         };
+        if scope.is_empty() {
+            return Ok(false);
+        }
         let cmdline = match std::fs::read(format!("/proc/{pid}/cmdline")) {
             Ok(cmdline) => cmdline,
-            Err(_) => return false,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
         };
-        let args: Vec<&[u8]> = cmdline
-            .split(|byte| *byte == 0)
-            .filter(|arg| !arg.is_empty())
-            .collect();
-        let Some(executable) = args
-            .first()
-            .and_then(|arg| arg.rsplit(|byte| *byte == b'/').next())
-        else {
-            return false;
-        };
-        if !slot_service_executable_name(&String::from_utf8_lossy(executable)) {
-            return false;
+        if !linux_slot_command_line_matches(&cmdline, state_dir, scope, index, generation) {
+            return Ok(false);
         }
-        let state_dir = state_dir.to_string_lossy();
-        let generation = generation.0.to_string();
-        let expected = [
-            b"slot".as_slice(),
-            b"--state-dir".as_slice(),
-            state_dir.as_bytes(),
-            b"--scope".as_slice(),
-            scope.as_bytes(),
-            b"--slot-index".as_slice(),
-            index.as_bytes(),
-            b"--generation".as_slice(),
-            generation.as_bytes(),
-        ];
-        args.get(1..)
-            .is_some_and(|args| args == expected.as_slice())
+        pidfd_is_live(&pidfd)
     }
 
     #[cfg(all(unix, not(target_os = "linux")))]
@@ -201,7 +249,92 @@ pub fn slot_process_is_alive(
     #[cfg(not(unix))]
     {
         let _ = (state_dir, slot_id, generation);
-        pid_is_alive(pid)
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "slot process identity checks are unavailable on this platform",
+        ))
+    }
+}
+
+/// Compatibility query for callers that only need to avoid acting as though
+/// uncertain ownership were dead. Unknown process evidence is treated as
+/// potentially alive; code that grants readiness or sends signals must use
+/// `slot_process_liveness` and handle its error explicitly.
+#[must_use]
+pub fn slot_process_is_alive(
+    pid: u32,
+    state_dir: &std::path::Path,
+    slot_id: &SlotId,
+    generation: Generation,
+) -> bool {
+    slot_process_liveness(pid, state_dir, slot_id, generation).unwrap_or(true)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_slot_command_line_matches(
+    cmdline: &[u8],
+    state_dir: &Path,
+    scope: &str,
+    index: &str,
+    generation: Generation,
+) -> bool {
+    let args: Vec<&[u8]> = cmdline
+        .split(|byte| *byte == 0)
+        .filter(|arg| !arg.is_empty())
+        .collect();
+    let Some(executable) = args
+        .first()
+        .and_then(|arg| arg.rsplit(|byte| *byte == b'/').next())
+    else {
+        return false;
+    };
+    if !slot_service_executable_name(&String::from_utf8_lossy(executable)) {
+        return false;
+    }
+    let state_dir = state_dir.to_string_lossy();
+    let generation = generation.0.to_string();
+    let expected = [
+        b"slot".as_slice(),
+        b"--state-dir".as_slice(),
+        state_dir.as_bytes(),
+        b"--scope".as_slice(),
+        scope.as_bytes(),
+        b"--slot-index".as_slice(),
+        index.as_bytes(),
+        b"--generation".as_slice(),
+        generation.as_bytes(),
+    ];
+    args.get(1..)
+        .is_some_and(|args| args == expected.as_slice())
+}
+
+#[cfg(target_os = "linux")]
+fn pidfd_is_live(pidfd: &std::fs::File) -> std::io::Result<bool> {
+    let mut pollfd = libc::pollfd {
+        fd: pidfd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    loop {
+        // SAFETY: poll reads the initialized descriptor record only.
+        let result = unsafe { libc::poll(&mut pollfd, 1, 0) };
+        if result < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if result == 0 {
+            return Ok(true);
+        }
+        if pollfd.revents & libc::POLLIN != 0 {
+            return Ok(false);
+        }
+        return Err(std::io::Error::other(format!(
+            "pidfd poll returned unknown flags {:#x}",
+            pollfd.revents
+        )));
     }
 }
 
@@ -211,34 +344,63 @@ fn unix_slot_process_matches_command_line(
     state_dir: &Path,
     slot_id: &SlotId,
     generation: Generation,
-) -> bool {
+) -> std::io::Result<bool> {
     let Some((scope, index)) = slot_id.0.rsplit_once('-') else {
-        return false;
+        return Ok(false);
     };
     let Some(state_dir) = state_dir.to_str() else {
-        return false;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "slot state directory is not UTF-8",
+        ));
     };
-    let Ok(output) = std::process::Command::new("ps")
-        .args(["-ww", "-p", &pid.to_string(), "-o", "command="])
-        .output()
-    else {
-        return false;
+    let read_snapshot = || -> std::io::Result<Option<String>> {
+        let output = std::process::Command::new("ps")
+            .args([
+                "-ww",
+                "-p",
+                &pid.to_string(),
+                "-o",
+                "lstart=",
+                "-o",
+                "command=",
+            ])
+            .output()?;
+        if !output.status.success() {
+            if pid_is_alive(pid) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    format!("cannot inspect slot process {pid}"),
+                ));
+            }
+            return Ok(None);
+        }
+        let command_line = String::from_utf8(output.stdout)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        if command_line.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("empty process snapshot for slot pid {pid}"),
+            ));
+        }
+        Ok(Some(command_line))
     };
-    if !output.status.success() {
-        return false;
-    }
-    let Ok(command_line) = std::str::from_utf8(&output.stdout) else {
-        return false;
+    let Some(before) = read_snapshot()? else {
+        return Ok(false);
     };
-    if !command_line_names_slot_service(command_line) || !command_line.contains(" slot ") {
-        return false;
+    if !command_line_names_slot_service(&before) || !before.contains(" slot ") {
+        return Ok(false);
     }
     // macOS `ps` preserves spaces inside `--state-dir` values; token splitting
     // would reject the default Application Support layout.
-    command_line.contains(state_dir)
-        && command_line.contains(&format!("--scope {scope}"))
-        && command_line.contains(&format!("--slot-index {index}"))
-        && command_line.contains(&format!("--generation {}", generation.0))
+    let matches = before.contains(state_dir)
+        && before.contains(&format!("--scope {scope}"))
+        && before.contains(&format!("--slot-index {index}"))
+        && before.contains(&format!("--generation {}", generation.0));
+    if !matches {
+        return Ok(false);
+    }
+    Ok(read_snapshot()?.as_deref() == Some(before.as_str()))
 }
 
 /// Slot children may be `velnor-runner` or the `velnorctl`/`velnor-host`
@@ -270,37 +432,126 @@ pub fn slot_heartbeat_is_fresh(
     generation: Generation,
     max_age: Duration,
 ) -> bool {
-    let Some((scope, index)) = slot_id.0.rsplit_once('-') else {
-        return false;
-    };
+    slot_heartbeat_is_fresh_with_child(state_dir, slot_id, generation, max_age, None)
+}
+
+/// Verify a fresh generation-bound heartbeat using the controller's owned
+/// child handle when available. The fast path requires the handle's recorded
+/// generation and PID to match the heartbeat; after controller restart, the
+/// command-line proof in `slot_process_is_alive` remains required.
+#[must_use]
+pub fn slot_heartbeat_is_fresh_with_child(
+    state_dir: &Path,
+    slot_id: &SlotId,
+    generation: Generation,
+    max_age: Duration,
+    owned_child: Option<(&mut Child, Generation)>,
+) -> bool {
+    read_verified_slot_heartbeat_with_child(state_dir, slot_id, generation, max_age, owned_child)
+        .is_some()
+}
+
+/// Read and verify one heartbeat. Opening the file once binds its metadata and
+/// bytes to the same atomically-published heartbeat, avoiding a second stat or
+/// read after the controller has parsed it.
+#[must_use]
+pub fn read_verified_slot_heartbeat_with_child(
+    state_dir: &Path,
+    slot_id: &SlotId,
+    generation: Generation,
+    max_age: Duration,
+    owned_child: Option<(&mut Child, Generation)>,
+) -> Option<VerifiedSlotHeartbeat> {
+    let (scope, index) = slot_id.0.rsplit_once('-')?;
     if scope.is_empty() {
-        return false;
+        return None;
     }
     let Ok(index) = index.parse::<usize>() else {
-        return false;
+        return None;
     };
     let path = super::slot::heartbeat_path(state_dir, index);
-    let Ok(metadata) = std::fs::metadata(&path) else {
-        return false;
-    };
-    let Ok(age) = metadata
-        .modified()
-        .and_then(|time| time.elapsed().map_err(std::io::Error::other))
-    else {
-        return false;
-    };
-    if max_age.is_zero() || age > max_age {
-        return false;
+    let mut file = std::fs::File::open(path).ok()?;
+    let modified = file.metadata().ok()?.modified().ok()?;
+    let checked_at = Instant::now();
+    let wall_checked_at = SystemTime::now();
+    let age = wall_checked_at.duration_since(modified).ok()?;
+    if max_age.is_zero() || age >= max_age {
+        return None;
     }
-    let Ok(bytes) = std::fs::read(path) else {
-        return false;
+    let remaining_freshness = max_age.checked_sub(age)?;
+    let expires_at = checked_at.checked_add(remaining_freshness)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    let heartbeat = serde_json::from_slice::<super::slot::SlotHeartbeat>(&bytes).ok()?;
+    if heartbeat.generation != generation.0 || heartbeat.sequence == 0 {
+        return None;
+    }
+    let process_alive = match owned_child {
+        Some((child, child_generation))
+            if child_generation == generation && child.id() == heartbeat.pid =>
+        {
+            matches!(child.try_wait(), Ok(None))
+        }
+        Some(_) => false,
+        None => slot_process_liveness(heartbeat.pid, state_dir, slot_id, generation).ok()?,
     };
-    let Ok(heartbeat) = serde_json::from_slice::<super::slot::SlotHeartbeat>(&bytes) else {
-        return false;
+    let wall_elapsed = SystemTime::now().duration_since(wall_checked_at).ok()?;
+    if !process_alive || Instant::now() >= expires_at || wall_elapsed >= remaining_freshness {
+        return None;
+    }
+    Some(VerifiedSlotHeartbeat {
+        generation,
+        pid: heartbeat.pid,
+        sequence: heartbeat.sequence,
+        expires_at,
+        wall_checked_at,
+        remaining_freshness,
+    })
+}
+
+/// Reuse evidence read earlier in this reconcile cycle. `None` means the
+/// evidence expired, belongs to another generation, no longer matches the
+/// owned child, or its process proof failed; the caller must reread the
+/// heartbeat so a same-generation replacement can be observed. An owned
+/// child is rechecked with `try_wait`; without one, command-line identity is
+/// revalidated for controller-restart recovery.
+#[must_use]
+pub fn cached_slot_heartbeat_is_fresh_with_child(
+    state_dir: &Path,
+    slot_id: &SlotId,
+    evidence: &VerifiedSlotHeartbeat,
+    generation: Generation,
+    now: Instant,
+    owned_child: Option<(&mut Child, Generation)>,
+) -> Option<()> {
+    let wall_elapsed = SystemTime::now()
+        .duration_since(evidence.wall_checked_at)
+        .ok()?;
+    if evidence.generation != generation
+        || now >= evidence.expires_at
+        || wall_elapsed >= evidence.remaining_freshness
+    {
+        return None;
+    }
+    let process_alive = match owned_child {
+        Some((child, child_generation)) => {
+            if child_generation != generation || child.id() != evidence.pid {
+                return None;
+            }
+            matches!(child.try_wait(), Ok(None))
+        }
+        None => slot_process_liveness(evidence.pid, state_dir, slot_id, generation).ok()?,
     };
-    heartbeat.generation == generation.0
-        && heartbeat.sequence > 0
-        && slot_process_is_alive(heartbeat.pid, state_dir, slot_id, generation)
+    let wall_elapsed = SystemTime::now()
+        .duration_since(evidence.wall_checked_at)
+        .ok()?;
+    if !process_alive
+        || Instant::now() >= evidence.expires_at
+        || wall_elapsed >= evidence.remaining_freshness
+    {
+        return None;
+    }
+    Some(())
 }
 
 /// Persist evidence and desired policy. Never a boolean Ready stamp.
@@ -1330,6 +1581,7 @@ fn normalized(fields: &RoutingFields) -> RoutingFields {
 )]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     fn tmp(label: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -1344,6 +1596,54 @@ mod tests {
         path
     }
 
+    #[test]
+    fn pid_probe_retains_ambiguous_owner_evidence() {
+        assert!(pid_is_alive(std::process::id()));
+        assert!(pid_is_alive(0), "invalid pid cannot prove owner death");
+        assert!(
+            pid_is_alive(u32::MAX),
+            "unrepresentable pid cannot prove owner death"
+        );
+        assert!(
+            pid_is_alive_with(|| {
+                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            }),
+            "permission denial is unknown, not proof of death"
+        );
+        assert!(!pid_is_alive_with(|| {
+            Err(std::io::Error::from_raw_os_error(libc::ESRCH))
+        }));
+
+        let mut exited = Command::new("true").spawn().unwrap();
+        let pid = exited.id();
+        exited.wait().unwrap();
+        assert!(!pid_is_alive(pid), "ESRCH proves the owner is gone");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn live_reused_pid_does_not_prove_a_slot_without_pinned_argv_identity() {
+        let dir = tmp("slot-pid-reuse");
+        let slot_id = SlotId("different-scope-7".to_owned());
+        let pid = std::process::id();
+
+        assert!(pid_is_alive(pid), "the test process is live");
+        assert_eq!(
+            slot_process_liveness(pid, &dir, &slot_id, Generation(11)).unwrap(),
+            false,
+            "a live but unrelated process cannot prove persisted slot ownership"
+        );
+        assert!(
+            slot_process_liveness(u32::MAX, &dir, &slot_id, Generation(11)).is_err(),
+            "unrepresentable liveness evidence stays unknown"
+        );
+        assert!(
+            slot_process_is_alive(u32::MAX, &dir, &slot_id, Generation(11)),
+            "the conservative query does not turn unknown into dead"
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     fn matching_fields() -> RoutingFields {
         RoutingFields {
             group: "velnor".into(),
@@ -1351,6 +1651,293 @@ mod tests {
             labels: vec!["velnor".into()],
             trust_scope: "trusted".into(),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_child_proves_fresh_heartbeat_without_command_line_fallback() {
+        struct KillOnDrop(Child);
+
+        impl Drop for KillOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        let dir = tmp("owned-slot-heartbeat");
+        let slot_id = SlotId("owned-slot-1".to_owned());
+        let generation = Generation(7);
+        let mut child = KillOnDrop(
+            Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn live non-slot process"),
+        );
+        let pid = child.0.id();
+        let write_heartbeat = |generation, pid| {
+            std::fs::write(
+                super::super::slot::heartbeat_path(&dir, 1),
+                serde_json::to_vec(&super::super::slot::SlotHeartbeat {
+                    generation,
+                    pid,
+                    sequence: 1,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        };
+
+        write_heartbeat(generation.0, pid);
+        assert!(slot_heartbeat_is_fresh_with_child(
+            &dir,
+            &slot_id,
+            generation,
+            Duration::from_secs(10),
+            Some((&mut child.0, generation)),
+        ));
+        assert!(
+            !slot_heartbeat_is_fresh(&dir, &slot_id, generation, Duration::from_secs(10),),
+            "without an owned child handle, command-line identity must still be required"
+        );
+
+        write_heartbeat(generation.0, pid ^ 1);
+        assert!(!slot_heartbeat_is_fresh_with_child(
+            &dir,
+            &slot_id,
+            generation,
+            Duration::from_secs(10),
+            Some((&mut child.0, generation)),
+        ));
+
+        write_heartbeat(generation.0, pid);
+        assert!(!slot_heartbeat_is_fresh_with_child(
+            &dir,
+            &slot_id,
+            generation,
+            Duration::from_secs(10),
+            Some((&mut child.0, Generation(generation.0 + 1))),
+        ));
+
+        write_heartbeat(generation.0 + 1, pid);
+        assert!(!slot_heartbeat_is_fresh_with_child(
+            &dir,
+            &slot_id,
+            generation,
+            Duration::from_secs(10),
+            Some((&mut child.0, generation)),
+        ));
+
+        write_heartbeat(generation.0, pid);
+        child.0.kill().expect("stop child process");
+        child.0.wait().expect("reap child process");
+        assert!(!slot_heartbeat_is_fresh_with_child(
+            &dir,
+            &slot_id,
+            generation,
+            Duration::from_secs(10),
+            Some((&mut child.0, generation)),
+        ));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cached_heartbeat_reuse_checks_expiry_generation_and_owned_pid() {
+        struct KillOnDrop(Child);
+
+        impl Drop for KillOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        let dir = tmp("cached-slot-heartbeat");
+        let slot_id = SlotId("cached-slot-1".to_owned());
+        let generation = Generation(11);
+        let mut child = KillOnDrop(
+            Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn live non-slot process"),
+        );
+        let pid = child.0.id();
+        std::fs::write(
+            super::super::slot::heartbeat_path(&dir, 1),
+            serde_json::to_vec(&super::super::slot::SlotHeartbeat {
+                generation: generation.0,
+                pid,
+                sequence: 7,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let evidence = read_verified_slot_heartbeat_with_child(
+            &dir,
+            &slot_id,
+            generation,
+            Duration::from_secs(10),
+            Some((&mut child.0, generation)),
+        )
+        .expect("verify heartbeat once");
+        assert_eq!(evidence.generation(), generation);
+        assert_eq!(evidence.pid(), pid);
+        assert_eq!(evidence.sequence(), 7);
+
+        let now = Instant::now();
+        assert_eq!(
+            cached_slot_heartbeat_is_fresh_with_child(
+                &dir,
+                &slot_id,
+                &evidence,
+                generation,
+                now,
+                Some((&mut child.0, generation)),
+            ),
+            Some(())
+        );
+        assert_eq!(
+            cached_slot_heartbeat_is_fresh_with_child(
+                &dir,
+                &slot_id,
+                &evidence,
+                Generation(generation.0 + 1),
+                now,
+                Some((&mut child.0, generation)),
+            ),
+            None,
+            "generation mismatch must force a fresh heartbeat read"
+        );
+        let wrong_pid = VerifiedSlotHeartbeat {
+            pid: pid ^ 1,
+            ..evidence
+        };
+        assert_eq!(
+            cached_slot_heartbeat_is_fresh_with_child(
+                &dir,
+                &slot_id,
+                &wrong_pid,
+                generation,
+                now,
+                Some((&mut child.0, generation)),
+            ),
+            None,
+            "cached PID mismatch must trigger a fresh heartbeat read"
+        );
+        let mut replacement = KillOnDrop(
+            Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn replacement slot process"),
+        );
+        let replacement_pid = replacement.0.id();
+        std::fs::write(
+            super::super::slot::heartbeat_path(&dir, 1),
+            serde_json::to_vec(&super::super::slot::SlotHeartbeat {
+                generation: generation.0,
+                pid: replacement_pid,
+                sequence: 8,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            cached_slot_heartbeat_is_fresh_with_child(
+                &dir,
+                &slot_id,
+                &evidence,
+                generation,
+                now,
+                Some((&mut replacement.0, generation)),
+            ),
+            None,
+            "replacement child must invalidate evidence for the prior PID"
+        );
+        let replacement_evidence = read_verified_slot_heartbeat_with_child(
+            &dir,
+            &slot_id,
+            generation,
+            Duration::from_secs(10),
+            Some((&mut replacement.0, generation)),
+        )
+        .expect("reread accepts the replacement's current heartbeat");
+        assert_eq!(replacement_evidence.pid(), replacement_pid);
+        assert_eq!(replacement_evidence.sequence(), 8);
+        replacement.0.kill().expect("stop replacement process");
+        replacement.0.wait().expect("reap replacement process");
+        let expired = VerifiedSlotHeartbeat {
+            expires_at: now - Duration::from_nanos(1),
+            ..evidence
+        };
+        assert_eq!(
+            cached_slot_heartbeat_is_fresh_with_child(
+                &dir,
+                &slot_id,
+                &expired,
+                generation,
+                now,
+                Some((&mut child.0, generation)),
+            ),
+            None,
+            "expired evidence must trigger a fresh heartbeat read"
+        );
+        let suspended_past_wall_deadline = VerifiedSlotHeartbeat {
+            expires_at: now + Duration::from_secs(60),
+            wall_checked_at: SystemTime::now() - Duration::from_secs(2),
+            remaining_freshness: Duration::from_secs(1),
+            ..evidence
+        };
+        assert_eq!(
+            cached_slot_heartbeat_is_fresh_with_child(
+                &dir,
+                &slot_id,
+                &suspended_past_wall_deadline,
+                generation,
+                now,
+                Some((&mut child.0, generation)),
+            ),
+            None,
+            "wall-clock freshness must expire evidence across system suspend"
+        );
+
+        std::fs::write(
+            super::super::slot::heartbeat_path(&dir, 1),
+            serde_json::to_vec(&super::super::slot::SlotHeartbeat {
+                generation: generation.0,
+                pid,
+                sequence: 9,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        child.0.kill().expect("stop child process");
+        child.0.wait().expect("reap child process");
+        assert_eq!(
+            cached_slot_heartbeat_is_fresh_with_child(
+                &dir,
+                &slot_id,
+                &evidence,
+                generation,
+                Instant::now(),
+                Some((&mut child.0, generation)),
+            ),
+            None,
+            "exited owned child invalidates the cache and triggers a fresh read"
+        );
+        assert!(
+            read_verified_slot_heartbeat_with_child(
+                &dir,
+                &slot_id,
+                generation,
+                Duration::from_secs(10),
+                Some((&mut child.0, generation)),
+            )
+            .is_none(),
+            "the fresh read rejects the exited child's heartbeat"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

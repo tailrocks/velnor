@@ -13,12 +13,18 @@
 //! * [`unknown_event`]: future server message types are counted and logged,
 //!   never fatal.
 
+use std::fs::{File, OpenOptions};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use rusqlite::Connection;
 
-use crate::scaleset::capacity::{AcquireOutcome, CapacityLedger, LedgerLane, LedgerPermitState};
+use crate::scaleset::capacity::{
+    AcquireOutcome, CapacityLedger, LedgerDemandObservation, LedgerLane, LedgerPermitState,
+};
 use crate::scaleset::demand::{DemandState, DemandStore};
 use crate::scaleset::intents::{permit_holder, reconcile_returned_ids, AcquireBatchStore};
 use crate::scaleset::metrics::Metrics;
@@ -82,15 +88,326 @@ pub struct StartupReport {
 pub(crate) fn attest_demand_holders(
     state_db: &Path,
 ) -> Result<Vec<(String, velnor_control::permit_ledger::PermitState)>> {
+    let (_lock, attested) = lock_and_attest_demand_holders(state_db)?;
+    Ok(attested)
+}
+
+/// SQLite writer reservation held through the host ledger commit. Without
+/// it, cleanup can release a permit after attestation and before stale
+/// snapshot reconciliation adopts the same holder again.
+pub(crate) struct DemandSourceReconcileLock {
+    _connection: Connection,
+    _lifecycle_lock: DemandSourceLifecycleLock,
+}
+
+/// Cross-database lifecycle fence shared by host reconciliation and worker
+/// terminal cleanup. SQLite cannot atomically commit the worker row and host
+/// permit, so both operations hold this stable lock through their commit
+/// sequence and order the durable state to make retries safe.
+pub(crate) struct DemandSourceLifecycleLock {
+    _file: File,
+}
+
+/// Exclusive fence for Docker operations on one durable worker identity.
+///
+/// The descriptor is intentionally inheritable: a synchronous Docker CLI
+/// child keeps the flock alive if its lane process exits while an Engine
+/// request is outstanding. An ambiguous create also remains marked pending
+/// in the worker registry, so losing the last descriptor can never authorize
+/// RunnerAbsent cleanup by itself.
+pub(crate) struct WorkerDockerLifecycleLock {
+    _file: File,
+    ownership_id: String,
+    stripe: u64,
+}
+
+impl WorkerDockerLifecycleLock {
+    /// Check that this held descriptor was acquired for this exact worker.
+    pub(crate) fn authorizes(&self, ownership_id: &str) -> bool {
+        self.ownership_id == ownership_id
+            && self.stripe == worker_docker_lifecycle_stripe(ownership_id)
+    }
+}
+
+fn worker_docker_lifecycle_stripe(ownership_id: &str) -> u64 {
+    const STRIPES: u64 = 128;
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    ownership_id
+        .as_bytes()
+        .iter()
+        .fold(FNV_OFFSET, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
+        })
+        % STRIPES
+}
+
+/// Lock one stable stripe derived from the host ledger and worker identity.
+/// The finite stripe set avoids an unbounded pile of lock files while keeping
+/// every daemon using the same canonical host ledger on the same lock.
+pub(crate) fn lock_worker_docker_lifecycle(
+    ledger_path: &Path,
+    ownership_id: &str,
+) -> Result<WorkerDockerLifecycleLock> {
+    let ledger_path = ledger_path
+        .canonicalize()
+        .with_context(|| format!("canonicalize host permit ledger {}", ledger_path.display()))?;
+    let parent = ledger_path
+        .parent()
+        .context("host permit ledger has no parent directory")?;
+    let stripe = worker_docker_lifecycle_stripe(ownership_id);
+    let lock_path = parent.join(format!(".velnor-worker-lifecycle-{stripe:03}.lock"));
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(&lock_path)
+        .with_context(|| format!("open worker Docker lifecycle lock {}", lock_path.display()))?;
+    let metadata = file.metadata().with_context(|| {
+        format!(
+            "inspect worker Docker lifecycle lock {}",
+            lock_path.display()
+        )
+    })?;
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0
+    {
+        anyhow::bail!(
+            "worker Docker lifecycle lock {} is not a private regular file owned by this daemon",
+            lock_path.display()
+        );
+    }
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
+        .with_context(|| format!("lock worker Docker lifecycle for {ownership_id:?}"))?;
+
+    // Keep the lock attached to synchronous Docker children. If a lane dies
+    // after sending a create request, terminal cleanup waits while the CLI
+    // is still alive; if the CLI itself dies, the durable create-pending bit
+    // remains the fail-closed proof and prevents a no-runner release.
+    let descriptor = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("read worker lifecycle lock descriptor flags");
+    }
+    if unsafe {
+        libc::fcntl(
+            file.as_raw_fd(),
+            libc::F_SETFD,
+            descriptor & !libc::FD_CLOEXEC,
+        )
+    } < 0
+    {
+        return Err(std::io::Error::last_os_error())
+            .context("make worker lifecycle lock inheritable by Docker CLI");
+    }
+    Ok(WorkerDockerLifecycleLock {
+        _file: file,
+        ownership_id: ownership_id.to_owned(),
+        stripe,
+    })
+}
+
+pub(crate) fn lock_demand_source_lifecycle(state_db: &Path) -> Result<DemandSourceLifecycleLock> {
+    let mut lock_name = state_db.as_os_str().to_os_string();
+    lock_name.push(".permit-source.lock");
+    let lock_path = std::path::PathBuf::from(lock_name);
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(&lock_path)
+        .with_context(|| format!("open demand source lifecycle lock {}", lock_path.display()))?;
+    if !file
+        .metadata()
+        .with_context(|| {
+            format!(
+                "inspect demand source lifecycle lock {}",
+                lock_path.display()
+            )
+        })?
+        .is_file()
+    {
+        anyhow::bail!(
+            "demand source lifecycle lock {} is not a regular file",
+            lock_path.display()
+        );
+    }
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
+        .with_context(|| format!("lock demand source lifecycle {}", state_db.display()))?;
+    Ok(DemandSourceLifecycleLock { _file: file })
+}
+
+pub(crate) fn lock_and_attest_demand_holders(
+    state_db: &Path,
+) -> Result<(
+    DemandSourceReconcileLock,
+    Vec<(String, velnor_control::permit_ledger::PermitState)>,
+)> {
+    let lifecycle_lock = lock_demand_source_lifecycle(state_db)?;
+    // Apply one-time schema migrations before holding the writer reservation.
     let demand = DemandStore::open(state_db)?;
-    let mut attested = Vec::new();
-    for (scale_set_id, request_id, state) in demand.list_in_states_all(&PERMIT_STATES)? {
-        attested.push((
-            permit_holder(scale_set_id, request_id),
-            to_control_state(permit_state_for_demand(state)),
+    drop(demand);
+    let registry = crate::scaleset::WorkerRegistry::open(state_db)?;
+    drop(registry);
+    let connection = Connection::open(state_db)?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    connection.execute_batch("BEGIN IMMEDIATE")?;
+
+    let mut scale_sets = std::collections::HashMap::new();
+    {
+        let mut statement =
+            connection.prepare("SELECT request_id, scale_set_id FROM scaleset_demand")?;
+        for row in
+            statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i32>(1)?)))?
+        {
+            let (request_id, scale_set_id) = row?;
+            scale_sets.insert(request_id, scale_set_id);
+        }
+    }
+
+    let mut attested = std::collections::BTreeMap::new();
+    {
+        let mut statement = connection.prepare(
+            "SELECT request_id, state FROM scaleset_demand
+             WHERE state IN ('granted', 'acquire_intent', 'acquired', 'uncertain', 'provision_intent')",
+        )?;
+        for row in statement.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })? {
+            let (request_id, raw_state) = row?;
+            let scale_set_id = scale_sets.get(&request_id).copied().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "permit-state demand request {request_id} is absent in {}",
+                    state_db.display()
+                )
+            })?;
+            let state = match raw_state.as_str() {
+                "granted" => velnor_control::permit_ledger::PermitState::Reserved,
+                "acquire_intent" | "acquired" => {
+                    velnor_control::permit_ledger::PermitState::Acquiring
+                }
+                "uncertain" => velnor_control::permit_ledger::PermitState::Uncertain,
+                "provision_intent" => velnor_control::permit_ledger::PermitState::Provisioning,
+                _ => anyhow::bail!("unknown permit-state demand {raw_state:?}"),
+            };
+            attested.insert(permit_holder(scale_set_id, request_id), state);
+        }
+    }
+
+    // Worker rows remain occupancy evidence after demand becomes terminal,
+    // through diagnostics export, owned cleanup, and permit release.
+    {
+        let mut statement = connection.prepare(
+            "SELECT ownership_id, request_id, worker_state FROM scaleset_workers
+             WHERE worker_state != 'permit_released' ORDER BY created_at, ownership_id",
+        )?;
+        for row in statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })? {
+            let (ownership_id, request_id, worker_state) = row?;
+            let request_id = request_id.with_context(|| {
+                format!(
+                    "live scale-set worker {ownership_id} has no request id in {}",
+                    state_db.display()
+                )
+            })?;
+            let scale_set_id = scale_sets.get(&request_id).copied().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "live scale-set worker {ownership_id} references missing demand request {request_id} in {}",
+                    state_db.display()
+                )
+            })?;
+            let state = match worker_state.as_str() {
+                "provision_intent" => velnor_control::permit_ledger::PermitState::Provisioning,
+                "dind_ready" | "runner_connected" | "running" => {
+                    velnor_control::permit_ledger::PermitState::Running
+                }
+                "terminal" | "diagnostic_export" | "owned_cleanup" => {
+                    velnor_control::permit_ledger::PermitState::Cleaning
+                }
+                "observed" | "eligible" | "reserved" | "acquire_intent" | "acquired"
+                | "uncertain" => velnor_control::permit_ledger::PermitState::Uncertain,
+                "permit_released" => continue,
+                _ => anyhow::bail!("unknown live Scale Set worker state {worker_state:?}"),
+            };
+            attested.insert(permit_holder(scale_set_id, request_id), state);
+        }
+    }
+
+    Ok((
+        DemandSourceReconcileLock {
+            _connection: connection,
+            _lifecycle_lock: lifecycle_lock,
+        },
+        attested.into_iter().collect(),
+    ))
+}
+
+/// Restore every persisted eligible offer to the host-wide queue. Called
+/// from lane startup before native slots are supervised; one ledger batch
+/// prevents a peer acquisition from seeing only part of the restored queue.
+pub(crate) fn backfill_eligible_demands<L: CapacityLedger>(
+    demand: &DemandStore,
+    ledger: &mut L,
+) -> Result<()> {
+    let mut observations = Vec::new();
+    for row in demand.list_eligible_all()? {
+        let first_seen = velnor_model::Timestamp::parse(&row.first_seen_at).with_context(|| {
+            format!(
+                "parse durable Scale Set first-seen time for request {}",
+                row.request_id
+            )
+        })?;
+        let instant = first_seen.as_offset_datetime();
+        let first_seen_unix = u64::try_from(instant.unix_timestamp()).with_context(|| {
+            format!(
+                "Scale Set first-seen time predates Unix epoch for request {}",
+                row.request_id
+            )
+        })?;
+        let holder = permit_holder(row.scale_set_id, row.request_id);
+        let scope = format!("scaleset/{}", row.scale_set_id);
+        observations.push((
+            row.sequence,
+            LedgerDemandObservation {
+                holder,
+                lane: LedgerLane::ScaleSet,
+                scope,
+                first_seen_unix,
+                first_seen_subsec_nanos: instant.nanosecond(),
+            },
         ));
     }
-    Ok(attested)
+    observations.sort_by_key(|(sequence, demand)| {
+        (
+            demand.first_seen_unix,
+            demand.first_seen_subsec_nanos,
+            *sequence,
+        )
+    });
+    if observations.is_empty() {
+        return Ok(());
+    }
+    let observations = observations
+        .into_iter()
+        .map(|(_, demand)| demand)
+        .collect::<Vec<_>>();
+    ledger
+        .observe_demands(&observations, velnor_control::permit_ledger::unix_now())
+        .map_err(|error| anyhow::anyhow!("backfill persisted Scale Set demand batch: {error}"))?;
+    Ok(())
 }
 
 /// Reconcile-before-advertise: run once at adapter start (and after every
@@ -117,12 +434,21 @@ pub fn startup<L: CapacityLedger>(
     )? {
         if !batches.contains_request(scale_set_id, request_id)? {
             let holder = permit_holder(scale_set_id, request_id);
+            let lease_generation = exact_demand_lease_generation(ledger, demand, request_id)?;
             if state == DemandState::CanceledPending {
                 demand.set_state(request_id, DemandState::CanceledDone, None, generation)?;
-                ledger.release_cancelled(&holder)?;
+                if !ledger.release_cancelled_if_generation(&holder, lease_generation)? {
+                    anyhow::bail!(
+                        "could not release exact canceled Scale Set lease {lease_generation} for request {request_id}"
+                    );
+                }
             } else {
                 demand.set_state(request_id, DemandState::Eligible, None, generation)?;
-                ledger.release_to_eligible(&holder)?;
+                if !ledger.release_to_eligible_if_generation(&holder, lease_generation)? {
+                    anyhow::bail!(
+                        "could not requeue exact Scale Set lease {lease_generation} for request {request_id}"
+                    );
+                }
             }
             unbatched_acquire_intents_recovered += 1;
         }
@@ -175,8 +501,15 @@ pub fn startup<L: CapacityLedger>(
         .map(|(holder, lane, state)| (holder.as_str(), *lane, *state))
         .collect();
     let report = ledger
-        .reconcile(&alive_refs)
-        .map_err(|error| anyhow::anyhow!("reconcile ledger: {error}"))?;
+        .reconcile_host_sources(generation, demand.path(), &alive_refs)
+        .map_err(|error| anyhow::anyhow!("reconcile full host roster: {error}"))?;
+
+    // Pre-lease-schema rows may lack the immutable acquisition pointer.
+    // Backfill it only after full roster reconciliation has proved a held
+    // permit for each live local request. A mismatch stays fail-closed.
+    for (request_id, _) in demand.list_in_states(scale_set_id, &PERMIT_STATES)? {
+        let _ = exact_demand_lease_generation(ledger, demand, request_id)?;
+    }
 
     metrics.inc_reconcile_runs();
     Ok(StartupReport {
@@ -277,10 +610,22 @@ async fn resolve_from_observations<L: CapacityLedger>(
         let holder = permit_holder(batch.scale_set_id, *request_id);
         match row.state {
             DemandState::Acquired => {
-                transition_or_adopt(ledger, &holder, LedgerPermitState::Acquiring, generation)?;
+                transition_demand_lease(
+                    ledger,
+                    demand,
+                    *request_id,
+                    &holder,
+                    LedgerPermitState::Acquiring,
+                )?;
             }
             DemandState::CanceledAcquired => {
-                transition_or_adopt(ledger, &holder, LedgerPermitState::Acquiring, generation)?;
+                transition_demand_lease(
+                    ledger,
+                    demand,
+                    *request_id,
+                    &holder,
+                    LedgerPermitState::Acquiring,
+                )?;
             }
             // The terminal handler owns worker cleanup and permit release.
             // A completion message alone is not cleanup confirmation.
@@ -292,51 +637,51 @@ async fn resolve_from_observations<L: CapacityLedger>(
     Ok(true)
 }
 
-pub(crate) fn transition_or_adopt<L: CapacityLedger>(
+fn transition_demand_lease<L: CapacityLedger>(
     ledger: &mut L,
+    demand: &mut DemandStore,
+    request_id: i64,
     holder: &str,
     state: LedgerPermitState,
-    generation: u64,
 ) -> Result<()> {
-    match ledger.transition(holder, state, generation) {
-        Ok(()) => Ok(()),
-        Err(error) if L::is_stale_generation(&error) => {
-            let fresh = ledger
-                .generation()
-                .map_err(|error| anyhow::anyhow!("re-read ledger generation: {error}"))?;
-            match ledger.transition(holder, state, fresh) {
-                Ok(()) => Ok(()),
-                Err(_) => adopt_holder(ledger, holder, state, fresh),
-            }
-        }
-        Err(_) => adopt_holder(ledger, holder, state, generation),
+    let lease_generation = exact_demand_lease_generation(ledger, demand, request_id)?;
+    if ledger.transition_if_lease_generation(holder, state, lease_generation)? {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "Scale Set request {request_id} no longer owns exact permit lease {lease_generation}"
+        )
     }
 }
 
-/// Adopt a lost holder row back as counted occupancy rather than run
-/// rowless. A full or unconfigured ledger fails the step (the message is
-/// redelivered and the adoption retries); only a stale generation retries
-/// in place, once.
-fn adopt_holder<L: CapacityLedger>(
-    ledger: &mut L,
-    holder: &str,
-    state: LedgerPermitState,
-    generation: u64,
-) -> Result<()> {
-    match ledger.acquire(holder, LedgerLane::ScaleSet, state, generation) {
-        Ok(AcquireOutcome::Acquired | AcquireOutcome::AlreadyHeld) => Ok(()),
-        Ok(AcquireOutcome::StaleGeneration) => {
-            let fresh = ledger
-                .generation()
-                .map_err(|error| anyhow::anyhow!("re-read ledger generation: {error}"))?;
-            match ledger.acquire(holder, LedgerLane::ScaleSet, state, fresh) {
-                Ok(AcquireOutcome::Acquired | AcquireOutcome::AlreadyHeld) => Ok(()),
-                Ok(outcome) => anyhow::bail!("adopt lost holder {holder}: ledger says {outcome:?}"),
-                Err(error) => anyhow::bail!("adopt lost holder {holder}: {error}"),
-            }
+/// Resolve one immutable permit lease. A missing local pointer is repaired
+/// only from a currently held ledger row; a pointer with no held row remains
+/// useful only as an idempotent release receipt.
+fn exact_demand_lease_generation<L: CapacityLedger>(
+    ledger: &L,
+    demand: &mut DemandStore,
+    request_id: i64,
+) -> Result<u64> {
+    let row = demand
+        .get(request_id)?
+        .with_context(|| format!("missing Scale Set demand {request_id}"))?;
+    let holder = permit_holder(row.scale_set_id, request_id);
+    let current = ledger
+        .permit_lease_generation(&holder)
+        .map_err(|error| anyhow::anyhow!("read exact Scale Set lease for {holder}: {error}"))?;
+    match (row.permit_lease_generation, current) {
+        (Some(saved), Some(current)) if saved == current => Ok(saved),
+        (Some(saved), Some(current)) => anyhow::bail!(
+            "Scale Set request {request_id} records lease {saved}, ledger holds replacement lease {current}"
+        ),
+        (Some(saved), None) => Ok(saved),
+        (None, Some(current)) => {
+            demand.record_permit_lease_generation(request_id, current)?;
+            Ok(current)
         }
-        Ok(outcome) => anyhow::bail!("adopt lost holder {holder}: ledger says {outcome:?}"),
-        Err(error) => anyhow::bail!("adopt lost holder {holder}: {error}"),
+        (None, None) => anyhow::bail!(
+            "Scale Set request {request_id} has no recorded or held permit lease"
+        ),
     }
 }
 
@@ -393,11 +738,12 @@ async fn reacquire_batch<Q: QueueSession, L: CapacityLedger>(
             DemandState::Acquired
         };
         demand.set_state(*request_id, state, None, generation)?;
-        transition_or_adopt(
+        transition_demand_lease(
             ledger,
+            demand,
+            *request_id,
             &permit_holder(batch.scale_set_id, *request_id),
             LedgerPermitState::Acquiring,
-            generation,
         )?;
     }
     for request_id in &missing {
@@ -407,13 +753,19 @@ async fn reacquire_batch<Q: QueueSession, L: CapacityLedger>(
             // proves this request was not acquired, close this old attempt;
             // upstream sends a new JobAvailable for the requeued job.
             demand.set_state(*request_id, DemandState::CanceledDone, None, generation)?;
-            ledger
-                .release_cancelled(&holder)
-                .map_err(|error| anyhow::anyhow!("release canceled holder: {error}"))?;
+            let lease_generation = exact_demand_lease_generation(ledger, demand, *request_id)?;
+            if !ledger.release_cancelled_if_generation(&holder, lease_generation)? {
+                anyhow::bail!(
+                    "could not release exact canceled Scale Set lease {lease_generation} for request {request_id}"
+                );
+            }
         } else {
-            ledger
-                .release_to_eligible(&holder)
-                .map_err(|error| anyhow::anyhow!("release missing holder: {error}"))?;
+            let lease_generation = exact_demand_lease_generation(ledger, demand, *request_id)?;
+            if !ledger.release_to_eligible_if_generation(&holder, lease_generation)? {
+                anyhow::bail!(
+                    "could not requeue exact Scale Set lease {lease_generation} for request {request_id}"
+                );
+            }
             demand.set_state(*request_id, DemandState::Eligible, None, generation)?;
         }
     }
@@ -495,6 +847,18 @@ mod tests {
         dir.join("state.db")
     }
 
+    #[test]
+    fn worker_lifecycle_lock_authorizes_only_its_exact_owner() {
+        let path = temp_path("worker-lock-owner");
+        std::fs::write(&path, []).unwrap();
+        let lock = lock_worker_docker_lifecycle(&path, "7/worker-a").unwrap();
+
+        assert!(lock.authorizes("7/worker-a"));
+        assert!(!lock.authorizes("7/worker-b"));
+        drop(lock);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
     fn push_offer(id: i64) -> velnor_model::ScaleSetJobAvailable {
         velnor_model::ScaleSetJobAvailable {
             acquire_job_url: String::new(),
@@ -515,6 +879,43 @@ mod tests {
                 finish_time: String::new(),
             },
         }
+    }
+
+    #[test]
+    fn startup_attests_worker_cleanup_after_demand_is_terminal() {
+        let path = temp_path("terminal-worker-still-owns-permit");
+        let mut demand = DemandStore::open(&path).unwrap();
+        demand.submit_offer(7, &push_offer(77), 0).unwrap();
+        demand
+            .set_state(77, DemandState::Terminal, None, 0)
+            .unwrap();
+
+        let ownership = crate::scaleset::worker::OwnershipId::bind(7, "7-77").as_str();
+        let mut workers = crate::scaleset::WorkerRegistry::open(&path).unwrap();
+        workers
+            .upsert(
+                &ownership,
+                "operation-77",
+                77,
+                "7-77",
+                "network-77",
+                "/workers/s77/workspace",
+                "/workers/s77/dind-data",
+                "runner@sha256:test",
+                "dind@sha256:test",
+            )
+            .unwrap();
+        workers
+            .set_state(&ownership, velnor_model::ScaleSetWorkerState::OwnedCleanup)
+            .unwrap();
+
+        assert_eq!(
+            attest_demand_holders(&path).unwrap(),
+            vec![(
+                permit_holder(7, 77),
+                velnor_control::permit_ledger::PermitState::Cleaning,
+            )]
+        );
     }
 
     #[test]
@@ -554,17 +955,15 @@ mod tests {
             .set_state(12, DemandState::AcquireIntent, None, 0)
             .unwrap();
         let holder = permit_holder(7, 12);
-        assert_eq!(
-            ledger
-                .acquire(
-                    &holder,
-                    LedgerLane::ScaleSet,
-                    LedgerPermitState::Acquiring,
-                    0,
-                )
-                .unwrap(),
-            AcquireOutcome::Acquired
-        );
+        let (outcome, _) = ledger
+            .acquire_with_lease_generation(
+                &holder,
+                LedgerLane::ScaleSet,
+                LedgerPermitState::Acquiring,
+                0,
+            )
+            .unwrap();
+        assert_eq!(outcome, AcquireOutcome::Acquired);
 
         let report = startup(&mut ledger, &mut demand, &mut batches, 7, &metrics).unwrap();
         assert_eq!(report.unbatched_acquire_intents_recovered, 1);
@@ -604,17 +1003,15 @@ mod tests {
             .record_intended("acq-orphan", 7, &[21], &holders, 0)
             .unwrap();
         let generation = ledger.generation().unwrap();
-        assert_eq!(
-            ledger
-                .acquire(
-                    &holders[0],
-                    LedgerLane::ScaleSet,
-                    LedgerPermitState::Acquiring,
-                    generation
-                )
-                .unwrap(),
-            AcquireOutcome::Acquired
-        );
+        let (outcome, _) = ledger
+            .acquire_with_lease_generation(
+                &holders[0],
+                LedgerLane::ScaleSet,
+                LedgerPermitState::Acquiring,
+                generation,
+            )
+            .unwrap();
+        assert_eq!(outcome, AcquireOutcome::Acquired);
 
         let report = startup(&mut ledger, &mut demand, &mut batches, 7, &metrics).unwrap();
         assert_eq!(report.batches_orphaned, 1);
@@ -648,7 +1045,7 @@ mod tests {
                 .unwrap();
             let holder = permit_holder(7, id);
             ledger
-                .acquire(
+                .acquire_with_lease_generation(
                     &holder,
                     LedgerLane::ScaleSet,
                     LedgerPermitState::Acquiring,

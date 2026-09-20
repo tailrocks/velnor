@@ -74,12 +74,19 @@ impl std::error::Error for SchedulerNotCurrent {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RunnerScaleSetStatistic {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub total_available_jobs: i32,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub total_acquired_jobs: i32,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub total_assigned_jobs: i32,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub total_running_jobs: i32,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub total_registered_runners: i32,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub total_busy_runners: i32,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub total_idle_runners: i32,
 }
 
@@ -95,24 +102,71 @@ impl RunnerScaleSetStatistic {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RunnerScaleSetMessageResponse {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub message_id: i32,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub message_type: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub body: String,
     pub statistics: Option<RunnerScaleSetStatistic>,
 }
 
 /// Job lifecycle message types from `types.go`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScaleSetJobMessageType {
     /// Go's zero-value message type is the empty string.
-    #[default]
-    #[serde(rename = "")]
     Unspecified,
     JobAvailable,
     JobAssigned,
     JobStarted,
     JobCompleted,
+    /// A message type added by a newer scale-set service.
+    Unknown(String),
+}
+
+impl Default for ScaleSetJobMessageType {
+    fn default() -> Self {
+        Self::Unspecified
+    }
+}
+
+impl ScaleSetJobMessageType {
+    fn as_wire_str(&self) -> &str {
+        match self {
+            Self::Unspecified => "",
+            Self::JobAvailable => "JobAvailable",
+            Self::JobAssigned => "JobAssigned",
+            Self::JobStarted => "JobStarted",
+            Self::JobCompleted => "JobCompleted",
+            Self::Unknown(value) => value,
+        }
+    }
+}
+
+impl Serialize for ScaleSetJobMessageType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_wire_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ScaleSetJobMessageType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(match value.as_str() {
+            "" => Self::Unspecified,
+            "JobAvailable" => Self::JobAvailable,
+            "JobAssigned" => Self::JobAssigned,
+            "JobStarted" => Self::JobStarted,
+            "JobCompleted" => Self::JobCompleted,
+            _ => Self::Unknown(value),
+        })
+    }
 }
 
 /// Shared job-message fields from `types.go` (`JobMessageBase`).
@@ -123,24 +177,45 @@ pub enum ScaleSetJobMessageType {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ScaleSetJobMessage {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub message_type: ScaleSetJobMessageType,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub runner_request_id: i64,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub repository_name: String,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub owner_name: String,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub job_id: String,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub job_workflow_ref: String,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub job_display_name: String,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub workflow_run_id: i64,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub event_name: String,
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub request_labels: Vec<String>,
-    #[serde(default = "go_zero_timestamp")]
+    #[serde(
+        default = "go_zero_timestamp",
+        deserialize_with = "deserialize_null_go_zero_timestamp"
+    )]
     pub queue_time: String,
-    #[serde(default = "go_zero_timestamp")]
+    #[serde(
+        default = "go_zero_timestamp",
+        deserialize_with = "deserialize_null_go_zero_timestamp"
+    )]
     pub scale_set_assign_time: String,
-    #[serde(default = "go_zero_timestamp")]
+    #[serde(
+        default = "go_zero_timestamp",
+        deserialize_with = "deserialize_null_go_zero_timestamp"
+    )]
     pub runner_assign_time: String,
-    #[serde(default = "go_zero_timestamp")]
+    #[serde(
+        default = "go_zero_timestamp",
+        deserialize_with = "deserialize_null_go_zero_timestamp"
+    )]
     pub finish_time: String,
 }
 
@@ -152,12 +227,37 @@ fn go_zero_uuid() -> String {
     "00000000-0000-0000-0000-000000000000".to_owned()
 }
 
+fn deserialize_null_default_with<'de, D, T>(
+    deserializer: D,
+    default: impl FnOnce() -> T,
+) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_else(default))
+}
+
 fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de> + Default,
 {
-    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+    deserialize_null_default_with(deserializer, T::default)
+}
+
+fn deserialize_null_go_zero_timestamp<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_null_default_with(deserializer, go_zero_timestamp)
+}
+
+fn deserialize_null_go_zero_uuid<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_null_default_with(deserializer, go_zero_uuid)
 }
 
 impl Default for ScaleSetJobMessage {
@@ -185,6 +285,7 @@ impl Default for ScaleSetJobMessage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ScaleSetJobAvailable {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub acquire_job_url: String,
     #[serde(flatten)]
     pub base: ScaleSetJobMessage,
@@ -202,7 +303,9 @@ pub struct ScaleSetJobAssigned {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ScaleSetJobStarted {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub runner_id: i32,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub runner_name: String,
     #[serde(flatten)]
     pub base: ScaleSetJobMessage,
@@ -212,8 +315,11 @@ pub struct ScaleSetJobStarted {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ScaleSetJobCompleted {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub result: String,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub runner_id: i32,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub runner_name: String,
     #[serde(flatten)]
     pub base: ScaleSetJobMessage,
@@ -227,6 +333,7 @@ pub struct ScaleSetJobCompleted {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RunnerScaleSetMessage {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub message_id: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub statistics: Option<RunnerScaleSetStatistic>,
@@ -250,6 +357,7 @@ pub struct RunnerScaleSetMessage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AcquireJobsResponse {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub count: i32,
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub value: Vec<i64>,
@@ -259,7 +367,9 @@ pub struct AcquireJobsResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RunnerScaleSetJitRunnerSetting {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub name: String,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub work_folder: String,
 }
 
@@ -267,8 +377,11 @@ pub struct RunnerScaleSetJitRunnerSetting {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RunnerReference {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub id: i32,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub name: String,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub runner_scale_set_id: i32,
 }
 
@@ -276,6 +389,7 @@ pub struct RunnerReference {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RunnerReferenceList {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub count: i32,
     #[serde(
         default,
@@ -293,7 +407,11 @@ pub struct RunnerReferenceList {
 #[serde(rename_all = "camelCase", default)]
 pub struct RunnerScaleSetJitRunnerConfig {
     pub runner: Option<RunnerReference>,
-    #[serde(rename = "encodedJITConfig")]
+    #[serde(
+        rename = "encodedJITConfig",
+        default,
+        deserialize_with = "deserialize_null_default"
+    )]
     pub encoded_jit_config: String,
 }
 
@@ -310,8 +428,13 @@ impl std::fmt::Debug for RunnerScaleSetJitRunnerConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ScaleSetLabel {
-    #[serde(rename = "type")]
+    #[serde(
+        rename = "type",
+        default,
+        deserialize_with = "deserialize_null_default"
+    )]
     pub label_type: String,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub name: String,
 }
 
@@ -319,9 +442,13 @@ pub struct ScaleSetLabel {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RunnerGroup {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub id: i32,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub name: String,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub size: i32,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub is_default_group: bool,
 }
 
@@ -329,6 +456,7 @@ pub struct RunnerGroup {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RunnerGroupList {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub count: i32,
     #[serde(
         default,
@@ -342,6 +470,7 @@ pub struct RunnerGroupList {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RunnerScaleSetList {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub count: i32,
     #[serde(
         default,
@@ -355,7 +484,11 @@ pub struct RunnerScaleSetList {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct RunnerSetting {
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_null_default",
+        skip_serializing_if = "is_false"
+    )]
     pub disable_update: bool,
 }
 
@@ -371,13 +504,29 @@ fn is_false(value: &bool) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RunnerScaleSet {
-    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_null_default",
+        skip_serializing_if = "is_zero_i32"
+    )]
     pub id: i32,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_null_default",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub name: String,
-    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_null_default",
+        skip_serializing_if = "is_zero_i32"
+    )]
     pub runner_group_id: i32,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_null_default",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub runner_group_name: String,
     #[serde(
         default,
@@ -385,11 +534,22 @@ pub struct RunnerScaleSet {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub labels: Vec<ScaleSetLabel>,
-    #[serde(rename = "RunnerSetting")]
+    #[serde(
+        rename = "RunnerSetting",
+        default,
+        deserialize_with = "deserialize_null_default"
+    )]
     pub runner_setting: RunnerSetting,
-    #[serde(default = "go_zero_timestamp")]
+    #[serde(
+        default = "go_zero_timestamp",
+        deserialize_with = "deserialize_null_go_zero_timestamp"
+    )]
     pub created_on: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_null_default",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub runner_jit_config_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub statistics: Option<RunnerScaleSetStatistic>,
@@ -424,15 +584,31 @@ fn is_zero_i32(value: &i32) -> bool {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ScaleSetSession {
-    #[serde(default = "go_zero_uuid", skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default = "go_zero_uuid",
+        deserialize_with = "deserialize_null_go_zero_uuid",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub session_id: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_null_default",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub owner_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runner_scale_set: Option<RunnerScaleSet>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_null_default",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub message_queue_url: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_null_default",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub message_queue_access_token: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub statistics: Option<RunnerScaleSetStatistic>,
@@ -561,6 +737,20 @@ mod tests {
             serde_json::to_string(&ScaleSetJobMessageType::Unspecified).unwrap(),
             "\"\""
         );
+    }
+
+    #[test]
+    fn unknown_job_message_type_round_trips_without_loss() {
+        let raw = "JobQueuedByFutureService";
+        let parsed: ScaleSetJobAvailable =
+            serde_json::from_str(&format!(r#"{{"messageType":"{raw}"}}"#)).unwrap();
+        assert_eq!(
+            parsed.base.message_type,
+            ScaleSetJobMessageType::Unknown(raw.to_owned())
+        );
+
+        let serialized = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(serialized["messageType"], raw);
     }
 
     #[test]
@@ -714,6 +904,137 @@ mod tests {
 
         let acquired: AcquireJobsResponse = serde_json::from_str(r#"{"value":null}"#).unwrap();
         assert!(acquired.value.is_empty());
+    }
+
+    #[test]
+    fn explicit_null_scalars_decode_to_go_zero_values() {
+        let statistic: RunnerScaleSetStatistic = serde_json::from_str(
+            r#"{
+                "totalAvailableJobs":null,
+                "totalAcquiredJobs":null,
+                "totalAssignedJobs":null,
+                "totalRunningJobs":null,
+                "totalRegisteredRunners":null,
+                "totalBusyRunners":null,
+                "totalIdleRunners":null
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(statistic, RunnerScaleSetStatistic::default());
+
+        let envelope: RunnerScaleSetMessageResponse = serde_json::from_str(
+            r#"{"messageId":null,"messageType":null,"body":null,"statistics":null}"#,
+        )
+        .unwrap();
+        assert_eq!(envelope, RunnerScaleSetMessageResponse::default());
+
+        let batch: RunnerScaleSetMessage = serde_json::from_str(r#"{"messageId":null}"#).unwrap();
+        assert_eq!(batch, RunnerScaleSetMessage::default());
+
+        let available: ScaleSetJobAvailable = serde_json::from_str(
+            r#"{
+                "acquireJobUrl":null,
+                "messageType":null,
+                "runnerRequestId":null,
+                "repositoryName":null,
+                "ownerName":null,
+                "jobId":null,
+                "jobWorkflowRef":null,
+                "jobDisplayName":null,
+                "workflowRunId":null,
+                "eventName":null,
+                "requestLabels":null,
+                "queueTime":null,
+                "scaleSetAssignTime":null,
+                "runnerAssignTime":null,
+                "finishTime":null
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(available, ScaleSetJobAvailable::default());
+        assert_eq!(available.base.queue_time, "0001-01-01T00:00:00Z");
+
+        let started: ScaleSetJobStarted =
+            serde_json::from_str(r#"{"runnerId":null,"runnerName":null,"runnerRequestId":null}"#)
+                .unwrap();
+        assert_eq!(started.runner_id, 0);
+        assert_eq!(started.runner_name, "");
+
+        let completed: ScaleSetJobCompleted =
+            serde_json::from_str(r#"{"result":null,"runnerId":null,"runnerName":null}"#).unwrap();
+        assert_eq!(completed.result, "");
+        assert_eq!(completed.runner_id, 0);
+        assert_eq!(completed.runner_name, "");
+
+        let acquired: AcquireJobsResponse =
+            serde_json::from_str(r#"{"count":null,"value":null}"#).unwrap();
+        assert_eq!(acquired, AcquireJobsResponse::default());
+
+        let jit_setting: RunnerScaleSetJitRunnerSetting =
+            serde_json::from_str(r#"{"name":null,"workFolder":null}"#).unwrap();
+        assert_eq!(jit_setting, RunnerScaleSetJitRunnerSetting::default());
+
+        let jit_config: RunnerScaleSetJitRunnerConfig =
+            serde_json::from_str(r#"{"runner":null,"encodedJITConfig":null}"#).unwrap();
+        assert!(jit_config.runner.is_none());
+        assert_eq!(jit_config.encoded_jit_config, "");
+
+        let runner: RunnerReference =
+            serde_json::from_str(r#"{"id":null,"name":null,"runnerScaleSetId":null}"#).unwrap();
+        assert_eq!(runner, RunnerReference::default());
+
+        let runner_list: RunnerReferenceList =
+            serde_json::from_str(r#"{"count":null,"value":null}"#).unwrap();
+        assert_eq!(runner_list, RunnerReferenceList::default());
+
+        let label: ScaleSetLabel = serde_json::from_str(r#"{"type":null,"name":null}"#).unwrap();
+        assert_eq!(label, ScaleSetLabel::default());
+
+        let group: RunnerGroup =
+            serde_json::from_str(r#"{"id":null,"name":null,"size":null,"isDefaultGroup":null}"#)
+                .unwrap();
+        assert_eq!(group, RunnerGroup::default());
+
+        let group_list: RunnerGroupList =
+            serde_json::from_str(r#"{"count":null,"value":null}"#).unwrap();
+        assert_eq!(group_list, RunnerGroupList::default());
+
+        let scale_set_list: RunnerScaleSetList =
+            serde_json::from_str(r#"{"count":null,"value":null}"#).unwrap();
+        assert_eq!(scale_set_list, RunnerScaleSetList::default());
+
+        let runner_setting: RunnerSetting =
+            serde_json::from_str(r#"{"disableUpdate":null}"#).unwrap();
+        assert_eq!(runner_setting, RunnerSetting::default());
+
+        let scale_set: RunnerScaleSet = serde_json::from_str(
+            r#"{
+                "id":null,
+                "name":null,
+                "runnerGroupId":null,
+                "runnerGroupName":null,
+                "labels":null,
+                "RunnerSetting":null,
+                "createdOn":null,
+                "runnerJitConfigUrl":null,
+                "statistics":null
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(scale_set, RunnerScaleSet::default());
+
+        let session: ScaleSetSession = serde_json::from_str(
+            r#"{
+                "sessionId":null,
+                "ownerName":null,
+                "runnerScaleSet":null,
+                "messageQueueUrl":null,
+                "messageQueueAccessToken":null,
+                "statistics":null
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(session, ScaleSetSession::default());
     }
 
     #[test]

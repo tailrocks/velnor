@@ -1,7 +1,10 @@
 #![allow(dead_code)]
 
 use crate::{
-    container::{split_container_options, JobContainerSpec, ServiceContainerSpec},
+    container::{
+        split_container_options, strip_quota_container_options, JobContainerSpec,
+        ServiceContainerSpec,
+    },
     executor::ExecutableStep,
     job_message::{AgentJobRequestMessage, ContainerResource, ServiceEndpoint},
     plan::{
@@ -752,7 +755,8 @@ fn filter_privileged_container_options(
     options: Vec<String>,
     allow_privileged: bool,
 ) -> Vec<String> {
-    let options = strip_quota_container_options(options);
+    // Strip before the trust split with the same helper used at emission.
+    let options = strip_quota_container_options(&options, log_dropped_quota_container_option);
     if allow_privileged {
         let mut filtered = Vec::with_capacity(options.len());
         let mut options = options.into_iter().peekable();
@@ -844,62 +848,6 @@ fn filter_privileged_container_options(
     filtered
 }
 
-/// Docker flags that would impose a CPU/RAM/PID ceiling on the workload.
-/// No HostConfig ceiling may arrive via workflow `container.options` on any
-/// trust path: these are stripped at admission (and again at emission).
-/// `--shm-size` stays allowed: shared-memory sizing is not a CPU/RAM
-/// ceiling, and browsers need it larger than Docker's default. (Accepted
-/// risk, audit F4: unbounded is spec-mandated; see `QUOTA_FLAGS`.)
-const QUOTA_CONTAINER_OPTIONS: [&str; 12] = [
-    "--cpus",
-    "--cpu-period",
-    "--cpu-quota",
-    "--cpu-shares",
-    "--cpuset-cpus",
-    "--cpuset-mems",
-    "-m",
-    "--memory",
-    "--memory-reservation",
-    "--memory-swap",
-    "--memory-swappiness",
-    "--pids-limit",
-];
-
-fn is_quota_container_option(option: &str) -> bool {
-    let name = option.split_once('=').map_or(option, |(name, _)| name);
-    QUOTA_CONTAINER_OPTIONS.contains(&name)
-}
-
-/// Drop quota flags (and their values) from admitted workflow options.
-/// Runs before the trust split so trusted and untrusted lanes strip
-/// identically; every drop is logged, never silent.
-fn strip_quota_container_options(options: Vec<String>) -> Vec<String> {
-    let mut stripped = Vec::with_capacity(options.len());
-    let mut index = 0;
-    while index < options.len() {
-        let option = options[index].as_str();
-        if is_quota_container_option(option) {
-            // `--flag=value` carries its value inline; only the bare `--flag`
-            // form consumes the following token.
-            let consumed = if option.contains('=') {
-                option.to_owned()
-            } else {
-                option_with_optional_value(&options, index)
-            };
-            log_dropped_container_option(&consumed, "CPU/RAM/PID ceilings are not admitted");
-            index += if option.contains('=') {
-                1
-            } else {
-                consumed_option_count(&options, index)
-            };
-            continue;
-        }
-        stripped.push(options[index].clone());
-        index += 1;
-    }
-    stripped
-}
-
 fn safe_container_option(name: &str) -> bool {
     matches!(
         name,
@@ -960,6 +908,12 @@ fn consumed_option_count(options: &[String], index: usize) -> usize {
 fn log_dropped_container_option(option: &str, reason: &str) {
     eprintln!(
         "Velnor dropped privilege-granting container.options entry `{option}` ({reason}); set VELNOR_ALLOW_PRIVILEGED_OPTIONS=true only for trusted scopes to pass it through."
+    );
+}
+
+fn log_dropped_quota_container_option(option: &str) {
+    eprintln!(
+        "Velnor dropped container.options entry `{option}` (CPU/RAM/PID ceilings are not admitted on any trust path)."
     );
 }
 
@@ -2187,6 +2141,30 @@ mod tests {
             assert_eq!(
                 filter_privileged_container_options(options, allow_privileged),
                 vec!["--shm-size", "256m", "--hostname", "job-host"],
+                "allow_privileged={allow_privileged}"
+            );
+        }
+    }
+
+    #[test]
+    fn container_options_strip_cpu_share_and_realtime_ceilings_on_every_trust_path() {
+        for allow_privileged in [false, true] {
+            let options = vec![
+                "-c".to_string(),
+                "1024".to_string(),
+                "-c=2048".to_string(),
+                "--cpu-rt-period".to_string(),
+                "1000000".to_string(),
+                "--cpu-rt-period=2000000".to_string(),
+                "--cpu-rt-runtime".to_string(),
+                "950000".to_string(),
+                "--cpu-rt-runtime=500000".to_string(),
+                "--shm-size".to_string(),
+                "256m".to_string(),
+            ];
+            assert_eq!(
+                filter_privileged_container_options(options, allow_privileged),
+                vec!["--shm-size", "256m"],
                 "allow_privileged={allow_privileged}"
             );
         }

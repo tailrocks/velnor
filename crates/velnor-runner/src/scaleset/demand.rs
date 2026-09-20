@@ -16,10 +16,12 @@
 //!
 //! [tc]: crate::trust_class::TrustClass::derive
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, ToSql};
+use time::format_description::well_known::Rfc3339;
+use velnor_control::permit_ledger::PendingScaleSetDemandPublication;
 use velnor_model::ScaleSetJobAvailable;
 
 /// Demand-row lifecycle. Stored verbatim in `scaleset_demand.state`.
@@ -128,6 +130,10 @@ pub struct Demand {
     pub updated_at: String,
     /// Durable deciding input for the grant-pass trust gate (v23).
     pub event_name: String,
+    /// Immutable identity of the current global permit acquisition. It stays
+    /// with the durable request through crash/replay cleanup so stale
+    /// callbacks cannot release a later same-holder lease.
+    pub permit_lease_generation: Option<u64>,
 }
 
 /// Outcome of submitting one offered job.
@@ -231,16 +237,43 @@ pub fn classify_probe(probe: &OfferProbe<'_>) -> OfferTrust {
 #[derive(Debug)]
 pub struct DemandStore {
     conn: Connection,
+    path: PathBuf,
+}
+
+fn ensure_permit_lease_generation_column(conn: &mut Connection) -> Result<()> {
+    if DemandStore::table_has_column(conn, "scaleset_demand", "permit_lease_generation")? {
+        return Ok(());
+    }
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .context("begin scale-set permit lease migration")?;
+    if !DemandStore::table_has_column(&tx, "scaleset_demand", "permit_lease_generation")? {
+        tx.execute_batch("ALTER TABLE scaleset_demand ADD COLUMN permit_lease_generation INTEGER;")
+            .context("add scale-set permit lease identity")?;
+    }
+    tx.commit()
+        .context("commit scale-set permit lease migration")?;
+    Ok(())
 }
 
 impl DemandStore {
     /// Open the demand store at the state database path.
     pub fn open(path: &Path) -> Result<Self> {
         velnor_control::store::Store::open(path).context("migrate scale-set demand schema")?;
-        let conn = Connection::open(path).context("open scale-set demand database")?;
+        let mut conn = Connection::open(path).context("open scale-set demand database")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .context("set demand store busy timeout")?;
-        Ok(Self { conn })
+        ensure_permit_lease_generation_column(&mut conn)?;
+        let path = path
+            .canonicalize()
+            .with_context(|| format!("resolve scale-set demand database {}", path.display()))?;
+        Ok(Self { conn, path })
+    }
+
+    /// Canonical durable database backing this demand store.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     fn now_rfc3339() -> String {
@@ -268,7 +301,25 @@ impl DemandStore {
             generation: generation_raw.max(0) as u64,
             updated_at: row.get(10)?,
             event_name: row.get(11)?,
+            permit_lease_generation: row
+                .get::<_, Option<i64>>(12)?
+                .map(|generation| generation.max(0) as u64),
         })
+    }
+
+    fn table_has_column(conn: &Connection, table: &str, wanted: &str) -> Result<bool> {
+        let mut statement = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .context("inspect scale-set demand columns")?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .context("query scale-set demand columns")?;
+        for column in rows {
+            if column.context("read scale-set demand column")? == wanted {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Insert one offer, or retain the existing row on redelivery.
@@ -282,11 +333,32 @@ impl DemandStore {
         offer: &ScaleSetJobAvailable,
         generation: u64,
     ) -> Result<SubmitOutcome> {
+        let first_seen_at = Self::now_rfc3339();
+        self.submit_offer_at(scale_set_id, offer, generation, &first_seen_at)
+    }
+
+    /// Insert one offer with a timestamp allocated by the host-wide queue
+    /// transaction. Global-first ingress uses this so local eligibility
+    /// cannot receive a younger or older clock sample than its mirror.
+    pub fn submit_offer_at(
+        &mut self,
+        scale_set_id: i32,
+        offer: &ScaleSetJobAvailable,
+        generation: u64,
+        first_seen_at: &str,
+    ) -> Result<SubmitOutcome> {
         let request_id = offer.base.runner_request_id;
         if let Some(existing) = self.get(request_id)? {
             if existing.state == DemandState::Terminal {
                 return Ok(SubmitOutcome::ReofferedTerminal);
             }
+            self.conn
+                .execute(
+                    "UPDATE scaleset_demand SET updated_at = ?1
+                     WHERE request_id = ?2 AND state != 'terminal'",
+                    params![Self::now_rfc3339(), request_id],
+                )
+                .context("refresh demand redelivery time")?;
             return Ok(SubmitOutcome::Redelivered {
                 state: existing.state,
             });
@@ -322,7 +394,7 @@ impl DemandStore {
                 params![
                     request_id,
                     scale_set_id,
-                    now,
+                    first_seen_at,
                     sequence,
                     initial.as_str(),
                     reason,
@@ -355,7 +427,8 @@ impl DemandStore {
         self.conn
             .query_row(
                 "SELECT request_id, scale_set_id, first_seen_at, sequence, state, decline_reason,
-                        repo_owner, repo_name, job_id, generation, updated_at, event_name
+                        repo_owner, repo_name, job_id, generation, updated_at, event_name,
+                        permit_lease_generation
                  FROM scaleset_demand WHERE request_id = ?1",
                 params![request_id],
                 Self::row_to_demand,
@@ -364,13 +437,43 @@ impl DemandStore {
             .context("fetch demand row")
     }
 
+    /// Immutable fields needed to replay a global-first publication for an
+    /// already persisted eligible row. Redelivery must publish the durable
+    /// row's identity, even when the server repeats changed offer fields.
+    pub fn publication_for_request(
+        &self,
+        request_id: i64,
+    ) -> Result<Option<velnor_control::permit_ledger::ScaleSetDemandPublication>> {
+        self.conn
+            .query_row(
+                "SELECT request_id, scale_set_id, repo_owner, repo_name, job_id,
+                        labels_hash, event_name
+                 FROM scaleset_demand WHERE request_id = ?1",
+                params![request_id],
+                |row| {
+                    Ok(velnor_control::permit_ledger::ScaleSetDemandPublication {
+                        request_id: row.get(0)?,
+                        scale_set_id: row.get(1)?,
+                        repo_owner: row.get(2)?,
+                        repo_name: row.get(3)?,
+                        job_id_hash: row.get(4)?,
+                        labels_hash: row.get(5)?,
+                        event_name: row.get(6)?,
+                    })
+                },
+            )
+            .optional()
+            .context("fetch durable Scale Set publication fields")
+    }
+
     /// Oldest-first `eligible` rows for one set, bounded by `limit`.
     pub fn oldest_eligible(&self, scale_set_id: i32, limit: usize) -> Result<Vec<Demand>> {
         let mut stmt = self
             .conn
             .prepare(
                 "SELECT request_id, scale_set_id, first_seen_at, sequence, state, decline_reason,
-                        repo_owner, repo_name, job_id, generation, updated_at, event_name
+                        repo_owner, repo_name, job_id, generation, updated_at, event_name,
+                        permit_lease_generation
                  FROM scaleset_demand
                  WHERE scale_set_id = ?1 AND state = 'eligible'
                  ORDER BY first_seen_at, sequence LIMIT ?2",
@@ -386,13 +489,168 @@ impl DemandStore {
             .context("read oldest-eligible rows")
     }
 
+    /// Every eligible row across all sets, oldest-first. Startup uses this
+    /// to restore the host-wide permit queue from durable demand age.
+    pub fn list_eligible_all(&self) -> Result<Vec<Demand>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT request_id, scale_set_id, first_seen_at, sequence, state, decline_reason,
+                        repo_owner, repo_name, job_id, generation, updated_at, event_name,
+                        permit_lease_generation
+                 FROM scaleset_demand
+                 WHERE state = 'eligible'
+                 ORDER BY first_seen_at, sequence",
+            )
+            .context("prepare all eligible demand query")?;
+        stmt.query_map([], Self::row_to_demand)
+            .context("query all eligible demand")?
+            .collect::<Result<Vec<_>, _>>()
+            .context("read all eligible demand")
+    }
+
+    /// Recreate a locally missing eligible row from the global-first
+    /// publication record. This repairs a crash after the host queue marker
+    /// committed but before the source database insert. Existing rows must
+    /// agree with the publication; replay never overwrites age or sequence.
+    pub fn restore_pending_offer(
+        &mut self,
+        pending: &PendingScaleSetDemandPublication,
+    ) -> Result<()> {
+        let canonical_source = pending
+            .source_db
+            .canonicalize()
+            .with_context(|| format!("resolve pending source {}", pending.source_db.display()))?;
+        anyhow::ensure!(
+            canonical_source == self.path,
+            "pending Scale Set publication source does not match opened database"
+        );
+        let (holder_scale_set, holder_request) =
+            crate::scaleset::intents::parse_permit_holder(&pending.holder)
+                .context("parse pending Scale Set holder")?;
+        anyhow::ensure!(
+            holder_scale_set == pending.publication.scale_set_id
+                && holder_request == pending.publication.request_id,
+            "pending Scale Set holder and publication IDs disagree"
+        );
+        anyhow::ensure!(
+            matches!(
+                classify_probe(&OfferProbe {
+                    event_name: &pending.publication.event_name,
+                    owner_name: &pending.publication.repo_owner,
+                    repository_name: &pending.publication.repo_name,
+                }),
+                OfferTrust::Trusted
+            ),
+            "pending Scale Set publication no longer satisfies the trusted-offer gate"
+        );
+
+        let first_seen_at = time::OffsetDateTime::from_unix_timestamp(
+            i64::try_from(pending.first_seen_unix).context("pending timestamp exceeds i64")?,
+        )
+        .context("construct pending first-seen timestamp")?
+        .replace_nanosecond(pending.first_seen_subsec_nanos.min(999_999_999))
+        .context("set pending timestamp precision")?
+        .format(&Rfc3339)
+        .context("format pending first-seen timestamp")?;
+        let generation = i64::try_from(pending.generation)
+            .context("pending generation exceeds database range")?;
+        let now = Self::now_rfc3339();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("begin pending Scale Set publication replay")?;
+        let existing = tx
+            .query_row(
+                "SELECT request_id, scale_set_id, first_seen_at, sequence, state, decline_reason,
+                        repo_owner, repo_name, job_id, generation, updated_at, event_name,
+                        permit_lease_generation
+                 FROM scaleset_demand WHERE request_id = ?1",
+                params![pending.publication.request_id],
+                Self::row_to_demand,
+            )
+            .optional()
+            .context("read existing Scale Set row during publication replay")?;
+        if let Some(existing) = existing {
+            let existing_time = velnor_model::Timestamp::parse(&existing.first_seen_at)
+                .context("parse existing first-seen time during publication replay")?
+                .as_offset_datetime();
+            let (labels_hash, event_name): (String, String) = tx
+                .query_row(
+                    "SELECT labels_hash, event_name FROM scaleset_demand WHERE request_id = ?1",
+                    params![pending.publication.request_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .context("read immutable offer fields during publication replay")?;
+            let pending_seconds =
+                i64::try_from(pending.first_seen_unix).context("pending timestamp exceeds i64")?;
+            anyhow::ensure!(
+                existing.state == DemandState::Eligible
+                    && existing.scale_set_id == pending.publication.scale_set_id
+                    && existing_time.unix_timestamp() == pending_seconds
+                    && existing_time.nanosecond() == pending.first_seen_subsec_nanos
+                    && existing.repo_owner == pending.publication.repo_owner
+                    && existing.repo_name == pending.publication.repo_name
+                    && existing.job_id_hash == pending.publication.job_id_hash
+                    && labels_hash == pending.publication.labels_hash
+                    && event_name == pending.publication.event_name,
+                "existing Scale Set row conflicts with pending global publication"
+            );
+            // The durable global marker proves this offer has an
+            // uncommitted publication, even if the source row predates the
+            // stale-demand window. Refresh only liveness here; its original
+            // age and sequence remain the queue order.
+            tx.execute(
+                "UPDATE scaleset_demand SET updated_at = ?1
+                 WHERE request_id = ?2 AND state = 'eligible'",
+                params![now, pending.publication.request_id],
+            )
+            .context("refresh replayed eligible demand liveness")?;
+            tx.commit()
+                .context("finish idempotent Scale Set publication replay")?;
+            return Ok(());
+        }
+
+        let sequence: i64 = tx
+            .query_row(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM scaleset_demand",
+                [],
+                |row| row.get(0),
+            )
+            .context("allocate replayed demand sequence")?;
+        tx.execute(
+            "INSERT INTO scaleset_demand
+             (request_id, scale_set_id, first_seen_at, sequence, state, decline_reason,
+              repo_owner, repo_name, job_id, labels_hash, generation, updated_at, event_name)
+             VALUES (?1, ?2, ?3, ?4, 'eligible', NULL, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                pending.publication.request_id,
+                pending.publication.scale_set_id,
+                first_seen_at,
+                sequence,
+                pending.publication.repo_owner,
+                pending.publication.repo_name,
+                pending.publication.job_id_hash,
+                pending.publication.labels_hash,
+                generation,
+                now,
+                pending.publication.event_name,
+            ],
+        )
+        .context("restore missing eligible Scale Set demand")?;
+        tx.commit()
+            .context("commit replayed Scale Set publication")?;
+        Ok(())
+    }
+
     /// Oldest-first `granted` rows for one set, bounded by `limit`.
     pub fn oldest_granted(&self, scale_set_id: i32, limit: usize) -> Result<Vec<Demand>> {
         let mut stmt = self
             .conn
             .prepare(
                 "SELECT request_id, scale_set_id, first_seen_at, sequence, state, decline_reason,
-                        repo_owner, repo_name, job_id, generation, updated_at, event_name
+                        repo_owner, repo_name, job_id, generation, updated_at, event_name,
+                        permit_lease_generation
                  FROM scaleset_demand
                  WHERE scale_set_id = ?1 AND state = 'granted'
                  ORDER BY first_seen_at, sequence LIMIT ?2",
@@ -435,6 +693,132 @@ impl DemandStore {
         if updated == 0 {
             anyhow::bail!("demand holds no row for request {request_id}");
         }
+        Ok(())
+    }
+
+    /// Advance one durable state only if the row still has `expected`.
+    /// Completion and provisioning can run in different processes, so a
+    /// read followed by an unconditional write can resurrect a terminal
+    /// request after cleanup has started.
+    pub fn transition_state_if(
+        &mut self,
+        request_id: i64,
+        expected: DemandState,
+        state: DemandState,
+        decline_reason: Option<&str>,
+        generation: u64,
+    ) -> Result<bool> {
+        let updated = self
+            .conn
+            .execute(
+                "UPDATE scaleset_demand
+                 SET state = ?1, decline_reason = ?2, generation = ?3, updated_at = ?4
+                 WHERE request_id = ?5 AND state = ?6",
+                params![
+                    state.as_str(),
+                    decline_reason,
+                    i64::try_from(generation).unwrap_or(i64::MAX),
+                    Self::now_rfc3339(),
+                    request_id,
+                    expected.as_str(),
+                ],
+            )
+            .context("conditionally transition demand state")?;
+        Ok(updated == 1)
+    }
+
+    /// Atomically persist the pre-network acquire intent with the immutable
+    /// lease identity returned by the host ledger. A crash/replay may then
+    /// release only this attempt even if the same request ID is later
+    /// reacquired.
+    pub fn set_state_with_permit_lease(
+        &mut self,
+        request_id: i64,
+        state: DemandState,
+        decline_reason: Option<&str>,
+        generation: u64,
+        permit_lease_generation: u64,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            permit_lease_generation > 0,
+            "permit lease generation must be positive"
+        );
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("begin demand state/lease update")?;
+        let updated = tx
+            .execute(
+                "UPDATE scaleset_demand
+                 SET state = ?1, decline_reason = ?2, generation = ?3, updated_at = ?4,
+                     permit_lease_generation = ?5
+                 WHERE request_id = ?6",
+                params![
+                    state.as_str(),
+                    decline_reason,
+                    i64::try_from(generation).unwrap_or(i64::MAX),
+                    Self::now_rfc3339(),
+                    i64::try_from(permit_lease_generation).unwrap_or(i64::MAX),
+                    request_id,
+                ],
+            )
+            .context("persist demand state and permit lease")?;
+        if updated == 0 {
+            anyhow::bail!("demand holds no row for request {request_id}");
+        }
+        tx.commit().context("commit demand state/lease update")?;
+        Ok(())
+    }
+
+    /// Backfill lease identity during startup attestation for an older
+    /// durable request whose held global row predates local lease recording.
+    /// Never overwrite a different lease outside the fresh Granted edge.
+    pub fn record_permit_lease_generation(
+        &mut self,
+        request_id: i64,
+        permit_lease_generation: u64,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            permit_lease_generation > 0,
+            "permit lease generation must be positive"
+        );
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("begin demand permit lease backfill")?;
+        let existing: Option<(String, Option<i64>)> = tx
+            .query_row(
+                "SELECT state, permit_lease_generation FROM scaleset_demand
+                 WHERE request_id = ?1",
+                params![request_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .context("read demand permit lease before backfill")?;
+        let Some((state_raw, existing_generation)) = existing else {
+            anyhow::bail!("demand holds no row for request {request_id}");
+        };
+        let state = DemandState::parse(&state_raw)?;
+        anyhow::ensure!(
+            state.holds_permit() || state == DemandState::Terminal,
+            "demand {request_id} in state {state:?} cannot bind a held permit lease"
+        );
+        if let Some(existing_generation) = existing_generation {
+            anyhow::ensure!(
+                existing_generation.max(0) as u64 == permit_lease_generation
+                    || state == DemandState::Granted,
+                "demand {request_id} is already bound to another permit lease"
+            );
+        }
+        tx.execute(
+            "UPDATE scaleset_demand SET permit_lease_generation = ?1 WHERE request_id = ?2",
+            params![
+                i64::try_from(permit_lease_generation).unwrap_or(i64::MAX),
+                request_id,
+            ],
+        )
+        .context("backfill demand permit lease")?;
+        tx.commit().context("commit demand permit lease backfill")?;
         Ok(())
     }
 
@@ -672,6 +1056,106 @@ mod tests {
         assert_eq!(after.first_seen_at, before.first_seen_at);
         assert_eq!(after.sequence, sequence);
         assert_eq!(after.sequence, before.sequence);
+    }
+
+    #[test]
+    fn conditional_state_transition_does_not_resurrect_terminal_demand() {
+        let path = temp_path("conditional-state-transition");
+        let mut store = DemandStore::open(&path).unwrap();
+        store.submit_offer(7, &offer(103, "push"), 3).unwrap();
+        store
+            .set_state(103, DemandState::Acquired, None, 3)
+            .unwrap();
+        store
+            .set_state(103, DemandState::Terminal, None, 3)
+            .unwrap();
+
+        assert!(!store
+            .transition_state_if(
+                103,
+                DemandState::Acquired,
+                DemandState::ProvisionIntent,
+                None,
+                4,
+            )
+            .unwrap());
+        assert_eq!(
+            store.get(103).unwrap().unwrap().state,
+            DemandState::Terminal
+        );
+    }
+
+    #[test]
+    fn pending_global_publication_replay_restores_missing_row_once_with_exact_age() {
+        let path = temp_path("pending-replay");
+        // The journal records the canonical path of an already-created
+        // demand database; restore that source before constructing the row.
+        drop(DemandStore::open(&path).unwrap());
+        let source_db = path.canonicalize().unwrap();
+        let request_id = 102;
+        let pending = PendingScaleSetDemandPublication {
+            holder: crate::scaleset::intents::permit_holder(7, request_id),
+            source_db,
+            generation: 9,
+            first_seen_unix: 1_789_000_000,
+            first_seen_subsec_nanos: 123_456_789,
+            publication: velnor_control::permit_ledger::ScaleSetDemandPublication {
+                request_id,
+                scale_set_id: 7,
+                repo_owner: "tailrocks".to_owned(),
+                repo_name: "velnor".to_owned(),
+                job_id_hash: crate::scaleset::intents::stable_i64(&format!("job-{request_id}")),
+                labels_hash: crate::scaleset::intents::labels_hash(&["velnor".to_owned()]),
+                event_name: "push".to_owned(),
+            },
+        };
+
+        let mut store = DemandStore::open(&path).unwrap();
+        store.restore_pending_offer(&pending).unwrap();
+        let restored = store.get(request_id).unwrap().unwrap();
+        let restored_time = velnor_model::Timestamp::parse(&restored.first_seen_at)
+            .unwrap()
+            .as_offset_datetime();
+        assert_eq!(restored.state, DemandState::Eligible);
+        assert_eq!(restored.scale_set_id, 7);
+        assert_eq!(restored.generation, 9);
+        assert_eq!(restored_time.unix_timestamp(), 1_789_000_000);
+        assert_eq!(restored_time.nanosecond(), 123_456_789);
+        store.restore_pending_offer(&pending).unwrap();
+        let replayed = store.get(request_id).unwrap().unwrap();
+        assert_eq!(replayed.sequence, restored.sequence);
+        assert_eq!(replayed.first_seen_at, restored.first_seen_at);
+        let original_age = velnor_model::Timestamp::parse(&replayed.first_seen_at)
+            .unwrap()
+            .as_offset_datetime();
+        store
+            .conn
+            .execute(
+                "UPDATE scaleset_demand SET updated_at = '1970-01-01T00:00:00Z'
+                 WHERE request_id = ?1",
+                params![request_id],
+            )
+            .unwrap();
+        store.restore_pending_offer(&pending).unwrap();
+        let refreshed = store.get(request_id).unwrap().unwrap();
+        let refreshed_age = velnor_model::Timestamp::parse(&refreshed.first_seen_at)
+            .unwrap()
+            .as_offset_datetime();
+        let refreshed_liveness = velnor_model::Timestamp::parse(&refreshed.updated_at)
+            .unwrap()
+            .as_offset_datetime();
+        assert_eq!(refreshed.state, DemandState::Eligible);
+        assert_eq!(refreshed.sequence, restored.sequence);
+        assert_eq!(refreshed_age, original_age);
+        assert!(refreshed_liveness.unix_timestamp() > 0);
+        store
+            .conn
+            .execute(
+                "UPDATE scaleset_demand SET repo_name = 'changed' WHERE request_id = ?1",
+                params![request_id],
+            )
+            .unwrap();
+        assert!(store.restore_pending_offer(&pending).is_err());
     }
 
     #[test]

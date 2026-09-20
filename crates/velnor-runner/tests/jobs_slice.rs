@@ -120,29 +120,27 @@ fn stale_quota_dropin_removal_executes_and_is_idempotent() {
 }
 
 #[test]
-fn postrm_keeps_unit_cleanup_without_quota_logic() {
+fn postrm_stops_fleet_units_and_proves_workload_slice_inactive() {
     let postrm = include_str!("../debian/postrm");
 
     // Generic fleet cleanup survives: enumerate, mask, disable, stop, prove.
     assert!(postrm.contains("require_package_transaction_lock"));
-    assert!(postrm.contains("WORKER_UNIT_GLOB=velnor-job@*.service"));
     assert!(postrm.contains("systemctl mask --runtime \"$unit\""));
     assert!(!postrm.contains("systemctl unmask --runtime"));
     assert!(postrm.contains("systemctl stop \"$unit\""));
     assert!(postrm.contains("systemctl daemon-reload"));
-    assert!(postrm.contains("verify_worker_units_inactive"));
     assert!(postrm.contains("verify_jobs_slice_inactive"));
     assert!(postrm.contains("--property=LoadState --value velnor-jobs.slice"));
     assert!(postrm.contains("--property=ActiveState --value velnor-jobs.slice"));
 
     // Removal deletes only the old generated file, preserving operator
-    // drop-ins. It runs after both inactive proofs and before daemon-reload.
+    // drop-ins. It runs after the slice proof and before daemon-reload.
     assert!(postrm.contains("JOBS_SLICE_DROPIN=$JOBS_SLICE_DROPIN_DIR/10-host-cpu.conf"));
     assert!(postrm.contains("remove_stale_jobs_cpu_quota_dropin"));
     assert!(postrm.contains("rm -f \"$JOBS_SLICE_DROPIN\""));
     assert!(!postrm.contains("CPUQuota"));
 
-    // Ordering: enumerate < mask < disable < stop < proofs < reload < proofs.
+    // Ordering: enumerate < mask < disable < stop < slice proof < reload < proof.
     let lifecycle = postrm.split("case \"$1\" in").nth(1).unwrap();
     let unit_enumeration = lifecycle
         .find("all_units=$(systemctl list-unit-files")
@@ -151,11 +149,7 @@ fn postrm_keeps_unit_cleanup_without_quota_logic() {
         .find("systemctl mask --runtime \"$unit\"")
         .unwrap();
     let unit_disable = lifecycle.find("systemctl disable \"$unit\"").unwrap();
-    let worker_stop = lifecycle.find("systemctl stop \"$unit\"").unwrap();
-    let worker_proofs: Vec<_> = lifecycle
-        .match_indices("verify_worker_units_inactive")
-        .map(|(offset, _)| offset)
-        .collect();
+    let unit_stop = lifecycle.find("systemctl stop \"$unit\"").unwrap();
     let slice_proofs: Vec<_> = lifecycle
         .match_indices("verify_jobs_slice_inactive")
         .map(|(offset, _)| offset)
@@ -164,19 +158,14 @@ fn postrm_keeps_unit_cleanup_without_quota_logic() {
     let remove_dropin = lifecycle
         .find("remove_stale_jobs_cpu_quota_dropin")
         .unwrap();
-    assert_eq!(worker_proofs.len(), 2);
     assert_eq!(slice_proofs.len(), 2);
     assert!(unit_enumeration < unit_mask);
     assert!(unit_mask < unit_disable);
-    assert!(unit_mask < worker_stop);
-    assert!(worker_stop < worker_proofs[0]);
-    assert!(worker_proofs[0] < daemon_reload);
+    assert!(unit_disable < unit_stop);
+    assert!(unit_stop < slice_proofs[0]);
     assert!(slice_proofs[0] < daemon_reload);
-    assert!(worker_proofs[0] < remove_dropin);
     assert!(slice_proofs[0] < remove_dropin);
     assert!(remove_dropin < daemon_reload);
-    assert!(daemon_reload < worker_proofs[1]);
-    assert!(worker_proofs[1] < slice_proofs[1]);
     assert!(daemon_reload < slice_proofs[1]);
 }
 

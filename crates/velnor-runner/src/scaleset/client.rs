@@ -295,7 +295,7 @@ impl ScaleSetClient {
     async fn get_runner_registration_token(&self) -> Result<RegistrationToken, ScaleSetError> {
         let path = self.inner.config.registration_token_path();
         let url = self.github_api_url(&path)?;
-        let bearer = if let Some(token) = self.inner.auth.token.as_deref() {
+        let bearer = if let Some(token) = self.inner.auth.pat_token() {
             format!("Bearer {token}")
         } else {
             let access = self
@@ -814,19 +814,26 @@ impl ScaleSetClient {
                 Ok(response) => {
                     let status = response.status();
                     let headers = response.headers().clone();
-                    let body = response.bytes().await.map_err(|error| {
-                        ScaleSetError::Transport(format!(
-                            "failed to read the response body: {error}"
-                        ))
-                    })?;
                     if RetryPolicy::retryable_status(status, admin_handshake)
                         && self.inner.retry.may_retry(attempt)
                     {
                         let delay = self.retry_delay(status, &headers, attempt).await;
                         attempt += 1;
+                        drop(response);
                         tokio::time::sleep(delay).await;
                         continue;
                     }
+                    let body = response.bytes().await.map_err(|error| {
+                        request_response_error(
+                            &method_name,
+                            &url_text,
+                            status,
+                            &headers,
+                            &[],
+                            None,
+                            &format!("failed to read the response body: {error}"),
+                        )
+                    })?;
                     return Ok(RawResponse {
                         method: method_name,
                         url: url_text,
@@ -836,8 +843,9 @@ impl ScaleSetClient {
                     });
                 }
                 // Mirror `DefaultRetryPolicy`: retry transient transport
-                // failures, but not deadlines, malformed requests, redirect
-                // loops, or TLS certificate validation errors.
+                // failures, including the configured per-request timeout,
+                // but not malformed requests, redirect loops, or TLS
+                // certificate validation errors.
                 Err(error)
                     if self.inner.retry.may_retry(attempt)
                         && RetryPolicy::retryable_transport_error(&error) =>
@@ -1253,6 +1261,158 @@ mod tests {
         assert!(rendered.contains("<redacted>"), "{rendered}");
         assert!(!rendered.contains("connection-url-secret"), "{rendered}");
         assert!(!rendered.contains("connection-token-secret"), "{rendered}");
+    }
+
+    async fn accept_http_request(listener: &tokio::net::TcpListener) -> tokio::net::TcpStream {
+        use tokio::io::AsyncReadExt;
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let read = stream.read(&mut chunk).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        assert!(!request.is_empty(), "client sent no HTTP request");
+        stream
+    }
+
+    fn retry_test_client(timeout: std::time::Duration) -> ScaleSetClient {
+        ScaleSetClient::new_with_pat(
+            "https://github.com/octo-org",
+            "test-pat",
+            system_info(),
+            RetryPolicy {
+                max_retries: 1,
+                wait_min: std::time::Duration::ZERO,
+                wait_max: std::time::Duration::ZERO,
+                timeout,
+            },
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn retryable_status_is_retried_before_reading_its_body() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut first = accept_http_request(&listener).await;
+            first
+                .write_all(
+                    b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 100\r\nConnection: close\r\nRetry-After: 0\r\n\r\nshort",
+                )
+                .await
+                .unwrap();
+            drop(first);
+
+            let mut second = accept_http_request(&listener).await;
+            second
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await
+                .unwrap();
+        });
+
+        let client = retry_test_client(std::time::Duration::from_secs(2));
+        let response = client
+            .execute_with_retry(
+                Method::GET,
+                Url::parse(&format!("http://{address}/")).unwrap(),
+                false,
+                |client, method, url| client.request(method, url),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(response.body, b"ok");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn request_timeout_is_retried_like_retryablehttp_client_timeout() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut first = accept_http_request(&listener).await;
+            let delayed_first_response = tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                let _ = first
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
+                    )
+                    .await;
+            });
+
+            let mut second = accept_http_request(&listener).await;
+            second
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await
+                .unwrap();
+            delayed_first_response.await.unwrap();
+        });
+
+        let client = retry_test_client(std::time::Duration::from_millis(50));
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.execute_with_retry(
+                Method::GET,
+                Url::parse(&format!("http://{address}/")).unwrap(),
+                false,
+                |client, method, url| client.request(method, url),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(response.body, b"ok");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn final_body_read_error_keeps_response_metadata() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut stream = accept_http_request(&listener).await;
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nActivityId: activity-test\r\nX-GitHub-Request-Id: request-test\r\nConnection: close\r\n\r\nshort",
+                )
+                .await
+                .unwrap();
+        });
+
+        let client = retry_test_client(std::time::Duration::from_secs(2));
+        let error = client
+            .execute_with_retry(
+                Method::GET,
+                Url::parse(&format!("http://{address}/")).unwrap(),
+                false,
+                |client, method, url| client.request(method, url),
+            )
+            .await
+            .unwrap_err();
+        let ScaleSetError::RequestFailed(failure) = error else {
+            panic!("body read failure lost the HTTP response: {error}");
+        };
+        assert_eq!(failure.status, "200 OK");
+        assert_eq!(failure.activity, ", activity_id=\"activity-test\"");
+        assert_eq!(failure.request_id, ", github_request_id=\"request-test\"");
+        assert!(failure.message.contains("failed to read the response body"));
+        server.await.unwrap();
     }
 
     #[test]

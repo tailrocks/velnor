@@ -184,7 +184,7 @@ pool, symlink, special file, malformed JSON, or duplicate key, and writes by
 same-directory atomic replacement while preserving mode and ownership.
 Before its first APT or Docker configuration mutation, apply stops previously
 active Velnor admission units and activation sockets/timers/paths, waits for
-Velnor jobs to drain, then holds the exclusive
+those units to stop, and checks Docker container inventory before it holds the exclusive
 `/run/velnor/package-transaction.lock` through package changes, configuration
 writes, Docker restart, and final Docker health checks. It releases that lock
 before starting Velnor again because packaged Velnor services need a shared
@@ -196,9 +196,9 @@ unknown or unhealthy daemon leaves admission closed. Cleanup preserves the
 original failure status. Package installation is not rolled back: any Docker
 packages left installed after a partial APT failure are held for operator
 review.
-Running non-Velnor Docker containers block maintenance unless the operator
-explicitly sets `VELNOR_C1_ALLOW_RESTART=1`; Velnor job units must still drain.
-`VELNOR_C1_DRAIN_TIMEOUT_SECONDS` bounds waiting for jobs and the package lock.
+Running Docker containers block maintenance unless the operator explicitly
+sets `VELNOR_C1_ALLOW_RESTART=1`. `VELNOR_C1_DRAIN_TIMEOUT_SECONDS` bounds
+systemd stop operations and package-lock acquisition.
 The same deadline bounds APT and systemd commands used during maintenance.
 
 No shell cosmetics or remote `curl | sh` installers run. Every APT install and

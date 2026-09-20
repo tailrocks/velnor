@@ -136,6 +136,39 @@ pub fn forced_kill_delay(cancel_timeout: Option<Duration>) -> Duration {
         .saturating_sub(HARD_KILL_LEAD)
 }
 
+/// Parse the server-supplied cancellation grace without panicking on values
+/// that cannot be represented as a [`Duration`]. `None` preserves the
+/// caller's default grace for missing, invalid, or unrepresentable input.
+pub(crate) fn parse_server_cancel_timeout(raw: &str) -> Option<Duration> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    if let Ok(seconds) = raw.parse::<f64>() {
+        if !seconds.is_finite() || seconds < 0.0 {
+            return None;
+        }
+        return Duration::try_from_secs_f64(seconds).ok();
+    }
+
+    let mut parts = raw.split(':');
+    let hours = parts.next()?.parse::<u64>().ok()?;
+    let minutes = parts.next()?.parse::<u64>().ok()?;
+    let seconds = parts.next()?.parse::<f64>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    if !seconds.is_finite() || seconds < 0.0 {
+        return None;
+    }
+
+    let whole_seconds = hours
+        .checked_mul(3600)?
+        .checked_add(minutes.checked_mul(60)?)?;
+    Duration::from_secs(whole_seconds).checked_add(Duration::try_from_secs_f64(seconds).ok()?)
+}
+
 fn env_duration_ms(name: &str, fallback: Duration) -> Duration {
     std::env::var(name)
         .ok()
@@ -1307,16 +1340,79 @@ mod tests {
     }
 
     #[test]
-    fn forced_kill_delay_floors_at_sixty_seconds_minus_the_lead() {
+    fn forced_kill_delay_floors_raw_timeout_then_subtracts_the_lead() {
         // `JobDispatcher.cs:1280-1285`.
         assert_eq!(forced_kill_delay(None), Duration::from_secs(45));
+        for (timeout, expected_delay) in [
+            (Duration::ZERO, Duration::from_secs(45)),
+            (Duration::from_secs(59), Duration::from_secs(45)),
+            (Duration::from_secs(60), Duration::from_secs(45)),
+            (Duration::from_secs(61), Duration::from_secs(46)),
+            (Duration::from_secs(300), Duration::from_secs(285)),
+        ] {
+            assert_eq!(
+                forced_kill_delay(Some(timeout)),
+                expected_delay,
+                "raw timeout {timeout:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn forced_kill_delay_defaults_for_missing_or_invalid_timeout_and_handles_max_duration() {
+        // Invalid server timeout strings are parsed as `None` at the message
+        // boundary, preserving the upstream 60s floor minus the 15s lead.
+        assert_eq!(forced_kill_delay(None), Duration::from_secs(45));
+
+        // `Duration::MAX` exercises subtraction at the representation limit.
+        let timeout = Duration::MAX;
         assert_eq!(
-            forced_kill_delay(Some(Duration::from_secs(10))),
-            Duration::from_secs(45)
+            forced_kill_delay(Some(timeout)),
+            timeout.saturating_sub(HARD_KILL_LEAD)
+        );
+    }
+
+    #[test]
+    fn server_cancel_timeout_parser_preserves_zero_and_valid_formats() {
+        assert_eq!(parse_server_cancel_timeout("0"), Some(Duration::ZERO));
+        assert_eq!(
+            parse_server_cancel_timeout("00:00:00"),
+            Some(Duration::ZERO)
         );
         assert_eq!(
-            forced_kill_delay(Some(Duration::from_secs(300))),
-            Duration::from_secs(285)
+            parse_server_cancel_timeout("90"),
+            Some(Duration::from_secs(90))
+        );
+        assert_eq!(
+            parse_server_cancel_timeout("01:00:30.5"),
+            Some(Duration::from_millis(3_630_500))
+        );
+    }
+
+    #[test]
+    fn server_cancel_timeout_parser_rejects_unrepresentable_values() {
+        // The greatest f64 below 2^64 seconds still fits in Duration. The
+        // next f64 value, 2^64, crosses the representation boundary.
+        let largest_representable_seconds = f64::from_bits(0x43ef_ffff_ffff_ffff);
+        let expected = Duration::try_from_secs_f64(largest_representable_seconds).ok();
+        assert!(expected.is_some());
+        assert_eq!(
+            parse_server_cancel_timeout(&largest_representable_seconds.to_string()),
+            expected
+        );
+
+        let first_unrepresentable_seconds = f64::from_bits(0x43f0_0000_0000_0000);
+        assert!(first_unrepresentable_seconds.is_finite());
+        assert_eq!(
+            parse_server_cancel_timeout(&first_unrepresentable_seconds.to_string()),
+            None
+        );
+        assert_eq!(parse_server_cancel_timeout("1e300"), None);
+        assert_eq!(parse_server_cancel_timeout("00:00:1e300"), None);
+        assert_eq!(parse_server_cancel_timeout("1:2:3:4"), None);
+        assert_eq!(
+            parse_server_cancel_timeout("18446744073709551615:0:0"),
+            None
         );
     }
 
