@@ -109,8 +109,8 @@ jobs:
           run_attempt="$(jq -er '.run_attempt | numbers' <<<"$run")"
 
           jobs="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100" \
-            | jq -c --argjson run_id "$run_id" --arg head "$HEAD_SHA" \
-                '[.[][] | select(.name == "candidate_producer" and (.run_id | tonumber) == $run_id and .head_sha == $head and .status == "completed" and .conclusion == "success")]')"
+            | jq -c --argjson run_id "$run_id" --argjson run_attempt "$run_attempt" --arg head "$HEAD_SHA" \
+                '[.[][] | select(.name == "candidate_producer" and (.run_id | tonumber) == $run_id and (.run_attempt | tonumber) == $run_attempt and .head_sha == $head and .status == "completed" and .conclusion == "success")]')"
           test "$(jq -r 'length' <<<"$jobs")" = 1
           job="$(jq -c '.[0]' <<<"$jobs")"
           job_id="$(jq -er '.id | numbers' <<<"$job")"
@@ -785,8 +785,8 @@ jobs:
           ' <<<"$run_api" >/dev/null
           job_id="$(jq -er .job_id "$handoff_json")"
           job_api="$(gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job_id")"
-          jq -e --argjson id "$job_id" --argjson run_id "$run_id" --arg head "$HEAD_SHA" '
-            .id == $id and .run_id == $run_id and .name == "candidate_producer" and .head_sha == $head and
+          jq -e --argjson id "$job_id" --argjson run_id "$run_id" --argjson run_attempt "$run_attempt" --arg head "$HEAD_SHA" '
+            .id == $id and .run_id == $run_id and (.run_attempt | tonumber) == $run_attempt and .name == "candidate_producer" and .head_sha == $head and
             .status == "completed" and .conclusion == "success"
           ' <<<"$job_api" >/dev/null
           test "$head_tree_sha" = "$(jq -er .head_tree_sha "$handoff_json")"
