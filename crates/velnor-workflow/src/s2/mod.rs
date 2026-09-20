@@ -7791,7 +7791,7 @@ fn render_owned_workflow_file(
         Some(content) => Some(content),
         None if config.adopted_workflow_surface => None,
         None => match workflow_file {
-            "ci-pr.yml" | "ci-pull-request.yml" => Some(generated_ci_pr(workflow)),
+            "ci-pr.yml" => Some(generated_ci_pr(workflow)),
             "ci-pr-checks.yml" => Some(generated_ci_pr_checks(workflow)),
             "ci-policy.yml" => Some(generated_ci_policy(config)),
             "ci-release-package-signer.yml" => Some(generated_release_package_signer(config)),
@@ -8386,9 +8386,7 @@ fn generated_file_purpose(path: &Path) -> &'static str {
         ".github/actionlint.yaml" => "actionlint runner-label contract",
         ".github/ci/project.toml" => "detected CI graph + binary runtime contract",
         ".github/workflows/AGENTS.md" => "workflow directory rule file",
-        value if value.ends_with("ci-pull-request.yml") || value.ends_with("ci-pr.yml") => {
-            "parallel PR verification"
-        }
+        value if value.ends_with("ci-pr.yml") => "parallel PR verification",
         value if value.ends_with("ci-policy.yml") => "base-owned pull-request policy gate",
         value if value.ends_with("ci-release-package-signer.yml") => {
             "release artifact provenance signer"
@@ -17892,6 +17890,12 @@ lockfile = true
                 .get(Path::new(".github/ci/project.toml"))
                 .is_some_and(|toml| toml.contains("\"ci-pr-checks.yml\"")),
             "the generated project contract records the checks role"
+        );
+        assert!(
+            !files
+                .keys()
+                .any(|path| path.ends_with("ci-pull-request.yml")),
+            "the removed legacy PR workflow alias must never be rendered"
         );
     }
 

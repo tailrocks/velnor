@@ -5857,7 +5857,7 @@ fn generated_files_with_surface(
                     return None;
                 }
                 match workflow_file.as_str() {
-                    "ci-pr.yml" | "ci-pull-request.yml" => Some(generated_ci_pr(&workflow)),
+                    "ci-pr.yml" => Some(generated_ci_pr(&workflow)),
                     "ci-policy.yml" => Some(generated_ci_policy(&config)),
                     "ci-release-package-signer.yml" => {
                         Some(generated_release_package_signer(&config))
@@ -6405,9 +6405,7 @@ fn generated_file_purpose(path: &Path) -> &'static str {
         ".github/actionlint.yaml" => "actionlint runner-label contract",
         ".github/ci/project.toml" => "detected CI graph + binary runtime contract",
         ".github/workflows/AGENTS.md" => "workflow directory rule file",
-        value if value.ends_with("ci-pull-request.yml") || value.ends_with("ci-pr.yml") => {
-            "parallel PR verification"
-        }
+        value if value.ends_with("ci-pr.yml") => "parallel PR verification",
         value if value.ends_with("ci-policy.yml") => "base-owned pull-request policy gate",
         value if value.ends_with("ci-release-package-signer.yml") => {
             "release artifact provenance signer"
