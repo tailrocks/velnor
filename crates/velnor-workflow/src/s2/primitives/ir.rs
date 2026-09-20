@@ -3153,13 +3153,13 @@ impl WorkflowIr {
           CANDIDATE_ARTIFACT_NAME: {artifact}
           CANDIDATE_HEAD_SHA: ${{{{ github.event.pull_request.head.sha }}}}
           CANDIDATE_BUILD_IMAGE_REPOSITORY: {build_image_repository}
-          CANDIDATE_BUILD_IMAGE_DIGEST: {build_image_digest}
+          CANDIDATE_BUILD_IMAGE_DIGEST: "{build_image_digest}"
         run: |
           set -euo pipefail
-          case "$CANDIDATE_HEAD_SHA" in [0-9a-f]{{40}}) ;; *) exit 1 ;; esac
+          if [[ ! "$CANDIDATE_HEAD_SHA" =~ ^[0-9a-f]{{40}}$ ]]; then exit 1; fi
           test "$CANDIDATE_ARTIFACT_NAME" = "{artifact}"
           test "$CANDIDATE_BUILD_IMAGE_REPOSITORY" = "{build_image_repository}"
-          case "$CANDIDATE_BUILD_IMAGE_DIGEST" in sha256:[0-9a-f]{{64}}) ;; *) echo "::error::candidate builder image is not pinned" >&2; exit 1 ;; esac
+          if [[ ! "$CANDIDATE_BUILD_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{{64}}$ ]]; then echo "::error::candidate builder image is not pinned" >&2; exit 1; fi
           test -z "${{GITHUB_TOKEN:-}}"
           test -z "${{ACTIONS_RUNTIME_TOKEN:-}}"
           test -z "${{ACTIONS_RUNTIME_URL:-}}"
@@ -3177,7 +3177,7 @@ impl WorkflowIr {
           docker_cmd buildx imagetools inspect --raw "$builder_image" > "$RUNNER_TEMP/candidate-builder-index.json"
           jq -e '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64") | select((.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest")] | length == 1' "$RUNNER_TEMP/candidate-builder-index.json" >/dev/null
           builder_platform_digest="$(jq -er '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64") | select((.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest") | .digest] | if length == 1 then .[0] else error("builder platform digest is not unique") end' "$RUNNER_TEMP/candidate-builder-index.json")"
-          case "$builder_platform_digest" in sha256:[0-9a-f]{{64}}) ;; *) exit 1 ;; esac
+          if [[ ! "$builder_platform_digest" =~ ^sha256:[0-9a-f]{{64}}$ ]]; then exit 1; fi
           builder_platform_image="$CANDIDATE_BUILD_IMAGE_REPOSITORY@$builder_platform_digest"
           docker_cmd pull --quiet --platform linux/amd64 "$builder_platform_image"
           docker_cmd image inspect "$builder_platform_image" --format '{{{{json .}}}}' > "$RUNNER_TEMP/candidate-builder-local.json"

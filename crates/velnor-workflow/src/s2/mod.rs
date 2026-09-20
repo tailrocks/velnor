@@ -4603,8 +4603,8 @@ fn policy_candidate_step(revision: &str) -> String {
           set -euo pipefail
           test "$HEAD_REPOSITORY" = "$GITHUB_REPOSITORY" || {{ echo "::error::fork producer artifacts are not eligible" >&2; exit 1; }}
           test "$HEAD_REPOSITORY_ID" = "$TARGET_REPOSITORY_ID" || {{ echo "::error::head repository id is not the target repository id" >&2; exit 1; }}
-          case "$HEAD_SHA" in [0-9a-f]{{40}}) ;; *) exit 1 ;; esac
-          case "$BASE_SHA" in [0-9a-f]{{40}}) ;; *) exit 1 ;; esac
+          if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{{40}}$ ]]; then exit 1; fi
+          if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{{40}}$ ]]; then exit 1; fi
           case "$PR_NUMBER" in ''|*[!0-9]*) exit 1 ;; esac
           repository_api="$(gh api "repos/$GITHUB_REPOSITORY")"
           jq -e --arg repo "$GITHUB_REPOSITORY" --argjson id "$TARGET_REPOSITORY_ID" '.id == $id and .full_name == $repo' <<<"$repository_api" >/dev/null
@@ -4635,9 +4635,9 @@ fn policy_candidate_step(revision: &str) -> String {
           test "$(grep -Fxc "        uses: {checkout}" <<<"$candidate_block")" = 1
           grep -Fq "github.event.pull_request.head.repo.id == github.repository_id" <<<"$candidate_block"
           grep -Fq "github.event.pull_request.base.repo.id == github.repository_id" <<<"$candidate_block"
-          grep -Fq 'test -z "${{GITHUB_TOKEN:-}}"' <<<"$candidate_block"
-          grep -Fq 'test -z "${{ACTIONS_RUNTIME_TOKEN:-}}"' <<<"$candidate_block"
-          grep -Fq 'test -z "${{ACTIONS_RUNTIME_URL:-}}"' <<<"$candidate_block"
+          grep -Fq "test -z \"\${{GITHUB_TOKEN:-}}\"" <<<"$candidate_block"
+          grep -Fq "test -z \"\${{ACTIONS_RUNTIME_TOKEN:-}}\"" <<<"$candidate_block"
+          grep -Fq "test -z \"\${{ACTIONS_RUNTIME_URL:-}}\"" <<<"$candidate_block"
           grep -Fq 'env -i' <<<"$candidate_block"
           head_contract="$RUNNER_TEMP/ci-pr-head.yml"
           GIT_CONFIG_NOSYSTEM=1 HOME="$source_home" git -C "$source_repo" show "$HEAD_SHA:.github/workflows/ci-pr.yml" > "$head_contract"
@@ -4850,7 +4850,7 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
         env:
           HANDOFF: ${{{{ runner.temp }}}}/candidate-handoff/{handoff}
           SANDBOX_IMAGE_REPOSITORY: {image_repository}
-          SANDBOX_IMAGE_DIGEST: {image_digest}
+          SANDBOX_IMAGE_DIGEST: "{image_digest}"
           DEFAULT_BRANCH: {default_branch}
           PR_NUMBER: ${{{{ github.event.pull_request.number }}}}
         run: |
@@ -4910,12 +4910,12 @@ fn policy_candidate_role_jobs(runner: &str, revision: &str, default_branch: &str
           source_archive_sha256="$(sha256sum "$HANDOFF/source.tar" | awk '{{print $1}}')"
           test "$source_archive_sha256" = "$(jq -er .source_archive_sha256 "$HANDOFF/handoff.json")"
           test -n "$SANDBOX_IMAGE_DIGEST"
-          case "$SANDBOX_IMAGE_DIGEST" in sha256:[0-9a-f]{{64}}) ;; *) exit 1 ;; esac
+          if [[ ! "$SANDBOX_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{{64}}$ ]]; then exit 1; fi
           image="$SANDBOX_IMAGE_REPOSITORY@$SANDBOX_IMAGE_DIGEST"
           docker_cmd buildx imagetools inspect --raw "$image" > "$RUNNER_TEMP/sandbox-index.json"
           jq -e '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64") | select((.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest")] | length == 1' "$RUNNER_TEMP/sandbox-index.json" >/dev/null
           platform_digest="$(jq -er '[.manifests[]? | select(.platform.os == "linux" and .platform.architecture == "amd64") | select((.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest") | .digest] | if length == 1 then .[0] else error("platform digest is not unique") end' "$RUNNER_TEMP/sandbox-index.json")"
-          case "$platform_digest" in sha256:[0-9a-f]{{64}}) ;; *) exit 1 ;; esac
+          if [[ ! "$platform_digest" =~ ^sha256:[0-9a-f]{{64}}$ ]]; then exit 1; fi
           platform_image="$SANDBOX_IMAGE_REPOSITORY@$platform_digest"
           docker_cmd buildx imagetools inspect --raw "$platform_image" > "$RUNNER_TEMP/sandbox-platform.json"
           config_digest="$(jq -er '.config.digest | strings | select(test("^sha256:[0-9a-f]{{64}}$"))' "$RUNNER_TEMP/sandbox-platform.json")"
@@ -5159,7 +5159,7 @@ fn policy_candidate_result_verification_step() -> String {
         run: |
           set -euo pipefail
           case "$RESULT_ID" in ''|*[!0-9]*) exit 1 ;; esac
-          case "$RESULT_DIGEST" in sha256:[0-9a-f]{{64}}) ;; *) exit 1 ;; esac
+          if [[ ! "$RESULT_DIGEST" =~ ^sha256:[0-9a-f]{{64}}$ ]]; then exit 1; fi
           case "$PR_NUMBER" in ''|*[!0-9]*) exit 1 ;; esac
           test "$HEAD_REPOSITORY" = "$GITHUB_REPOSITORY"
           test "$HEAD_REPOSITORY_ID" = "$TARGET_REPOSITORY_ID"
@@ -5176,7 +5176,7 @@ fn policy_candidate_result_verification_step() -> String {
             "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$RESULT_ID/zip" \
             --output "$result_archive"
           result_raw_zip_sha256="$(sha256sum "$result_archive" | awk '{{print $1}}')"
-          case "$result_raw_zip_sha256" in [0-9a-f]{{64}}) ;; *) exit 1 ;; esac
+          if [[ ! "$result_raw_zip_sha256" =~ ^[0-9a-f]{{64}}$ ]]; then exit 1; fi
           result_service_digest="${{RESULT_DIGEST#sha256:}}"
           test "$result_raw_zip_sha256" = "$result_service_digest"
           result_dir="$RUNNER_TEMP/candidate-result-verified"
@@ -5262,7 +5262,7 @@ fn policy_candidate_result_verification_step() -> String {
             "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/artifacts/$handoff_id/zip" \
             --output "$handoff_archive"
           handoff_raw_zip_sha256="$(sha256sum "$handoff_archive" | awk '{{print $1}}')"
-          case "$handoff_raw_zip_sha256" in [0-9a-f]{{64}}) ;; *) exit 1 ;; esac
+          if [[ ! "$handoff_raw_zip_sha256" =~ ^[0-9a-f]{{64}}$ ]]; then exit 1; fi
           handoff_service_digest="${{handoff_digest#sha256:}}"
           test "$handoff_raw_zip_sha256" = "$handoff_service_digest"
           handoff_dir="$RUNNER_TEMP/candidate-handoff-verified"
