@@ -70,6 +70,7 @@ fn snapshot_dependency_inputs(members: &[&Unit]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::process::Command;
 
     use super::{
         automatic_event_selects_lane, dispatch_choice_selects_lane, dispatch_lane_expression,
@@ -212,6 +213,136 @@ mod tests {
             pins: Pins::resolved(),
             mise_lock_keys: BTreeSet::new(),
             declared_ruleset_contexts: String::new(),
+        }
+    }
+
+    fn aggregate_fixture_nodes(ir: &WorkflowIr) -> Vec<GraphNode> {
+        ir.units
+            .iter()
+            .map(|unit| GraphNode::Unit {
+                unit_id: unit.id.clone(),
+                job_id: stack_group_job_id(unit.kind),
+                name: sidebar_group_name(unit),
+                file: nested_unit_workflow_file(unit),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pull_request_aggregate_cancellation_guard_preserves_status_contract() {
+        let mut leaf = rust_unit("rust-leaf", "crates/leaf");
+        leaf.depends_on = vec!["rust-root".to_owned()];
+        let mut ir = owner_test_ir(
+            "example/cancellation",
+            vec![rust_unit("rust-root", "crates/root"), leaf],
+        );
+        ir.velnor_rust_needs = VelnorRustNeeds::DependencyClosure;
+        let nodes = aggregate_fixture_nodes(&ir);
+        let pr = ir.render_nested(WorkflowKind::PullRequest, &nodes, None);
+        let expected_callers = ir.required_callers(&nodes, None).len();
+        assert_eq!(
+            pr.matches("if: ${{ !cancelled() &&").count(),
+            expected_callers,
+            "every rendered PR caller carries the cancellation guard"
+        );
+        assert!(
+            pr.contains("if: ${{ !cancelled() && needs.plan.result == 'success'"),
+            "PR callers keep the explicit plan-success prerequisite after the cancellation guard"
+        );
+        assert!(
+            pr.contains("result == 'skipped'"),
+            "dependency skips remain an explicit caller condition"
+        );
+        assert!(
+            pr.contains("selected CI job") && pr.contains("case \"$result\" in"),
+            "the required gate still evaluates each selected caller result"
+        );
+        assert!(
+            pr.contains("cancel-in-progress: true")
+                && pr.contains("ci-required:\n    name:")
+                && pr.contains("if: ${{ !cancelled() }}"),
+            "PR concurrency and required checks use the cancellation-aware aggregate guard"
+        );
+        let direct_pr = ir.render(WorkflowKind::PullRequest);
+        assert!(
+            direct_pr.contains("cancel-in-progress: true")
+                && direct_pr.contains("if: ${{ !cancelled() }}"),
+            "the legacy direct renderer carries the same PR guard"
+        );
+
+        for kind in [WorkflowKind::Main, WorkflowKind::Nightly] {
+            let stable = ir.render_nested(kind, &nodes, None);
+            assert!(
+                stable.contains("cancel-in-progress: false"),
+                "{kind:?} keeps cancellation disabled"
+            );
+            assert!(
+                !stable.contains("if: ${{ !cancelled()"),
+                "{kind:?} keeps publishing/alert jobs on the always-running path"
+            );
+            assert!(
+                stable.contains("if: ${{ always()"),
+                "{kind:?} retains its always-running aggregate checks"
+            );
+        }
+    }
+
+    #[test]
+    fn required_gate_rejects_failed_skipped_and_cancelled_selected_callers() {
+        let ir = owner_test_ir(
+            "example/cancellation-results",
+            vec![rust_unit("rust", "crates/rust")],
+        );
+        let nodes = aggregate_fixture_nodes(&ir);
+        let callers = ir.required_callers(&nodes, None);
+        let mut rendered = String::new();
+        ir.render_nodes_required(
+            &nodes,
+            None,
+            &mut rendered,
+            false,
+            super::REQUIRED_CHECK,
+            false,
+            false,
+        );
+        let script = must_some(
+            rendered
+                .split_once("        run: |\n")
+                .and_then(|(_, body)| body.split_once("\n  required:\n").map(|(body, _)| body)),
+            "required gate shell fixture",
+        )
+        .lines()
+        .map(|line| line.strip_prefix("          ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+        for result in ["success", "failure", "skipped", "cancelled"] {
+            let mut needs = serde_json::Map::new();
+            needs.insert("plan".to_owned(), serde_json::json!({"result": "success"}));
+            if ir.emits_velnor_lane_admission() {
+                needs.insert(
+                    "velnor-lane-admission".to_owned(),
+                    serde_json::json!({"result": "skipped"}),
+                );
+            }
+            for caller in &callers {
+                needs.insert(caller.job_id.clone(), serde_json::json!({"result": result}));
+            }
+            let mut command = Command::new("bash");
+            command
+                .args(["-euo", "pipefail", "-c", &script])
+                .env("NEEDS_JSON", serde_json::Value::Object(needs).to_string())
+                .env("SELECTED_UNITS", "rust")
+                .env("LANE_ADMITTED_GITHUB", "true")
+                .env("LANE_ADMITTED_VELNOR", "true")
+                .env("LANE_ADMITTED_VELNOR_TRUSTED", "true");
+            let output = must_ok(command.output(), "bash executes required gate fixture");
+            assert_eq!(
+                output.status.success(),
+                result == "success",
+                "selected caller result {result}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     }
 
@@ -2968,10 +3099,22 @@ fn aggregate_concurrency_group(ir: &WorkflowIr, kind: WorkflowKind) -> String {
 fn aggregate_concurrency_block(
     ir: &WorkflowIr,
     kind: WorkflowKind,
-    cancel_in_progress: &str,
+    cancel_in_progress: bool,
 ) -> String {
     let group = aggregate_concurrency_group(ir, kind);
     format!("concurrency:\n  group: {group}\n  cancel-in-progress: {cancel_in_progress}\n\n")
+}
+
+/// PR aggregates may be superseded while they are waiting on a dependency.
+/// Keep their callers and required mirrors out of the cancelled run while
+/// retaining the explicit result/admission predicates below the status guard.
+/// Main and nightly aggregates must finish their publishing and alert paths.
+fn aggregate_job_guard(cancel_in_progress: bool) -> &'static str {
+    if cancel_in_progress {
+        "!cancelled()"
+    } else {
+        "always()"
+    }
 }
 
 fn aggregate_triggers(
@@ -2980,7 +3123,7 @@ fn aggregate_triggers(
     runners: RunnerMode,
     automatic: RunnerMode,
     default_dispatch_runner: &str,
-) -> (&'static str, &'static str, String, &'static str) {
+) -> (&'static str, &'static str, String, bool) {
     match kind {
         WorkflowKind::PullRequest => (
             "CI / PR",
@@ -2996,7 +3139,7 @@ fn aggregate_triggers(
                     default_dispatch_runner,
                 )
             ),
-            "true",
+            true,
         ),
         WorkflowKind::Main => (
             "CI / Main",
@@ -3013,7 +3156,7 @@ fn aggregate_triggers(
                     default_dispatch_runner,
                 )
             ),
-            "false",
+            false,
         ),
         WorkflowKind::Nightly => (
             "Nightly",
@@ -3029,7 +3172,7 @@ fn aggregate_triggers(
                     default_dispatch_runner,
                 )
             ),
-            "false",
+            false,
         ),
     }
 }
@@ -3732,6 +3875,7 @@ impl WorkflowIr {
             nodes,
             &mut output,
             kind != WorkflowKind::PullRequest,
+            cancel_in_progress,
             contracts,
         );
         if kind == WorkflowKind::Nightly {
@@ -3742,6 +3886,7 @@ impl WorkflowIr {
                 true,
                 "nightly-required",
                 true,
+                cancel_in_progress,
             );
             self.render_nightly_alert(&mut output, "nightly-required", None);
         } else if self.ci_required {
@@ -3752,6 +3897,7 @@ impl WorkflowIr {
                 kind != WorkflowKind::PullRequest,
                 REQUIRED_CHECK,
                 false,
+                cancel_in_progress,
             );
         }
         while output.ends_with("\n\n") {
@@ -3771,7 +3917,7 @@ impl WorkflowIr {
             self.automatic,
             &self.default_dispatch_runner,
         );
-        let concurrency = aggregate_concurrency_block(self, WorkflowKind::Nightly, "false");
+        let concurrency = aggregate_concurrency_block(self, WorkflowKind::Nightly, false);
         let default_branch = yaml_scalar(&self.default_branch);
         let default_runner = match self.runners {
             RunnerMode::Github => "github",
@@ -3910,6 +4056,7 @@ impl WorkflowIr {
         file: &str,
         sample_unit: &str,
         include_policy: bool,
+        cancel_in_progress: bool,
     ) {
         let caller = self.prepare_cargo_required_caller(file);
         let mut needs = vec!["plan".to_owned()];
@@ -3917,7 +4064,7 @@ impl WorkflowIr {
             needs.push("policy".to_owned());
         }
         let mut conditions = vec![
-            "always()".to_owned(),
+            aggregate_job_guard(cancel_in_progress).to_owned(),
             "needs.plan.result == 'success'".to_owned(),
         ];
         if include_policy {
@@ -3954,6 +4101,7 @@ impl WorkflowIr {
         caller: &UnitLaneCaller,
         include_policy: bool,
         extra_needs: &[String],
+        cancel_in_progress: bool,
     ) {
         let lane = caller.lane;
         let mut needs = vec!["plan".to_owned()];
@@ -3969,7 +4117,7 @@ impl WorkflowIr {
             velnor_rust_dependency_needs(lane, unit, self.velnor_rust_needs, &self.units),
         );
         let mut conditions = vec![
-            "always()".to_owned(),
+            aggregate_job_guard(cancel_in_progress).to_owned(),
             "needs.plan.result == 'success'".to_owned(),
         ];
         if include_policy {
@@ -4017,6 +4165,7 @@ impl WorkflowIr {
         nodes: &[GraphNode],
         output: &mut String,
         include_policy: bool,
+        cancel_in_progress: bool,
         contracts: Option<&BTreeMap<String, UnitContract>>,
     ) {
         let mut prepare_cargo_files = BTreeSet::new();
@@ -4028,7 +4177,13 @@ impl WorkflowIr {
             if self.kind_file_needs_prepare_cargo(file)
                 && prepare_cargo_files.insert(file.to_owned())
             {
-                self.render_prepare_cargo_caller(output, file, unit_id, include_policy);
+                self.render_prepare_cargo_caller(
+                    output,
+                    file,
+                    unit_id,
+                    include_policy,
+                    cancel_in_progress,
+                );
             }
             for caller in self.unit_lane_callers(unit, file, contracts) {
                 let extra_needs = if self.runners == RunnerMode::Velnor
@@ -4039,7 +4194,14 @@ impl WorkflowIr {
                 } else {
                     Vec::new()
                 };
-                self.render_unit_lane_caller(output, unit, &caller, include_policy, &extra_needs);
+                self.render_unit_lane_caller(
+                    output,
+                    unit,
+                    &caller,
+                    include_policy,
+                    &extra_needs,
+                    cancel_in_progress,
+                );
                 if caller.lane == RunnerMode::Velnor {
                     previous_velnor_caller = Some(caller.job_id.clone());
                 }
@@ -4086,6 +4248,10 @@ impl WorkflowIr {
     }
 
     /// The aggregate required check over every contributed unit node.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the required gate has independent plan, policy, simulation, and cancellation inputs"
+    )]
     pub(crate) fn render_nodes_required(
         &self,
         nodes: &[GraphNode],
@@ -4094,6 +4260,7 @@ impl WorkflowIr {
         include_policy: bool,
         check_name: &str,
         simulate_failure: bool,
+        cancel_in_progress: bool,
     ) {
         let callers = self.required_callers(nodes, contracts);
         let mut needs = vec!["plan".to_owned()];
@@ -4110,9 +4277,13 @@ impl WorkflowIr {
             other => yaml_scalar(other),
         };
         let if_condition = if self.control_plane_lane() == RunnerMode::Velnor {
-            format!("always() && ({})", self.velnor_control_plane_expression())
+            format!(
+                "{} && ({})",
+                aggregate_job_guard(cancel_in_progress),
+                self.velnor_control_plane_expression()
+            )
         } else {
-            "always()".to_owned()
+            aggregate_job_guard(cancel_in_progress).to_owned()
         };
         let needs_json = github_expression("toJSON(needs)");
         let selected_units = github_expression("needs.plan.outputs.units");
@@ -4154,9 +4325,13 @@ impl WorkflowIr {
         render_required_caller_verdicts(output, &callers);
         if check_name == REQUIRED_CHECK {
             let required_gate = if self.control_plane_lane() == RunnerMode::Velnor {
-                format!("always() && ({})", self.velnor_control_plane_expression())
+                format!(
+                    "{} && ({})",
+                    aggregate_job_guard(cancel_in_progress),
+                    self.velnor_control_plane_expression()
+                )
             } else {
-                "always()".to_owned()
+                aggregate_job_guard(cancel_in_progress).to_owned()
             };
             let _ = writeln!(
                 output,
@@ -6489,7 +6664,7 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         &self,
         output: &mut String,
         runners: RunnerMode,
-        _stable: bool,
+        cancel_in_progress: bool,
         include_policy: bool,
     ) {
         let display_name = yaml_scalar(REQUIRED_CHECK);
@@ -6523,9 +6698,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
             }
         }
         let gate = if self.control_plane_lane() == RunnerMode::Velnor {
-            format!("always() && ({})", self.velnor_control_plane_expression())
+            format!(
+                "{} && ({})",
+                aggregate_job_guard(cancel_in_progress),
+                self.velnor_control_plane_expression()
+            )
         } else {
-            "always()".to_owned()
+            aggregate_job_guard(cancel_in_progress).to_owned()
         };
         let needs_json = github_expression("toJSON(needs)");
         let selected_units = github_expression("needs.plan.outputs.units");
@@ -6553,9 +6732,13 @@ Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID""#
         output.push_str("          selected=\",$SELECTED_UNITS,\"\n");
         render_required_caller_verdicts(output, &callers);
         let required_gate = if self.control_plane_lane() == RunnerMode::Velnor {
-            format!("always() && ({})", self.velnor_control_plane_expression())
+            format!(
+                "{} && ({})",
+                aggregate_job_guard(cancel_in_progress),
+                self.velnor_control_plane_expression()
+            )
         } else {
-            "always()".to_owned()
+            aggregate_job_guard(cancel_in_progress).to_owned()
         };
         let _ = writeln!(
             output,

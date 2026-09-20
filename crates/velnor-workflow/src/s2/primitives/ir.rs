@@ -234,6 +234,71 @@ mod tests {
         }
     }
 
+    fn aggregate_fixture_nodes(ir: &WorkflowIr) -> Vec<GraphNode> {
+        ir.units
+            .iter()
+            .map(|unit| GraphNode::Unit {
+                unit_id: unit.id.clone(),
+                job_id: stack_group_job_id(unit.kind),
+                name: sidebar_group_name(unit),
+                file: nested_unit_workflow_file(unit),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pull_request_aggregate_cancellation_guard_preserves_status_contract() {
+        let mut leaf = rust_unit("rust-leaf", "crates/leaf");
+        leaf.depends_on = vec!["rust-root".to_owned()];
+        let mut ir = owner_test_ir(
+            "example/cancellation",
+            vec![rust_unit("rust-root", "crates/root"), leaf],
+        );
+        ir.rust_needs = RustNeeds::DependencyClosure;
+        let nodes = aggregate_fixture_nodes(&ir);
+        let pr = ir.render_nested(WorkflowKind::PullRequest, &nodes, None);
+        let expected_callers = ir.required_callers(&nodes, None).len();
+        assert_eq!(
+            pr.matches("if: ${{ !cancelled() &&").count(),
+            expected_callers,
+            "every rendered PR caller carries the cancellation guard"
+        );
+        assert!(
+            pr.contains("if: ${{ !cancelled() && needs.plan.result == 'success'"),
+            "PR callers keep the explicit plan-success prerequisite after the cancellation guard"
+        );
+        assert!(
+            pr.contains("result == 'skipped'"),
+            "dependency skips remain an explicit caller condition"
+        );
+        assert!(
+            pr.contains("expected CI job") && pr.contains("cancelled)") && pr.contains("skipped)"),
+            "the required gate retains explicit failed, cancelled, and skipped verdicts"
+        );
+        assert!(
+            pr.contains("cancel-in-progress: true")
+                && pr.contains("ci-required:\n    name:")
+                && pr.contains("if: ${{ !cancelled() }}"),
+            "PR concurrency and required checks use the cancellation-aware aggregate guard"
+        );
+
+        for kind in [WorkflowKind::Main, WorkflowKind::Nightly] {
+            let stable = ir.render_nested(kind, &nodes, None);
+            assert!(
+                stable.contains("cancel-in-progress: false"),
+                "{kind:?} keeps cancellation disabled"
+            );
+            assert!(
+                !stable.contains("if: ${{ !cancelled()"),
+                "{kind:?} keeps publishing/alert jobs on the always-running path"
+            );
+            assert!(
+                stable.contains("if: ${{ always()"),
+                "{kind:?} retains its always-running aggregate checks"
+            );
+        }
+    }
+
     #[test]
     fn tool_provisioning_renders_declared_prepared_tools() {
         let mut unit = rust_unit("rust", ".");
@@ -525,6 +590,7 @@ mod tests {
             &mut rendered,
             include_policy,
             REQUIRED_CHECK,
+            false,
             false,
         );
         let script = must_some(
@@ -3197,10 +3263,22 @@ fn aggregate_concurrency_group(ir: &WorkflowIr, kind: WorkflowKind) -> String {
 fn aggregate_concurrency_block(
     ir: &WorkflowIr,
     kind: WorkflowKind,
-    cancel_in_progress: &str,
+    cancel_in_progress: bool,
 ) -> String {
     let group = aggregate_concurrency_group(ir, kind);
     format!("concurrency:\n  group: {group}\n  cancel-in-progress: {cancel_in_progress}\n\n")
+}
+
+/// PR aggregates may be superseded while they are waiting on a dependency.
+/// Keep their callers and required mirrors out of the cancelled run while
+/// retaining the explicit result/admission predicates below the status guard.
+/// Main and nightly aggregates must finish their publishing and alert paths.
+fn aggregate_job_guard(cancel_in_progress: bool) -> &'static str {
+    if cancel_in_progress {
+        "!cancelled()"
+    } else {
+        "always()"
+    }
 }
 
 fn aggregate_triggers(
@@ -3208,7 +3286,7 @@ fn aggregate_triggers(
     default_branch: &str,
     providers: &ProviderSet,
     default_dispatch_providers: &ProviderSet,
-) -> (&'static str, &'static str, String, &'static str) {
+) -> (&'static str, &'static str, String, bool) {
     match kind {
         WorkflowKind::PullRequest => (
             "CI / PR",
@@ -3223,7 +3301,7 @@ fn aggregate_triggers(
                     default_dispatch_providers,
                 )
             ),
-            "true",
+            true,
         ),
         WorkflowKind::Main => (
             "CI / Main",
@@ -3239,7 +3317,7 @@ fn aggregate_triggers(
                     default_dispatch_providers,
                 )
             ),
-            "false",
+            false,
         ),
         WorkflowKind::Nightly => (
             "Nightly",
@@ -3254,7 +3332,7 @@ fn aggregate_triggers(
                     default_dispatch_providers,
                 )
             ),
-            "false",
+            false,
         ),
     }
 }
@@ -3894,6 +3972,7 @@ impl WorkflowIr {
             nodes,
             &mut output,
             kind != WorkflowKind::PullRequest,
+            cancel_in_progress,
             contracts,
         );
         if kind == WorkflowKind::Nightly {
@@ -3904,6 +3983,7 @@ impl WorkflowIr {
                 true,
                 "nightly-required",
                 true,
+                cancel_in_progress,
             );
             self.render_nightly_alert(&mut output, "nightly-required", None);
         } else if self.ci_required {
@@ -3914,6 +3994,7 @@ impl WorkflowIr {
                 kind != WorkflowKind::PullRequest,
                 REQUIRED_CHECK,
                 false,
+                cancel_in_progress,
             );
         }
         while output.ends_with("\n\n") {
@@ -3932,7 +4013,7 @@ impl WorkflowIr {
             &self.providers,
             &self.default_dispatch_providers,
         );
-        let concurrency = aggregate_concurrency_block(self, WorkflowKind::Nightly, "false");
+        let concurrency = aggregate_concurrency_block(self, WorkflowKind::Nightly, false);
         let default_branch = yaml_scalar(&self.default_branch);
         let default_providers = self
             .default_dispatch_providers
@@ -4050,6 +4131,7 @@ impl WorkflowIr {
         file: &str,
         sample_unit: &str,
         include_policy: bool,
+        cancel_in_progress: bool,
     ) {
         let caller = self.prepare_cargo_required_caller(file);
         let mut needs = vec!["plan".to_owned()];
@@ -4057,7 +4139,7 @@ impl WorkflowIr {
             needs.push("policy".to_owned());
         }
         let mut conditions = vec![
-            "always()".to_owned(),
+            aggregate_job_guard(cancel_in_progress).to_owned(),
             "needs.plan.result == 'success'".to_owned(),
         ];
         if include_policy {
@@ -4094,6 +4176,7 @@ impl WorkflowIr {
         caller: &UnitProviderCaller,
         include_policy: bool,
         extra_needs: &[String],
+        cancel_in_progress: bool,
     ) {
         let provider = caller.provider;
         let mut needs = vec!["plan".to_owned()];
@@ -4109,7 +4192,7 @@ impl WorkflowIr {
             rust_dependency_needs(provider, unit, self.rust_needs, &self.units),
         );
         let mut conditions = vec![
-            "always()".to_owned(),
+            aggregate_job_guard(cancel_in_progress).to_owned(),
             "needs.plan.result == 'success'".to_owned(),
         ];
         if include_policy {
@@ -4155,6 +4238,7 @@ impl WorkflowIr {
         nodes: &[GraphNode],
         output: &mut String,
         include_policy: bool,
+        cancel_in_progress: bool,
         contracts: Option<&BTreeMap<String, UnitContract>>,
     ) {
         let mut prepare_cargo_files = BTreeSet::new();
@@ -4166,7 +4250,13 @@ impl WorkflowIr {
             if self.kind_file_needs_prepare_cargo(file)
                 && prepare_cargo_files.insert(file.to_owned())
             {
-                self.render_prepare_cargo_caller(output, file, unit_id, include_policy);
+                self.render_prepare_cargo_caller(
+                    output,
+                    file,
+                    unit_id,
+                    include_policy,
+                    cancel_in_progress,
+                );
             }
             for caller in self.unit_provider_callers(unit, file, contracts) {
                 let extra_needs = if self.serial_stack_groups && caller.provider.is_local() {
@@ -4180,6 +4270,7 @@ impl WorkflowIr {
                     &caller,
                     include_policy,
                     &extra_needs,
+                    cancel_in_progress,
                 );
                 if caller.provider.is_local() {
                     previous_local_caller = Some(caller.job_id.clone());
@@ -4229,6 +4320,10 @@ impl WorkflowIr {
     }
 
     /// The aggregate required check over every contributed unit node.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the required gate has independent plan, policy, simulation, and cancellation inputs"
+    )]
     pub(crate) fn render_nodes_required(
         &self,
         nodes: &[GraphNode],
@@ -4237,6 +4332,7 @@ impl WorkflowIr {
         include_policy: bool,
         check_name: &str,
         simulate_failure: bool,
+        cancel_in_progress: bool,
     ) {
         let controls = required_controls(include_policy);
         let callers = self.required_callers(nodes, contracts);
@@ -4257,7 +4353,8 @@ impl WorkflowIr {
         let expected_callers = required_execution_contract(&callers);
         let _ = write!(
             output,
-            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ always() }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n          PLAN_DIGEST: {plan_digest}\n          EXCLUDED: {excluded}\n          EXPECTED_CALLERS: {}\n{}",
+            "  {check_name}:\n    name: {display_name}\n    if: ${{{{ {} }}}}\n    needs: [{}]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Validate generated stack results\n        env:\n          NEEDS_JSON: {needs_json}\n          SELECTED_UNITS: {selected_units}\n          PLAN_DIGEST: {plan_digest}\n          EXCLUDED: {excluded}\n          EXPECTED_CALLERS: {}\n{}",
+            aggregate_job_guard(cancel_in_progress),
             needs.join(", "),
             self.runs_on_yaml(CONTROL_PLANE_PROVIDER),
             yaml_scalar(&expected_callers),
@@ -4308,8 +4405,9 @@ impl WorkflowIr {
         if check_name == REQUIRED_CHECK {
             let _ = writeln!(
                 output,
-                "  required:\n    name: {}\n    if: ${{{{ always() }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
+                "  required:\n    name: {}\n    if: ${{{{ {} }}}}\n    needs: [ci-required]\n    runs-on: {}\n    timeout-minutes: 5\n    steps:\n      - name: Mirror CI / Required\n        if: ${{{{ needs.ci-required.result != 'success' }}}}\n        run: exit 1",
                 crate::s2::control_job_name("Required"),
+                aggregate_job_guard(cancel_in_progress),
                 self.runs_on_yaml(CONTROL_PLANE_PROVIDER)
             );
         }
