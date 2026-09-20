@@ -97,9 +97,14 @@ fn write_inputs(root: &Path, config: &str, include_verify_task: bool) {
     } else {
         ""
     };
+    let pre_publish = if config.contains("pre_publish_tasks") {
+        "\n[tasks.migrate-preview-legacy]\nrun = \"echo migrate\"\n"
+    } else {
+        ""
+    };
     fs::write(
         root.join("mise.toml"),
-        format!("[tasks.build-release]\nrun = \"echo build\"\n{verify}"),
+        format!("[tasks.build-release]\nrun = \"echo build\"\n{verify}{pre_publish}"),
     )
     .unwrap();
 }
@@ -219,6 +224,68 @@ fn package_release_hook_rejects_undeclared_mise_task() {
             "package-release verify_tasks entry verify-release is not declared by mise.toml"
         ),
         "error must identify the undeclared task: {error}"
+    );
+    let _ = fs::remove_dir_all(workspace);
+}
+
+#[test]
+fn package_release_hook_renders_locked_pre_publish_migration_with_narrow_tokens() {
+    let workspace = temporary_root("pre-publish");
+    let root = fixture_root(&workspace.join("repo"));
+    let config = format!(
+        "{}\npre_publish_tasks = [\"migrate-preview-legacy\"]\n",
+        package_config("verify-release")
+    );
+    write_inputs(&root, &config, true);
+    let generated = generate_in_place(&root);
+    assert!(
+        generated.status.success(),
+        "generation failed:\n{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+
+    let workflow = fs::read_to_string(root.join(".github/workflows/preview.yml")).unwrap();
+    assert_eq!(
+        workflow
+            .matches("mise run 'migrate-preview-legacy'")
+            .count(),
+        1
+    );
+    let handoff = workflow
+        .find("- name: Re-verify downloaded handoff")
+        .expect("handoff verification");
+    let attest = workflow
+        .find("- name: Verify build attestations")
+        .expect("build attestation verification");
+    let lock = workflow
+        .find("- name: Acquire package publication lock")
+        .expect("publication lock");
+    let migration = workflow
+        .find("- name: Run pre-publish migration tasks")
+        .expect("pre-publish migration");
+    let immutable = workflow
+        .find("- name: Publish immutable source-bound release")
+        .expect("immutable publication");
+    let published = workflow
+        .find("- name: Download and re-verify published release")
+        .expect("published verification");
+    assert!(handoff < attest && attest < lock && lock < migration && migration < immutable);
+    assert!(immutable < published);
+    assert!(workflow.contains("GH_TOKEN: ${{ github.token }}\n          VELNOR_SOURCE_CHECKOUT_DIR: ${{ github.workspace }}/source"));
+    assert!(workflow.contains("        working-directory: source\n        run: |\n          set -euo pipefail\n          mise run 'migrate-preview-legacy'"));
+    let publish_job = workflow
+        .split_once("  publish:\n")
+        .map(|(_, job)| job)
+        .expect("publish job");
+    let publish_env = publish_job
+        .split_once("    concurrency:\n")
+        .map(|(env, _)| env)
+        .expect("publish job environment");
+    assert!(!publish_env.contains("UPDATER_TOKEN"));
+    assert!(workflow.contains("token: ${{ secrets.TAP_TOKEN }}"));
+    assert_eq!(workflow.matches("${{ secrets.TAP_TOKEN }}").count(), 3);
+    assert!(
+        workflow.contains("contents: write\n      pull-requests: write\n      attestations: read")
     );
     let _ = fs::remove_dir_all(workspace);
 }
