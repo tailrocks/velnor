@@ -89,15 +89,21 @@ pub struct LiveSourceJob {
 pub struct LiveCheckoutObservation {
     pub api_head_sha: String,
     pub api_raw_object_refs: Vec<String>,
-    pub proof: Option<LiveCheckoutProof>,
+    pub(crate) proof: Option<LiveCheckoutProof>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LiveCheckoutProof {
-    pub checkout_sha: String,
-    pub source_kind: String,
-    pub raw_object_refs: Vec<String>,
+pub(crate) struct LiveCheckoutProof {
+    checkout_sha: String,
+    source_kind: String,
+    raw_object_refs: Vec<String>,
+}
+
+impl LiveCheckoutProof {
+    pub(crate) fn raw_object_refs(&self) -> &[String] {
+        &self.raw_object_refs
+    }
 }
 
 impl LiveCheckoutObservation {
@@ -945,7 +951,7 @@ where
         )
         .await?;
         merge_artifacts(&mut artifacts, run_artifacts)?;
-        let workflow_bindings = workflow_bindings(&executions);
+        let workflow_bindings = workflow_bindings(&executions)?;
         let raw_ids = identity.raw_object_refs.clone();
         open_prs.push(LivePullRequest {
             identity,
@@ -1831,7 +1837,7 @@ fn validate_unique_jobs(jobs: &[LiveJob], run_id: u64, run_attempt: u32) -> Resu
     Ok(())
 }
 
-fn workflow_bindings(executions: &[LiveExecution]) -> Vec<LiveWorkflowBinding> {
+fn workflow_bindings(executions: &[LiveExecution]) -> Result<Vec<LiveWorkflowBinding>> {
     let mut grouped = BTreeMap::<(String, String, String, String), LiveWorkflowBinding>::new();
     for execution in executions {
         let key = (
@@ -1850,14 +1856,24 @@ fn workflow_bindings(executions: &[LiveExecution]) -> Vec<LiveWorkflowBinding> {
             raw_object_refs: Vec::new(),
         });
         entry.run_ids.push(execution.run_id);
-        if entry.checkout.proof.is_none() && execution.checkout.proof.is_some() {
-            entry.checkout = execution.checkout.clone();
+        match (&entry.checkout.proof, &execution.checkout.proof) {
+            (Some(existing), Some(incoming)) if existing != incoming => {
+                bail!(
+                    "workflow {} event {} has conflicting checkout proofs",
+                    entry.workflow_path,
+                    entry.event
+                );
+            }
+            (None, Some(_)) => {
+                entry.checkout = execution.checkout.clone();
+            }
+            _ => {}
         }
         entry
             .raw_object_refs
             .extend(execution.raw_object_refs.clone());
     }
-    grouped
+    Ok(grouped
         .into_values()
         .map(|mut binding| {
             binding.run_ids.sort();
@@ -1866,7 +1882,7 @@ fn workflow_bindings(executions: &[LiveExecution]) -> Vec<LiveWorkflowBinding> {
             binding.raw_object_refs.dedup();
             binding
         })
-        .collect()
+        .collect())
 }
 
 fn parse_pull_request_identity(
@@ -3628,6 +3644,7 @@ jobs:
         .expect("API-bound job");
         assert_eq!(job.job_id, 8);
         assert_eq!(job.check_run_id, 17);
+        assert!(validate_unique_jobs(&[job.clone(), job], 7, 2).is_err());
 
         let mut hostile = value.clone();
         hostile["check_run_url"] =
@@ -3709,6 +3726,32 @@ jobs:
         )
         .expect("artifact");
         assert_eq!(artifact.run_id, 7);
+        assert_eq!(artifact.run_attempt, None);
+        let mut foreign_repository = value.clone();
+        foreign_repository["workflow_run"]["repository_id"] = serde_json::json!(2);
+        assert!(parse_artifact(
+            &foreign_repository,
+            "tailrocks/velnor",
+            1,
+            7,
+            "cccccccccccccccccccccccccccccccccccccccc",
+            vec![]
+        )
+        .is_err());
+        let mut missing_repository = value.clone();
+        missing_repository["workflow_run"] = serde_json::json!({
+            "id": 7,
+            "head_sha": "cccccccccccccccccccccccccccccccccccccccc"
+        });
+        assert!(parse_artifact(
+            &missing_repository,
+            "tailrocks/velnor",
+            1,
+            7,
+            "cccccccccccccccccccccccccccccccccccccccc",
+            vec![]
+        )
+        .is_err());
         assert!(parse_artifact(
             &serde_json::json!({
                 "id": 9,
@@ -3724,5 +3767,41 @@ jobs:
             vec![]
         )
         .is_err());
+    }
+
+    #[test]
+    fn workflow_run_identity_binds_repository_urls_and_attempts() {
+        let source_sha = "cccccccccccccccccccccccccccccccccccccccc";
+        let run = serde_json::json!({
+            "id": 7,
+            "path": ".github/workflows/ci.yml@main",
+            "head_sha": source_sha,
+            "run_attempt": 2,
+            "url": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7",
+            "html_url": "https://github.com/tailrocks/velnor/actions/runs/7",
+            "repository": {"id": 1, "full_name": "tailrocks/velnor"}
+        });
+        validate_workflow_run(&run, "tailrocks/velnor", 1, 7, source_sha, None)
+            .expect("workflow run identity");
+        assert_eq!(
+            workflow_path_from_run(&run).expect("workflow path"),
+            ".github/workflows/ci.yml"
+        );
+        let attempt = serde_json::json!({
+            "id": 7,
+            "path": ".github/workflows/ci.yml@main",
+            "head_sha": source_sha,
+            "run_attempt": 2,
+            "url": "https://api.github.com/repos/tailrocks/velnor/actions/runs/7/attempts/2",
+            "html_url": "https://github.com/tailrocks/velnor/actions/runs/7/attempts/2",
+            "repository": {"id": 1, "full_name": "tailrocks/velnor"}
+        });
+        validate_workflow_run(&attempt, "tailrocks/velnor", 1, 7, source_sha, Some(2))
+            .expect("workflow attempt identity");
+        let mut foreign = run.clone();
+        foreign["repository"]["id"] = serde_json::json!(2);
+        assert!(
+            validate_workflow_run(&foreign, "tailrocks/velnor", 1, 7, source_sha, None).is_err()
+        );
     }
 }
