@@ -37,6 +37,73 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(unix)]
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 
+#[cfg(test)]
+pub(super) type TestPendingRenameHook = Box<dyn FnOnce() + Send + 'static>;
+
+#[cfg(test)]
+use std::cell::RefCell;
+
+#[cfg(test)]
+thread_local! {
+    static TEST_PENDING_RENAME_HOOK: RefCell<Option<TestPendingRenameHook>> = RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(super) fn set_test_pending_rename_hook(hook: TestPendingRenameHook) {
+    TEST_PENDING_RENAME_HOOK.with(|hooks| *hooks.borrow_mut() = Some(hook));
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum TestManifestFault {
+    Write,
+    FileSync,
+    Chmod,
+    Readback,
+    DirectorySync,
+    PublishRename,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_MANIFEST_FAULT: RefCell<Option<TestManifestFault>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn set_test_manifest_fault(fault: TestManifestFault) {
+    TEST_MANIFEST_FAULT.with(|faults| *faults.borrow_mut() = Some(fault));
+}
+
+#[cfg(test)]
+fn consume_test_manifest_fault(fault: TestManifestFault) -> bool {
+    TEST_MANIFEST_FAULT.with(|configured| {
+        let mut configured = configured.borrow_mut();
+        if *configured == Some(fault) {
+            *configured = None;
+            true
+        } else {
+            false
+        }
+    })
+}
+
+#[cfg(test)]
+fn inject_test_manifest_fault(fault: TestManifestFault) -> Result<(), RawStorageError> {
+    if consume_test_manifest_fault(fault) {
+        Err(RawStorageError::Refused)
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+fn invoke_test_pending_rename_hook() {
+    let hook = TEST_PENDING_RENAME_HOOK.with(|hooks| hooks.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 const MAX_RAW_OBJECT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_RAW_SIDECAR_BYTES: usize = MAX_RAW_OBJECT_BYTES * 2 + 4096;
 const MAX_RETAINED_ENTRIES: usize = 128;
@@ -49,6 +116,7 @@ const MAX_RETAINED_BYTES: u64 = 128 * 1024 * 1024;
 // below. Each bounded qdir has at most one payload entry, and each record has
 // one manifest no larger than MAX_RETAINED_MANIFEST_BYTES.
 const FILESYSTEM_BLOCK_BYTES: u64 = 512;
+const RETENTION_TEMP_OVERHEAD_BYTES: u64 = 64 * 1024;
 const RETENTION_SOURCE_OVERHEAD_BYTES: u64 = 64 * 1024;
 const RETENTION_RECORD_OVERHEAD_BYTES: u64 = 64 * 1024;
 const RETENTION_RECORD_RESERVATION_BYTES: u64 =
@@ -58,13 +126,15 @@ const RETENTION_MANIFEST_NAME: &[u8] = b"manifest.json\0";
 const RETENTION_ENTRY_NAME: &[u8] = b"entry\0";
 
 #[cfg(unix)]
-const RETENTION_SCHEMA_VERSION: u32 = 2;
+const RETENTION_SCHEMA_VERSION: u32 = 3;
 
 #[cfg(unix)]
 // Retention invariants:
 // * the anchored retention root contains only generated record directories;
 // * every record has exactly this schema and a private manifest. The manifest
 //   points at the descriptor-owned source entry; bytes are never duplicated;
+//   record_identity binds the manifest to the directory inode through pending
+//   publication and replay;
 // * source quarantine directories are never renamed or removed, so a source
 //   path race cannot orphan the original reachable identity;
 // * admission counts source bytes, pending qdirs, record metadata, and
@@ -101,6 +171,7 @@ struct RetentionManifest {
     source_name: String,
     source_parent: RetentionIdentity,
     quarantine: RetentionIdentity,
+    record_identity: RetentionIdentity,
     entry: Option<RetentionEntry>,
 }
 
@@ -120,6 +191,23 @@ struct RetentionScope<'a> {
     originals: &'a File,
     refs: &'a File,
     retention: &'a File,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTransaction {
+    raw_id: String,
+    request_id: String,
+    object_kind: String,
+    canonicalization: String,
+    sha256: String,
+    byte_length: u64,
+    original_sha256: String,
+    original_byte_length: u64,
+    media_type: String,
+    storage_ref: String,
+    original_storage_ref: String,
 }
 
 #[cfg(unix)]
@@ -270,6 +358,13 @@ impl RawObjectFileStore {
         if sidecar_bytes.len() > MAX_RAW_SIDECAR_BYTES {
             return Err(RawStorageError::Refused);
         }
+        // The transaction journal carries only metadata and digest claims. The
+        // immutable CAS objects remain the sole payload, so recovery never
+        // writes a second payload-sized journal before installing the sidecar.
+        let transaction_bytes = transaction_bytes(&reference)?;
+        if transaction_bytes.len() > MAX_RAW_SIDECAR_BYTES {
+            return Err(RawStorageError::Refused);
+        }
         // A valid raw ID can already be bound to a different response. Read
         // that sidecar before publishing anything so a collision cannot
         // create an unreferenced object as a side effect. The journal is the
@@ -277,11 +372,11 @@ impl RawObjectFileStore {
         // after both immutable CAS objects are complete.
         ensure_sidecar_slot(&self.refs, &sidecar_name, &sidecar_bytes)?;
         let transaction_name = transaction_name(&reference.raw_id)?;
-        ensure_sidecar_slot(&self.refs, &transaction_name, &sidecar_bytes)?;
+        ensure_sidecar_slot(&self.refs, &transaction_name, &transaction_bytes)?;
         publish_if_absent(
             &self.refs,
             &transaction_name,
-            &sidecar_bytes,
+            &transaction_bytes,
             MAX_RAW_SIDECAR_BYTES,
             &scope,
             "refs",
@@ -313,7 +408,7 @@ impl RawObjectFileStore {
         remove_exact_file(
             &self.refs,
             &transaction_name,
-            &sidecar_bytes,
+            &transaction_bytes,
             MAX_RAW_SIDECAR_BYTES,
             &scope,
             "refs",
@@ -421,6 +516,77 @@ fn sidecar_bytes(reference: &RawObjectRef) -> Result<Vec<u8>, RawStorageError> {
         "original_storage_ref": reference.original_storage_ref,
     }))
     .map_err(|_| RawStorageError::Refused)
+}
+
+#[cfg(unix)]
+fn transaction_bytes(reference: &RawObjectRef) -> Result<Vec<u8>, RawStorageError> {
+    serde_json::to_vec(&RawTransaction {
+        raw_id: reference.raw_id.clone(),
+        request_id: reference.request_id.clone(),
+        object_kind: reference.object_kind.clone(),
+        canonicalization: reference.canonicalization.clone(),
+        sha256: reference.sha256.clone(),
+        byte_length: reference.byte_length,
+        original_sha256: reference.original_sha256.clone(),
+        original_byte_length: reference.original_byte_length,
+        media_type: reference.media_type.clone(),
+        storage_ref: reference.storage_ref.clone(),
+        original_storage_ref: reference.original_storage_ref.clone(),
+    })
+    .map_err(|_| RawStorageError::Refused)
+}
+
+#[cfg(unix)]
+fn parse_transaction(raw_id: &str, bytes: &[u8]) -> Option<RawTransaction> {
+    let transaction = serde_json::from_slice::<RawTransaction>(bytes).ok()?;
+    if transaction.raw_id != raw_id
+        || transaction.byte_length > MAX_RAW_OBJECT_BYTES as u64
+        || transaction.original_byte_length > MAX_RAW_OBJECT_BYTES as u64
+        || !valid_digest(&transaction.sha256)
+        || !valid_digest(&transaction.original_sha256)
+        || transaction.storage_ref != content_addressed_storage_ref(&transaction.sha256)
+        || transaction.original_storage_ref
+            != content_addressed_storage_ref(&transaction.original_sha256)
+    {
+        return None;
+    }
+    Some(transaction)
+}
+
+#[cfg(unix)]
+fn complete_transaction_reference(
+    objects: &File,
+    originals: &File,
+    transaction: &RawTransaction,
+) -> Option<RawObjectRef> {
+    let object_name = digest_name(&transaction.sha256).ok()?;
+    let safe_bytes = read_named(objects, &object_name, MAX_RAW_OBJECT_BYTES).ok()?;
+    if safe_bytes.len() as u64 != transaction.byte_length
+        || sha256_digest(&safe_bytes) != transaction.sha256
+    {
+        return None;
+    }
+    let original_name = digest_name(&transaction.original_sha256).ok()?;
+    let original_bytes = read_named(originals, &original_name, MAX_RAW_OBJECT_BYTES).ok()?;
+    if original_bytes.len() as u64 != transaction.original_byte_length
+        || sha256_digest(&original_bytes) != transaction.original_sha256
+    {
+        return None;
+    }
+    Some(RawObjectRef {
+        raw_id: transaction.raw_id.clone(),
+        request_id: transaction.request_id.clone(),
+        object_kind: transaction.object_kind.clone(),
+        canonicalization: transaction.canonicalization.clone(),
+        sha256: transaction.sha256.clone(),
+        byte_length: transaction.byte_length,
+        original_sha256: transaction.original_sha256.clone(),
+        original_byte_length: transaction.original_byte_length,
+        bytes_base64: BASE64.encode(safe_bytes),
+        media_type: transaction.media_type.clone(),
+        storage_ref: transaction.storage_ref.clone(),
+        original_storage_ref: transaction.original_storage_ref.clone(),
+    })
 }
 
 fn sidecar_size_within_limit(reference: &RawObjectRef) -> bool {
@@ -1104,18 +1270,22 @@ fn reconcile_namespace(
             remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), &scope, "refs")?;
             continue;
         }
-        let transaction_bytes = read_named(refs, &name, MAX_RAW_SIDECAR_BYTES)?;
-        let Some(reference) = parse_reference(raw_id, &transaction_bytes) else {
+        let transaction_payload = read_named(refs, &name, MAX_RAW_SIDECAR_BYTES)?;
+        let Some(transaction) = parse_transaction(raw_id, &transaction_payload) else {
             remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), &scope, "refs")?;
             continue;
         };
         let sidecar_name = raw_id_name(raw_id)?;
+        let Some(reference) = complete_transaction_reference(objects, originals, &transaction)
+        else {
+            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), &scope, "refs")?;
+            continue;
+        };
         if object_bundle_matches(objects, originals, &reference) {
+            // Complete the public sidecar from descriptor-verified CAS bytes;
+            // the compact journal itself is intentionally never copied as a
+            // payload-sized recovery temporary.
             let expected_sidecar = sidecar_bytes(&reference)?;
-            if transaction_bytes != expected_sidecar {
-                remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), &scope, "refs")?;
-                continue;
-            }
             ensure_sidecar_slot(refs, &sidecar_name, &expected_sidecar)?;
             publish_if_absent(
                 refs,
@@ -1125,11 +1295,14 @@ fn reconcile_namespace(
                 &scope,
                 "refs",
             )?;
+        } else {
+            remove_private_named(refs, &name, Some(MAX_RAW_SIDECAR_BYTES), &scope, "refs")?;
+            continue;
         }
         remove_exact_file(
             refs,
             &name,
-            &transaction_bytes,
+            &transaction_payload,
             MAX_RAW_SIDECAR_BYTES,
             &scope,
             "refs",
@@ -1198,19 +1371,74 @@ fn reconcile_pending_retained_records(scope: &RetentionScope<'_>) -> Result<(), 
         if !valid_retained_pending_name(name.to_bytes()) {
             continue;
         }
-        let (_record, _manifest_bytes, manifest, _manifest_identity) =
+        let (record, manifest_bytes, manifest, manifest_identity) =
             read_pending_retained_record(scope.retention, &name)?;
         validate_retained_source(scope, &manifest)?;
+        let record_identity = stat_fd(&record).map_err(storage_io)?;
+        let manifest_name = CStr::from_bytes_with_nul(RETENTION_MANIFEST_NAME)
+            .map_err(|_| RawStorageError::Refused)?;
+        let current_manifest_identity = stat_at(&record, manifest_name)?;
+        if !record_identity.same_directory(manifest.record_identity.file_identity())
+            || current_manifest_identity != manifest_identity
+        {
+            return preserve_rejected_retained_record(scope.retention, &name);
+        }
         let final_name =
             CString::new(manifest.record_name.as_bytes()).map_err(|_| RawStorageError::Refused)?;
+        #[cfg(test)]
+        invoke_test_pending_rename_hook();
         rename_no_clobber(scope.retention, &name, scope.retention, &final_name)
-            .map_err(storage_io)?;
+            .map_err(|_| RawStorageError::Refused)?;
+        let final_record = match open_directory_named(scope.retention, &final_name) {
+            Ok(Some(record)) => record,
+            Ok(None) | Err(RawStorageError::Refused) => {
+                return preserve_rejected_retained_record(scope.retention, &final_name)
+            }
+            Err(error) => return Err(error),
+        };
+        let final_identity = stat_fd(&final_record).map_err(storage_io)?;
+        let (final_manifest_identity, final_manifest_bytes) =
+            read_named_with_identity(&final_record, manifest_name, MAX_RETAINED_MANIFEST_BYTES)?;
+        if !final_identity.same_directory(record_identity)
+            || final_manifest_bytes != manifest_bytes
+            || final_manifest_identity != manifest_identity
+        {
+            return preserve_rejected_retained_record(scope.retention, &final_name);
+        }
         published = true;
     }
     if published {
         sync_directory(scope.retention)?;
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn rejected_retained_record_name(retention: &File) -> Result<CString, RawStorageError> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+    for attempt in 0..64_u32 {
+        let name = CString::new(format!(
+            ".velnor-raw-retained-rejected-{}-{sequence}-{attempt}",
+            std::process::id()
+        ))
+        .map_err(|_| RawStorageError::Refused)?;
+        match stat_at(retention, &name) {
+            Err(RawStorageError::Unavailable) => return Ok(name),
+            Ok(_) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(RawStorageError::Unavailable)
+}
+
+#[cfg(unix)]
+fn preserve_rejected_retained_record(retention: &File, name: &CStr) -> Result<(), RawStorageError> {
+    let rejected = rejected_retained_record_name(retention)?;
+    rename_no_clobber(retention, name, retention, &rejected)
+        .map_err(|_| RawStorageError::Refused)?;
+    sync_directory(retention)?;
+    Err(RawStorageError::Refused)
 }
 
 #[cfg(unix)]
@@ -1689,27 +1917,16 @@ fn materialize_retained_record(
 
     let record_name = create_retained_record_name(scope.retention)?;
     let source_key = retention_key(source_namespace, &source_name, parent_identity, expected);
-    let manifest = retention_manifest(
-        &record_name,
-        source_namespace,
-        &source_name,
-        parent_identity,
-        expected,
-        entry.as_ref().map(|(identity, bytes)| RetentionEntry {
-            name: "entry".to_owned(),
-            identity: (*identity).into(),
-            byte_length: bytes.len() as u64,
-            sha256: sha256_digest(bytes),
-        }),
-    );
-    let manifest_bytes = serde_json::to_vec(&manifest).map_err(|_| RawStorageError::Refused)?;
-    if manifest_bytes.len() > MAX_RETAINED_MANIFEST_BYTES {
-        return Err(RawStorageError::Refused);
-    }
+    let entry = entry.as_ref().map(|(identity, bytes)| RetentionEntry {
+        name: "entry".to_owned(),
+        identity: (*identity).into(),
+        byte_length: bytes.len() as u64,
+        sha256: sha256_digest(bytes),
+    });
     let next_bytes = usage
         .bytes
         .checked_add(RETENTION_RECORD_OVERHEAD_BYTES)
-        .and_then(|bytes| bytes.checked_add(manifest_bytes.len() as u64))
+        .and_then(|bytes| bytes.checked_add(MAX_RETAINED_MANIFEST_BYTES as u64))
         .ok_or(RawStorageError::Refused)?;
     let next_entries = usage
         .entries
@@ -1721,6 +1938,20 @@ fn materialize_retained_record(
 
     let pending_name = retained_pending_name(&record_name)?;
     let record = create_retained_record_directory(scope.retention, &pending_name)?;
+    let record_identity = stat_fd(&record).map_err(storage_io)?;
+    let manifest = retention_manifest(
+        &record_name,
+        source_namespace,
+        &source_name,
+        parent_identity,
+        expected,
+        record_identity,
+        entry,
+    );
+    let manifest_bytes = serde_json::to_vec(&manifest).map_err(|_| RawStorageError::Refused)?;
+    if manifest_bytes.len() > MAX_RETAINED_MANIFEST_BYTES {
+        return Err(RawStorageError::Refused);
+    }
     let manifest_name =
         CStr::from_bytes_with_nul(RETENTION_MANIFEST_NAME).map_err(|_| RawStorageError::Refused)?;
     write_private_file(
@@ -1732,6 +1963,8 @@ fn materialize_retained_record(
     sync_directory(&record)?;
     sync_directory(scope.retention)?;
     sync_directory(parent)?;
+    #[cfg(test)]
+    inject_test_manifest_fault(TestManifestFault::PublishRename)?;
     rename_no_clobber(
         scope.retention,
         &pending_name,
@@ -1760,6 +1993,7 @@ fn retention_manifest(
     source_name: &str,
     source_parent: FileIdentity,
     quarantine: FileIdentity,
+    record_identity: FileIdentity,
     entry: Option<RetentionEntry>,
 ) -> RetentionManifest {
     RetentionManifest {
@@ -1770,6 +2004,7 @@ fn retention_manifest(
         source_name: source_name.to_owned(),
         source_parent: source_parent.into(),
         quarantine: quarantine.into(),
+        record_identity: record_identity.into(),
         entry,
     }
 }
@@ -1793,6 +2028,9 @@ fn parse_retention_manifest(bytes: &[u8]) -> Result<RetentionManifest, RawStorag
         || manifest.source_parent.file_identity().mode & 0o777 != 0o700
         || manifest.quarantine.file_identity().mode & libc::S_IFMT as u32 != libc::S_IFDIR as u32
         || manifest.quarantine.file_identity().mode & 0o777 != 0o700
+        || manifest.record_identity.file_identity().mode & libc::S_IFMT as u32
+            != libc::S_IFDIR as u32
+        || manifest.record_identity.file_identity().mode & 0o777 != 0o700
     {
         return Err(RawStorageError::Refused);
     }
@@ -1976,7 +2214,12 @@ fn read_retained_record(
     let (manifest_identity, manifest_bytes) =
         read_named_with_identity(&record, manifest_name, MAX_RETAINED_MANIFEST_BYTES)?;
     let manifest = parse_retention_manifest(&manifest_bytes)?;
-    if manifest.record_name != name.to_string_lossy() {
+    if manifest.record_name != name.to_string_lossy()
+        || !manifest
+            .record_identity
+            .file_identity()
+            .same_directory(identity)
+    {
         return Err(RawStorageError::Refused);
     }
     let mut names = directory_names(&record)?;
@@ -2013,7 +2256,12 @@ fn read_pending_retained_record(
     let (manifest_identity, manifest_bytes) =
         read_named_with_identity(&record, manifest_name, MAX_RETAINED_MANIFEST_BYTES)?;
     let manifest = parse_retention_manifest(&manifest_bytes)?;
-    if !valid_retained_name(manifest.record_name.as_bytes()) {
+    if !valid_retained_name(manifest.record_name.as_bytes())
+        || !manifest
+            .record_identity
+            .file_identity()
+            .same_directory(identity)
+    {
         return Err(RawStorageError::Refused);
     }
     let mut names = directory_names(&record)?;
@@ -2090,7 +2338,11 @@ fn allocation_or_logical(identity: FileIdentity, logical_bytes: u64) -> u64 {
 }
 
 #[cfg(unix)]
-fn account_pending_file(
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the accounting identity and source namespace stay explicit at the descriptor boundary"
+)]
+fn account_source_file(
     usage: &mut RetentionUsage,
     source_keys: &mut HashSet<RetentionKey>,
     parent: FileIdentity,
@@ -2098,11 +2350,17 @@ fn account_pending_file(
     name: &CStr,
     identity: FileIdentity,
     bytes: &[u8],
+    temporary: bool,
 ) -> Result<(), RawStorageError> {
     account_actual_bytes(usage, allocation_or_logical(identity, bytes.len() as u64))?;
+    let temporary_overhead = if temporary {
+        RETENTION_TEMP_OVERHEAD_BYTES
+    } else {
+        0
+    };
     add_retention_bytes(
         &mut usage.reserved_bytes,
-        RETENTION_SOURCE_OVERHEAD_BYTES + RETENTION_RECORD_RESERVATION_BYTES,
+        temporary_overhead + RETENTION_SOURCE_OVERHEAD_BYTES + RETENTION_RECORD_RESERVATION_BYTES,
     )?;
     let source_name = source_name_string(name)?;
     source_keys.insert(retention_key(
@@ -2115,26 +2373,70 @@ fn account_pending_file(
 }
 
 #[cfg(unix)]
+fn publication_admission(
+    scope: &RetentionScope<'_>,
+    payload_bytes: usize,
+) -> Result<(), RawStorageError> {
+    let usage = retention_usage(scope)?;
+    if usage.entries >= MAX_RETAINED_ENTRIES {
+        return Err(RawStorageError::Refused);
+    }
+    let incoming = u64::try_from(payload_bytes)
+        .map_err(|_| RawStorageError::Refused)?
+        .checked_add(
+            RETENTION_TEMP_OVERHEAD_BYTES
+                + RETENTION_SOURCE_OVERHEAD_BYTES
+                + RETENTION_RECORD_RESERVATION_BYTES,
+        )
+        .ok_or(RawStorageError::Refused)?;
+    let peak = usage
+        .reserved_bytes
+        .checked_add(incoming)
+        .ok_or(RawStorageError::Refused)?;
+    if peak > MAX_RETAINED_BYTES {
+        return Err(RawStorageError::Refused);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn referenced_object_names(
     scope: &RetentionScope<'_>,
 ) -> Result<(HashSet<String>, HashSet<String>), RawStorageError> {
     let mut safe_names = HashSet::new();
     let mut original_names = HashSet::new();
     for name in directory_names(scope.refs)? {
-        let Some(raw_id_bytes) = name.to_bytes().strip_suffix(b".json") else {
-            continue;
-        };
+        let (raw_id_bytes, transaction) =
+            if let Some(raw_id_bytes) = name.to_bytes().strip_suffix(b".json") {
+                (raw_id_bytes, false)
+            } else if let Some(raw_id_bytes) = name.to_bytes().strip_suffix(b".txn") {
+                (raw_id_bytes, true)
+            } else {
+                continue;
+            };
         let Ok(raw_id) = std::str::from_utf8(raw_id_bytes) else {
             continue;
         };
-        let Ok(expected_name) = raw_id_name(raw_id) else {
+        let Ok(expected_name) = (if transaction {
+            transaction_name(raw_id)
+        } else {
+            raw_id_name(raw_id)
+        }) else {
             continue;
         };
         if expected_name.as_bytes() != name.as_bytes() {
             continue;
         }
         let bytes = read_named(scope.refs, &name, MAX_RAW_SIDECAR_BYTES)?;
-        let Some(reference) = parse_reference(raw_id, &bytes) else {
+        let reference = if transaction {
+            let Some(transaction) = parse_transaction(raw_id, &bytes) else {
+                continue;
+            };
+            complete_transaction_reference(scope.objects, scope.originals, &transaction)
+        } else {
+            parse_reference(raw_id, &bytes)
+        };
+        let Some(reference) = reference else {
             continue;
         };
         if object_bundle_matches(scope.objects, scope.originals, &reference) {
@@ -2275,7 +2577,7 @@ fn retention_usage(scope: &RetentionScope<'_>) -> Result<RetentionUsage, RawStor
                     MAX_RAW_OBJECT_BYTES
                 };
                 let bytes = read_verified_fd(&mut temporary, max_bytes)?;
-                account_pending_file(
+                account_source_file(
                     &mut usage,
                     &mut source_keys,
                     parent,
@@ -2283,6 +2585,7 @@ fn retention_usage(scope: &RetentionScope<'_>) -> Result<RetentionUsage, RawStor
                     &name,
                     identity,
                     &bytes,
+                    true,
                 )?;
                 continue;
             }
@@ -2372,7 +2675,7 @@ fn retention_usage(scope: &RetentionScope<'_>) -> Result<RetentionUsage, RawStor
                     MAX_RAW_OBJECT_BYTES
                 };
                 let bytes = read_verified_fd(&mut file, max_bytes)?;
-                account_pending_file(
+                account_source_file(
                     &mut usage,
                     &mut source_keys,
                     parent,
@@ -2380,6 +2683,7 @@ fn retention_usage(scope: &RetentionScope<'_>) -> Result<RetentionUsage, RawStor
                     &name,
                     identity,
                     &bytes,
+                    false,
                 )?;
             }
         }
@@ -2472,15 +2776,29 @@ fn write_private_file(
         return Err(storage_io(error));
     }
     let mut file = unsafe { File::from_raw_fd(fd) };
+    #[cfg(test)]
+    if consume_test_manifest_fault(TestManifestFault::Write) {
+        let partial_len = bytes.len().checked_div(2).unwrap_or(0);
+        file.write_all(&bytes[..partial_len]).map_err(storage_io)?;
+        return Err(RawStorageError::Refused);
+    }
     file.write_all(bytes).map_err(storage_io)?;
+    #[cfg(test)]
+    inject_test_manifest_fault(TestManifestFault::FileSync)?;
     file.sync_all().map_err(storage_io)?;
+    #[cfg(test)]
+    inject_test_manifest_fault(TestManifestFault::Chmod)?;
     if unsafe { libc::fchmod(file.as_raw_fd(), 0o400) } < 0 {
         return Err(storage_io(io::Error::last_os_error()));
     }
     file.seek(SeekFrom::Start(0)).map_err(storage_io)?;
+    #[cfg(test)]
+    inject_test_manifest_fault(TestManifestFault::Readback)?;
     if read_verified_fd(&mut file, max_bytes)? != bytes {
         return Err(RawStorageError::Refused);
     }
+    #[cfg(test)]
+    inject_test_manifest_fault(TestManifestFault::DirectorySync)?;
     sync_directory(directory)?;
     Ok(())
 }
@@ -2542,6 +2860,11 @@ fn publish_if_absent(
         Some(_) => return Err(RawStorageError::Refused),
         None => {}
     }
+    // Admission happens while the namespace lock is held and before the
+    // temporary inode exists. Its reservation covers the complete write peak
+    // (payload, filesystem slack, and record/source metadata), so a failed
+    // write cannot create an unaccounted over-quota state.
+    publication_admission(scope, bytes.len())?;
     let mut temporary = TemporaryFile::create(directory, scope, source_namespace)?;
     (|| {
         temporary

@@ -150,6 +150,26 @@ fn sidecar_path(root: &Path, reference: &RawObjectRef) -> PathBuf {
     root.join("refs").join(format!("{}.json", reference.raw_id))
 }
 
+#[cfg(unix)]
+fn transaction_journal_bytes(reference: &RawObjectRef) -> Vec<u8> {
+    must(
+        serde_json::to_vec(&serde_json::json!({
+            "raw_id": reference.raw_id,
+            "request_id": reference.request_id,
+            "object_kind": reference.object_kind,
+            "canonicalization": reference.canonicalization,
+            "sha256": reference.sha256,
+            "byte_length": reference.byte_length,
+            "original_sha256": reference.original_sha256,
+            "original_byte_length": reference.original_byte_length,
+            "media_type": reference.media_type,
+            "storage_ref": reference.storage_ref,
+            "original_storage_ref": reference.original_storage_ref,
+        })),
+        "serialize transaction journal",
+    )
+}
+
 #[test]
 fn stores_safe_bytes_with_distinct_original_provenance() {
     let root = fixture("provenance");
@@ -264,6 +284,8 @@ fn stores_safe_bytes_with_distinct_original_provenance() {
 #[cfg(unix)]
 #[test]
 fn recovers_complete_transaction_and_sweeps_incomplete_bundle() {
+    use std::os::unix::fs::PermissionsExt;
+
     let root = fixture("transaction-recovery");
     let mut store = must(RawObjectFileStore::new(&root), "open transaction store");
     let reference = must(
@@ -273,8 +295,16 @@ fn recovers_complete_transaction_and_sweeps_incomplete_bundle() {
     let sidecar = sidecar_path(&root, &reference);
     let transaction = root.join("refs").join("recover-complete.txn");
     must(
-        fs::rename(&sidecar, &transaction),
-        "move sidecar to durable transaction journal",
+        fs::remove_file(&sidecar),
+        "remove complete sidecar before journaling",
+    );
+    must(
+        fs::write(&transaction, transaction_journal_bytes(&reference)),
+        "write compact durable transaction journal",
+    );
+    must(
+        fs::set_permissions(&transaction, fs::Permissions::from_mode(0o400)),
+        "restrict complete transaction journal",
     );
     drop(store);
 
@@ -298,8 +328,19 @@ fn recovers_complete_transaction_and_sweeps_incomplete_bundle() {
     let incomplete_sidecar = sidecar_path(&root, &incomplete_reference);
     let incomplete_transaction = root.join("refs").join("recover-incomplete.txn");
     must(
-        fs::rename(&incomplete_sidecar, &incomplete_transaction),
-        "move incomplete sidecar to journal",
+        fs::remove_file(&incomplete_sidecar),
+        "remove incomplete sidecar before journaling",
+    );
+    must(
+        fs::write(
+            &incomplete_transaction,
+            transaction_journal_bytes(&incomplete_reference),
+        ),
+        "write compact incomplete transaction journal",
+    );
+    must(
+        fs::set_permissions(&incomplete_transaction, fs::Permissions::from_mode(0o400)),
+        "restrict incomplete transaction journal",
     );
     must(
         fs::remove_file(object_path(&root, &incomplete_reference)),
@@ -319,6 +360,48 @@ fn recovers_complete_transaction_and_sweeps_incomplete_bundle() {
         recovered.verify(&reference),
         "verify surviving complete bundle",
     );
+    remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn recovers_max_size_valid_compact_transaction_without_payload_duplicate() {
+    use std::os::unix::fs::PermissionsExt;
+
+    const MAX_OBJECT_BYTES: usize = 64 * 1024 * 1024;
+    let root = fixture("transaction-recovery-max");
+    let mut store = must(RawObjectFileStore::new(&root), "open max transaction store");
+    let reference = must(
+        store.store(capture(
+            "recover-max",
+            b"small-original",
+            &vec![b's'; MAX_OBJECT_BYTES],
+        )),
+        "store max recoverable bundle",
+    );
+    let sidecar = sidecar_path(&root, &reference);
+    let transaction = root.join("refs").join("recover-max.txn");
+    must(
+        fs::remove_file(&sidecar),
+        "remove max sidecar before journaling",
+    );
+    must(
+        fs::write(&transaction, transaction_journal_bytes(&reference)),
+        "write max compact transaction journal",
+    );
+    must(
+        fs::set_permissions(&transaction, fs::Permissions::from_mode(0o400)),
+        "restrict max transaction journal",
+    );
+    drop(store);
+
+    let reopened = must(
+        RawObjectFileStore::new(&root),
+        "recover max compact transaction journal",
+    );
+    assert!(sidecar.exists());
+    assert!(!transaction.exists());
+    must(reopened.verify(&reference), "verify max recovered bundle");
     remove_fixture(&root);
 }
 
@@ -1387,6 +1470,170 @@ fn complete_staged_retention_record_is_published_on_reopen() {
 
 #[cfg(unix)]
 #[test]
+fn pending_recovery_rejects_replaced_valid_record() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fixture("retention-staged-replacement");
+    let store = must(RawObjectFileStore::new(&root), "open replacement store");
+    drop(store);
+    for (name, bytes) in [
+        (".velnor-raw-quarantine-21-0-0", b"first-source".as_slice()),
+        (".velnor-raw-quarantine-22-0-0", b"second-source".as_slice()),
+    ] {
+        let quarantine = root.join("sha256").join(name);
+        must(
+            fs::create_dir(&quarantine),
+            "create replacement source quarantine",
+        );
+        must(
+            fs::set_permissions(&quarantine, fs::Permissions::from_mode(0o700)),
+            "restrict replacement source quarantine",
+        );
+        let entry = quarantine.join("entry");
+        must(fs::write(&entry, bytes), "write replacement source entry");
+        must(
+            fs::set_permissions(&entry, fs::Permissions::from_mode(0o400)),
+            "restrict replacement source entry",
+        );
+    }
+    let reopened = must(
+        RawObjectFileStore::new(&root),
+        "materialize replacement source records",
+    );
+    drop(reopened);
+
+    let retention = root.join(".velnor-raw-quarantine");
+    let mut records = must(fs::read_dir(&retention), "read replacement records")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(".velnor-raw-retained-"))
+                && !path.file_name().is_some_and(|name| {
+                    name.to_string_lossy()
+                        .starts_with(".velnor-raw-retained-pending-")
+                })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 2);
+    records.sort();
+    let target = records.remove(0);
+    let wrong = records.remove(0);
+    let target_name = target
+        .file_name()
+        .unwrap_or_else(|| panic!("target record name"))
+        .to_owned();
+    let pending = retention.join(target_name.to_string_lossy().replacen(
+        ".velnor-raw-retained-",
+        ".velnor-raw-retained-pending-",
+        1,
+    ));
+    must(fs::rename(&target, &pending), "stage target record");
+    let pending_for_hook = pending.clone();
+    let wrong_for_hook = wrong.clone();
+    github_raw_store::set_test_pending_rename_hook(Box::new(move || {
+        fs::remove_dir_all(&pending_for_hook)
+            .unwrap_or_else(|error| panic!("remove staged target for replacement: {error}"));
+        fs::rename(&wrong_for_hook, &pending_for_hook)
+            .unwrap_or_else(|error| panic!("install valid wrong staged record: {error}"));
+    }));
+
+    assert!(RawObjectFileStore::new(&root).is_err());
+    assert!(!retention.join(&target_name).exists());
+    assert!(!pending.exists());
+    assert!(must(fs::read_dir(&retention), "read rejected record")
+        .flatten()
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".velnor-raw-retained-rejected-")
+        }));
+    remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn pending_recovery_rejects_replaced_symlink() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let root = fixture("retention-staged-symlink");
+    let store = must(
+        RawObjectFileStore::new(&root),
+        "open symlink replacement store",
+    );
+    drop(store);
+    let quarantine = root.join("sha256").join(".velnor-raw-quarantine-31-0-0");
+    must(
+        fs::create_dir(&quarantine),
+        "create symlink source quarantine",
+    );
+    must(
+        fs::set_permissions(&quarantine, fs::Permissions::from_mode(0o700)),
+        "restrict symlink source quarantine",
+    );
+    let entry = quarantine.join("entry");
+    must(
+        fs::write(&entry, b"symlink-source"),
+        "write symlink source entry",
+    );
+    must(
+        fs::set_permissions(&entry, fs::Permissions::from_mode(0o400)),
+        "restrict symlink source entry",
+    );
+    let reopened = must(
+        RawObjectFileStore::new(&root),
+        "materialize symlink source record",
+    );
+    drop(reopened);
+
+    let retention = root.join(".velnor-raw-quarantine");
+    let target = must(fs::read_dir(&retention), "read symlink retention");
+    let target = target
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with(".velnor-raw-retained-"))
+        })
+        .unwrap_or_else(|| panic!("symlink target record missing"));
+    let target_name = target
+        .file_name()
+        .unwrap_or_else(|| panic!("symlink target name"))
+        .to_owned();
+    let pending = retention.join(target_name.to_string_lossy().replacen(
+        ".velnor-raw-retained-",
+        ".velnor-raw-retained-pending-",
+        1,
+    ));
+    must(fs::rename(&target, &pending), "stage symlink target");
+    let outside = root.join("outside-pending-target");
+    must(fs::create_dir(&outside), "create symlink outside target");
+    let pending_for_hook = pending.clone();
+    let outside_for_hook = outside.clone();
+    github_raw_store::set_test_pending_rename_hook(Box::new(move || {
+        fs::remove_dir_all(&pending_for_hook)
+            .unwrap_or_else(|error| panic!("remove staged symlink target: {error}"));
+        symlink(&outside_for_hook, &pending_for_hook)
+            .unwrap_or_else(|error| panic!("install staged symlink replacement: {error}"));
+    }));
+
+    assert!(RawObjectFileStore::new(&root).is_err());
+    assert!(!retention.join(&target_name).exists());
+    assert!(!pending.exists());
+    assert!(must(fs::read_dir(&retention), "read rejected symlink")
+        .flatten()
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".velnor-raw-retained-rejected-")
+        }));
+    remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
 fn partial_staged_retention_record_fails_closed_without_reclaim() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -1403,7 +1650,7 @@ fn partial_staged_retention_record_fails_closed_without_reclaim() {
     );
     let manifest = record.join("manifest.json");
     must(
-        fs::write(&manifest, b"{\"schema\":2"),
+        fs::write(&manifest, b"{\"schema\":3"),
         "write partial staged manifest",
     );
     must(
@@ -1417,7 +1664,7 @@ fn partial_staged_retention_record_fails_closed_without_reclaim() {
             fs::read(&manifest),
             "read preserved partial staged manifest"
         ),
-        b"{\"schema\":2"
+        b"{\"schema\":3"
     );
     remove_fixture(&root);
 }
@@ -1455,6 +1702,72 @@ fn partial_retention_record_fails_closed_without_reclaim() {
         b"{\"schema\":1"
     );
     remove_fixture(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn manifest_fault_boundaries_leave_only_bounded_staging_state() {
+    use github_raw_store::TestManifestFault;
+    use std::os::unix::fs::PermissionsExt;
+
+    let faults = [
+        TestManifestFault::Write,
+        TestManifestFault::FileSync,
+        TestManifestFault::Chmod,
+        TestManifestFault::Readback,
+        TestManifestFault::DirectorySync,
+        TestManifestFault::PublishRename,
+    ];
+    for (index, fault) in faults.into_iter().enumerate() {
+        let root = fixture(&format!("retention-fault-{index}"));
+        let store = must(RawObjectFileStore::new(&root), "open fault store");
+        drop(store);
+        let quarantine = root
+            .join("sha256")
+            .join(format!(".velnor-raw-quarantine-{index}-0-0"));
+        must(
+            fs::create_dir(&quarantine),
+            "create fault source quarantine",
+        );
+        must(
+            fs::set_permissions(&quarantine, fs::Permissions::from_mode(0o700)),
+            "restrict fault source quarantine",
+        );
+        let entry = quarantine.join("entry");
+        must(
+            fs::write(&entry, b"fault-source"),
+            "write fault source entry",
+        );
+        must(
+            fs::set_permissions(&entry, fs::Permissions::from_mode(0o400)),
+            "restrict fault source entry",
+        );
+
+        github_raw_store::set_test_manifest_fault(fault);
+        assert!(RawObjectFileStore::new(&root).is_err());
+        let retention = root.join(".velnor-raw-quarantine");
+        let pending = must(fs::read_dir(&retention), "read fault staging")
+            .flatten()
+            .any(|record| {
+                record
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".velnor-raw-retained-pending-")
+            });
+        assert!(pending, "fault {fault:?} lost its bounded staging state");
+        assert!(quarantine.is_dir());
+        if fault == TestManifestFault::PublishRename
+            || fault == TestManifestFault::DirectorySync
+            || fault == TestManifestFault::Chmod
+            || fault == TestManifestFault::Readback
+            || fault == TestManifestFault::FileSync
+        {
+            assert!(RawObjectFileStore::new(&root).is_ok());
+        } else {
+            assert!(RawObjectFileStore::new(&root).is_err());
+        }
+        remove_fixture(&root);
+    }
 }
 
 #[cfg(unix)]
