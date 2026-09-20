@@ -2321,7 +2321,7 @@ fn inject_native_preview_bindings(
             1,
         );
         let publish_gate = format!(
-            "    if: ${{{{ github.ref == 'refs/heads/{}' && needs.publish-gate.outputs.admitted == 'true' && needs.publish-gate.outputs.mode == 'publish' }}}}\n    timeout-minutes: 20\n",
+            "    if: ${{{{ github.event_name == 'push' && github.ref == 'refs/heads/{}' && (needs.publish-gate.outputs.admitted == 'true' && needs.publish-gate.outputs.mode == 'publish') }}}}\n    timeout-minutes: 20\n",
             config.default_branch,
         );
         output = output.replacen(
@@ -2911,14 +2911,10 @@ fn render_preview(config: &ProjectConfig, release: Option<&ReleaseSpec>) -> Stri
         &publish_if,
         &format!(
             "    if: ${{{{ {} && ({publish_gate}) }}}}\n",
-            if has_producer_binding(release) {
-                format!("github.ref == 'refs/heads/{}'", config.default_branch)
-            } else {
-                format!(
-                    "github.event_name == 'push' && github.ref == 'refs/heads/{}'",
-                    config.default_branch
-                )
-            },
+            format!(
+                "github.event_name == 'push' && github.ref == 'refs/heads/{}'",
+                config.default_branch
+            ),
         ),
         1,
     );
@@ -9088,7 +9084,7 @@ cp "$record" "$out"
         let build = yaml_job(&preview, "build");
         assert!(
             build.contains(
-                "    needs: [source, release-github-hosted-rust-example, release-github-self-hosted-rust-example, release-velnor-rust-example]\n"
+                "    needs: [source, publish-gate, release-github-hosted-rust-example, release-github-self-hosted-rust-example, release-velnor-rust-example]\n"
             ),
             "the build must wait for the resolved source: {build}"
         );
