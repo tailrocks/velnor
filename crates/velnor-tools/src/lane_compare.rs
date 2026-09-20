@@ -454,7 +454,7 @@ fn lane_compare_watch(root: &Path, args: LaneCompareArgs) -> Result<()> {
         bail!("--regress-threshold must be non-negative");
     }
 
-    let run_items = recent_run_items(&args.repo, &args.workflow, args.since)?;
+    let run_items = recent_complete_both_lane_runs(&args.repo, &args.workflow, args.since)?;
     if run_items.len() < 2 {
         bail!(
             "need at least two completed both-lane runs for --watch; found {}",
@@ -518,7 +518,7 @@ fn lane_compare_watch(root: &Path, args: LaneCompareArgs) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct RunListItem {
     #[serde(rename = "databaseId")]
     database_id: u64,
@@ -557,6 +557,59 @@ fn recent_run_items(repo: &str, workflow: &str, limit: usize) -> Result<Vec<RunL
     let runs: Vec<RunListItem> =
         serde_json::from_slice(&output.stdout).context("parse gh run list output")?;
     Ok(runs)
+}
+
+fn recent_complete_both_lane_runs(
+    repo: &str,
+    workflow: &str,
+    limit: usize,
+) -> Result<Vec<RunListItem>> {
+    let target = limit.max(2);
+    let mut fetch_limit = target;
+    let mut inspected = BTreeSet::new();
+    let mut selected = Vec::new();
+    loop {
+        let candidates = recent_run_items(repo, workflow, fetch_limit)?;
+        let mut new_candidate = false;
+        for run in candidates.iter() {
+            if !inspected.insert(run.database_id) {
+                continue;
+            }
+            new_candidate = true;
+            if !run.status.eq_ignore_ascii_case("completed")
+                || !run
+                    .conclusion
+                    .as_deref()
+                    .is_some_and(|conclusion| conclusion.eq_ignore_ascii_case("success"))
+            {
+                continue;
+            }
+            let jobs = fetch_run_jobs(repo, run.database_id).with_context(|| {
+                format!(
+                    "inspect both-lane census for successful run {}",
+                    run.database_id
+                )
+            })?;
+            if has_complete_both_lane_census(&jobs) {
+                selected.push(run.clone());
+                if selected.len() == target {
+                    return Ok(selected);
+                }
+            }
+        }
+        if candidates.len() < fetch_limit || !new_candidate {
+            return Ok(selected);
+        }
+        let Some(next_limit) = fetch_limit.checked_mul(2) else {
+            return Ok(selected);
+        };
+        fetch_limit = next_limit;
+    }
+}
+
+fn has_complete_both_lane_census(jobs: &[Job]) -> bool {
+    let census = pair_lane_census(jobs);
+    !census.matched.is_empty() && !census.has_parity_failures()
 }
 
 fn save_jobs_json(run_dir: &Path, jobs: &[Job]) -> Result<()> {
@@ -2275,6 +2328,27 @@ mod tests {
                 "databaseId,status,conclusion".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn watch_keeps_only_complete_both_lane_censuses() {
+        let (jobs, _, _) = valid_pair_fixture();
+        assert!(has_complete_both_lane_census(&jobs));
+
+        let github_only = jobs
+            .iter()
+            .filter(|job| job.id == 1)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(!has_complete_both_lane_census(&github_only));
+
+        let mut skipped_counterpart = jobs;
+        skipped_counterpart
+            .iter_mut()
+            .find(|job| job.id == 2)
+            .unwrap()
+            .status = "skipped".to_owned();
+        assert!(!has_complete_both_lane_census(&skipped_counterpart));
     }
 
     #[test]
