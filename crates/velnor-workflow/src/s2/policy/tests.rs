@@ -1374,6 +1374,11 @@ fn assert_candidate_transport_acquisition(job: &str) {
         "{job}"
     );
     assert!(
+        job.contains("source_repo=\"$verifier_source_repo\""),
+        "final verifier must point the recursive workflow scan at its fresh source checkout: {job}"
+    );
+    assert!(job.contains("candidate_workflow_binding_sha256"), "{job}");
+    assert!(
         !job.contains("git rev-parse \"$HEAD_SHA^{{tree}}\""),
         "{job}"
     );
