@@ -4684,6 +4684,7 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
           external_workflow_pattern = re.compile(r"^[^./][^ ]*/[^ ]+/.github/workflows/[^ #]+@")
           uploads = []
           external_reusable_workflows = {}
+          untrusted_action_references = {}
           local_workflow_edges = {}
           local_action_edges = {}
           archive_members = {}
@@ -4703,6 +4704,7 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
               archive_action_edges = {}
               archive_workflows = {}
               archive_external_reusable_workflows = []
+              archive_untrusted_action_references = []
               archive_source_members = {}
               with tarfile.open(archive_name, "r:") as archive:
                   for member in archive.getmembers():
@@ -4742,7 +4744,7 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                           if value is not None and external_workflow_pattern.match(value):
                               archive_external_reusable_workflows.append((member.name, value))
                           elif value is not None and not value.startswith("./") and not pinned_action_pattern.fullmatch(value):
-                              raise SystemExit(f"{member.name}: action reference is not a pinned base-owned action: {value}")
+                              archive_untrusted_action_references.append((member.name, value))
                       job = None
                       for index, line in enumerate(lines):
                           matched_job = job_pattern.fullmatch(line)
@@ -4780,6 +4782,7 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
               local_action_edges[archive_name] = archive_action_edges
               workflow_lines[archive_name] = archive_workflows
               external_reusable_workflows[archive_name] = archive_external_reusable_workflows
+              untrusted_action_references[archive_name] = archive_untrusted_action_references
               archive_members[archive_name] = archive_source_members
 
           def resolve_action_manifest(reference, files):
@@ -4925,6 +4928,9 @@ const CANDIDATE_NAMESPACE_SCAN_SCRIPT: &str = r#"
                       raise SystemExit(
                           f"{path}: reachable external reusable workflow is outside the closed artifact publisher contract: {value}"
                       )
+              for path, value in untrusted_action_references[archive_name]:
+                  if path in reachable:
+                      raise SystemExit(f"{path}: reachable action reference is not a pinned base-owned action: {value}")
               found = [
                   row
                   for row in uploads
