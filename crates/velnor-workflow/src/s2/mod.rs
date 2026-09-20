@@ -5314,7 +5314,7 @@ macro_rules! policy_candidate_step_template {
           job_started_epoch="$(jq -er '.started_at | fromdateiso8601' <<<"$job")"
           job_completed_epoch="$(jq -er '.completed_at | fromdateiso8601' <<<"$job")"
           test "$job_completed_epoch" -ge "$job_started_epoch"
-          upload_steps="$(jq -c '[.steps[]? | select(.id == "candidate_upload" and .name == "Upload candidate generator product" and .status == "completed" and .conclusion == "success")]' <<<"$job")"
+          upload_steps="$(jq -c '[.steps[]? | select(.name == "Upload candidate generator product" and .status == "completed" and .conclusion == "success")]' <<<"$job")"
           test "$(jq -r 'length' <<<"$upload_steps")" = 1
 
           artifacts="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" \
